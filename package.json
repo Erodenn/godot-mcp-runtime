@@ -1,0 +1,36 @@
+{
+  "name": "godot-mcp-runtime",
+  "version": "0.3.0",
+  "description": "MCP server for Godot Engine — headless scene editing, runtime input simulation, live script execution, and more",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "godot-mcp-runtime": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-scripts.js",
+    "start": "node dist/index.js",
+    "dev": "npm run build && node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "godot",
+    "game-development",
+    "model-context-protocol",
+    "ai",
+    "game-engine",
+    "godot4"
+  ],
+  "author": "Owen Sterling",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
