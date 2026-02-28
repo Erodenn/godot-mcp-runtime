@@ -26,7 +26,13 @@ The bridge cleans itself up automatically when `stop_project` is called. No left
 - [Node.js](https://nodejs.org/) v18+
 - [Godot 4.x](https://godotengine.org/)
 
-### Install
+### Install via npm
+
+```bash
+npm install -g godot-mcp-runtime
+```
+
+### Or clone from source
 
 ```bash
 git clone https://github.com/Erodenn/godot-mcp-runtime.git
@@ -37,7 +43,24 @@ npm run build
 
 ### Configure Your MCP Client
 
-Add the following to your MCP client config. This works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client:
+Add the following to your MCP client config. This works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
+
+**If installed via npm:**
+
+```json
+{
+  "mcpServers": {
+    "godot": {
+      "command": "godot-mcp-runtime",
+      "env": {
+        "GODOT_PATH": "<path-to-godot-executable>"
+      }
+    }
+  }
+}
+```
+
+**If cloned from source:**
 
 ```json
 {
