@@ -23,6 +23,15 @@
   ],
   "author": "Owen Sterling",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Erodenn/godot-mcp-runtime.git"
+  },
+  "homepage": "https://github.com/Erodenn/godot-mcp-runtime",
+  "bugs": {
+    "url": "https://github.com/Erodenn/godot-mcp-runtime/issues"
+  },
+  "mcpName": "io.github.erodenn/godot-mcp-runtime",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2"
   },
@@ -30,6 +39,11 @@
     "@types/node": "^25.0.9",
     "typescript": "^5.9.3"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18.0.0"
   }
