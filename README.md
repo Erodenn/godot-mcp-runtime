@@ -1,10 +1,19 @@
 # Godot Runtime MCP Server
 
+[![npm version](https://img.shields.io/npm/v/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
+[![npm downloads](https://img.shields.io/npm/dm/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Node.js](https://img.shields.io/node/v/godot-mcp-runtime)](https://nodejs.org/)
+
 An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running Godot 4.x game. Not just file editing, not just scene manipulation, but actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.
 
 Most Godot MCP servers operate headlessly. They can create scenes, add nodes, attach scripts, and that covers a lot of ground. But they stop at the editor boundary. This one doesn't. When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would. It presses keys, clicks buttons, reads what's on screen, and runs arbitrary code against the live scene tree.
 
 The distinction matters: the AI doesn't just write your game, it can test it.
+
+<a href="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="Godot Runtime MCP Server on Glama" />
+</a>
 
 ## What It Does
 
@@ -175,3 +184,4 @@ Developed with [Claude Code](https://claude.ai/code).
 ## License
 
 [MIT](LICENSE)
+

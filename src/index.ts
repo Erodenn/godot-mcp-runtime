@@ -152,12 +152,10 @@ class GodotMcpServer {
 
       const godotPath = this.runner.getGodotPath();
       if (!godotPath) {
-        console.error('[SERVER] Failed to find a valid Godot executable path');
-        console.error('[SERVER] Please set GODOT_PATH environment variable or provide a valid path');
-        process.exit(1);
+        console.error('[SERVER] Warning: Godot executable not found. Set GODOT_PATH to enable Godot tools.');
+      } else {
+        console.error(`[SERVER] Using Godot at: ${godotPath}`);
       }
-
-      console.error(`[SERVER] Using Godot at: ${godotPath}`);
 
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
