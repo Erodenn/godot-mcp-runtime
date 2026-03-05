@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env*
+.mcp/
+*.log
+.git/
+.claude/
+.vscode/
+.idea/
