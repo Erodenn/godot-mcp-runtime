@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
 [![npm downloads](https://img.shields.io/npm/dm/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://badgen.net/github/license/Erodenn/godot-mcp-runtime)](LICENSE)
 [![Node.js](https://img.shields.io/node/v/godot-mcp-runtime)](https://nodejs.org/)
 
 An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running Godot 4.x game. Not just file editing, not just scene manipulation, but actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.

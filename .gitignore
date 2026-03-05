@@ -27,3 +27,6 @@ Thumbs.db
 
 # Godot MCP working directory
 .mcp/
+
+# Claude Code local config
+.claude/
