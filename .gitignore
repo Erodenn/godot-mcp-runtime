@@ -22,6 +22,8 @@ Thumbs.db
 *.swo
 
 # Root markdown files (except README)
+# CLAUDE.md is intentionally excluded — it contains local AI assistant context
+# and project-specific instructions not meant for public distribution. Final decision.
 /*.md
 !README.md
 

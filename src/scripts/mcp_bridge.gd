@@ -341,9 +341,9 @@ func _find_control_by_identifier(identifier: String) -> Control:
 	var root := get_tree().root
 	# Try as node path first
 	if identifier.begins_with("/"):
-		var node := root.get_node_or_null(NodePath(identifier))
-		if node is Control:
-			return node as Control
+		var abs_node := root.get_node_or_null(NodePath(identifier))
+		if abs_node is Control:
+			return abs_node as Control
 	# Try as relative path from root
 	var node := root.get_node_or_null(NodePath(identifier))
 	if node is Control:
@@ -392,7 +392,6 @@ func _handle_run_script(peer: PacketPeerUDP, payload: Dictionary) -> void:
 
 	# Execute
 	var result = null
-	var exec_error := ""
 	result = instance.execute(get_tree())
 
 	# Clean up

@@ -447,19 +447,32 @@ export class GodotRunner {
       return cleanOutput(stdout);
     }
 
+    let stdout = '';
+    let stderr = '';
     try {
-      const { stdout, stderr } = await this.spawnAsync(this.godotPath, args, timeoutMs);
-      return { stdout: cleanStdout(stdout), stderr };
+      ({ stdout, stderr } = await this.spawnAsync(this.godotPath, args, timeoutMs));
     } catch (error: unknown) {
       if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
         const execError = error as Error & { stdout: string; stderr: string };
-        return {
-          stdout: cleanStdout(execError.stdout),
-          stderr: execError.stderr,
-        };
+        stdout = execError.stdout;
+        stderr = execError.stderr;
+      } else {
+        throw error;
       }
-      throw error;
     }
+
+    // If the process produced no operation output but has errors, initialization
+    // failed before the script ran. Autoload errors are the most common cause.
+    const operationRan = stdout.trim().length > 0 || stderr.includes('[INFO] Operation:');
+    if (!operationRan && (stderr.includes('ERROR:') || stderr.includes('SCRIPT ERROR:'))) {
+      throw new Error(
+        `Headless Godot failed before the operation could run — likely an autoload initialization error.\n` +
+        `Stderr:\n${stderr.trim()}\n\n` +
+        `Use manage_project (list_autoloads, remove_autoload) to inspect or remove the failing autoload, then retry.`
+      );
+    }
+
+    return { stdout: cleanStdout(stdout), stderr };
   }
 
   launchEditor(projectPath: string): ChildProcess {

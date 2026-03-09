@@ -10,6 +10,104 @@ import {
   ToolDefinition,
 } from '../utils/godot-runner.js';
 
+// --- Autoload / project.godot helpers (no Godot process needed) ---
+
+interface AutoloadEntry {
+  name: string;
+  path: string;
+  singleton: boolean;
+}
+
+function parseAutoloads(projectFilePath: string): AutoloadEntry[] {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const autoloads: AutoloadEntry[] = [];
+  let inAutoloadSection = false;
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) {
+      inAutoloadSection = trimmed === '[autoload]';
+      continue;
+    }
+    if (!inAutoloadSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^(\w+)="(\*?)([^"]*)"$/);
+    if (match) {
+      autoloads.push({ name: match[1], singleton: match[2] === '*', path: match[3] });
+    }
+  }
+  return autoloads;
+}
+
+function normalizeAutoloadPath(p: string): string {
+  return p.startsWith('res://') ? p : `res://${p}`;
+}
+
+function addAutoloadEntry(projectFilePath: string, name: string, path: string, singleton: boolean): void {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const lines = content.split('\n');
+  const entry = `${name}="${singleton ? '*' : ''}${normalizeAutoloadPath(path)}"`;
+
+  const sectionIdx = lines.findIndex(l => l.trim() === '[autoload]');
+  if (sectionIdx === -1) {
+    writeFileSync(projectFilePath, content.trimEnd() + '\n\n[autoload]\n' + entry + '\n', 'utf8');
+    return;
+  }
+
+  let insertIdx = sectionIdx + 1;
+  while (insertIdx < lines.length && !lines[insertIdx].trim().startsWith('[')) {
+    insertIdx++;
+  }
+  lines.splice(insertIdx, 0, entry);
+  writeFileSync(projectFilePath, lines.join('\n'), 'utf8');
+}
+
+function removeAutoloadEntry(projectFilePath: string, name: string): boolean {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const lines = content.split('\n');
+  let inAutoloadSection = false;
+  let removed = false;
+
+  const newLines = lines.filter(line => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) { inAutoloadSection = trimmed === '[autoload]'; return true; }
+    if (inAutoloadSection) {
+      const match = trimmed.match(/^(\w+)=/);
+      if (match && match[1] === name) { removed = true; return false; }
+    }
+    return true;
+  });
+
+  if (removed) writeFileSync(projectFilePath, newLines.join('\n'), 'utf8');
+  return removed;
+}
+
+function updateAutoloadEntry(projectFilePath: string, name: string, newPath?: string, singleton?: boolean): boolean {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const lines = content.split('\n');
+  let inAutoloadSection = false;
+  let updated = false;
+
+  const newLines = lines.map(line => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) { inAutoloadSection = trimmed === '[autoload]'; return line; }
+    if (inAutoloadSection) {
+      const match = trimmed.match(/^(\w+)="(\*?)([^"]*)"$/);
+      if (match && match[1] === name) {
+        const effectiveSingleton = singleton !== undefined ? singleton : match[2] === '*';
+        const effectivePath = newPath !== undefined ? normalizeAutoloadPath(newPath) : match[3];
+        updated = true;
+        return `${name}="${effectiveSingleton ? '*' : ''}${effectivePath}"`;
+      }
+    }
+    return line;
+  });
+
+  if (updated) writeFileSync(projectFilePath, newLines.join('\n'), 'utf8');
+  return updated;
+}
+
+// --- Tool definitions ---
+
 export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'launch_editor',
@@ -186,6 +284,45 @@ export const projectToolDefinitions: ToolDefinition[] = [
         },
       },
       required: ['script'],
+    },
+  },
+  {
+    name: 'manage_project',
+    description: `Manage Godot project settings and autoloads by directly editing project.godot. No Godot process required — safe to use even when the project has broken autoloads.
+
+⚠️  AUTOLOAD LIMITATION: Never use headless Godot tools (manage_scene, manage_node, etc.) to add or configure autoloads. Running headless initializes ALL existing autoloads — if any are broken or require a display, the process fails. Always use manage_project for autoload management.
+
+Operations:
+- list_autoloads: List all registered autoloads with paths and singleton status
+- add_autoload: Register a new autoload (required: autoloadName, autoloadPath; optional: singleton, default true)
+- remove_autoload: Unregister an autoload by name (required: autoloadName)
+- update_autoload: Modify an existing autoload's path or singleton flag (required: autoloadName; optional: autoloadPath, singleton)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          enum: ['list_autoloads', 'add_autoload', 'remove_autoload', 'update_autoload'],
+          description: 'The project operation to perform',
+        },
+        projectPath: {
+          type: 'string',
+          description: 'Path to the Godot project directory',
+        },
+        autoloadName: {
+          type: 'string',
+          description: '[add/remove/update_autoload] Name of the autoload node (e.g. "MyManager")',
+        },
+        autoloadPath: {
+          type: 'string',
+          description: '[add/update_autoload] Path to the script or scene (e.g. "res://autoload/my_manager.gd" or "autoload/my_manager.gd")',
+        },
+        singleton: {
+          type: 'boolean',
+          description: '[add/update_autoload] Register as a globally accessible singleton by name (default: true)',
+        },
+      },
+      required: ['operation', 'projectPath'],
     },
   },
 ];
@@ -827,6 +964,112 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
         'Check that UDP port 9900 is not blocked',
         'For long-running scripts, increase the timeout parameter',
       ]
+    );
+  }
+}
+
+export async function handleManageProject(args: OperationParams) {
+  args = normalizeParameters(args);
+
+  const operation = args.operation as string;
+  if (!operation) {
+    return createErrorResponse('operation is required', ['Provide one of: list_autoloads, add_autoload, remove_autoload, update_autoload']);
+  }
+
+  if (!args.projectPath) {
+    return createErrorResponse('projectPath is required', ['Provide a valid path to a Godot project directory']);
+  }
+
+  if (!validatePath(args.projectPath as string)) {
+    return createErrorResponse('Invalid project path', ['Provide a valid path without ".."']);
+  }
+
+  const projectFile = join(args.projectPath as string, 'project.godot');
+  if (!existsSync(projectFile)) {
+    return createErrorResponse(
+      `Not a valid Godot project: ${args.projectPath}`,
+      ['Ensure the path points to a directory containing a project.godot file']
+    );
+  }
+
+  try {
+    switch (operation) {
+      case 'list_autoloads': {
+        const autoloads = parseAutoloads(projectFile);
+        return { content: [{ type: 'text', text: JSON.stringify({ autoloads }) }] };
+      }
+
+      case 'add_autoload': {
+        if (!args.autoloadName || !args.autoloadPath) {
+          return createErrorResponse(
+            'autoloadName and autoloadPath are required for add_autoload',
+            ['Provide the autoload node name and the path to the script or scene']
+          );
+        }
+        if (!validatePath(args.autoloadPath as string)) {
+          return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
+        }
+        const existing = parseAutoloads(projectFile);
+        if (existing.some(a => a.name === (args.autoloadName as string))) {
+          return createErrorResponse(
+            `Autoload '${args.autoloadName}' already exists`,
+            ['Use update_autoload to modify an existing autoload', 'Use list_autoloads to see current autoloads']
+          );
+        }
+        const isSingleton = args.singleton !== false;
+        addAutoloadEntry(projectFile, args.autoloadName as string, args.autoloadPath as string, isSingleton);
+        return {
+          content: [{ type: 'text', text: `Autoload '${args.autoloadName}' registered at '${args.autoloadPath}' (singleton: ${isSingleton}).` }],
+        };
+      }
+
+      case 'remove_autoload': {
+        if (!args.autoloadName) {
+          return createErrorResponse('autoloadName is required for remove_autoload', ['Provide the name of the autoload to remove']);
+        }
+        const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
+        if (!removed) {
+          return createErrorResponse(
+            `Autoload '${args.autoloadName}' not found`,
+            ['Use list_autoloads to see existing autoloads']
+          );
+        }
+        return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }] };
+      }
+
+      case 'update_autoload': {
+        if (!args.autoloadName) {
+          return createErrorResponse('autoloadName is required for update_autoload', ['Provide the name of the autoload to update']);
+        }
+        if (args.autoloadPath && !validatePath(args.autoloadPath as string)) {
+          return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
+        }
+        const updated = updateAutoloadEntry(
+          projectFile,
+          args.autoloadName as string,
+          args.autoloadPath as string | undefined,
+          args.singleton as boolean | undefined
+        );
+        if (!updated) {
+          return createErrorResponse(
+            `Autoload '${args.autoloadName}' not found`,
+            ['Use list_autoloads to see existing autoloads', 'Use add_autoload to register a new autoload']
+          );
+        }
+        return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }] };
+      }
+
+      default:
+        return createErrorResponse(
+          `Unknown operation: ${operation}`,
+          ['Use one of: list_autoloads, add_autoload, remove_autoload, update_autoload']
+        );
+    }
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(
+      `Failed to ${operation}: ${errorMessage}`,
+      ['Check if project.godot is accessible and not corrupted']
     );
   }
 }

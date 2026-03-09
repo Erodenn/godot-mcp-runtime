@@ -31,6 +31,7 @@ import {
   handleSimulateInput,
   handleGetUiElements,
   handleRunScript,
+  handleManageProject,
 } from './tools/project-tools.js';
 
 // Scene tools
@@ -126,6 +127,8 @@ class GodotMcpServer {
           return await handleGetUiElements(this.runner, args);
         case 'run_script':
           return await handleRunScript(this.runner, args);
+        case 'manage_project':
+          return await handleManageProject(args);
 
         // Scene tools
         case 'manage_scene':
