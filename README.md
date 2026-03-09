@@ -125,6 +125,17 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 | `save` | Save a scene, or save-as with `newPath` |
 | `export_mesh_library` | Export scenes as a MeshLibrary for GridMap |
 
+### Project Settings: `manage_project`
+
+Edits `project.godot` directly — no Godot process required. Safe to use even when autoloads are broken.
+
+| Operation | Description |
+|-----------|-------------|
+| `list_autoloads` | List all registered autoloads with paths and singleton status |
+| `add_autoload` | Register a new autoload |
+| `remove_autoload` | Unregister an autoload by name |
+| `update_autoload` | Modify an existing autoload's path or singleton flag |
+
 ### UIDs: `manage_uids` (Godot 4.4+)
 
 | Operation | Description |
