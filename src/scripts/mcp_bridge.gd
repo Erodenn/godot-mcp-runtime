@@ -6,7 +6,7 @@ var _is_processing_input: bool = false
 
 func _ready() -> void:
 	udp_server = UDPServer.new()
-	var err = udp_server.listen(port)
+	var err = udp_server.listen(port, "127.0.0.1")
 	if err != OK:
 		push_error("McpBridge: Failed to listen on port %d (error %d)" % [port, err])
 	else:
@@ -172,18 +172,22 @@ func _inject_key(action: Dictionary) -> String:
 	Input.parse_input_event(event)
 	return ""
 
-func _inject_mouse_button(action: Dictionary) -> String:
-	var button_name = action.get("button", "left")
-	var button_index: MouseButton
+func _resolve_button_name(button_name: String) -> Array:
 	match button_name:
 		"left":
-			button_index = MOUSE_BUTTON_LEFT
+			return [MOUSE_BUTTON_LEFT, ""]
 		"right":
-			button_index = MOUSE_BUTTON_RIGHT
+			return [MOUSE_BUTTON_RIGHT, ""]
 		"middle":
-			button_index = MOUSE_BUTTON_MIDDLE
+			return [MOUSE_BUTTON_MIDDLE, ""]
 		_:
-			return "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name
+			return [MOUSE_BUTTON_NONE, "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name]
+
+func _inject_mouse_button(action: Dictionary) -> String:
+	var button_result := _resolve_button_name(action.get("button", "left"))
+	if button_result[1] != "":
+		return button_result[1]
+	var button_index: MouseButton = button_result[0]
 
 	var pos = Vector2(action.get("x", 0), action.get("y", 0))
 	var double_click = action.get("double_click", false)
@@ -249,18 +253,10 @@ func _inject_click_element(action: Dictionary) -> String:
 	if not target.is_visible_in_tree():
 		return "UI element '%s' is not visible" % identifier
 
-	var button_name: String = action.get("button", "left")
-	var button_index: MouseButton
-	match button_name:
-		"left":
-			button_index = MOUSE_BUTTON_LEFT
-		"right":
-			button_index = MOUSE_BUTTON_RIGHT
-		"middle":
-			button_index = MOUSE_BUTTON_MIDDLE
-		_:
-			return "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name
-
+	var button_result := _resolve_button_name(action.get("button", "left"))
+	if button_result[1] != "":
+		return button_result[1]
+	var button_index: MouseButton = button_result[0]
 	var double_click: bool = action.get("double_click", false)
 	var rect := target.get_global_rect()
 	var center := rect.get_center()
@@ -390,9 +386,8 @@ func _handle_run_script(peer: PacketPeerUDP, payload: Dictionary) -> void:
 		_send_response(peer, {"error": "Script must define func execute(scene_tree: SceneTree) -> Variant"})
 		return
 
-	# Execute
-	var result = null
-	result = instance.execute(get_tree())
+	# Execute (await in case the user's script uses async/await internally)
+	var result = await instance.execute(get_tree())
 
 	# Clean up
 	if instance is RefCounted:

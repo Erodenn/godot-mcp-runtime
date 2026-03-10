@@ -47,6 +47,12 @@ import {
   handleManageNode,
 } from './tools/node-tools.js';
 
+// Validate tools
+import {
+  validateToolDefinitions,
+  handleValidate,
+} from './tools/validate-tools.js';
+
 class GodotMcpServer {
   private server: Server;
   private runner: GodotRunner;
@@ -57,7 +63,7 @@ class GodotMcpServer {
     this.server = new Server(
       {
         name: 'godot-mcp',
-        version: '0.5.2',
+        version: '1.0.0',
       },
       {
         capabilities: {
@@ -93,6 +99,7 @@ class GodotMcpServer {
       ...projectToolDefinitions,
       ...sceneToolDefinitions,
       ...nodeToolDefinitions,
+      ...validateToolDefinitions,
     ];
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -139,6 +146,10 @@ class GodotMcpServer {
         // Node tools
         case 'manage_node':
           return await handleManageNode(this.runner, args);
+
+        // Validate tools
+        case 'validate':
+          return await handleValidate(this.runner, args);
 
         default:
           throw new McpError(

@@ -197,6 +197,15 @@ export function validatePath(path: string): boolean {
   return true;
 }
 
+/**
+ * Extract the first [ERROR] message from GDScript stderr output.
+ * Falls back to a generic message if no [ERROR] line is found.
+ */
+export function extractGdError(stderr: string): string {
+  const errLine = stderr.split('\n').find(l => l.includes('[ERROR]'));
+  return errLine ? errLine.replace(/.*\[ERROR\]\s*/, '').trim() : 'see get_debug_output for details';
+}
+
 export function createErrorResponse(message: string, possibleSolutions: string[] = []): {
   content: Array<{ type: 'text'; text: string }>;
   isError: boolean;
@@ -629,11 +638,8 @@ export class GodotRunner {
     if (!existsSync(mcpDir)) {
       mkdirSync(mcpDir, { recursive: true });
     }
-    const gdignorePath = join(mcpDir, '.gdignore');
-    if (!existsSync(gdignorePath)) {
-      writeFileSync(gdignorePath, '', 'utf8');
-      logDebug('Created .mcp/.gdignore');
-    }
+    writeFileSync(join(mcpDir, '.gdignore'), '', 'utf8');
+    logDebug('Created .mcp/.gdignore');
 
     // Also add .mcp/ to .gitignore if not already present
     const gitignorePath = join(projectPath, '.gitignore');

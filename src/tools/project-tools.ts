@@ -1,4 +1,4 @@
-import { join, basename } from 'path';
+import { join, basename, sep } from 'path';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import {
   GodotRunner,
@@ -296,13 +296,17 @@ Operations:
 - list_autoloads: List all registered autoloads with paths and singleton status
 - add_autoload: Register a new autoload (required: autoloadName, autoloadPath; optional: singleton, default true)
 - remove_autoload: Unregister an autoload by name (required: autoloadName)
-- update_autoload: Modify an existing autoload's path or singleton flag (required: autoloadName; optional: autoloadPath, singleton)`,
+- update_autoload: Modify an existing autoload's path or singleton flag (required: autoloadName; optional: autoloadPath, singleton)
+- get_filesystem_tree: Return a recursive file tree of the project (optional: maxDepth, extensions). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } objects.
+- search_in_files: Plain-text search across project files (required: pattern; optional: fileTypes, caseSensitive, maxResults). Returns { matches: [{ file, lineNumber, line }], truncated } — check truncated if maxResults may have been hit. Skips hidden entries and the .mcp directory.
+- get_scene_dependencies: Parse a .tscn file for ext_resource references only (scripts, textures, subscenes — not inlined sub_resource blocks). Required: scenePath. Returns { scene, dependencies: [{ path, type, uid? }] }.
+- get_project_settings: Parse project.godot into structured JSON (optional: section). Returns { settings: { [section]: { [key]: value } } }. Complex Godot types (e.g. Vector2, PackedStringArray) are returned as raw strings. Keys not under any section appear under __global__.`,
     inputSchema: {
       type: 'object',
       properties: {
         operation: {
           type: 'string',
-          enum: ['list_autoloads', 'add_autoload', 'remove_autoload', 'update_autoload'],
+          enum: ['list_autoloads', 'add_autoload', 'remove_autoload', 'update_autoload', 'get_filesystem_tree', 'search_in_files', 'get_scene_dependencies', 'get_project_settings'],
           description: 'The project operation to perform',
         },
         projectPath: {
@@ -320,6 +324,40 @@ Operations:
         singleton: {
           type: 'boolean',
           description: '[add/update_autoload] Register as a globally accessible singleton by name (default: true)',
+        },
+        maxDepth: {
+          type: 'number',
+          description: '[get_filesystem_tree] Maximum recursion depth. -1 means unlimited (default: -1)',
+        },
+        extensions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '[get_filesystem_tree] Filter results to only these file extensions (e.g. ["gd", "tscn"]). Omit to include all files.',
+        },
+        pattern: {
+          type: 'string',
+          description: '[search_in_files] Plain-text string to search for across project files',
+        },
+        fileTypes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '[search_in_files] File extensions to search (default: ["gd", "tscn", "cs", "gdshader"])',
+        },
+        caseSensitive: {
+          type: 'boolean',
+          description: '[search_in_files] Whether the search is case-sensitive (default: false)',
+        },
+        maxResults: {
+          type: 'number',
+          description: '[search_in_files] Maximum number of matches to return (default: 100)',
+        },
+        scenePath: {
+          type: 'string',
+          description: '[get_scene_dependencies] Path to the .tscn file relative to the project root (e.g. "scenes/main.tscn")',
+        },
+        section: {
+          type: 'string',
+          description: '[get_project_settings] Filter output to a specific INI section (e.g. "display", "application"). Omit to get all sections.',
         },
       },
       required: ['operation', 'projectPath'],
@@ -339,40 +377,14 @@ function findGodotProjects(directory: string, recursive: boolean): Array<{ path:
       });
     }
 
-    if (!recursive) {
-      const entries = readdirSync(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          if (entry.name.startsWith('.')) continue;
-          const subdir = join(directory, entry.name);
-          const subProjectFile = join(subdir, 'project.godot');
-          if (existsSync(subProjectFile)) {
-            projects.push({
-              path: subdir,
-              name: entry.name,
-            });
-          }
-        }
-      }
-    } else {
-      const entries = readdirSync(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          const subdir = join(directory, entry.name);
-          if (entry.name.startsWith('.')) {
-            continue;
-          }
-          const subProjectFile = join(subdir, 'project.godot');
-          if (existsSync(subProjectFile)) {
-            projects.push({
-              path: subdir,
-              name: entry.name,
-            });
-          } else {
-            const subProjects = findGodotProjects(subdir, true);
-            projects.push(...subProjects);
-          }
-        }
+    const entries = readdirSync(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const subdir = join(directory, entry.name);
+      if (existsSync(join(subdir, 'project.godot'))) {
+        projects.push({ path: subdir, name: entry.name });
+      } else if (recursive) {
+        projects.push(...findGodotProjects(subdir, true));
       }
     }
   } catch (error) {
@@ -449,8 +461,7 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
   }
 
   try {
-    const godotPath = runner.getGodotPath();
-    if (!godotPath) {
+    if (!runner.getGodotPath()) {
       await runner.detectGodotPath();
       if (!runner.getGodotPath()) {
         return createErrorResponse(
@@ -549,6 +560,7 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
     errors: string[];
     running: boolean;
     exitCode?: number | null;
+    tip?: string;
   } = {
     output: proc.output.slice(-limit),
     errors: proc.errors.slice(-limit),
@@ -557,8 +569,7 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
 
   if (proc.hasExited) {
     response.exitCode = proc.exitCode;
-    (response as typeof response & { tip: string }).tip =
-      'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
+    response.tip = 'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
   }
 
   return {
@@ -733,7 +744,7 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
     }
 
     // Normalize path for the local filesystem (forward slashes from GDScript)
-    const screenshotPath = parsed.path.replace(/\//g, join('/', '').charAt(0) === '\\' ? '\\' : '/');
+    const screenshotPath = sep === '\\' ? parsed.path.replace(/\//g, '\\') : parsed.path;
 
     if (!existsSync(screenshotPath)) {
       return createErrorResponse(
@@ -983,12 +994,163 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
   }
 }
 
+// --- manage_project helper: filesystem tree ---
+
+interface FileTreeNode {
+  name: string;
+  type: 'file' | 'dir';
+  path: string;
+  extension?: string;
+  children?: FileTreeNode[];
+}
+
+function buildFilesystemTree(
+  currentPath: string,
+  relativePath: string,
+  maxDepth: number,
+  currentDepth: number,
+  extensions: string[] | null
+): FileTreeNode {
+  const name = basename(currentPath);
+  const node: FileTreeNode = { name, type: 'dir', path: relativePath || '.' };
+  if (maxDepth !== -1 && currentDepth >= maxDepth) {
+    node.children = [];
+    return node;
+  }
+  const children: FileTreeNode[] = [];
+  try {
+    const entries = readdirSync(currentPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const childRelPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        children.push(buildFilesystemTree(
+          join(currentPath, entry.name),
+          childRelPath,
+          maxDepth,
+          currentDepth + 1,
+          extensions
+        ));
+      } else if (entry.isFile()) {
+        const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : '';
+        if (extensions && !extensions.includes(ext)) continue;
+        children.push({ name: entry.name, type: 'file', path: childRelPath, extension: ext });
+      }
+    }
+  } catch (err) {
+    logDebug(`buildFilesystemTree error at ${currentPath}: ${err}`);
+  }
+  node.children = children;
+  return node;
+}
+
+// --- manage_project helper: search in files ---
+
+interface SearchMatch {
+  file: string;
+  lineNumber: number;
+  line: string;
+}
+
+function searchInFiles(
+  rootPath: string,
+  pattern: string,
+  fileTypes: string[],
+  caseSensitive: boolean,
+  maxResults: number
+): { matches: SearchMatch[]; truncated: boolean } {
+  const matches: SearchMatch[] = [];
+  let truncated = false;
+
+  const searchDir = (currentPath: string, relBase: string) => {
+    if (truncated) return;
+    let entries;
+    try {
+      entries = readdirSync(currentPath, { withFileTypes: true });
+    } catch (err) {
+      logDebug(`searchInFiles readdir error at ${currentPath}: ${err}`);
+      return;
+    }
+    for (const entry of entries) {
+      if (truncated) return;
+      if (entry.name.startsWith('.')) continue;
+      const childRelPath = relBase ? `${relBase}/${entry.name}` : entry.name;
+      const fullPath = join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        searchDir(fullPath, childRelPath);
+      } else if (entry.isFile()) {
+        const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : '';
+        if (!fileTypes.includes(ext)) continue;
+        let content: string;
+        try {
+          content = readFileSync(fullPath, 'utf8');
+        } catch {
+          continue;
+        }
+        const lines = content.split('\n');
+        const needle = caseSensitive ? pattern : pattern.toLowerCase();
+        for (let i = 0; i < lines.length; i++) {
+          const haystack = caseSensitive ? lines[i] : lines[i].toLowerCase();
+          if (haystack.includes(needle)) {
+            matches.push({ file: childRelPath, lineNumber: i + 1, line: lines[i] });
+            if (matches.length >= maxResults) {
+              truncated = true;
+              return;
+            }
+          }
+        }
+      }
+    }
+  };
+
+  searchDir(rootPath, '');
+  return { matches, truncated };
+}
+
+// --- manage_project helper: project settings parser ---
+
+type SettingsValue = string | number | boolean;
+
+function parseProjectSettings(projectFilePath: string): Record<string, Record<string, SettingsValue>> {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const result: Record<string, Record<string, SettingsValue>> = {};
+  let currentSection = '__global__';
+
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith(';') || line.startsWith('#')) continue;
+    if (line.startsWith('config_version')) continue; // header line
+    if (line.startsWith('[') && line.endsWith(']')) {
+      currentSection = line.slice(1, -1);
+      continue;
+    }
+    const eqIdx = line.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = line.slice(0, eqIdx).trim();
+    const rawVal = line.slice(eqIdx + 1).trim();
+    let value: SettingsValue;
+    if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
+      value = rawVal.slice(1, -1);
+    } else if (rawVal === 'true') {
+      value = true;
+    } else if (rawVal === 'false') {
+      value = false;
+    } else {
+      const num = Number(rawVal);
+      value = isNaN(num) ? rawVal : num;
+    }
+    if (!result[currentSection]) result[currentSection] = {};
+    result[currentSection][key] = value;
+  }
+  return result;
+}
+
 export async function handleManageProject(args: OperationParams) {
   args = normalizeParameters(args);
 
   const operation = args.operation as string;
   if (!operation) {
-    return createErrorResponse('operation is required', ['Provide one of: list_autoloads, add_autoload, remove_autoload, update_autoload']);
+    return createErrorResponse('operation is required', ['Provide one of: list_autoloads, add_autoload, remove_autoload, update_autoload, get_filesystem_tree, search_in_files, get_scene_dependencies, get_project_settings']);
   }
 
   if (!args.projectPath) {
@@ -1074,10 +1236,77 @@ export async function handleManageProject(args: OperationParams) {
         return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }] };
       }
 
+      case 'get_filesystem_tree': {
+        const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : -1;
+        const extensions = Array.isArray(args.extensions)
+          ? (args.extensions as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
+          : null;
+        const tree = buildFilesystemTree(args.projectPath as string, '', maxDepth, 0, extensions);
+        return { content: [{ type: 'text', text: JSON.stringify(tree) }] };
+      }
+
+      case 'search_in_files': {
+        if (!args.pattern || typeof args.pattern !== 'string') {
+          return createErrorResponse('pattern is required for search_in_files', ['Provide a plain-text search string']);
+        }
+        const fileTypes = Array.isArray(args.fileTypes)
+          ? (args.fileTypes as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
+          : ['gd', 'tscn', 'cs', 'gdshader'];
+        const caseSensitive = args.caseSensitive === true;
+        const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 100;
+        const result = searchInFiles(args.projectPath as string, args.pattern as string, fileTypes, caseSensitive, maxResults);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      case 'get_scene_dependencies': {
+        if (!args.scenePath || typeof args.scenePath !== 'string') {
+          return createErrorResponse('scenePath is required for get_scene_dependencies', ['Provide a path relative to the project root, e.g. "scenes/main.tscn"']);
+        }
+        if (!validatePath(args.scenePath as string)) {
+          return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
+        }
+        const sceneFullPath = join(args.projectPath as string, args.scenePath as string);
+        if (!existsSync(sceneFullPath)) {
+          return createErrorResponse(
+            `Scene file not found: ${args.scenePath}`,
+            ['Verify the path is relative to the project root', 'Use get_filesystem_tree to list available .tscn files']
+          );
+        }
+        const sceneContent = readFileSync(sceneFullPath, 'utf8');
+        const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
+        const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
+        let match;
+        while ((match = extResourcePattern.exec(sceneContent)) !== null) {
+          const attrs = match[1];
+          const typeMatch = attrs.match(/\btype="([^"]*)"/);
+          const pathMatch = attrs.match(/\bpath="([^"]*)"/);
+          const uidMatch = attrs.match(/\buid="([^"]*)"/);
+          if (pathMatch) {
+            const depPath = pathMatch[1].replace(/^res:\/\//, '');
+            const dep: { path: string; type: string; uid?: string } = {
+              path: depPath,
+              type: typeMatch ? typeMatch[1] : 'Unknown',
+            };
+            if (uidMatch) dep.uid = uidMatch[1];
+            dependencies.push(dep);
+          }
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }] };
+      }
+
+      case 'get_project_settings': {
+        const allSettings = parseProjectSettings(projectFile);
+        if (args.section && typeof args.section === 'string') {
+          const sectionData = allSettings[args.section as string] ?? {};
+          return { content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] };
+      }
+
       default:
         return createErrorResponse(
           `Unknown operation: ${operation}`,
-          ['Use one of: list_autoloads, add_autoload, remove_autoload, update_autoload']
+          ['Use one of: list_autoloads, add_autoload, remove_autoload, update_autoload, get_filesystem_tree, search_in_files, get_scene_dependencies, get_project_settings']
         );
     }
   } catch (error: unknown) {

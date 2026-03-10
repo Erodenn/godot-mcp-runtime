@@ -78,6 +78,16 @@ func _init():
 			get_scene_tree(params)
 		"attach_script":
 			attach_script(params)
+		"duplicate_node":
+			duplicate_node(params)
+		"get_node_signals":
+			get_node_signals(params)
+		"connect_node_signal":
+			connect_node_signal(params)
+		"disconnect_node_signal":
+			disconnect_node_signal(params)
+		"validate_resource":
+			validate_resource(params)
 		_:
 			log_error("Unknown operation: " + operation)
 			quit(1)
@@ -754,4 +764,174 @@ func attach_script(params):
 		print("Script '" + params.script_path + "' attached successfully to node '" + params.node_path + "'")
 	else:
 		log_error("Failed to save scene after attaching script")
+		quit(1)
+
+# ============================================
+# SIGNAL AND DUPLICATE OPERATIONS
+# ============================================
+
+# Duplicate a node and its children within a scene
+func duplicate_node(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root: quit(1)
+
+	var node = find_node_by_path(scene_root, params.node_path)
+	if not node:
+		log_error("Node not found: " + params.node_path)
+		quit(1)
+	if node == scene_root:
+		log_error("Cannot duplicate the root node")
+		quit(1)
+
+	var duplicate = node.duplicate()
+	if params.has("new_name"):
+		duplicate.name = params.new_name
+	else:
+		duplicate.name = node.name + "2"
+
+	var parent = node.get_parent()
+	if params.has("target_parent_path"):
+		parent = find_node_by_path(scene_root, params.target_parent_path)
+		if not parent:
+			log_error("Target parent not found: " + params.target_parent_path)
+			quit(1)
+
+	parent.add_child(duplicate)
+	duplicate.owner = scene_root
+	# Recursively set owner on all descendants
+	for child in duplicate.get_children():
+		set_owner_recursive(child, scene_root)
+
+	if save_scene_to_path(scene_root, params.scene_path):
+		print("Node duplicated successfully as '" + duplicate.name + "'")
+	else:
+		log_error("Failed to save scene after duplicating node")
+		quit(1)
+
+func set_owner_recursive(node: Node, owner: Node):
+	node.owner = owner
+	for child in node.get_children():
+		set_owner_recursive(child, owner)
+
+# List signals defined on a node and their current connections
+func get_node_signals(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root: quit(1)
+
+	var node = find_node_by_path(scene_root, params.node_path)
+	if not node:
+		log_error("Node not found: " + params.node_path)
+		quit(1)
+
+	var signals = []
+	for sig in node.get_signal_list():
+		var sig_name = sig["name"]
+		var connections = []
+		for conn in node.get_signal_connection_list(sig_name):
+			connections.append({
+				"signal": sig_name,
+				"target": str(conn["callable"].get_object().get_path()) if conn["callable"].get_object() else "unknown",
+				"method": conn["callable"].get_method()
+			})
+		signals.append({
+			"name": sig_name,
+			"connections": connections
+		})
+
+	print(JSON.stringify({
+		"nodePath": params.node_path,
+		"nodeType": node.get_class(),
+		"signals": signals
+	}))
+
+# Connect a signal from one node to a method on another node
+func connect_node_signal(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root: quit(1)
+
+	var source = find_node_by_path(scene_root, params.node_path)
+	if not source:
+		log_error("Source node not found: " + params.node_path)
+		quit(1)
+
+	var target = find_node_by_path(scene_root, params.target_node_path)
+	if not target:
+		log_error("Target node not found: " + params.target_node_path)
+		quit(1)
+
+	if not source.has_signal(params.signal):
+		log_error("Signal does not exist: " + params.signal + " on " + source.get_class())
+		quit(1)
+
+	if not target.has_method(params.method):
+		log_error("Method does not exist: " + params.method + " on " + target.get_class())
+		quit(1)
+
+	var err = source.connect(params.signal, Callable(target, params.method))
+	if err != OK:
+		log_error("Failed to connect signal: " + str(err))
+		quit(1)
+
+	if save_scene_to_path(scene_root, params.scene_path):
+		print("Signal '" + params.signal + "' connected from '" + params.node_path + "' to '" + params.target_node_path + "." + params.method + "'")
+	else:
+		log_error("Failed to save scene after connecting signal")
+		quit(1)
+
+# Disconnect a signal connection between two nodes
+func disconnect_node_signal(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root: quit(1)
+
+	var source = find_node_by_path(scene_root, params.node_path)
+	if not source:
+		log_error("Source node not found: " + params.node_path)
+		quit(1)
+
+	var target = find_node_by_path(scene_root, params.target_node_path)
+	if not target:
+		log_error("Target node not found: " + params.target_node_path)
+		quit(1)
+
+	if not source.is_connected(params.signal, Callable(target, params.method)):
+		log_error("Signal connection does not exist")
+		quit(1)
+
+	source.disconnect(params.signal, Callable(target, params.method))
+
+	if save_scene_to_path(scene_root, params.scene_path):
+		print("Signal '" + params.signal + "' disconnected from '" + params.target_node_path + "." + params.method + "'")
+	else:
+		log_error("Failed to save scene after disconnecting signal")
+		quit(1)
+
+# ============================================
+# VALIDATE OPERATION
+# ============================================
+
+# Validate a GDScript or scene file by loading it headlessly
+func validate_resource(params):
+	if params.has("script_path"):
+		var path = normalize_scene_path(params.script_path)
+		if not FileAccess.file_exists(path):
+			print(JSON.stringify({"valid": false, "errors": [{"message": "File not found: " + path}]}))
+			return
+		var resource = load(path)
+		if resource:
+			print(JSON.stringify({"valid": true, "errors": []}))
+		else:
+			print(JSON.stringify({"valid": false, "errors": []}))
+			# Actual error details will be in stderr, parsed by TypeScript
+	elif params.has("scene_path"):
+		var path = normalize_scene_path(params.scene_path)
+		if not FileAccess.file_exists(path):
+			print(JSON.stringify({"valid": false, "errors": [{"message": "File not found: " + path}]}))
+			return
+		var scene = load(path)
+		if scene:
+			print(JSON.stringify({"valid": true, "errors": []}))
+		else:
+			print(JSON.stringify({"valid": false, "errors": []}))
+	else:
+		log_error("validate_resource requires script_path or scene_path")
 		quit(1)

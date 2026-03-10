@@ -5,6 +5,7 @@ import {
   normalizeParameters,
   validatePath,
   createErrorResponse,
+  extractGdError,
   OperationParams,
   ToolDefinition,
 } from '../utils/godot-runner.js';
@@ -142,8 +143,8 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
           rootNodeType: args.rootNodeType || 'Node2D',
         };
         const { stdout, stderr } = await runner.executeOperation('create_scene', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to create scene: ${stderr}`, ['Check if the root node type is valid']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to create scene: ${extractGdError(stderr)}`, ['Check if the root node type is valid']);
         }
         return { content: [{ type: 'text', text: stdout }] };
       }
@@ -160,8 +161,8 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
         if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
         if (args.properties) params.properties = args.properties;
         const { stdout, stderr } = await runner.executeOperation('add_node', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to add node: ${stderr}`, ['Check if the node type is valid', 'Ensure the parent node path exists']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to add node: ${extractGdError(stderr)}`, ['Check if the node type is valid', 'Ensure the parent node path exists']);
         }
         return { content: [{ type: 'text', text: stdout }] };
       }
@@ -183,8 +184,8 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
           texturePath: args.texturePath,
         };
         const { stdout, stderr } = await runner.executeOperation('load_sprite', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to load sprite: ${stderr}`, ['Check if the node is a Sprite2D, Sprite3D, or TextureRect']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to load sprite: ${extractGdError(stderr)}`, ['Check if the node is a Sprite2D, Sprite3D, or TextureRect']);
         }
         return { content: [{ type: 'text', text: stdout }] };
       }
@@ -196,10 +197,9 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
         const params: OperationParams = { scenePath: args.scenePath };
         if (args.newPath) params.newPath = args.newPath;
         const { stdout, stderr } = await runner.executeOperation('save_scene', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to save scene: ${stderr}`, ['Check if the scene file is valid']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to save scene: ${extractGdError(stderr)}`, ['Check if the scene file is valid']);
         }
-        const savePath = args.newPath || args.scenePath;
         return { content: [{ type: 'text', text: stdout }] };
       }
 
@@ -218,8 +218,8 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
           params.meshItemNames = args.meshItemNames;
         }
         const { stdout, stderr } = await runner.executeOperation('export_mesh_library', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to export mesh library: ${stderr}`, ['Check if the scene contains valid 3D meshes']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to export mesh library: ${extractGdError(stderr)}`, ['Check if the scene contains valid 3D meshes']);
         }
         return { content: [{ type: 'text', text: stdout }] };
       }
@@ -283,8 +283,8 @@ export async function handleManageUids(runner: GodotRunner, args: OperationParam
         }
         const params = { filePath: args.filePath };
         const { stdout, stderr } = await runner.executeOperation('get_uid', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to get UID: ${stderr}`, ['Check if the file is a valid Godot resource']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to get UID: ${extractGdError(stderr)}`, ['Check if the file is a valid Godot resource']);
         }
         return { content: [{ type: 'text', text: `UID for ${args.filePath}: ${stdout.trim()}` }] };
       }
@@ -292,8 +292,8 @@ export async function handleManageUids(runner: GodotRunner, args: OperationParam
       case 'update': {
         const params = { projectPath: args.projectPath };
         const { stdout, stderr } = await runner.executeOperation('resave_resources', params, args.projectPath as string);
-        if (stderr && stderr.includes('Failed to')) {
-          return createErrorResponse(`Failed to update project UIDs: ${stderr}`, ['Check if the project is valid']);
+        if (!stdout.trim()) {
+          return createErrorResponse(`Failed to update project UIDs: ${extractGdError(stderr)}`, ['Check if the project is valid']);
         }
         return { content: [{ type: 'text', text: stdout }] };
       }
