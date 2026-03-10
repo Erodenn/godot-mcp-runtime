@@ -1,6 +1,6 @@
 {
   "name": "godot-mcp-runtime",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "MCP server for Godot Engine — headless scene editing, runtime input simulation, live script execution, and more",
   "main": "dist/index.js",
   "type": "module",
