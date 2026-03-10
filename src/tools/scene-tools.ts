@@ -12,7 +12,7 @@ import {
 export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_scene',
-    description: 'Manage Godot scene files using headless Godot. Important: create, add_node, and load_sprite modify an in-memory scene — always follow them with operation "save" to persist changes to disk.\n\nOperations:\n- create: Create a new scene file (optional: rootNodeType, default Node2D)\n- add_node: Add a node to the scene (required: nodeType, nodeName; optional: parentNodePath, properties)\n- load_sprite: Set the texture on a Sprite2D, Sprite3D, or TextureRect node (required: nodePath, texturePath)\n- save: Write the scene to disk (optional: newPath for save-as)\n- export_mesh_library: Export scene as a MeshLibrary .res file (required: outputPath; optional: meshItemNames)',
+    description: 'Manage Godot scene files using headless Godot. All mutation operations (create, add_node, load_sprite) save automatically — no explicit save call needed. Use the save operation only for save-as (newPath) or to re-canonicalize a .tscn file.\n\nOperations:\n- create: Create a new scene file (optional: rootNodeType, default Node2D)\n- add_node: Add a node to the scene (required: nodeType, nodeName; optional: parentNodePath, properties)\n- load_sprite: Set the texture on a Sprite2D, Sprite3D, or TextureRect node (required: nodePath, texturePath)\n- save: Re-pack and save the scene, optionally to a different path (optional: newPath for save-as)\n- export_mesh_library: Export scene as a MeshLibrary .res file (required: outputPath; optional: meshItemNames)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -145,10 +145,7 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
         if (stderr && stderr.includes('Failed to')) {
           return createErrorResponse(`Failed to create scene: ${stderr}`, ['Check if the root node type is valid']);
         }
-        return { content: [
-          { type: 'text', text: stdout },
-          { type: 'text', text: 'Call manage_scene with operation "save" to persist this scene to disk.' },
-        ] };
+        return { content: [{ type: 'text', text: stdout }] };
       }
 
       case 'add_node': {
@@ -166,10 +163,7 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
         if (stderr && stderr.includes('Failed to')) {
           return createErrorResponse(`Failed to add node: ${stderr}`, ['Check if the node type is valid', 'Ensure the parent node path exists']);
         }
-        return { content: [
-          { type: 'text', text: stdout },
-          { type: 'text', text: 'Call manage_scene with operation "save" to persist this change to disk.' },
-        ] };
+        return { content: [{ type: 'text', text: stdout }] };
       }
 
       case 'load_sprite': {
@@ -192,10 +186,7 @@ export async function handleManageScene(runner: GodotRunner, args: OperationPara
         if (stderr && stderr.includes('Failed to')) {
           return createErrorResponse(`Failed to load sprite: ${stderr}`, ['Check if the node is a Sprite2D, Sprite3D, or TextureRect']);
         }
-        return { content: [
-          { type: 'text', text: stdout },
-          { type: 'text', text: 'Call manage_scene with operation "save" to persist this change to disk.' },
-        ] };
+        return { content: [{ type: 'text', text: stdout }] };
       }
 
       case 'save': {

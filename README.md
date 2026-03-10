@@ -119,14 +119,14 @@ After calling `run_project`, wait 2–3 seconds for the MCP bridge to initialize
 
 ### Scene: `manage_scene`
 
-`create`, `add_node`, and `load_sprite` modify an in-memory scene. Always follow them with `save` to write changes to disk.
+All mutation operations save automatically. Use `save` only for save-as (`newPath`) or to re-canonicalize a `.tscn` file.
 
 | Operation | Description |
 |-----------|-------------|
 | `create` | Create a new scene file |
 | `add_node` | Add a node to an existing scene |
 | `load_sprite` | Set a texture on a Sprite2D, Sprite3D, or TextureRect |
-| `save` | Write the scene to disk (or save-as with `newPath`) |
+| `save` | Re-pack and save the scene, or save-as with `newPath` |
 | `export_mesh_library` | Export scenes as a MeshLibrary for GridMap |
 
 ### Project Settings: `manage_project`
@@ -149,7 +149,7 @@ Edits `project.godot` directly — no Godot process required. Safe to use even w
 
 ### Node: `manage_node`
 
-`delete`, `update_property`, and `attach_script` modify an in-memory scene. Always follow them with `manage_scene` → `save` to persist.
+All mutation operations save automatically.
 
 | Operation | Description |
 |-----------|-------------|

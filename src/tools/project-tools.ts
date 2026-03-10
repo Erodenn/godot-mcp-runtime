@@ -212,7 +212,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'simulate_input',
-    description: 'Simulate batched sequential input in a running Godot project. Requires run_project first; wait 2–3 seconds after starting. Use get_ui_elements first to discover element names for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path, name, or visible text (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)',
+    description: 'Simulate batched sequential input in a running Godot project. Requires run_project first; wait 2–3 seconds after starting. Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -238,7 +238,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
               relative_x: { type: 'number', description: '[mouse_motion] Relative X movement in pixels' },
               relative_y: { type: 'number', description: '[mouse_motion] Relative Y movement in pixels' },
               double_click: { type: 'boolean', description: '[mouse_button, click_element] Double click' },
-              element: { type: 'string', description: '[click_element] Identifies the UI element to click. Accepts: node path (e.g. "root/HUD/Button"), node name, or visible text label. Use get_ui_elements to discover valid values.' },
+              element: { type: 'string', description: '[click_element] Identifies the UI element to click. Accepts: absolute node path (e.g. "/root/HUD/Button"), relative node path, or node name (BFS matched). Use get_ui_elements to discover valid names and paths.' },
               action: { type: 'string', description: '[action] Godot input action name (as defined in Project Settings > Input Map)' },
               strength: { type: 'number', description: '[action] Action strength (0–1, default 1.0)' },
               ms: { type: 'number', description: '[wait] Duration in milliseconds to pause before the next action' },
@@ -252,7 +252,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'get_ui_elements',
-    description: 'Get Control nodes from a running Godot project with their positions, sizes, types, and text. Requires run_project first; wait 2–3 seconds after starting. Call this before simulate_input with click_element to discover valid element names. Returns: { elements: [{ node_path, node_name, type, text, position, size }] }',
+    description: 'Get Control nodes from a running Godot project with their positions, sizes, types, and text. Requires run_project first; wait 2–3 seconds after starting. Call this before simulate_input with click_element to discover valid element names and paths. Returns: { elements: [{ name, path, type, rect: {x,y,width,height}, visible, text? (Button/Label/LineEdit/TextEdit), disabled? (buttons), tooltip? }] }',
     inputSchema: {
       type: 'object',
       properties: {
