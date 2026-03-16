@@ -427,6 +427,8 @@ export class GodotRunner {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
+    this.repairOrphanedBridge(projectPath);
+
     const snakeCaseParams = convertCamelToSnakeCase(params);
     logDebug(`Converted snake_case params: ${JSON.stringify(snakeCaseParams)}`);
 
@@ -670,6 +672,10 @@ export class GodotRunner {
 
     if (content.includes(autoloadEntry)) {
       logDebug('Bridge autoload already present, skipping injection');
+      if (!existsSync(destScript)) {
+        copyFileSync(this.bridgeScriptPath, destScript);
+        logDebug('Re-copied missing bridge script');
+      }
       this.injectedProjects.add(projectPath);
       return;
     }
@@ -689,6 +695,22 @@ export class GodotRunner {
   cleanupBridgeAutoload(projectPath: string): void {
     this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
     this.injectedProjects.delete(projectPath);
+  }
+
+  private repairOrphanedBridge(projectPath: string): void {
+    const projectFile = join(projectPath, 'project.godot');
+    const bridgeScript = join(projectPath, 'mcp_bridge.gd');
+    if (!existsSync(projectFile)) return;
+    if (existsSync(bridgeScript)) return;
+    try {
+      const content = readFileSync(projectFile, 'utf8');
+      if (content.includes('McpBridge=')) {
+        this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
+        logDebug('Cleaned up orphaned McpBridge autoload entry');
+      }
+    } catch (err) {
+      logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
+    }
   }
 
   sendCommand(command: string, params: Record<string, unknown> = {}, timeoutMs: number = 10000): Promise<string> {
