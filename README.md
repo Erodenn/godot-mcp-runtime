@@ -134,6 +134,7 @@ All mutation operations save automatically. Use `save` only for save-as (`newPat
 | `load_sprite` | Set a texture on a Sprite2D, Sprite3D, or TextureRect |
 | `save` | Re-pack and save the scene, or save-as with `newPath` |
 | `export_mesh_library` | Export scenes as a MeshLibrary for GridMap |
+| `batch` | Execute an ordered sequence of `add_node`, `load_sprite`, and `save` ops across one or more scenes in a single Godot process |
 
 ### Node: `manage_node`
 
@@ -143,8 +144,8 @@ All mutation operations save automatically.
 |-----------|-------------|
 | `get_tree` | Get the full scene tree hierarchy |
 | `list` | List direct child nodes of a node |
-| `get_properties` | Read a node's current property values |
-| `update_property` | Set a property on a node |
+| `get_properties` | Read properties from one node, or pass a `nodes` array to read from multiple nodes in one process |
+| `update_property` | Set a property on a node, or pass an `updates` array to set multiple properties in one process |
 | `attach_script` | Attach a GDScript to a node |
 | `duplicate` | Duplicate a node within the scene |
 | `delete` | Remove a node from the scene |
@@ -176,8 +177,9 @@ Validate before attaching or running. Catches syntax errors and missing resource
 | `scriptPath` | Validate an existing `.gd` file in the project |
 | `source` | Validate inline GDScript written to a temp file |
 | `scenePath` | Validate a `.tscn` file and check that all `ext_resource` references resolve |
+| `targets` | Array of the above — validate multiple scripts or scenes in a single Godot process |
 
-Returns `{ valid, errors: [{ line?, message }] }`. Fix reported errors and re-validate before calling `attach_script` or `run_script`.
+Returns `{ valid, errors: [{ line?, message }] }` per target. Fix reported errors and re-validate before calling `attach_script` or `run_script`.
 
 ### UIDs: `manage_uids` (Godot 4.4+)
 
