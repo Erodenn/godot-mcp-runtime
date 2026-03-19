@@ -233,6 +233,72 @@ export function createErrorResponse(message: string, possibleSolutions: string[]
   return response;
 }
 
+// --- Shared validation helpers ---
+
+interface ValidatedProjectArgs {
+  projectPath: string;
+}
+
+interface ValidatedSceneArgs {
+  projectPath: string;
+  scenePath: string;
+}
+
+type ValidationErrorResult = ReturnType<typeof createErrorResponse>;
+
+export function validateProjectArgs(args: OperationParams): ValidatedProjectArgs | ValidationErrorResult {
+  if (!args.projectPath) {
+    return createErrorResponse('projectPath is required', ['Provide a valid path to a Godot project directory']);
+  }
+
+  if (!validatePath(args.projectPath as string)) {
+    return createErrorResponse('Invalid project path', ['Provide a valid path without ".." or other potentially unsafe characters']);
+  }
+
+  const projectFile = join(args.projectPath as string, 'project.godot');
+  if (!existsSync(projectFile)) {
+    return createErrorResponse(
+      `Not a valid Godot project: ${args.projectPath}`,
+      ['Ensure the path points to a directory containing a project.godot file']
+    );
+  }
+
+  return { projectPath: args.projectPath as string };
+}
+
+export function validateSceneArgs(
+  args: OperationParams,
+  opts?: { sceneRequired?: boolean }
+): ValidatedSceneArgs | ValidationErrorResult {
+  const projectResult = validateProjectArgs(args);
+  if ('isError' in projectResult) return projectResult;
+
+  const sceneRequired = opts?.sceneRequired !== false;
+
+  if (!args.scenePath) {
+    if (sceneRequired) {
+      return createErrorResponse('scenePath is required', ['Provide the scene file path relative to the project']);
+    }
+    return { projectPath: projectResult.projectPath, scenePath: '' };
+  }
+
+  if (!validatePath(args.scenePath as string)) {
+    return createErrorResponse('Invalid scene path', ['Provide a valid path without ".." or other potentially unsafe characters']);
+  }
+
+  if (sceneRequired) {
+    const sceneFullPath = join(projectResult.projectPath, args.scenePath as string);
+    if (!existsSync(sceneFullPath)) {
+      return createErrorResponse(
+        `Scene file does not exist: ${args.scenePath}`,
+        ['Ensure the scene path is correct', 'Use create_scene to create a new scene first']
+      );
+    }
+  }
+
+  return { projectPath: projectResult.projectPath, scenePath: args.scenePath as string };
+}
+
 export class GodotRunner {
   private godotPath: string | null = null;
   private operationsScriptPath: string;
@@ -479,7 +545,7 @@ export class GodotRunner {
       throw new Error(
         `Headless Godot failed before the operation could run — likely an autoload initialization error.\n` +
         `Stderr:\n${stderr.trim()}\n\n` +
-        `Use manage_project (list_autoloads, remove_autoload) to inspect or remove the failing autoload, then retry.`
+        `Use list_autoloads and remove_autoload to inspect or remove the failing autoload, then retry.`
       );
     }
 

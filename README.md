@@ -19,7 +19,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 This is not a playtesting replacement. It doesn't catch the subtle feel issues that only a human notices, and it won't tell you if your game is fun. What it does is let an agent confirm that a scene loads, a button responds, a value updated, a script ran without errors. That's a fundamentally different development workflow, and it's what this server is built for.
 
-This server is built around a small set of composable, wide-reaching tools rather than a long list of narrow ones. Each tool is designed to teach agents how to use it well. Response messages include next steps, timing constraints, and cleanup reminders so agents stay on track without extra prompting.
+Every operation is its own tool with only its relevant parameters — no operation discriminators, no conditional schemas. Each tool teaches agents how to use it through its description and response messages: what to call next, when to wait, and how to recover from errors.
 
 ## What It Does
 
@@ -99,9 +99,7 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 
 ## Tools
 
-This server intentionally keeps the tool count small. Each tool covers a broad surface area through operations and parameters, so agents spend less time finding the right tool and more time doing useful work. Tool descriptions and responses are written to guide agent behavior: what to call next, when to wait, and how to recover from errors.
-
-### Project
+### Project Management
 
 | Tool | Description |
 |------|-------------|
@@ -119,67 +117,59 @@ After calling `run_project`, wait 2-3 seconds for the bridge to initialize befor
 | Tool | Description |
 |------|-------------|
 | `take_screenshot` | Capture a PNG of the running viewport |
-| `simulate_input` | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait |
+| `simulate_input` | Send batched input: key, mouse, click_element, action, wait |
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text |
 | `run_script` | Execute arbitrary GDScript at runtime with full SceneTree access |
 
-### Scene: `manage_scene`
+### Scene Editing (headless)
 
-All mutation operations save automatically. Use `save` only for save-as (`newPath`) or to re-canonicalize a `.tscn` file.
+All mutation operations save automatically. Use `save_scene` only for save-as (`newPath`) or to re-canonicalize a `.tscn` file.
 
-| Operation | Description |
-|-----------|-------------|
-| `create` | Create a new scene file |
-| `add_node` | Add a node to an existing scene |
+| Tool | Description |
+|------|-------------|
+| `create_scene` | Create a new scene file |
+| `add_node` | Add a node to an existing scene (supports promoted spatial params) |
 | `load_sprite` | Set a texture on a Sprite2D, Sprite3D, or TextureRect |
-| `save` | Re-pack and save the scene, or save-as with `newPath` |
+| `save_scene` | Re-pack and save the scene, or save-as with `newPath` |
 | `export_mesh_library` | Export scenes as a MeshLibrary for GridMap |
-| `batch` | Execute an ordered sequence of `add_node`, `load_sprite`, and `save` ops across one or more scenes in a single Godot process |
+| `batch_scene_operations` | Run multiple add_node/load_sprite/save ops in a single Godot process |
 
-### Node: `manage_node`
+### Node Editing (headless)
 
 All mutation operations save automatically.
 
-| Operation | Description |
-|-----------|-------------|
-| `get_tree` | Get the full scene tree hierarchy |
-| `list` | List direct child nodes of a node |
-| `get_properties` | Read properties from one node, or pass a `nodes` array to read from multiple nodes in one process |
-| `update_property` | Set a property on a node, or pass an `updates` array to set multiple properties in one process |
+| Tool | Description |
+|------|-------------|
+| `get_scene_tree` | Get the full scene tree hierarchy (use `maxDepth: 1` for shallow listing) |
+| `get_node_properties` | Read properties from a node |
+| `batch_get_node_properties` | Read properties from multiple nodes in one process |
+| `set_node_property` | Set a property on a node |
+| `batch_set_node_properties` | Set multiple properties in one process |
 | `attach_script` | Attach a GDScript to a node |
-| `duplicate` | Duplicate a node within the scene |
-| `delete` | Remove a node from the scene |
-| `get_signals` | List all signals on a node with their connections |
+| `duplicate_node` | Duplicate a node within the scene |
+| `delete_node` | Remove a node from the scene |
+| `get_node_signals` | List all signals on a node with their connections |
 | `connect_signal` | Connect a signal to a method on another node |
 | `disconnect_signal` | Disconnect a signal connection |
 
-### Project Settings: `manage_project`
+### Project Config (no Godot process required)
 
-Edits `project.godot` directly, no Godot process required. Safe to use even when autoloads are broken or headless operations are failing.
+These tools edit `project.godot` directly or read the filesystem. Safe to use even when autoloads are broken.
 
-| Operation | Description |
-|-----------|-------------|
+| Tool | Description |
+|------|-------------|
 | `list_autoloads` | List all registered autoloads with paths and singleton status |
 | `add_autoload` | Register a new autoload |
 | `remove_autoload` | Unregister an autoload by name |
 | `update_autoload` | Modify an existing autoload's path or singleton flag |
 | `get_project_settings` | Read settings from `project.godot` by section and key |
-| `get_filesystem_tree` | Get the project file tree with types and extensions |
-| `search_in_files` | Search for a string across project source files |
+| `get_project_files` | Get the project file tree with types and extensions |
+| `search_project` | Search for a string across project source files |
 | `get_scene_dependencies` | List all resources a scene depends on |
 
-### Validate: `validate`
+### Validation: `validate`
 
-Validate before attaching or running. Catches syntax errors and missing resource references before they cause headless crashes or runtime failures.
-
-| Input | Description |
-|-------|-------------|
-| `scriptPath` | Validate an existing `.gd` file in the project |
-| `source` | Validate inline GDScript written to a temp file |
-| `scenePath` | Validate a `.tscn` file and check that all `ext_resource` references resolve |
-| `targets` | Array of the above — validate multiple scripts or scenes in a single Godot process |
-
-Returns `{ valid, errors: [{ line?, message }] }` per target. Fix reported errors and re-validate before calling `attach_script` or `run_script`.
+Validate before attaching or running. Catches syntax errors and missing resource references before they cause headless crashes or runtime failures. Supports `scriptPath`, `source` (inline GDScript), `scenePath`, or a `targets` array for batch validation.
 
 ### UIDs: `manage_uids` (Godot 4.4+)
 
@@ -194,15 +184,15 @@ Returns `{ valid, errors: [{ line?, message }] }` per target. Fix reported error
 src/
 ├── index.ts                # MCP server entry point, routes tool calls
 ├── tools/
-│   ├── project-tools.ts    # Project and runtime tool handlers
-│   ├── scene-tools.ts      # Scene operations
-│   ├── node-tools.ts       # Node operations
+│   ├── project-tools.ts    # Project, runtime, autoload, filesystem, search, settings
+│   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops, UIDs
+│   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
 │   └── mcp_bridge.gd       # UDP autoload for runtime communication
 └── utils/
-    └── godot-runner.ts     # Process spawning, output parsing
+    └── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
 ```
 
 Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over UDP with the injected `McpBridge` autoload.
@@ -221,7 +211,7 @@ Files generated during runtime (screenshots, executed scripts) are stored in `.m
 
 ## Broken Autoloads
 
-If any registered autoload fails to initialize (syntax error, missing resource, display dependency), Godot's headless process will crash before any operation runs. Use `manage_project` to inspect and remove the failing autoload. It edits `project.godot` directly, with no Godot process involved.
+If any registered autoload fails to initialize (syntax error, missing resource, display dependency), Godot's headless process will crash before any operation runs. Use `list_autoloads` and `remove_autoload` to inspect and remove the failing autoload. These tools edit `project.godot` directly, with no Godot process involved.
 
 ## Acknowledgments
 

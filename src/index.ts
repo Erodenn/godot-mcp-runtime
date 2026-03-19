@@ -31,20 +31,42 @@ import {
   handleSimulateInput,
   handleGetUiElements,
   handleRunScript,
-  handleManageProject,
+  handleListAutoloads,
+  handleAddAutoload,
+  handleRemoveAutoload,
+  handleUpdateAutoload,
+  handleGetProjectFiles,
+  handleSearchProject,
+  handleGetSceneDependencies,
+  handleGetProjectSettings,
 } from './tools/project-tools.js';
 
 // Scene tools
 import {
   sceneToolDefinitions,
-  handleManageScene,
+  handleCreateScene,
+  handleAddNode,
+  handleLoadSprite,
+  handleSaveScene,
+  handleExportMeshLibrary,
+  handleBatchSceneOperations,
   handleManageUids,
 } from './tools/scene-tools.js';
 
 // Node tools
 import {
   nodeToolDefinitions,
-  handleManageNode,
+  handleDeleteNode,
+  handleSetNodeProperty,
+  handleBatchSetNodeProperties,
+  handleGetNodeProperties,
+  handleBatchGetNodeProperties,
+  handleAttachScript,
+  handleGetSceneTree,
+  handleDuplicateNode,
+  handleGetNodeSignals,
+  handleConnectSignal,
+  handleDisconnectSignal,
 } from './tools/node-tools.js';
 
 // Validate tools
@@ -63,12 +85,29 @@ class GodotMcpServer {
     this.server = new Server(
       {
         name: 'godot-mcp',
-        version: '1.1.1',
+        version: '2.0.0',
       },
       {
         capabilities: {
           tools: {},
         },
+        instructions: `Godot MCP Server — AI-driven Godot 4.x project manipulation.
+
+Tool categories:
+- Project management: launch_editor, run_project, stop_project, get_debug_output, list_projects, get_project_info
+- Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
+- Node editing (headless): delete_node, set_node_property, batch_set_node_properties, get_node_properties, batch_get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
+- Runtime (requires run_project): take_screenshot, simulate_input, get_ui_elements, run_script
+- Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings
+- Validation: validate
+- UIDs (Godot 4.4+): manage_uids
+
+Key behaviors:
+- All mutation operations (add_node, set_node_property, delete_node, etc.) save the scene automatically. Only use save_scene for save-as (newPath) or re-canonicalization.
+- Headless Godot initializes ALL registered autoloads. If any autoload is broken, headless operations will fail. Use list_autoloads / remove_autoload to diagnose.
+- After run_project, wait 2-3 seconds before using runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script). The MCP bridge needs time to initialize.
+- click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
+- run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".`,
       }
     );
 
@@ -134,18 +173,62 @@ class GodotMcpServer {
           return await handleGetUiElements(this.runner, args);
         case 'run_script':
           return await handleRunScript(this.runner, args);
-        case 'manage_project':
-          return await handleManageProject(args);
+        case 'list_autoloads':
+          return await handleListAutoloads(args);
+        case 'add_autoload':
+          return await handleAddAutoload(args);
+        case 'remove_autoload':
+          return await handleRemoveAutoload(args);
+        case 'update_autoload':
+          return await handleUpdateAutoload(args);
+        case 'get_project_files':
+          return await handleGetProjectFiles(args);
+        case 'search_project':
+          return await handleSearchProject(args);
+        case 'get_scene_dependencies':
+          return await handleGetSceneDependencies(args);
+        case 'get_project_settings':
+          return await handleGetProjectSettings(args);
 
         // Scene tools
-        case 'manage_scene':
-          return await handleManageScene(this.runner, args);
+        case 'create_scene':
+          return await handleCreateScene(this.runner, args);
+        case 'add_node':
+          return await handleAddNode(this.runner, args);
+        case 'load_sprite':
+          return await handleLoadSprite(this.runner, args);
+        case 'save_scene':
+          return await handleSaveScene(this.runner, args);
+        case 'export_mesh_library':
+          return await handleExportMeshLibrary(this.runner, args);
+        case 'batch_scene_operations':
+          return await handleBatchSceneOperations(this.runner, args);
         case 'manage_uids':
           return await handleManageUids(this.runner, args);
 
         // Node tools
-        case 'manage_node':
-          return await handleManageNode(this.runner, args);
+        case 'delete_node':
+          return await handleDeleteNode(this.runner, args);
+        case 'set_node_property':
+          return await handleSetNodeProperty(this.runner, args);
+        case 'batch_set_node_properties':
+          return await handleBatchSetNodeProperties(this.runner, args);
+        case 'get_node_properties':
+          return await handleGetNodeProperties(this.runner, args);
+        case 'batch_get_node_properties':
+          return await handleBatchGetNodeProperties(this.runner, args);
+        case 'attach_script':
+          return await handleAttachScript(this.runner, args);
+        case 'get_scene_tree':
+          return await handleGetSceneTree(this.runner, args);
+        case 'duplicate_node':
+          return await handleDuplicateNode(this.runner, args);
+        case 'get_node_signals':
+          return await handleGetNodeSignals(this.runner, args);
+        case 'connect_signal':
+          return await handleConnectSignal(this.runner, args);
+        case 'disconnect_signal':
+          return await handleDisconnectSignal(this.runner, args);
 
         // Validate tools
         case 'validate':

@@ -4,6 +4,7 @@ import {
   GodotRunner,
   normalizeParameters,
   validatePath,
+  validateProjectArgs,
   createErrorResponse,
   logDebug,
   OperationParams,
@@ -111,7 +112,7 @@ function updateAutoloadEntry(projectFilePath: string, name: string, newPath?: st
 export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'launch_editor',
-    description: 'Open the Godot editor GUI for a project. The editor is a display application — it cannot be controlled programmatically and returns immediately. For headless project modification, use manage_scene and manage_node instead.',
+    description: 'Open the Godot editor GUI for a project. The editor is a display application — it cannot be controlled programmatically and returns immediately. For headless project modification, use the scene and node editing tools (add_node, set_node_property, etc.) instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -212,7 +213,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'simulate_input',
-    description: 'Simulate batched sequential input in a running Godot project. Requires run_project first; wait 2–3 seconds after starting. Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)',
+    description: 'Simulate batched sequential input in a running Godot project. Requires run_project first; wait 2–3 seconds after starting. Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)\n\nExamples:\n1. Press and release Space: [{type:"key",key:"Space",pressed:true},{type:"wait",ms:100},{type:"key",key:"Space",pressed:false}]\n2. Click a UI button (discover path with get_ui_elements first): [{type:"click_element",element:"StartButton"}]\n3. Left-click at viewport coordinates: [{type:"mouse_button",x:400,y:300,button:"left",pressed:true},{type:"mouse_button",x:400,y:300,button:"left",pressed:false}]\n4. Fire a Godot action: [{type:"action",action:"jump",pressed:true},{type:"wait",ms:200},{type:"action",action:"jump",pressed:false}]\n5. Type "hello": [{type:"key",key:"H",pressed:true},{type:"key",key:"H",pressed:false},{type:"key",key:"E",pressed:true},{type:"key",key:"E",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"O",pressed:true},{type:"key",key:"O",pressed:false}]',
     inputSchema: {
       type: 'object',
       properties: {
@@ -287,80 +288,106 @@ export const projectToolDefinitions: ToolDefinition[] = [
     },
   },
   {
-    name: 'manage_project',
-    description: `Manage Godot project settings and autoloads by directly editing project.godot. No Godot process required — safe to use even when the project has broken autoloads.
-
-⚠️  AUTOLOAD LIMITATION: Never use headless Godot tools (manage_scene, manage_node, etc.) to add or configure autoloads. Running headless initializes ALL existing autoloads — if any are broken or require a display, the process fails. Always use manage_project for autoload management.
-
-Operations:
-- list_autoloads: List all registered autoloads with paths and singleton status
-- add_autoload: Register a new autoload (required: autoloadName, autoloadPath; optional: singleton, default true)
-- remove_autoload: Unregister an autoload by name (required: autoloadName)
-- update_autoload: Modify an existing autoload's path or singleton flag (required: autoloadName; optional: autoloadPath, singleton)
-- get_filesystem_tree: Return a recursive file tree of the project (optional: maxDepth, extensions). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } objects.
-- search_in_files: Plain-text search across project files (required: pattern; optional: fileTypes, caseSensitive, maxResults). Returns { matches: [{ file, lineNumber, line }], truncated } — check truncated if maxResults may have been hit. Skips hidden entries and the .mcp directory.
-- get_scene_dependencies: Parse a .tscn file for ext_resource references only (scripts, textures, subscenes — not inlined sub_resource blocks). Required: scenePath. Returns { scene, dependencies: [{ path, type, uid? }] }.
-- get_project_settings: Parse project.godot into structured JSON (optional: section). Returns { settings: { [section]: { [key]: value } } }. Complex Godot types (e.g. Vector2, PackedStringArray) are returned as raw strings. Keys not under any section appear under __global__.`,
+    name: 'list_autoloads',
+    description: 'List all registered autoloads in a Godot project with paths and singleton status. No Godot process required — reads project.godot directly.',
     inputSchema: {
       type: 'object',
       properties: {
-        operation: {
-          type: 'string',
-          enum: ['list_autoloads', 'add_autoload', 'remove_autoload', 'update_autoload', 'get_filesystem_tree', 'search_in_files', 'get_scene_dependencies', 'get_project_settings'],
-          description: 'The project operation to perform',
-        },
-        projectPath: {
-          type: 'string',
-          description: 'Path to the Godot project directory',
-        },
-        autoloadName: {
-          type: 'string',
-          description: '[add/remove/update_autoload] Name of the autoload node (e.g. "MyManager")',
-        },
-        autoloadPath: {
-          type: 'string',
-          description: '[add/update_autoload] Path to the script or scene (e.g. "res://autoload/my_manager.gd" or "autoload/my_manager.gd")',
-        },
-        singleton: {
-          type: 'boolean',
-          description: '[add/update_autoload] Register as a globally accessible singleton by name (default: true)',
-        },
-        maxDepth: {
-          type: 'number',
-          description: '[get_filesystem_tree] Maximum recursion depth. -1 means unlimited (default: -1)',
-        },
-        extensions: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '[get_filesystem_tree] Filter results to only these file extensions (e.g. ["gd", "tscn"]). Omit to include all files.',
-        },
-        pattern: {
-          type: 'string',
-          description: '[search_in_files] Plain-text string to search for across project files',
-        },
-        fileTypes: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '[search_in_files] File extensions to search (default: ["gd", "tscn", "cs", "gdshader"])',
-        },
-        caseSensitive: {
-          type: 'boolean',
-          description: '[search_in_files] Whether the search is case-sensitive (default: false)',
-        },
-        maxResults: {
-          type: 'number',
-          description: '[search_in_files] Maximum number of matches to return (default: 100)',
-        },
-        scenePath: {
-          type: 'string',
-          description: '[get_scene_dependencies] Path to the .tscn file relative to the project root (e.g. "scenes/main.tscn")',
-        },
-        section: {
-          type: 'string',
-          description: '[get_project_settings] Filter output to a specific INI section (e.g. "display", "application"). Omit to get all sections.',
-        },
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
       },
-      required: ['operation', 'projectPath'],
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'add_autoload',
+    description: 'Register a new autoload in a Godot project. No Godot process required. Warning: autoloads initialize in headless mode — if the script has errors, all headless operations will fail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        autoloadName: { type: 'string', description: 'Name of the autoload node (e.g. "MyManager")' },
+        autoloadPath: { type: 'string', description: 'Path to the script or scene (e.g. "res://autoload/my_manager.gd" or "autoload/my_manager.gd")' },
+        singleton: { type: 'boolean', description: 'Register as a globally accessible singleton by name (default: true)' },
+      },
+      required: ['projectPath', 'autoloadName', 'autoloadPath'],
+    },
+  },
+  {
+    name: 'remove_autoload',
+    description: 'Unregister an autoload from a Godot project by name. No Godot process required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        autoloadName: { type: 'string', description: 'Name of the autoload to remove' },
+      },
+      required: ['projectPath', 'autoloadName'],
+    },
+  },
+  {
+    name: 'update_autoload',
+    description: 'Modify an existing autoload\'s path or singleton flag. No Godot process required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        autoloadName: { type: 'string', description: 'Name of the autoload to update' },
+        autoloadPath: { type: 'string', description: 'New path to the script or scene' },
+        singleton: { type: 'boolean', description: 'New singleton flag' },
+      },
+      required: ['projectPath', 'autoloadName'],
+    },
+  },
+  {
+    name: 'get_project_files',
+    description: 'Return a recursive file tree of a Godot project. Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } objects.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        maxDepth: { type: 'number', description: 'Maximum recursion depth. -1 means unlimited (default: -1)' },
+        extensions: { type: 'array', items: { type: 'string' }, description: 'Filter to only these file extensions (e.g. ["gd", "tscn"]). Omit to include all.' },
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'search_project',
+    description: 'Plain-text search across project files. Returns { matches: [{ file, lineNumber, line }], truncated }. Skips hidden entries and the .mcp directory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        pattern: { type: 'string', description: 'Plain-text string to search for' },
+        fileTypes: { type: 'array', items: { type: 'string' }, description: 'File extensions to search (default: ["gd", "tscn", "cs", "gdshader"])' },
+        caseSensitive: { type: 'boolean', description: 'Case-sensitive search (default: false)' },
+        maxResults: { type: 'number', description: 'Maximum matches to return (default: 100)' },
+      },
+      required: ['projectPath', 'pattern'],
+    },
+  },
+  {
+    name: 'get_scene_dependencies',
+    description: 'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Returns { scene, dependencies: [{ path, type, uid? }] }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        scenePath: { type: 'string', description: 'Path to the .tscn file relative to the project root (e.g. "scenes/main.tscn")' },
+      },
+      required: ['projectPath', 'scenePath'],
+    },
+  },
+  {
+    name: 'get_project_settings',
+    description: 'Parse project.godot into structured JSON. Returns { settings: { [section]: { [key]: value } } }. Complex Godot types are returned as raw strings. Keys not under any section appear under __global__.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        section: { type: 'string', description: 'Filter to a specific INI section (e.g. "display", "application"). Omit for all sections.' },
+      },
+      required: ['projectPath'],
     },
   },
 ];
@@ -487,7 +514,7 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
     });
 
     return {
-      content: [{ type: 'text', text: `Godot editor launched successfully for project at ${args.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use manage_scene and manage_node to modify the project headlessly without the editor.` }],
+      content: [{ type: 'text', text: `Godot editor launched successfully for project at ${args.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_property, etc.) to modify the project headlessly without the editor.` }],
     };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -994,7 +1021,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
   }
 }
 
-// --- manage_project helper: filesystem tree ---
+// --- Project helper: filesystem tree ---
 
 interface FileTreeNode {
   name: string;
@@ -1044,7 +1071,7 @@ function buildFilesystemTree(
   return node;
 }
 
-// --- manage_project helper: search in files ---
+// --- Project helper: search in files ---
 
 interface SearchMatch {
   file: string;
@@ -1107,7 +1134,7 @@ function searchInFiles(
   return { matches, truncated };
 }
 
-// --- manage_project helper: project settings parser ---
+// --- Project helper: project settings parser ---
 
 type SettingsValue = string | number | boolean;
 
@@ -1145,176 +1172,211 @@ function parseProjectSettings(projectFilePath: string): Record<string, Record<st
   return result;
 }
 
-export async function handleManageProject(args: OperationParams) {
+export async function handleListAutoloads(args: OperationParams) {
   args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
 
-  const operation = args.operation as string;
-  if (!operation) {
-    return createErrorResponse('operation is required', ['Provide one of: list_autoloads, add_autoload, remove_autoload, update_autoload, get_filesystem_tree, search_in_files, get_scene_dependencies, get_project_settings']);
+  try {
+    const projectFile = join(v.projectPath, 'project.godot');
+    const autoloads = parseAutoloads(projectFile);
+    return { content: [{ type: 'text', text: JSON.stringify({ autoloads }) }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to list autoloads: ${errorMessage}`, ['Check if project.godot is accessible']);
   }
+}
 
-  if (!args.projectPath) {
-    return createErrorResponse('projectPath is required', ['Provide a valid path to a Godot project directory']);
+export async function handleAddAutoload(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  if (!args.autoloadName || !args.autoloadPath) {
+    return createErrorResponse('autoloadName and autoloadPath are required', ['Provide the autoload node name and script/scene path']);
   }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', ['Provide a valid path without ".."']);
-  }
-
-  const projectFile = join(args.projectPath as string, 'project.godot');
-  if (!existsSync(projectFile)) {
-    return createErrorResponse(
-      `Not a valid Godot project: ${args.projectPath}`,
-      ['Ensure the path points to a directory containing a project.godot file']
-    );
+  if (!validatePath(args.autoloadPath as string)) {
+    return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
   }
 
   try {
-    switch (operation) {
-      case 'list_autoloads': {
-        const autoloads = parseAutoloads(projectFile);
-        return { content: [{ type: 'text', text: JSON.stringify({ autoloads }) }] };
-      }
-
-      case 'add_autoload': {
-        if (!args.autoloadName || !args.autoloadPath) {
-          return createErrorResponse(
-            'autoloadName and autoloadPath are required for add_autoload',
-            ['Provide the autoload node name and the path to the script or scene']
-          );
-        }
-        if (!validatePath(args.autoloadPath as string)) {
-          return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
-        }
-        const existing = parseAutoloads(projectFile);
-        if (existing.some(a => a.name === (args.autoloadName as string))) {
-          return createErrorResponse(
-            `Autoload '${args.autoloadName}' already exists`,
-            ['Use update_autoload to modify an existing autoload', 'Use list_autoloads to see current autoloads']
-          );
-        }
-        const isSingleton = args.singleton !== false;
-        addAutoloadEntry(projectFile, args.autoloadName as string, args.autoloadPath as string, isSingleton);
-        return {
-          content: [{ type: 'text', text: `Autoload '${args.autoloadName}' registered at '${args.autoloadPath}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors or missing dependencies, all manage_scene and manage_node operations will fail with a cryptic crash. Verify by running a simple manage_node get_tree operation — if it fails, use manage_project remove_autoload to remove it.` }],
-        };
-      }
-
-      case 'remove_autoload': {
-        if (!args.autoloadName) {
-          return createErrorResponse('autoloadName is required for remove_autoload', ['Provide the name of the autoload to remove']);
-        }
-        const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
-        if (!removed) {
-          return createErrorResponse(
-            `Autoload '${args.autoloadName}' not found`,
-            ['Use list_autoloads to see existing autoloads']
-          );
-        }
-        return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }] };
-      }
-
-      case 'update_autoload': {
-        if (!args.autoloadName) {
-          return createErrorResponse('autoloadName is required for update_autoload', ['Provide the name of the autoload to update']);
-        }
-        if (args.autoloadPath && !validatePath(args.autoloadPath as string)) {
-          return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
-        }
-        const updated = updateAutoloadEntry(
-          projectFile,
-          args.autoloadName as string,
-          args.autoloadPath as string | undefined,
-          args.singleton as boolean | undefined
-        );
-        if (!updated) {
-          return createErrorResponse(
-            `Autoload '${args.autoloadName}' not found`,
-            ['Use list_autoloads to see existing autoloads', 'Use add_autoload to register a new autoload']
-          );
-        }
-        return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }] };
-      }
-
-      case 'get_filesystem_tree': {
-        const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : -1;
-        const extensions = Array.isArray(args.extensions)
-          ? (args.extensions as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
-          : null;
-        const tree = buildFilesystemTree(args.projectPath as string, '', maxDepth, 0, extensions);
-        return { content: [{ type: 'text', text: JSON.stringify(tree) }] };
-      }
-
-      case 'search_in_files': {
-        if (!args.pattern || typeof args.pattern !== 'string') {
-          return createErrorResponse('pattern is required for search_in_files', ['Provide a plain-text search string']);
-        }
-        const fileTypes = Array.isArray(args.fileTypes)
-          ? (args.fileTypes as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
-          : ['gd', 'tscn', 'cs', 'gdshader'];
-        const caseSensitive = args.caseSensitive === true;
-        const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 100;
-        const result = searchInFiles(args.projectPath as string, args.pattern as string, fileTypes, caseSensitive, maxResults);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
-      case 'get_scene_dependencies': {
-        if (!args.scenePath || typeof args.scenePath !== 'string') {
-          return createErrorResponse('scenePath is required for get_scene_dependencies', ['Provide a path relative to the project root, e.g. "scenes/main.tscn"']);
-        }
-        if (!validatePath(args.scenePath as string)) {
-          return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
-        }
-        const sceneFullPath = join(args.projectPath as string, args.scenePath as string);
-        if (!existsSync(sceneFullPath)) {
-          return createErrorResponse(
-            `Scene file not found: ${args.scenePath}`,
-            ['Verify the path is relative to the project root', 'Use get_filesystem_tree to list available .tscn files']
-          );
-        }
-        const sceneContent = readFileSync(sceneFullPath, 'utf8');
-        const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
-        const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
-        let match;
-        while ((match = extResourcePattern.exec(sceneContent)) !== null) {
-          const attrs = match[1];
-          const typeMatch = attrs.match(/\btype="([^"]*)"/);
-          const pathMatch = attrs.match(/\bpath="([^"]*)"/);
-          const uidMatch = attrs.match(/\buid="([^"]*)"/);
-          if (pathMatch) {
-            const depPath = pathMatch[1].replace(/^res:\/\//, '');
-            const dep: { path: string; type: string; uid?: string } = {
-              path: depPath,
-              type: typeMatch ? typeMatch[1] : 'Unknown',
-            };
-            if (uidMatch) dep.uid = uidMatch[1];
-            dependencies.push(dep);
-          }
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }] };
-      }
-
-      case 'get_project_settings': {
-        const allSettings = parseProjectSettings(projectFile);
-        if (args.section && typeof args.section === 'string') {
-          const sectionData = allSettings[args.section as string] ?? {};
-          return { content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] };
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] };
-      }
-
-      default:
-        return createErrorResponse(
-          `Unknown operation: ${operation}`,
-          ['Use one of: list_autoloads, add_autoload, remove_autoload, update_autoload, get_filesystem_tree, search_in_files, get_scene_dependencies, get_project_settings']
-        );
+    const projectFile = join(v.projectPath, 'project.godot');
+    const existing = parseAutoloads(projectFile);
+    if (existing.some(a => a.name === (args.autoloadName as string))) {
+      return createErrorResponse(
+        `Autoload '${args.autoloadName}' already exists`,
+        ['Use update_autoload to modify it', 'Use list_autoloads to see current autoloads']
+      );
     }
+    const isSingleton = args.singleton !== false;
+    addAutoloadEntry(projectFile, args.autoloadName as string, args.autoloadPath as string, isSingleton);
+    return {
+      content: [{ type: 'text', text: `Autoload '${args.autoloadName}' registered at '${args.autoloadPath}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.` }],
+    };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(
-      `Failed to ${operation}: ${errorMessage}`,
-      ['Check if project.godot is accessible and not corrupted']
+    return createErrorResponse(`Failed to add autoload: ${errorMessage}`, ['Check if project.godot is accessible']);
+  }
+}
+
+export async function handleRemoveAutoload(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  if (!args.autoloadName) {
+    return createErrorResponse('autoloadName is required', ['Provide the name of the autoload to remove']);
+  }
+
+  try {
+    const projectFile = join(v.projectPath, 'project.godot');
+    const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
+    if (!removed) {
+      return createErrorResponse(`Autoload '${args.autoloadName}' not found`, ['Use list_autoloads to see existing autoloads']);
+    }
+    return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to remove autoload: ${errorMessage}`, ['Check if project.godot is accessible']);
+  }
+}
+
+export async function handleUpdateAutoload(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  if (!args.autoloadName) {
+    return createErrorResponse('autoloadName is required', ['Provide the name of the autoload to update']);
+  }
+  if (args.autoloadPath && !validatePath(args.autoloadPath as string)) {
+    return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
+  }
+
+  try {
+    const projectFile = join(v.projectPath, 'project.godot');
+    const updated = updateAutoloadEntry(
+      projectFile,
+      args.autoloadName as string,
+      args.autoloadPath as string | undefined,
+      args.singleton as boolean | undefined
     );
+    if (!updated) {
+      return createErrorResponse(
+        `Autoload '${args.autoloadName}' not found`,
+        ['Use list_autoloads to see existing autoloads', 'Use add_autoload to register a new one']
+      );
+    }
+    return { content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to update autoload: ${errorMessage}`, ['Check if project.godot is accessible']);
+  }
+}
+
+export async function handleGetProjectFiles(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  try {
+    const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : -1;
+    const extensions = Array.isArray(args.extensions)
+      ? (args.extensions as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
+      : null;
+    const tree = buildFilesystemTree(v.projectPath, '', maxDepth, 0, extensions);
+    return { content: [{ type: 'text', text: JSON.stringify(tree) }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to get project files: ${errorMessage}`, ['Check if the project directory is accessible']);
+  }
+}
+
+export async function handleSearchProject(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  if (!args.pattern || typeof args.pattern !== 'string') {
+    return createErrorResponse('pattern is required', ['Provide a plain-text search string']);
+  }
+
+  try {
+    const fileTypes = Array.isArray(args.fileTypes)
+      ? (args.fileTypes as string[]).map(e => e.toLowerCase().replace(/^\./, ''))
+      : ['gd', 'tscn', 'cs', 'gdshader'];
+    const caseSensitive = args.caseSensitive === true;
+    const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 100;
+    const result = searchInFiles(v.projectPath, args.pattern as string, fileTypes, caseSensitive, maxResults);
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to search project: ${errorMessage}`, ['Check if the project directory is accessible']);
+  }
+}
+
+export async function handleGetSceneDependencies(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  if (!args.scenePath || typeof args.scenePath !== 'string') {
+    return createErrorResponse('scenePath is required', ['Provide a path relative to the project root, e.g. "scenes/main.tscn"']);
+  }
+  if (!validatePath(args.scenePath as string)) {
+    return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
+  }
+
+  try {
+    const sceneFullPath = join(v.projectPath, args.scenePath as string);
+    if (!existsSync(sceneFullPath)) {
+      return createErrorResponse(
+        `Scene file not found: ${args.scenePath}`,
+        ['Verify the path is relative to the project root', 'Use get_project_files to list available .tscn files']
+      );
+    }
+    const sceneContent = readFileSync(sceneFullPath, 'utf8');
+    const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
+    const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
+    let match;
+    while ((match = extResourcePattern.exec(sceneContent)) !== null) {
+      const attrs = match[1];
+      const typeMatch = attrs.match(/\btype="([^"]*)"/);
+      const pathMatch = attrs.match(/\bpath="([^"]*)"/);
+      const uidMatch = attrs.match(/\buid="([^"]*)"/);
+      if (pathMatch) {
+        const depPath = pathMatch[1].replace(/^res:\/\//, '');
+        const dep: { path: string; type: string; uid?: string } = {
+          path: depPath,
+          type: typeMatch ? typeMatch[1] : 'Unknown',
+        };
+        if (uidMatch) dep.uid = uidMatch[1];
+        dependencies.push(dep);
+      }
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to get scene dependencies: ${errorMessage}`, ['Check if the scene file is accessible']);
+  }
+}
+
+export async function handleGetProjectSettings(args: OperationParams) {
+  args = normalizeParameters(args);
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
+
+  try {
+    const projectFile = join(v.projectPath, 'project.godot');
+    const allSettings = parseProjectSettings(projectFile);
+    if (args.section && typeof args.section === 'string') {
+      const sectionData = allSettings[args.section as string] ?? {};
+      return { content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(`Failed to get project settings: ${errorMessage}`, ['Check if project.godot is accessible']);
   }
 }
 
