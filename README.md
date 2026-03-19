@@ -1,4 +1,4 @@
-# Godot MCP Server
+# Godot MCP Runtime
 
 [![npm version](https://img.shields.io/npm/v/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
 [![npm downloads](https://img.shields.io/npm/dm/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
