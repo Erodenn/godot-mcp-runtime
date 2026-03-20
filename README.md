@@ -7,9 +7,11 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running Godot 4.x game. Not just file editing, not just scene manipulation. Actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.
 
-Most Godot MCP servers operate headlessly. They can create scenes, add nodes, attach scripts. That covers a lot of ground, but stops at the editor boundary. This one doesn't. When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
+When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
 
 **The distinction matters: the AI doesn't just write your game, it can check its work.**
+
+**No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon — something you install into your project, commit to version control, and manage as a dependency. This server does none of that. The bridge script is injected on `run_project` and removed on `stop_project`. Your project files are left exactly as they were. All you need is Node.js and a Godot executable — no addon installation, no project modifications, no cleanup.
 
 <a href="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server" />
@@ -41,26 +43,33 @@ The bridge cleans itself up automatically when `stop_project` is called. No left
 - [Node.js](https://nodejs.org/) v18+
 - [Godot 4.x](https://godotengine.org/)
 
-### Install via npm
-
-```bash
-npm install -g godot-mcp-runtime
-```
-
-### Or clone from source
-
-```bash
-git clone https://github.com/Erodenn/godot-mcp-runtime.git
-cd godot-mcp-runtime
-npm install
-npm run build
-```
+That's it. No Godot addon, no project modifications.
 
 ### Configure Your MCP Client
 
 Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
 
-**If installed via npm:**
+**Zero-install via npx (recommended):**
+
+```json
+{
+  "mcpServers": {
+    "godot": {
+      "command": "npx",
+      "args": ["-y", "godot-mcp-runtime"],
+      "env": {
+        "GODOT_PATH": "<path-to-godot-executable>"
+      }
+    }
+  }
+}
+```
+
+**Or install globally:**
+
+```bash
+npm install -g godot-mcp-runtime
+```
 
 ```json
 {
@@ -75,7 +84,14 @@ Add the following to your MCP client config. Works with Claude Code, Claude Desk
 }
 ```
 
-**If cloned from source:**
+**Or clone from source:**
+
+```bash
+git clone https://github.com/Erodenn/godot-mcp-runtime.git
+cd godot-mcp-runtime
+npm install
+npm run build
+```
 
 ```json
 {
