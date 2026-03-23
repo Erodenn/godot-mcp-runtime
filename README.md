@@ -34,6 +34,8 @@ Every operation is its own tool with only its relevant parameters — no operati
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
 
+**Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen with physical input blocked — borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
+
 The bridge cleans itself up automatically when `stop_project` is called. No leftover autoloads, no modified project files.
 
 ## Quick Start
@@ -120,7 +122,7 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 | Tool | Description |
 |------|-------------|
 | `launch_editor` | Open the Godot editor GUI for a project |
-| `run_project` | Run a project in debug mode and inject the MCP bridge |
+| `run_project` | Run a project in debug mode and inject the MCP bridge. Pass `background: true` to hide the window |
 | `stop_project` | Stop the running project and remove the bridge |
 | `get_debug_output` | Read stdout/stderr from the running project |
 | `list_projects` | Find Godot projects in a directory |
