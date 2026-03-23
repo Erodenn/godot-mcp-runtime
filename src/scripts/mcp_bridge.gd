@@ -12,6 +12,13 @@ func _ready() -> void:
 	else:
 		print("McpBridge: Listening on UDP port %d" % port)
 
+	if OS.get_environment("MCP_BACKGROUND") == "1":
+		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
+		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true)
+		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true)
+		DisplayServer.window_set_position(Vector2i(-9999, -9999))
+		print("McpBridge: Background mode active - window hidden, physical input blocked")
+
 func _process(_delta: float) -> void:
 	udp_server.poll()
 	if udp_server.is_connection_available():

@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'url';
 import { join, dirname, normalize } from 'path';
 import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { createSocket } from 'dgram';
 
 // Derive __filename and __dirname in ESM
@@ -559,7 +559,7 @@ export class GodotRunner {
     return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
   }
 
-  runProject(projectPath: string, scene?: string): GodotProcess {
+  runProject(projectPath: string, scene?: string, background: boolean = false): GodotProcess {
     if (!this.godotPath) {
       throw new Error('Godot path not set. Call detectGodotPath first.');
     }
@@ -587,7 +587,11 @@ export class GodotRunner {
     }
 
     logDebug(`Running Godot project: ${projectPath}`);
-    const proc = spawn(this.godotPath, cmdArgs, { stdio: 'pipe' });
+    const spawnOptions: SpawnOptions = { stdio: 'pipe' };
+    if (background) {
+      spawnOptions.env = { ...process.env, MCP_BACKGROUND: '1' };
+    }
+    const proc = spawn(this.godotPath, cmdArgs, spawnOptions);
     const output: string[] = [];
     const errors: string[] = [];
 

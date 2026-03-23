@@ -138,6 +138,10 @@ export const projectToolDefinitions: ToolDefinition[] = [
           type: 'string',
           description: 'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene.',
         },
+        background: {
+          type: 'boolean',
+          description: 'If true, hides the Godot window off-screen and blocks all physical keyboard and mouse input, while keeping programmatic input (simulate_input, run_script) and screenshots fully active. Useful for automated agent-driven testing where the window should not be visible or interactive.',
+        },
       },
       required: ['projectPath'],
     },
@@ -551,15 +555,21 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       );
     }
 
-    runner.runProject(args.projectPath as string, args.scene as string | undefined);
+    const background = args.background === true;
+    runner.runProject(args.projectPath as string, args.scene as string | undefined, background);
+
+    const lines = [
+      'Godot project started in debug mode.',
+      '- Use get_debug_output to check runtime output and errors',
+      '- Wait 2–3 seconds before calling take_screenshot, simulate_input, get_ui_elements, or run_script (bridge needs time to initialize)',
+      '- Always call stop_project when done — it terminates the process and cleans up the MCP bridge',
+    ];
+    if (background) {
+      lines.push('- Background mode: window hidden, physical input blocked');
+    }
 
     return {
-      content: [{ type: 'text', text: [
-        'Godot project started in debug mode.',
-        '- Use get_debug_output to check runtime output and errors',
-        '- Wait 2–3 seconds before calling take_screenshot, simulate_input, get_ui_elements, or run_script (bridge needs time to initialize)',
-        '- Always call stop_project when done — it terminates the process and cleans up the MCP bridge',
-      ].join('\n') }],
+      content: [{ type: 'text', text: lines.join('\n') }],
     };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
