@@ -115,6 +115,10 @@ If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will 
 
 Ask your AI assistant to call `get_project_info`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/erodenn-godot-mcp-runtime).
+
 ## Tools
 
 ### Project Management
