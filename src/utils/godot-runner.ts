@@ -86,6 +86,15 @@ export interface GodotProcess {
   hasExited: boolean;
 }
 
+export type RuntimeSessionMode = 'spawned' | 'attached';
+
+export interface RuntimeStopResult {
+  mode: RuntimeSessionMode;
+  output: string[];
+  errors: string[];
+  externalProcessPreserved?: boolean;
+}
+
 export interface GodotServerConfig {
   godotPath?: string;
   debugMode?: boolean;
@@ -308,6 +317,7 @@ export class GodotRunner {
   private strictPathValidation: boolean;
   public activeProcess: GodotProcess | null = null;
   public activeProjectPath: string | null = null;
+  public activeSessionMode: RuntimeSessionMode | null = null;
 
   constructor(config?: GodotServerConfig) {
     this.strictPathValidation = config?.strictPathValidation ?? false;
@@ -564,13 +574,14 @@ export class GodotRunner {
       throw new Error('Godot path not set. Call detectGodotPath first.');
     }
 
-    if (this.activeProcess) {
+    if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       logDebug('Killing existing Godot process before starting a new one');
       this.activeProcess.process.kill();
-      // Clean up old project's autoload if switching projects
       if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
         this.cleanupBridgeAutoload(this.activeProjectPath);
       }
+    } else if (this.activeSessionMode === 'attached' && this.activeProjectPath && this.activeProjectPath !== projectPath) {
+      this.cleanupBridgeAutoload(this.activeProjectPath);
     }
 
     try {
@@ -579,6 +590,7 @@ export class GodotRunner {
       logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
     }
     this.activeProjectPath = projectPath;
+    this.activeSessionMode = 'spawned';
 
     const cmdArgs = ['-d', '--path', projectPath];
     if (scene && validatePath(scene)) {
@@ -638,14 +650,50 @@ export class GodotRunner {
     return this.activeProcess;
   }
 
-  stopProject(): { output: string[]; errors: string[] } | null {
+  attachProject(projectPath: string): void {
+    if (this.activeSessionMode === 'spawned' && this.activeProcess) {
+      this.stopProject();
+    } else if (this.activeSessionMode === 'attached' && this.activeProjectPath && this.activeProjectPath !== projectPath) {
+      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.activeProjectPath = null;
+      this.activeSessionMode = null;
+    }
+
+    this.injectBridgeAutoload(projectPath);
+    this.activeProjectPath = projectPath;
+    this.activeSessionMode = 'attached';
+    this.activeProcess = null;
+  }
+
+  stopProject(): RuntimeStopResult | null {
+    if (!this.activeSessionMode) {
+      return null;
+    }
+
+    if (this.activeSessionMode === 'attached') {
+      const projectPath = this.activeProjectPath;
+      if (projectPath) {
+        this.cleanupBridgeAutoload(projectPath);
+      }
+      this.activeProjectPath = null;
+      this.activeSessionMode = null;
+      this.activeProcess = null;
+      return {
+        mode: 'attached',
+        output: [],
+        errors: [],
+        externalProcessPreserved: true,
+      };
+    }
+
     if (!this.activeProcess) {
       return null;
     }
 
     logDebug('Stopping active Godot process');
     this.activeProcess.process.kill();
-    const result = {
+    const result: RuntimeStopResult = {
+      mode: 'spawned',
       output: this.activeProcess.output,
       errors: this.activeProcess.errors,
     };
@@ -655,8 +703,19 @@ export class GodotRunner {
       this.cleanupBridgeAutoload(this.activeProjectPath);
       this.activeProjectPath = null;
     }
+    this.activeSessionMode = null;
 
     return result;
+  }
+
+  hasActiveRuntimeSession(): boolean {
+    if (!this.activeSessionMode || !this.activeProjectPath) {
+      return false;
+    }
+    if (this.activeSessionMode === 'spawned') {
+      return this.activeProcess !== null && !this.activeProcess.hasExited;
+    }
+    return true;
   }
 
   private removeAutoloadEntry(projectPath: string, entryName: string, scriptFilename: string): void {

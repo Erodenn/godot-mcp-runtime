@@ -5,6 +5,7 @@ var port: int = 9900
 var _is_processing_input: bool = false
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	udp_server = UDPServer.new()
 	var err = udp_server.listen(port, "127.0.0.1")
 	if err != OK:

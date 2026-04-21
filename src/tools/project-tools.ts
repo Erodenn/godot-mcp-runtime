@@ -126,7 +126,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'run_project',
-    description: 'Run a Godot project in debug mode. Required before calling take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. After starting, wait 2–3 seconds for the MCP bridge to initialize before using those tools. Call stop_project when done.',
+    description: 'Run a Godot project in debug mode. Preferred path for runtime tools. Required before calling take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output unless you intentionally use attach_project for a manually launched game. After starting, wait 2–3 seconds for the MCP bridge to initialize before using runtime tools. Call stop_project when done.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -147,8 +147,31 @@ export const projectToolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'attach_project',
+    description: 'Attach runtime MCP tools to a project without spawning Godot. This injects the McpBridge autoload and marks the project as the active runtime session so you can launch the game manually from your own shell, then use take_screenshot, simulate_input, get_ui_elements, and run_script against that running game. Use detach_project or stop_project when done. get_debug_output is not available in attached mode because stdout/stderr are not captured.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to the Godot project directory',
+        },
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'detach_project',
+    description: 'Clear attached-mode runtime state and remove the injected McpBridge autoload without claiming that the manually launched Godot process was stopped.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: 'get_debug_output',
-    description: 'Get stdout/stderr output from the running Godot project. Requires run_project first. Returns the last N lines of output and errors, a running flag, and an exit code if the process has ended. Use this to check GDScript errors, print() calls, and crash messages.',
+    description: 'Get stdout/stderr output from the running Godot project. Requires run_project first. Returns the last N lines of output and errors, a running flag, and an exit code if the process has ended. In attached mode, this reports that stdout/stderr capture is unavailable because Godot was launched outside MCP.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -396,6 +419,24 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
 ];
 
+function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
+  if (!runner.activeSessionMode || !runner.activeProjectPath) {
+    return createErrorResponse(
+      `No active runtime session. A project must be running or attached to ${actionDescription}.`,
+      ['Use run_project to start a Godot project first', 'Or use attach_project before launching Godot manually']
+    );
+  }
+
+  if (runner.activeSessionMode === 'spawned' && (!runner.activeProcess || runner.activeProcess.hasExited)) {
+    return createErrorResponse(
+      `The spawned Godot process has exited and cannot ${actionDescription}.`,
+      ['Use get_debug_output to inspect the last captured logs', 'Call stop_project to clean up, then run_project again']
+    );
+  }
+
+  return null;
+}
+
 function findGodotProjects(directory: string, recursive: boolean): Array<{ path: string; name: string }> {
   const projects: Array<{ path: string; name: string }> = [];
 
@@ -580,18 +621,115 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
   }
 }
 
+export async function handleAttachProject(runner: GodotRunner, args: OperationParams) {
+  args = normalizeParameters(args);
+
+  if (!args.projectPath) {
+    return createErrorResponse(
+      'Project path is required',
+      ['Provide a valid path to a Godot project directory']
+    );
+  }
+
+  if (!validatePath(args.projectPath as string)) {
+    return createErrorResponse(
+      'Invalid project path',
+      ['Provide a valid path without ".." or other potentially unsafe characters']
+    );
+  }
+
+  try {
+    const projectFile = join(args.projectPath as string, 'project.godot');
+    if (!existsSync(projectFile)) {
+      return createErrorResponse(
+        `Not a valid Godot project: ${args.projectPath}`,
+        ['Ensure the path points to a directory containing a project.godot file', 'Use list_projects to find valid Godot projects']
+      );
+    }
+
+    runner.attachProject(args.projectPath as string);
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          'Project attached for manual runtime use.',
+          '- Launch Godot yourself after this call so the injected McpBridge can initialize',
+          '- Wait 2–3 seconds after launch before calling take_screenshot, simulate_input, get_ui_elements, or run_script',
+          '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
+          '- Use detach_project or stop_project when done to clean up the injected bridge state',
+        ].join('\n'),
+      }],
+    };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return createErrorResponse(
+      `Failed to attach project: ${errorMessage}`,
+      ['Check if project.godot is accessible', 'Ensure MCP can write the bridge autoload into the project']
+    );
+  }
+}
+
+export function handleDetachProject(runner: GodotRunner) {
+  if (runner.activeSessionMode !== 'attached') {
+    return createErrorResponse(
+      'No attached project to detach.',
+      ['Use attach_project first for manual-launch workflows', 'If MCP launched the game, use stop_project instead']
+    );
+  }
+
+  const result = runner.stopProject();
+  if (!result) {
+    return createErrorResponse(
+      'No attached project to detach.',
+      ['Use attach_project first for manual-launch workflows']
+    );
+  }
+
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        message: 'Detached attached project and cleaned MCP bridge state',
+        externalProcessPreserved: result.externalProcessPreserved === true,
+      }),
+    }],
+  };
+}
+
 export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams = {}) {
   args = normalizeParameters(args);
 
-  if (!runner.activeProcess) {
+  if (!runner.activeSessionMode) {
     return createErrorResponse(
-      'No active Godot process.',
-      ['Use run_project to start a Godot project first', 'Check if the Godot process crashed unexpectedly']
+      'No active runtime session.',
+      ['Use run_project to start a Godot project first', 'Or use attach_project before launching Godot manually']
     );
+  }
+
+  if (runner.activeSessionMode === 'attached') {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          output: [],
+          errors: [],
+          running: null,
+          attached: true,
+          tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
+        }),
+      }],
+    };
   }
 
   const limit = typeof args.limit === 'number' ? args.limit : 200;
   const proc = runner.activeProcess;
+  if (!proc) {
+    return createErrorResponse(
+      'No active spawned process is available for debug output.',
+      ['Use run_project to start a Godot project first', 'Or use attach_project only when stdout/stderr capture is not needed']
+    );
+  }
   const response: {
     output: string[];
     errors: string[];
@@ -631,7 +769,11 @@ export function handleStopProject(runner: GodotRunner) {
     content: [{
       type: 'text',
       text: JSON.stringify({
-        message: 'Godot project stopped',
+        message: result.mode === 'attached'
+          ? 'Attached project detached and MCP bridge state cleaned up'
+          : 'Godot project stopped',
+        mode: result.mode,
+        externalProcessPreserved: result.externalProcessPreserved === true,
         finalOutput: result.output.slice(-200),
         finalErrors: result.errors.slice(-200),
       }),
@@ -744,11 +886,9 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
 export async function handleTakeScreenshot(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!runner.activeProcess || runner.activeProcess.hasExited) {
-    return createErrorResponse(
-      'No active Godot process. A project must be running to take a screenshot.',
-      ['Use run_project to start a Godot project first', 'Wait a few seconds after starting for the game to initialize']
-    );
+  const sessionError = ensureRuntimeSession(runner, 'take a screenshot');
+  if (sessionError) {
+    return sessionError;
   }
 
   const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
@@ -822,11 +962,9 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
 export async function handleSimulateInput(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!runner.activeProcess || runner.activeProcess.hasExited) {
-    return createErrorResponse(
-      'No active Godot process. A project must be running to simulate input.',
-      ['Use run_project to start a Godot project first', 'Wait a few seconds after starting for the game to initialize']
-    );
+  const sessionError = ensureRuntimeSession(runner, 'simulate input');
+  if (sessionError) {
+    return sessionError;
   }
 
   const actions = args.actions;
@@ -892,11 +1030,9 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
 export async function handleGetUiElements(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!runner.activeProcess || runner.activeProcess.hasExited) {
-    return createErrorResponse(
-      'No active Godot process. A project must be running to query UI elements.',
-      ['Use run_project to start a Godot project first', 'Wait a few seconds after starting for the game to initialize']
-    );
+  const sessionError = ensureRuntimeSession(runner, 'query UI elements');
+  if (sessionError) {
+    return sessionError;
   }
 
   const visibleOnly = args.visibleOnly !== false;
@@ -948,11 +1084,9 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
 export async function handleRunScript(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!runner.activeProcess || runner.activeProcess.hasExited) {
-    return createErrorResponse(
-      'No active Godot process. A project must be running to execute scripts.',
-      ['Use run_project to start a Godot project first', 'Wait a few seconds after starting for the game to initialize']
-    );
+  const sessionError = ensureRuntimeSession(runner, 'execute scripts');
+  if (sessionError) {
+    return sessionError;
   }
 
   const script = args.script;
@@ -1389,4 +1523,3 @@ export async function handleGetProjectSettings(args: OperationParams) {
     return createErrorResponse(`Failed to get project settings: ${errorMessage}`, ['Check if project.godot is accessible']);
   }
 }
-
