@@ -885,4 +885,15 @@ export class GodotRunner {
       });
     });
   }
+
+  getErrorCount(): number {
+    return this.activeProcess?.errors.length ?? 0;
+  }
+
+  getErrorsSince(marker: number): string[] {
+    if (!this.activeProcess) return [];
+    return this.activeProcess.errors
+      .slice(marker)
+      .filter(line => line.trim() !== '');
+  }
 }

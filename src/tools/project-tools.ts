@@ -298,7 +298,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'run_script',
-    description: 'Execute a custom GDScript in the live running project with full scene tree access. Requires run_project first. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings are supported). Use print() for debug output — it appears in get_debug_output, not in the script result.',
+    description: 'Execute a custom GDScript in the live running project with full scene tree access. Requires run_project first. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings are supported). Use print() for debug output — it appears in get_debug_output, not in the script result. In spawned mode, runtime errors are detected via process stderr and reported as failures. In attached mode, a null result includes a caveat since stderr is not captured.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1117,6 +1117,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
   const timeout = typeof args.timeout === 'number' ? args.timeout : 30000;
 
   try {
+    const errorMarker = runner.getErrorCount();
     const responseStr = await runner.sendCommand('run_script', { source: script }, timeout);
 
     let parsed: { success?: boolean; result?: unknown; error?: string };
@@ -1136,6 +1137,38 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       );
     }
 
+    // Detect false-positive success: GDScript has no try-catch, so runtime errors
+    // return null and the real error only appears in stderr.
+    if (parsed.success && parsed.result === null && runner.activeSessionMode === 'spawned') {
+      const newErrors = runner.getErrorsSince(errorMarker);
+      const scriptErrorLines = newErrors.filter(
+        line => line.includes('SCRIPT ERROR:') || line.includes('GDScript error')
+      );
+
+      if (scriptErrorLines.length > 0) {
+        const errorContext = newErrors.slice(0, 30).join('\n');
+        return createErrorResponse(
+          `Script runtime error detected:\n${errorContext}`,
+          [
+            'Fix the GDScript error in your script and retry',
+            'Use get_debug_output for full process output',
+          ]
+        );
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            result: null,
+            warning: 'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
+            tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+          }),
+        }],
+      };
+    }
+
     return {
       content: [{
         type: 'text',
@@ -1152,7 +1185,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       `Failed to execute script: ${errorMessage}`,
       [
         'Ensure the project is running (use run_project first)',
-        'Wait 2-3 seconds after starting for the bridge to initialize',
+        'The bridge may not be ready yet — use get_debug_output to investigate',
         'Check that UDP port 9900 is not blocked',
         'For long-running scripts, increase the timeout parameter',
       ]
