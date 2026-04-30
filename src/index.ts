@@ -110,7 +110,8 @@ Key behaviors:
 - After run_project, wait 2-3 seconds before using runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script). The MCP bridge needs time to initialize.
 - attach_project is the fallback path for a manually launched Godot process. It injects the bridge and marks the project active, but it does not spawn Godot or capture stdout/stderr.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
-- run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".`,
+- run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
+- run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.`,
       }
     );
 

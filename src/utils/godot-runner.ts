@@ -82,6 +82,7 @@ export interface GodotProcess {
   process: ChildProcess;
   output: string[];
   errors: string[];
+  totalErrorsWritten: number;
   exitCode: number | null;
   hasExited: boolean;
 }
@@ -592,7 +593,7 @@ export class GodotRunner {
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'spawned';
 
-    const cmdArgs = ['-d', '--path', projectPath];
+    const cmdArgs = ['--path', projectPath];
     if (scene && validatePath(scene)) {
       logDebug(`Adding scene parameter: ${scene}`);
       cmdArgs.push(scene);
@@ -611,6 +612,7 @@ export class GodotRunner {
       process: proc,
       output,
       errors,
+      totalErrorsWritten: 0,
       exitCode: null,
       hasExited: false,
     };
@@ -626,6 +628,7 @@ export class GodotRunner {
 
     proc.stderr?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n');
+      godotProcess.totalErrorsWritten += lines.length;
       errors.push(...lines);
       if (errors.length > 500) errors.splice(0, errors.length - 500);
       lines.forEach((line: string) => {
@@ -887,13 +890,41 @@ export class GodotRunner {
   }
 
   getErrorCount(): number {
-    return this.activeProcess?.errors.length ?? 0;
+    return this.activeProcess?.totalErrorsWritten ?? 0;
   }
 
   getErrorsSince(marker: number): string[] {
     if (!this.activeProcess) return [];
-    return this.activeProcess.errors
-      .slice(marker)
-      .filter(line => line.trim() !== '');
+    const { errors, totalErrorsWritten } = this.activeProcess;
+    const delta = totalErrorsWritten - marker;
+    if (delta <= 0) return [];
+    const window = delta >= errors.length ? errors.slice() : errors.slice(errors.length - delta);
+    return window.filter(line => line.trim() !== '');
+  }
+
+  private static readonly SCRIPT_ERROR_PATTERNS = [
+    'SCRIPT ERROR:',
+    'USER SCRIPT ERROR:',
+    'GDScript error',
+  ];
+
+  extractRuntimeErrors(lines: string[]): string[] {
+    return lines.filter(line =>
+      GodotRunner.SCRIPT_ERROR_PATTERNS.some(p => line.includes(p))
+    );
+  }
+
+  async sendCommandWithErrors(
+    command: string,
+    params: Record<string, unknown> = {},
+    timeoutMs: number = 10000
+  ): Promise<{ response: string; runtimeErrors: string[] }> {
+    const marker = this.getErrorCount();
+    const response = await this.sendCommand(command, params, timeoutMs);
+    const newErrors = this.getErrorsSince(marker);
+    const runtimeErrors = this.activeSessionMode === 'spawned'
+      ? this.extractRuntimeErrors(newErrors)
+      : [];
+    return { response, runtimeErrors };
   }
 }

@@ -11,6 +11,8 @@ import {
   ToolDefinition,
 } from '../utils/godot-runner.js';
 
+const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
+
 // --- Autoload / project.godot helpers (no Godot process needed) ---
 
 interface AutoloadEntry {
@@ -126,7 +128,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'run_project',
-    description: 'Run a Godot project in debug mode. Preferred path for runtime tools. Required before calling take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output unless you intentionally use attach_project for a manually launched game. After starting, wait 2–3 seconds for the MCP bridge to initialize before using runtime tools. Call stop_project when done.',
+    description: 'Run a Godot project with stdout/stderr captured. Preferred path for runtime tools. Required before calling take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output unless you intentionally use attach_project for a manually launched game. After starting, wait 2–3 seconds for the MCP bridge to initialize before using runtime tools. Call stop_project when done.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -298,7 +300,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'run_script',
-    description: 'Execute a custom GDScript in the live running project with full scene tree access. Requires run_project first. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings are supported). Use print() for debug output — it appears in get_debug_output, not in the script result. In spawned mode, runtime errors are detected via process stderr and reported as failures. In attached mode, a null result includes a caveat since stderr is not captured.',
+    description: 'Execute a custom GDScript in the live running project with full scene tree access. Requires run_project first. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings are supported). Use print() for debug output — it appears in get_debug_output, not in the script result. In spawned mode, runtime errors emitted to stderr are detected and either escalated (when the script returns null) or surfaced as warnings. In attached mode a null result includes a caveat since stderr is not captured.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -600,7 +602,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
     runner.runProject(args.projectPath as string, args.scene as string | undefined, background);
 
     const lines = [
-      'Godot project started in debug mode.',
+      'Godot project started.',
       '- Use get_debug_output to check runtime output and errors',
       '- Wait 2–3 seconds before calling take_screenshot, simulate_input, get_ui_elements, or run_script (bridge needs time to initialize)',
       '- Always call stop_project when done — it terminates the process and cleans up the MCP bridge',
@@ -889,7 +891,7 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
   const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
 
   try {
-    const responseStr = await runner.sendCommand('screenshot', {}, timeout);
+    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors('screenshot', {}, timeout);
 
     let parsed: { path?: string; error?: string };
     try {
@@ -928,26 +930,35 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
     const imageBuffer = readFileSync(screenshotPath);
     const base64Data = imageBuffer.toString('base64');
 
-    return {
-      content: [
-        {
-          type: 'image',
-          data: base64Data,
-          mimeType: 'image/png',
-        },
-        {
-          type: 'text',
-          text: `Screenshot saved to: ${parsed.path}`,
-        },
-      ],
-    };
+    const content: Array<{ type: string; [key: string]: unknown }> = [
+      {
+        type: 'image',
+        data: base64Data,
+        mimeType: 'image/png',
+      },
+      {
+        type: 'text',
+        text: `Screenshot saved to: ${parsed.path}`,
+      },
+    ];
+
+    if (runtimeErrors.length > 0) {
+      content.push({
+        type: 'text',
+        text: JSON.stringify({
+          warnings: runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES),
+        }),
+      });
+    }
+
+    return { content };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(
       `Failed to take screenshot: ${errorMessage}`,
       [
         'Ensure the project is running (use run_project first)',
-        'Wait 2-3 seconds after starting for the screenshot server to initialize',
+        'The bridge may not be ready yet — wait 2-3 seconds after starting, then check get_debug_output if the issue persists',
         'Check that UDP port 9900 is not blocked',
       ]
     );
@@ -980,7 +991,7 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
   const timeoutMs = totalWaitMs + 10000;
 
   try {
-    const responseStr = await runner.sendCommand('input', { actions }, timeoutMs);
+    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors('input', { actions }, timeoutMs);
 
     let parsed: { success?: boolean; error?: string; actions_processed?: number };
     try {
@@ -999,14 +1010,19 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       );
     }
 
+    const payload: Record<string, unknown> = {
+      success: true,
+      actions_processed: parsed.actions_processed,
+      tip: 'Call take_screenshot to verify the input had the intended visual effect.',
+    };
+    if (runtimeErrors.length > 0) {
+      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    }
+
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify({
-          success: true,
-          actions_processed: parsed.actions_processed,
-          tip: 'Call take_screenshot to verify the input had the intended visual effect.',
-        }),
+        text: JSON.stringify(payload),
       }],
     };
   } catch (error: unknown) {
@@ -1015,7 +1031,7 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       `Failed to simulate input: ${errorMessage}`,
       [
         'Ensure the project is running (use run_project first)',
-        'Wait 2-3 seconds after starting for the bridge to initialize',
+        'The bridge may not be ready yet — wait 2-3 seconds after starting, then check get_debug_output if the issue persists',
         'Check that UDP port 9900 is not blocked',
       ]
     );
@@ -1035,7 +1051,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
   try {
     const cmdParams: Record<string, unknown> = { visible_only: visibleOnly };
     if (args.filter) cmdParams.type_filter = args.filter;
-    const responseStr = await runner.sendCommand('get_ui_elements', cmdParams);
+    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors('get_ui_elements', cmdParams);
 
     let parsed: { elements?: unknown[]; error?: string };
     try {
@@ -1054,13 +1070,18 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       );
     }
 
+    const payload: Record<string, unknown> = {
+      ...parsed,
+      tip: "Use simulate_input with type 'click_element' and a node_path or text value from this list to interact with these elements.",
+    };
+    if (runtimeErrors.length > 0) {
+      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    }
+
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify({
-          ...parsed,
-          tip: "Use simulate_input with type 'click_element' and a node_path or text value from this list to interact with these elements.",
-        }),
+        text: JSON.stringify(payload),
       }],
     };
   } catch (error: unknown) {
@@ -1069,7 +1090,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       `Failed to get UI elements: ${errorMessage}`,
       [
         'Ensure the project is running (use run_project first)',
-        'Wait 2-3 seconds after starting for the bridge to initialize',
+        'The bridge may not be ready yet — wait 2-3 seconds after starting, then check get_debug_output if the issue persists',
         'Check that UDP port 9900 is not blocked',
       ]
     );
@@ -1117,8 +1138,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
   const timeout = typeof args.timeout === 'number' ? args.timeout : 30000;
 
   try {
-    const errorMarker = runner.getErrorCount();
-    const responseStr = await runner.sendCommand('run_script', { source: script }, timeout);
+    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors('run_script', { source: script }, timeout);
 
     let parsed: { success?: boolean; result?: unknown; error?: string };
     try {
@@ -1140,13 +1160,8 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
     // Detect false-positive success: GDScript has no try-catch, so runtime errors
     // return null and the real error only appears in stderr.
     if (parsed.success && parsed.result === null && runner.activeSessionMode === 'spawned') {
-      const newErrors = runner.getErrorsSince(errorMarker);
-      const scriptErrorLines = newErrors.filter(
-        line => line.includes('SCRIPT ERROR:') || line.includes('GDScript error')
-      );
-
-      if (scriptErrorLines.length > 0) {
-        const errorContext = newErrors.slice(0, 30).join('\n');
+      if (runtimeErrors.length > 0) {
+        const errorContext = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES).join('\n');
         return createErrorResponse(
           `Script runtime error detected:\n${errorContext}`,
           [
@@ -1169,14 +1184,19 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       };
     }
 
+    const payload: Record<string, unknown> = {
+      success: true,
+      result: parsed.result,
+      tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+    };
+    if (runtimeErrors.length > 0) {
+      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    }
+
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify({
-          success: true,
-          result: parsed.result,
-          tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
-        }),
+        text: JSON.stringify(payload),
       }],
     };
   } catch (error: unknown) {
@@ -1185,7 +1205,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       `Failed to execute script: ${errorMessage}`,
       [
         'Ensure the project is running (use run_project first)',
-        'The bridge may not be ready yet — use get_debug_output to investigate',
+        'The bridge may not be ready yet — wait 2-3 seconds after starting, then check get_debug_output if the issue persists',
         'Check that UDP port 9900 is not blocked',
         'For long-running scripts, increase the timeout parameter',
       ]

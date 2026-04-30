@@ -124,7 +124,7 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 | Tool | Description |
 |------|-------------|
 | `launch_editor` | Open the Godot editor GUI for a project |
-| `run_project` | Run a project in debug mode and inject the MCP bridge. Pass `background: true` to hide the window |
+| `run_project` | Run a project and inject the MCP bridge. Pass `background: true` to hide the window |
 | `attach_project` | Inject the MCP bridge for a project you'll launch yourself |
 | `detach_project` | Remove the injected bridge after manual-launch use, leaving the external process alone |
 | `stop_project` | Stop the running project and remove the bridge (also detaches attached-mode state) |
