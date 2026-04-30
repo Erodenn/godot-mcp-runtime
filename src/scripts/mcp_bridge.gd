@@ -156,6 +156,12 @@ func _handle_input(peer: PacketPeerUDP, actions: Array) -> void:
 
 	_is_processing_input = false
 
+	# Allow queued input events to dispatch and any signal handlers
+	# (and their runtime errors) to fire before we reply, so the
+	# Node-side stderr scan in sendCommandWithErrors sees them.
+	await get_tree().process_frame
+	await get_tree().process_frame
+
 	if error_msg != "":
 		_send_response(peer, {"error": error_msg, "actions_processed": processed})
 	else:
