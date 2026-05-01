@@ -1,14 +1,15 @@
 import { join, basename, sep } from 'path';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import {
+import type {
   GodotRunner,
+  OperationParams,
+  ToolDefinition} from '../utils/godot-runner.js';
+import {
   normalizeParameters,
   validatePath,
   validateProjectArgs,
   createErrorResponse,
-  logDebug,
-  OperationParams,
-  ToolDefinition,
+  logDebug
 } from '../utils/godot-runner.js';
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;

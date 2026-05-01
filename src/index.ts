@@ -16,7 +16,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { GodotRunner, GodotServerConfig } from './utils/godot-runner.js';
+import type { GodotServerConfig } from './utils/godot-runner.js';
+import { GodotRunner } from './utils/godot-runner.js';
 
 // Project tools
 import {

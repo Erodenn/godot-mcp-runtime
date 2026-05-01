@@ -1,16 +1,17 @@
 import { join } from 'path';
 import { existsSync } from 'fs';
-import {
+import type {
   GodotRunner,
+  OperationParams,
+  ToolDefinition} from '../utils/godot-runner.js';
+import {
   normalizeParameters,
   convertCamelToSnakeCase,
   validatePath,
   createErrorResponse,
   extractGdError,
   validateProjectArgs,
-  validateSceneArgs,
-  OperationParams,
-  ToolDefinition,
+  validateSceneArgs
 } from '../utils/godot-runner.js';
 
 export const sceneToolDefinitions: ToolDefinition[] = [

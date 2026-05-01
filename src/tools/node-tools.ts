@@ -1,15 +1,16 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
-import {
+import type {
   GodotRunner,
+  OperationParams,
+  ToolDefinition} from '../utils/godot-runner.js';
+import {
   normalizeParameters,
   convertCamelToSnakeCase,
   validatePath,
   createErrorResponse,
   extractGdError,
-  validateSceneArgs,
-  OperationParams,
-  ToolDefinition,
+  validateSceneArgs
 } from '../utils/godot-runner.js';
 
 // --- Tool definitions ---

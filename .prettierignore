@@ -1,0 +1,7 @@
+dist/
+node_modules/
+coverage/
+.test-project/
+tests/fixtures/
+*.gd
+package-lock.json

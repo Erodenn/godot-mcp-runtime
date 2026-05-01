@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'url';
 import { join, dirname, normalize } from 'path';
 import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
-import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+import type { ChildProcess, SpawnOptions } from 'child_process';
+import { spawn } from 'child_process';
 import { createSocket } from 'dgram';
 import { randomBytes } from 'crypto';
 

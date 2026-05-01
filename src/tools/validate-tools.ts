@@ -1,14 +1,15 @@
 import { join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
-import {
+import type {
   GodotRunner,
+  OperationParams,
+  ToolDefinition} from '../utils/godot-runner.js';
+import {
   normalizeParameters,
   validatePath,
   createErrorResponse,
-  extractGdError,
-  OperationParams,
-  ToolDefinition,
+  extractGdError
 } from '../utils/godot-runner.js';
 
 export const validateToolDefinitions: ToolDefinition[] = [
