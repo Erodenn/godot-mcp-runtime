@@ -150,13 +150,17 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'attach_project',
-    description: 'Attach runtime MCP tools to a project without spawning Godot. This injects the McpBridge autoload and marks the project as the active runtime session so you can launch the game manually from your own shell, then use take_screenshot, simulate_input, get_ui_elements, and run_script against that running game. Use detach_project or stop_project when done. get_debug_output is not available in attached mode because stdout/stderr are not captured.',
+    description: 'Attach runtime MCP tools to a project without spawning Godot. This injects the McpBridge autoload and marks the project as the active runtime session so you can launch the game manually from your own shell, then use take_screenshot, simulate_input, get_ui_elements, and run_script against that running game. Set waitForBridge to true after launching Godot to block until the bridge is confirmed ready. Use detach_project or stop_project when done. get_debug_output is not available in attached mode because stdout/stderr are not captured.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: {
           type: 'string',
           description: 'Path to the Godot project directory',
+        },
+        waitForBridge: {
+          type: 'boolean',
+          description: 'If true, poll the bridge until it responds (up to 15 seconds). Use this after Godot is already running to confirm runtime tools are ready. Defaults to false.',
         },
       },
       required: ['projectPath'],
@@ -686,13 +690,45 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
 
     runner.attachProject(args.projectPath as string);
 
+    if (args.waitForBridge === true) {
+      const bridgeResult = await runner.waitForBridgeAttached();
+
+      if (!bridgeResult.ready) {
+        return {
+          content: [{
+            type: 'text',
+            text: [
+              'Project attached but the MCP bridge did not respond within 15 seconds.',
+              '- Verify Godot is running with this project',
+              '- The McpBridge autoload must be initialized and listening on UDP port 9900',
+              '- Runtime tools may work if you retry after a moment',
+              '- get_debug_output is unavailable in attached mode',
+              '- Use detach_project or stop_project when done',
+            ].join('\n'),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            'Project attached and MCP bridge is ready.',
+            '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
+            '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
+            '- Use detach_project or stop_project when done to clean up the injected bridge state',
+          ].join('\n'),
+        }],
+      };
+    }
+
     return {
       content: [{
         type: 'text',
         text: [
           'Project attached for manual runtime use.',
-          '- Launch Godot yourself after this call so the injected McpBridge can initialize',
-          '- Runtime tools will become available once the bridge responds (typically 2–3 seconds after launch)',
+          '- Launch Godot yourself, then call attach_project again with waitForBridge: true to confirm readiness',
+          '- Or use runtime tools directly — they will fail with a clear error if the bridge is not yet listening',
           '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
           '- Use detach_project or stop_project when done to clean up the injected bridge state',
         ].join('\n'),

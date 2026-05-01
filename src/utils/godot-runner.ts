@@ -935,6 +935,26 @@ export class GodotRunner {
     return { response, runtimeErrors };
   }
 
+  async waitForBridgeAttached(timeoutMs: number = 15000, intervalMs: number = 500): Promise<{ ready: boolean; error?: string }> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        const response = await this.sendCommand('ping', {}, 1000);
+        const parsed = JSON.parse(response);
+        if (parsed.status === 'pong') {
+          return { ready: true };
+        }
+      } catch {
+        // Expected: ping will fail until bridge is listening
+      }
+
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+
+    return { ready: false, error: 'Bridge did not respond within timeout — is Godot running with the McpBridge autoload?' };
+  }
+
   async waitForBridge(timeoutMs: number = 8000, intervalMs: number = 300): Promise<{ ready: boolean; error?: string }> {
     const deadline = Date.now() + timeoutMs;
     const expectedToken = this.activeProcess?.sessionToken;
