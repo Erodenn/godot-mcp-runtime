@@ -21,11 +21,12 @@ Thumbs.db
 *.swp
 *.swo
 
-# Root markdown files (except README)
+# Root markdown files (except README, CONTRIBUTING)
 # CLAUDE.md is intentionally excluded — it contains local AI assistant context
 # and project-specific instructions not meant for public distribution. Final decision.
 /*.md
 !README.md
+!CONTRIBUTING.md
 
 # Godot MCP working directory
 .mcp/
@@ -34,5 +35,6 @@ Thumbs.db
 .claude/
 .mcp.json
 
-# Test fixture project
+# Local-only Godot test project (ad hoc manual testing).
+# The committed shared fixture lives at tests/fixtures/godot-project/.
 .test-project/

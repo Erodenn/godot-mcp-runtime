@@ -1,0 +1,16 @@
+; Engine configuration file.
+; Minimal Godot 4 fixture project for godot-mcp-runtime tests.
+; See tests/fixtures/README.md for usage.
+
+config_version=5
+
+[application]
+
+config/name="godot-mcp-runtime test fixture"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.4")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

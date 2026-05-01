@@ -10,7 +10,16 @@
   "scripts": {
     "build": "tsc && node scripts/copy-scripts.js",
     "start": "node dist/index.js",
-    "dev": "npm run build && node dist/index.js"
+    "dev": "npm run build && node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "bash scripts/verify.sh"
   },
   "keywords": [
     "mcp",
@@ -36,8 +45,17 @@
     "@modelcontextprotocol/sdk": "^1.25.2"
   },
   "devDependencies": {
+    "@eslint-community/eslint-plugin-eslint-comments": "^4.7.1",
     "@types/node": "^25.0.9",
-    "typescript": "^5.9.3"
+    "@typescript-eslint/eslint-plugin": "^8.59.1",
+    "@typescript-eslint/parser": "^8.59.1",
+    "@vitest/coverage-v8": "^4.1.5",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "prettier": "^3.8.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
   },
   "files": [
     "dist/",

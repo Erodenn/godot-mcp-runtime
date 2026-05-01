@@ -1,20 +1,19 @@
 import { join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
+import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
-  GodotRunner,
   normalizeParameters,
   validatePath,
   createErrorResponse,
   extractGdError,
-  OperationParams,
-  ToolDefinition,
 } from '../utils/godot-runner.js';
 
 export const validateToolDefinitions: ToolDefinition[] = [
   {
     name: 'validate',
-    description: 'Validate GDScript syntax or scene file integrity using headless Godot. Returns { valid, errors: [{ line?, message }] } — line numbers are present when Godot\'s error output includes them, which is not always the case. If valid is false, fix the reported errors and re-validate before calling attach_script or run_script.\n\nSingle-target: provide exactly one of scriptPath, source, or scenePath.\nBatch: provide a targets array where each item has one of { scriptPath, source, scenePath }. Runs all targets in a single Godot process. Returns { results: [{ target, valid, errors }] }.',
+    description:
+      "Validate GDScript syntax or scene file integrity using headless Godot. Returns { valid, errors: [{ line?, message }] } — line numbers are present when Godot's error output includes them, which is not always the case. If valid is false, fix the reported errors and re-validate before calling attach_script or run_script.\n\nSingle-target: provide exactly one of scriptPath, source, or scenePath.\nBatch: provide a targets array where each item has one of { scriptPath, source, scenePath }. Runs all targets in a single Godot process. Returns { results: [{ target, valid, errors }] }.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -24,25 +23,35 @@ export const validateToolDefinitions: ToolDefinition[] = [
         },
         scriptPath: {
           type: 'string',
-          description: '[single] Path to a .gd file relative to the project to validate (e.g. "scripts/player.gd")',
+          description:
+            '[single] Path to a .gd file relative to the project to validate (e.g. "scripts/player.gd")',
         },
         source: {
           type: 'string',
-          description: '[single] Inline GDScript source code to validate. Written to a temporary file and validated against the project.',
+          description:
+            '[single] Inline GDScript source code to validate. Written to a temporary file and validated against the project.',
         },
         scenePath: {
           type: 'string',
-          description: '[single] Path to a .tscn scene file relative to the project to validate (e.g. "scenes/main.tscn")',
+          description:
+            '[single] Path to a .tscn scene file relative to the project to validate (e.g. "scenes/main.tscn")',
         },
         targets: {
           type: 'array',
-          description: '[batch] Array of targets to validate in a single Godot process. Each item must have exactly one of: scriptPath, source, or scenePath.',
+          description:
+            '[batch] Array of targets to validate in a single Godot process. Each item must have exactly one of: scriptPath, source, or scenePath.',
           items: {
             type: 'object',
             properties: {
-              scriptPath: { type: 'string', description: 'Path to a .gd file relative to the project' },
+              scriptPath: {
+                type: 'string',
+                description: 'Path to a .gd file relative to the project',
+              },
               source: { type: 'string', description: 'Inline GDScript source code' },
-              scenePath: { type: 'string', description: 'Path to a .tscn file relative to the project' },
+              scenePath: {
+                type: 'string',
+                description: 'Path to a .tscn file relative to the project',
+              },
             },
           },
         },
@@ -144,7 +153,9 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
   args = normalizeParameters(args);
 
   if (!args.projectPath) {
-    return createErrorResponse('projectPath is required', ['Provide the path to a Godot project directory']);
+    return createErrorResponse('projectPath is required', [
+      'Provide the path to a Godot project directory',
+    ]);
   }
 
   if (!validatePath(args.projectPath as string)) {
@@ -153,15 +164,18 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
   const projectFile = join(args.projectPath as string, 'project.godot');
   if (!existsSync(projectFile)) {
-    return createErrorResponse(
-      `Not a valid Godot project: ${args.projectPath}`,
-      ['Ensure the path points to a directory containing a project.godot file']
-    );
+    return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+      'Ensure the path points to a directory containing a project.godot file',
+    ]);
   }
 
   // Batch mode: targets array
   if (args.targets && Array.isArray(args.targets)) {
-    const targets = args.targets as Array<{ scriptPath?: string; source?: string; scenePath?: string }>;
+    const targets = args.targets as Array<{
+      scriptPath?: string;
+      source?: string;
+      scenePath?: string;
+    }>;
     const tempFiles: string[] = [];
 
     try {
@@ -189,32 +203,32 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       const { stdout, stderr } = await runner.executeOperation(
         'validate_batch',
         { targets: snakeTargets },
-        args.projectPath as string
+        args.projectPath as string,
       );
 
       if (!stdout.trim()) {
-        return createErrorResponse(
-          `Batch validate failed: ${extractGdError(stderr)}`,
-          ['Check that all target paths are valid', 'Ensure Godot is installed correctly']
-        );
+        return createErrorResponse(`Batch validate failed: ${extractGdError(stderr)}`, [
+          'Check that all target paths are valid',
+          'Ensure Godot is installed correctly',
+        ]);
       }
 
       let parsed: { results: Array<{ target: string; valid: boolean; errors: ValidationError[] }> };
       try {
         parsed = JSON.parse(stdout.trim());
       } catch {
-        return createErrorResponse(
-          `Invalid response from validate_batch: ${stdout}`,
-          ['Ensure Godot is installed correctly']
-        );
+        return createErrorResponse(`Invalid response from validate_batch: ${stdout}`, [
+          'Ensure Godot is installed correctly',
+        ]);
       }
 
       const errorsByPath = parseGodotErrorsByPath(stderr || '');
 
-      const results = parsed.results.map(r => {
+      const results = parsed.results.map((r) => {
         const key = r.target.startsWith('res://') ? r.target : `res://${r.target}`;
         const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
-        const allErrors: ValidationError[] = stderrErrors.length > 0 ? stderrErrors : (r.errors || []);
+        const allErrors: ValidationError[] =
+          stderrErrors.length > 0 ? stderrErrors : r.errors || [];
         return {
           target: r.target,
           valid: r.valid && stderrErrors.length === 0,
@@ -225,13 +239,17 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       return { content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] };
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return createErrorResponse(
-        `Batch validation failed: ${errorMessage}`,
-        ['Ensure Godot is installed correctly', 'Check if the GODOT_PATH environment variable is set correctly']
-      );
+      return createErrorResponse(`Batch validation failed: ${errorMessage}`, [
+        'Ensure Godot is installed correctly',
+        'Check if the GODOT_PATH environment variable is set correctly',
+      ]);
     } finally {
       for (const f of tempFiles) {
-        try { unlinkSync(f); } catch { /* ignore */ }
+        try {
+          unlinkSync(f);
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
@@ -239,15 +257,14 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
   // Determine mode — exactly one must be provided
   const modeCount = [args.scriptPath, args.source, args.scenePath].filter(Boolean).length;
   if (modeCount === 0) {
-    return createErrorResponse(
-      'One of scriptPath, source, or scenePath is required',
-      ['Provide scriptPath to validate an existing .gd file, source to validate inline GDScript, or scenePath to validate a .tscn file']
-    );
+    return createErrorResponse('One of scriptPath, source, or scenePath is required', [
+      'Provide scriptPath to validate an existing .gd file, source to validate inline GDScript, or scenePath to validate a .tscn file',
+    ]);
   }
   if (modeCount > 1) {
     return createErrorResponse(
       'Provide exactly one of scriptPath, source, or scenePath — not multiple',
-      ['Only one target can be validated per call']
+      ['Only one target can be validated per call'],
     );
   }
 
@@ -273,10 +290,9 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       }
       const fullPath = join(args.projectPath as string, args.scriptPath as string);
       if (!existsSync(fullPath)) {
-        return createErrorResponse(
-          `Script file does not exist: ${args.scriptPath}`,
-          ['Ensure the path is correct relative to the project directory']
-        );
+        return createErrorResponse(`Script file does not exist: ${args.scriptPath}`, [
+          'Ensure the path is correct relative to the project directory',
+        ]);
       }
       resolvedScriptPath = args.scriptPath as string;
     } else if (args.scenePath) {
@@ -285,10 +301,9 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       }
       const fullPath = join(args.projectPath as string, args.scenePath as string);
       if (!existsSync(fullPath)) {
-        return createErrorResponse(
-          `Scene file does not exist: ${args.scenePath}`,
-          ['Ensure the path is correct relative to the project directory']
-        );
+        return createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
+          'Ensure the path is correct relative to the project directory',
+        ]);
       }
       resolvedScenePath = args.scenePath as string;
     }
@@ -297,7 +312,11 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     if (resolvedScriptPath) params.scriptPath = resolvedScriptPath;
     if (resolvedScenePath) params.scenePath = resolvedScenePath;
 
-    const { stdout, stderr } = await runner.executeOperation('validate_resource', params, args.projectPath as string);
+    const { stdout, stderr } = await runner.executeOperation(
+      'validate_resource',
+      params,
+      args.projectPath as string,
+    );
 
     // Parse stdout for the base valid/invalid signal from GDScript
     let valid = false;
@@ -327,10 +346,10 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(
-      `Validation failed: ${errorMessage}`,
-      ['Ensure Godot is installed correctly', 'Check if the GODOT_PATH environment variable is set correctly']
-    );
+    return createErrorResponse(`Validation failed: ${errorMessage}`, [
+      'Ensure Godot is installed correctly',
+      'Check if the GODOT_PATH environment variable is set correctly',
+    ]);
   } finally {
     if (tempFile && resolvedScriptPath) {
       const tempFilePath = join(args.projectPath as string, resolvedScriptPath);

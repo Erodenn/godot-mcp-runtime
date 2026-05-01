@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'url';
 import { join, dirname, normalize } from 'path';
 import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
-import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+import type { ChildProcess, SpawnOptions } from 'child_process';
+import { spawn } from 'child_process';
 import { createSocket } from 'dgram';
 import { randomBytes } from 'crypto';
 
@@ -32,7 +33,7 @@ function normalizeForCompare(p: string): string {
  * Extract JSON from Godot output by finding the first { or [ and matching to the end.
  * This strips debug logs, version banners, and other noise.
  */
-function extractJson(output: string): string {
+export function extractJson(output: string): string {
   // Find the first occurrence of { or [
   const jsonStartBrace = output.indexOf('{');
   const jsonStartBracket = output.indexOf('[');
@@ -79,7 +80,7 @@ function extractJson(output: string): string {
  */
 function cleanOutput(output: string): string {
   const lines = output.split('\n');
-  const cleanedLines = lines.filter(line => {
+  const cleanedLines = lines.filter((line) => {
     const trimmed = line.trim();
     // Skip empty lines
     if (!trimmed) return false;
@@ -141,19 +142,19 @@ export interface ToolDefinition {
 
 // Parameter mappings between snake_case and camelCase
 const parameterMappings: Record<string, string> = {
-  'project_path': 'projectPath',
-  'scene_path': 'scenePath',
-  'root_node_type': 'rootNodeType',
-  'parent_node_path': 'parentNodePath',
-  'node_type': 'nodeType',
-  'node_name': 'nodeName',
-  'texture_path': 'texturePath',
-  'node_path': 'nodePath',
-  'output_path': 'outputPath',
-  'mesh_item_names': 'meshItemNames',
-  'new_path': 'newPath',
-  'file_path': 'filePath',
-  'script_path': 'scriptPath',
+  project_path: 'projectPath',
+  scene_path: 'scenePath',
+  root_node_type: 'rootNodeType',
+  parent_node_path: 'parentNodePath',
+  node_type: 'nodeType',
+  node_name: 'nodeName',
+  texture_path: 'texturePath',
+  node_path: 'nodePath',
+  output_path: 'outputPath',
+  mesh_item_names: 'meshItemNames',
+  new_path: 'newPath',
+  file_path: 'filePath',
+  script_path: 'scriptPath',
 };
 
 // Reverse mapping from camelCase to snake_case
@@ -204,7 +205,9 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
 
   for (const key in params) {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
-      const snakeKey = reverseParameterMappings[key] || key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+      const snakeKey =
+        reverseParameterMappings[key] ||
+        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 
       const value = params[key];
       if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
@@ -230,11 +233,16 @@ export function validatePath(path: string): boolean {
  * Falls back to a generic message if no [ERROR] line is found.
  */
 export function extractGdError(stderr: string): string {
-  const errLine = stderr.split('\n').find(l => l.includes('[ERROR]'));
-  return errLine ? errLine.replace(/.*\[ERROR\]\s*/, '').trim() : 'see get_debug_output for details';
+  const errLine = stderr.split('\n').find((l) => l.includes('[ERROR]'));
+  return errLine
+    ? errLine.replace(/.*\[ERROR\]\s*/, '').trim()
+    : 'see get_debug_output for details';
 }
 
-export function createErrorResponse(message: string, possibleSolutions: string[] = []): {
+export function createErrorResponse(
+  message: string,
+  possibleSolutions: string[] = [],
+): {
   content: Array<{ type: 'text'; text: string }>;
   isError: boolean;
 } {
@@ -274,21 +282,26 @@ interface ValidatedSceneArgs {
 
 type ValidationErrorResult = ReturnType<typeof createErrorResponse>;
 
-export function validateProjectArgs(args: OperationParams): ValidatedProjectArgs | ValidationErrorResult {
+export function validateProjectArgs(
+  args: OperationParams,
+): ValidatedProjectArgs | ValidationErrorResult {
   if (!args.projectPath) {
-    return createErrorResponse('projectPath is required', ['Provide a valid path to a Godot project directory']);
+    return createErrorResponse('projectPath is required', [
+      'Provide a valid path to a Godot project directory',
+    ]);
   }
 
   if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', ['Provide a valid path without ".." or other potentially unsafe characters']);
+    return createErrorResponse('Invalid project path', [
+      'Provide a valid path without ".." or other potentially unsafe characters',
+    ]);
   }
 
   const projectFile = join(args.projectPath as string, 'project.godot');
   if (!existsSync(projectFile)) {
-    return createErrorResponse(
-      `Not a valid Godot project: ${args.projectPath}`,
-      ['Ensure the path points to a directory containing a project.godot file']
-    );
+    return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+      'Ensure the path points to a directory containing a project.godot file',
+    ]);
   }
 
   return { projectPath: args.projectPath as string };
@@ -296,7 +309,7 @@ export function validateProjectArgs(args: OperationParams): ValidatedProjectArgs
 
 export function validateSceneArgs(
   args: OperationParams,
-  opts?: { sceneRequired?: boolean }
+  opts?: { sceneRequired?: boolean },
 ): ValidatedSceneArgs | ValidationErrorResult {
   const projectResult = validateProjectArgs(args);
   if ('isError' in projectResult) return projectResult;
@@ -305,22 +318,26 @@ export function validateSceneArgs(
 
   if (!args.scenePath) {
     if (sceneRequired) {
-      return createErrorResponse('scenePath is required', ['Provide the scene file path relative to the project']);
+      return createErrorResponse('scenePath is required', [
+        'Provide the scene file path relative to the project',
+      ]);
     }
     return { projectPath: projectResult.projectPath, scenePath: '' };
   }
 
   if (!validatePath(args.scenePath as string)) {
-    return createErrorResponse('Invalid scene path', ['Provide a valid path without ".." or other potentially unsafe characters']);
+    return createErrorResponse('Invalid scene path', [
+      'Provide a valid path without ".." or other potentially unsafe characters',
+    ]);
   }
 
   if (sceneRequired) {
     const sceneFullPath = join(projectResult.projectPath, args.scenePath as string);
     if (!existsSync(sceneFullPath)) {
-      return createErrorResponse(
-        `Scene file does not exist: ${args.scenePath}`,
-        ['Ensure the scene path is correct', 'Use create_scene to create a new scene first']
-      );
+      return createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
+        'Ensure the scene path is correct',
+        'Use create_scene to create a new scene first',
+      ]);
     }
   }
 
@@ -365,7 +382,11 @@ export class GodotRunner {
     }
   }
 
-  private spawnAsync(cmd: string, args: string[], timeoutMs: number = 10000): Promise<{ stdout: string; stderr: string }> {
+  private spawnAsync(
+    cmd: string,
+    args: string[],
+    timeoutMs: number = 10000,
+  ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const proc = spawn(cmd, args, { stdio: 'pipe' });
       let stdout = '';
@@ -375,15 +396,26 @@ export class GodotRunner {
         reject(new Error(`Process timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-      proc.on('error', (err) => { clearTimeout(timer); reject(err); });
+      proc.stdout?.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      proc.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
       proc.on('close', (code) => {
         clearTimeout(timer);
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
-          const err = new Error(`Process exited with code ${code}`) as Error & { stdout: string; stderr: string; code: number | null };
+          const err = new Error(`Process exited with code ${code}`) as Error & {
+            stdout: string;
+            stderr: string;
+            code: number | null;
+          };
           err.stdout = stdout;
           err.stderr = stderr;
           err.code = code;
@@ -420,7 +452,7 @@ export class GodotRunner {
   }
 
   async detectGodotPath(): Promise<void> {
-    if (this.godotPath && await this.isValidGodotPath(this.godotPath)) {
+    if (this.godotPath && (await this.isValidGodotPath(this.godotPath))) {
       logDebug(`Using existing Godot path: ${this.godotPath}`);
       return;
     }
@@ -444,20 +476,20 @@ export class GodotRunner {
       possiblePaths.push(
         '/Applications/Godot.app/Contents/MacOS/Godot',
         '/Applications/Godot_4.app/Contents/MacOS/Godot',
-        `${process.env.HOME}/Applications/Godot.app/Contents/MacOS/Godot`
+        `${process.env.HOME}/Applications/Godot.app/Contents/MacOS/Godot`,
       );
     } else if (osPlatform === 'win32') {
       possiblePaths.push(
         'C:\\Program Files\\Godot\\Godot.exe',
         'C:\\Program Files (x86)\\Godot\\Godot.exe',
-        `${process.env.USERPROFILE}\\Godot\\Godot.exe`
+        `${process.env.USERPROFILE}\\Godot\\Godot.exe`,
       );
     } else if (osPlatform === 'linux') {
       possiblePaths.push(
         '/usr/bin/godot',
         '/usr/local/bin/godot',
         '/snap/bin/godot',
-        `${process.env.HOME}/.local/bin/godot`
+        `${process.env.HOME}/.local/bin/godot`,
       );
     }
 
@@ -474,7 +506,9 @@ export class GodotRunner {
     logError(`Could not find Godot in common locations for ${osPlatform}`);
 
     if (this.strictPathValidation) {
-      throw new Error('Could not find a valid Godot executable. Set GODOT_PATH or provide a valid path in config.');
+      throw new Error(
+        'Could not find a valid Godot executable. Set GODOT_PATH or provide a valid path in config.',
+      );
     } else {
       if (osPlatform === 'win32') {
         this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
@@ -517,7 +551,7 @@ export class GodotRunner {
     operation: string,
     params: OperationParams,
     projectPath: string,
-    timeoutMs: number = 30000
+    timeoutMs: number = 30000,
   ): Promise<OperationResult> {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
@@ -537,8 +571,10 @@ export class GodotRunner {
     const paramsJson = JSON.stringify(snakeCaseParams);
     const args = [
       '--headless',
-      '--path', projectPath,
-      '--script', this.operationsScriptPath,
+      '--path',
+      projectPath,
+      '--script',
+      this.operationsScriptPath,
       operation,
       paramsJson,
       ...(DEBUG_MODE ? ['--debug-godot'] : []),
@@ -573,8 +609,8 @@ export class GodotRunner {
     if (!operationRan && (stderr.includes('ERROR:') || stderr.includes('SCRIPT ERROR:'))) {
       throw new Error(
         `Headless Godot failed before the operation could run — likely an autoload initialization error.\n` +
-        `Stderr:\n${stderr.trim()}\n\n` +
-        `Use list_autoloads and remove_autoload to inspect or remove the failing autoload, then retry.`
+          `Stderr:\n${stderr.trim()}\n\n` +
+          `Use list_autoloads and remove_autoload to inspect or remove the failing autoload, then retry.`,
       );
     }
 
@@ -599,7 +635,11 @@ export class GodotRunner {
       if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
         this.cleanupBridgeAutoload(this.activeProjectPath);
       }
-    } else if (this.activeSessionMode === 'attached' && this.activeProjectPath && this.activeProjectPath !== projectPath) {
+    } else if (
+      this.activeSessionMode === 'attached' &&
+      this.activeProjectPath &&
+      this.activeProjectPath !== projectPath
+    ) {
       this.cleanupBridgeAutoload(this.activeProjectPath);
     }
 
@@ -679,7 +719,11 @@ export class GodotRunner {
   attachProject(projectPath: string): void {
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       this.stopProject();
-    } else if (this.activeSessionMode === 'attached' && this.activeProjectPath && this.activeProjectPath !== projectPath) {
+    } else if (
+      this.activeSessionMode === 'attached' &&
+      this.activeProjectPath &&
+      this.activeProjectPath !== projectPath
+    ) {
       this.cleanupBridgeAutoload(this.activeProjectPath);
       this.activeProjectPath = null;
       this.activeSessionMode = null;
@@ -744,7 +788,11 @@ export class GodotRunner {
     return true;
   }
 
-  private removeAutoloadEntry(projectPath: string, entryName: string, scriptFilename: string): void {
+  private removeAutoloadEntry(
+    projectPath: string,
+    entryName: string,
+    scriptFilename: string,
+  ): void {
     try {
       const projectFile = join(projectPath, 'project.godot');
       if (existsSync(projectFile)) {
@@ -752,7 +800,10 @@ export class GodotRunner {
         const autoloadEntry = `${entryName}="*res://${scriptFilename}"`;
 
         if (content.includes(autoloadEntry)) {
-          content = content.replace(new RegExp(`\\n?${autoloadEntry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), '');
+          content = content.replace(
+            new RegExp(`\\n?${autoloadEntry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'),
+            '',
+          );
           content = content.replace(/\[autoload\]\s*(?=\n\[|\n*$)/g, '');
           content = content.trimEnd() + '\n';
           writeFileSync(projectFile, content, 'utf8');
@@ -872,7 +923,11 @@ export class GodotRunner {
     }
   }
 
-  sendCommand(command: string, params: Record<string, unknown> = {}, timeoutMs: number = 10000): Promise<string> {
+  sendCommand(
+    command: string,
+    params: Record<string, unknown> = {},
+    timeoutMs: number = 10000,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const socket = createSocket('udp4');
       let settled = false;
@@ -881,7 +936,9 @@ export class GodotRunner {
         if (!settled) {
           settled = true;
           socket.close();
-          reject(new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`));
+          reject(
+            new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
+          );
         }
       }, timeoutMs);
 
@@ -926,7 +983,7 @@ export class GodotRunner {
     const delta = totalErrorsWritten - marker;
     if (delta <= 0) return [];
     const window = delta >= errors.length ? errors.slice() : errors.slice(errors.length - delta);
-    return window.filter(line => line.trim() !== '');
+    return window.filter((line) => line.trim() !== '');
   }
 
   private static readonly SCRIPT_ERROR_PATTERNS = [
@@ -936,22 +993,19 @@ export class GodotRunner {
   ];
 
   extractRuntimeErrors(lines: string[]): string[] {
-    return lines.filter(line =>
-      GodotRunner.SCRIPT_ERROR_PATTERNS.some(p => line.includes(p))
-    );
+    return lines.filter((line) => GodotRunner.SCRIPT_ERROR_PATTERNS.some((p) => line.includes(p)));
   }
 
   async sendCommandWithErrors(
     command: string,
     params: Record<string, unknown> = {},
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
   ): Promise<{ response: string; runtimeErrors: string[] }> {
     const marker = this.getErrorCount();
     const response = await this.sendCommand(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
-    const runtimeErrors = this.activeSessionMode === 'spawned'
-      ? this.extractRuntimeErrors(newErrors)
-      : [];
+    const runtimeErrors =
+      this.activeSessionMode === 'spawned' ? this.extractRuntimeErrors(newErrors) : [];
     return { response, runtimeErrors };
   }
 
@@ -960,7 +1014,9 @@ export class GodotRunner {
     intervalMs: number = BRIDGE_WAIT_ATTACHED_INTERVAL_MS,
   ): Promise<{ ready: boolean; error?: string }> {
     const deadline = Date.now() + timeoutMs;
-    const expectedPath = this.activeProjectPath ? normalizeForCompare(this.activeProjectPath) : null;
+    const expectedPath = this.activeProjectPath
+      ? normalizeForCompare(this.activeProjectPath)
+      : null;
 
     while (Date.now() < deadline) {
       try {
@@ -970,7 +1026,10 @@ export class GodotRunner {
           if (expectedPath && parsed.project_path) {
             const bridgePath = normalizeForCompare(parsed.project_path);
             if (bridgePath !== expectedPath) {
-              return { ready: false, error: `Bridge is running for a different project (${bridgePath}), expected ${expectedPath}` };
+              return {
+                ready: false,
+                error: `Bridge is running for a different project (${bridgePath}), expected ${expectedPath}`,
+              };
             }
           }
           return { ready: true };
@@ -979,10 +1038,14 @@ export class GodotRunner {
         // Expected: ping will fail until bridge is listening
       }
 
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
 
-    return { ready: false, error: 'Bridge did not respond within timeout — is Godot running with the McpBridge autoload?' };
+    return {
+      ready: false,
+      error:
+        'Bridge did not respond within timeout — is Godot running with the McpBridge autoload?',
+    };
   }
 
   async waitForBridge(
@@ -991,7 +1054,9 @@ export class GodotRunner {
   ): Promise<{ ready: boolean; error?: string }> {
     const deadline = Date.now() + timeoutMs;
     const expectedToken = this.activeProcess?.sessionToken;
-    const expectedPath = this.activeProjectPath ? normalizeForCompare(this.activeProjectPath) : null;
+    const expectedPath = this.activeProjectPath
+      ? normalizeForCompare(this.activeProjectPath)
+      : null;
 
     if (!expectedToken) {
       return { ready: false, error: 'No active spawned Godot process to verify' };
@@ -1008,13 +1073,20 @@ export class GodotRunner {
       }
 
       try {
-        const response = await this.sendCommand('ping', { session_token: expectedToken }, BRIDGE_PING_TIMEOUT_MS);
+        const response = await this.sendCommand(
+          'ping',
+          { session_token: expectedToken },
+          BRIDGE_PING_TIMEOUT_MS,
+        );
         const parsed = JSON.parse(response);
         if (parsed.status === 'pong' && parsed.session_token === expectedToken) {
           if (expectedPath && parsed.project_path) {
             const bridgePath = normalizeForCompare(parsed.project_path);
             if (bridgePath !== expectedPath) {
-              return { ready: false, error: `Bridge reports project ${bridgePath}, expected ${expectedPath}` };
+              return {
+                ready: false,
+                error: `Bridge reports project ${bridgePath}, expected ${expectedPath}`,
+              };
             }
           }
           return { ready: true };
@@ -1023,16 +1095,17 @@ export class GodotRunner {
         // Expected: ping will fail until bridge is listening
       }
 
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
 
-    return { ready: false, error: 'Bridge did not respond with the expected session token within timeout' };
+    return {
+      ready: false,
+      error: 'Bridge did not respond with the expected session token within timeout',
+    };
   }
 
   getRecentErrors(count: number = 20): string[] {
     if (!this.activeProcess) return [];
-    return this.activeProcess.errors
-      .slice(-count)
-      .filter(line => line.trim() !== '');
+    return this.activeProcess.errors.slice(-count).filter((line) => line.trim() !== '');
   }
 }

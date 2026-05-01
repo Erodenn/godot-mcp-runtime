@@ -1,0 +1,11 @@
+[gd_scene format=3]
+
+[node name="Main" type="Node2D"]
+
+[node name="Label" type="Label" parent="."]
+offset_right = 100.0
+offset_bottom = 23.0
+text = "fixture"
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(50, 50)

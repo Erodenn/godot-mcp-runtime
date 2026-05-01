@@ -16,7 +16,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { GodotRunner, GodotServerConfig } from './utils/godot-runner.js';
+import type { GodotServerConfig } from './utils/godot-runner.js';
+import { GodotRunner } from './utils/godot-runner.js';
 
 // Project tools
 import {
@@ -72,10 +73,7 @@ import {
 } from './tools/node-tools.js';
 
 // Validate tools
-import {
-  validateToolDefinitions,
-  handleValidate,
-} from './tools/validate-tools.js';
+import { validateToolDefinitions, handleValidate } from './tools/validate-tools.js';
 
 class GodotMcpServer {
   private server: Server;
@@ -112,7 +110,7 @@ Key behaviors:
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.`,
-      }
+      },
     );
 
     this.setupToolHandlers();
@@ -243,10 +241,7 @@ Key behaviors:
           return await handleValidate(this.runner, args);
 
         default:
-          throw new McpError(
-            ErrorCode.MethodNotFound,
-            `Unknown tool: ${toolName}`
-          );
+          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
       }
     });
   }
@@ -257,7 +252,9 @@ Key behaviors:
 
       const godotPath = this.runner.getGodotPath();
       if (!godotPath) {
-        console.error('[SERVER] Warning: Godot executable not found. Set GODOT_PATH to enable Godot tools.');
+        console.error(
+          '[SERVER] Warning: Godot executable not found. Set GODOT_PATH to enable Godot tools.',
+        );
       } else {
         console.error(`[SERVER] Using Godot at: ${godotPath}`);
       }
