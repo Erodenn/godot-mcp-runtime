@@ -375,15 +375,11 @@ describe('handleManageUids', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('returns isError for unknown operation after successful version check', async () => {
-    // Fake runner returns a version string on getVersion, then fails for the operation.
-    // We use a real GodotRunner-shaped fake that exposes getVersion.
-    const fake = createFakeRunner({ stdout: '' });
-    // Patch getVersion onto the asRunner façade
-    (fake.asRunner as unknown as { getVersion: () => Promise<string> }).getVersion = async () =>
-      '4.4.1.stable';
-    (fake.asRunner as unknown as { isGodot44OrLater: (v: string) => boolean }).isGodot44OrLater =
-      () => true;
+  it('rejects unknown operation when running on a version-gated Godot 4.4+ project', async () => {
+    // Reports Godot 4.4+ so handleManageUids passes its version gate, then
+    // returns an empty stdout for the operation itself, which the handler
+    // surfaces as an error response.
+    const fake = createFakeRunner({ stdout: '', godotVersion: '4.4.1.stable' });
     const result = await handleManageUids(fake.asRunner, {
       operation: 'bad_op',
       projectPath: fixtureProjectPath,

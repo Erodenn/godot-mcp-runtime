@@ -8,8 +8,8 @@ import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-path
 // handleValidate — single-target mode
 // ---------------------------------------------------------------------------
 
-describe('handleValidate (single-target)', () => {
-  it('rejects missing projectPath', async () => {
+describe('handleValidate', () => {
+  it('rejects missing projectPath in single-target mode', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, { source: 'extends Node' });
     expect(hasError(result)).toBe(true);
@@ -128,20 +128,22 @@ describe('handleValidate (single-target)', () => {
 // handleValidate — batch (targets[]) mode
 // ---------------------------------------------------------------------------
 
-describe('handleValidate (batch mode)', () => {
-  it('enters batch mode when targets array is provided alongside single-target params', async () => {
-    // When targets is provided, the handler runs in batch mode and ignores single-target params.
-    // The handler does NOT return isError just because both are present; it processes targets.
+describe('handleValidate batch mode', () => {
+  it('invokes validate_batch (not validate_resource) when targets array is provided alongside single-target params', async () => {
+    // Boundary contract: targets[] should route through the batch operation
+    // even when single-target params are also present. Asserting only on the
+    // result shape can't distinguish batch from single, so we inspect the spy.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
-      scenePath: fixtureScenePath, // single-target param also present
+      scenePath: fixtureScenePath,
       targets: [{ scenePath: fixtureScenePath }],
     });
-    // Batch mode runs; no isError expected when runner returns valid JSON
     expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0].operation).toBe('validate_batch');
   });
 
   it('treats empty Godot output as a failed operation in batch mode', async () => {

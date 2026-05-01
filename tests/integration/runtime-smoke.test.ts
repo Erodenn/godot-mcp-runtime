@@ -24,33 +24,45 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 
-let runner: GodotRunner;
-let tmpProject: string | null = null;
-
-beforeAll(async () => {
-  runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
-  await runner.detectGodotPath();
-});
-
-afterEach(async () => {
-  // Always stop the project between tests so the bridge port is freed
-  try {
-    runner.stopProject();
-  } catch {
-    // already stopped
-  }
-  // Clean up tmp copy
-  if (tmpProject) {
-    try {
-      rmSync(tmpProject, { recursive: true, force: true });
-    } catch {
-      // best-effort
-    }
-    tmpProject = null;
-  }
-});
+// Heuristic: bridge failures we treat as "no display server" (skip-worthy)
+// rather than real failures. Anything else means runProject or the bridge is
+// genuinely broken and the test must fail loudly.
+function isHeadlessEnvironmentError(err: string | undefined): boolean {
+  if (!err) return false;
+  const lower = err.toLowerCase();
+  return (
+    lower.includes('display') ||
+    lower.includes('no x server') ||
+    lower.includes('wayland') ||
+    lower.includes('cannot open display')
+  );
+}
 
 describe('runtime bridge smoke', () => {
+  let runner: GodotRunner;
+  let tmpProject: string | null = null;
+
+  beforeAll(async () => {
+    runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
+    await runner.detectGodotPath();
+  });
+
+  afterEach(async () => {
+    try {
+      runner.stopProject();
+    } catch {
+      // already stopped
+    }
+    if (tmpProject) {
+      try {
+        rmSync(tmpProject, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+      tmpProject = null;
+    }
+  });
+
   itGodot(
     'take_screenshot saves a PNG file after run_project',
     async () => {
@@ -64,14 +76,20 @@ describe('runtime bridge smoke', () => {
       runner.runProject(tmpProject);
       const bridgeResult = await runner.waitForBridge(12000);
 
-      // If the display server is unavailable the bridge will never respond.
-      // Skip rather than fail so the suite stays green on headless machines.
       if (!bridgeResult.ready) {
-        console.error(
-          `[runtime-smoke] Bridge not ready: ${bridgeResult.error ?? 'unknown'}. ` +
-            `Skipping screenshot assertion — likely no display server available.`,
+        // Distinguish "no display server" (acceptable skip) from "process exited
+        // / port collision / bridge code is broken" (real failure that must not
+        // pass silently).
+        if (isHeadlessEnvironmentError(bridgeResult.error)) {
+          console.error(
+            `[runtime-smoke] Skipping: display server unavailable (${bridgeResult.error}).`,
+          );
+          return;
+        }
+        throw new Error(
+          `Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}. ` +
+            `This is not a "no display" skip — runProject or the bridge is broken.`,
         );
-        return;
       }
 
       const response = await runner.sendCommand('screenshot', {}, 15000);
