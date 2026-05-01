@@ -1,5 +1,5 @@
 # Godot MCP Runtime
-<a href="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp">
+<a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server" />
 </a>
 
