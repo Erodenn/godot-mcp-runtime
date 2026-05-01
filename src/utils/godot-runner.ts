@@ -25,7 +25,7 @@ const BRIDGE_PING_TIMEOUT_MS = 1000;
  * Folds Windows backslashes to forward slashes and strips trailing slashes,
  * so Node's `path.normalize` output matches Godot's `globalize_path("res://")`.
  */
-function normalizeForCompare(p: string): string {
+export function normalizeForCompare(p: string): string {
   return normalize(p).replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
@@ -78,7 +78,7 @@ export function extractJson(output: string): string {
 /**
  * Strip Godot banner and debug lines from output, keeping only meaningful content.
  */
-function cleanOutput(output: string): string {
+export function cleanOutput(output: string): string {
   const lines = output.split('\n');
   const cleanedLines = lines.filter((line) => {
     const trimmed = line.trim();

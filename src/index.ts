@@ -9,71 +9,23 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 
-// Project tools
-import {
-  projectToolDefinitions,
-  handleLaunchEditor,
-  handleRunProject,
-  handleAttachProject,
-  handleDetachProject,
-  handleGetDebugOutput,
-  handleStopProject,
-  handleListProjects,
-  handleGetProjectInfo,
-  handleTakeScreenshot,
-  handleSimulateInput,
-  handleGetUiElements,
-  handleRunScript,
-  handleListAutoloads,
-  handleAddAutoload,
-  handleRemoveAutoload,
-  handleUpdateAutoload,
-  handleGetProjectFiles,
-  handleSearchProject,
-  handleGetSceneDependencies,
-  handleGetProjectSettings,
-} from './tools/project-tools.js';
+import { dispatchToolCall } from './dispatch.js';
+import { projectToolDefinitions } from './tools/project-tools.js';
+import { sceneToolDefinitions } from './tools/scene-tools.js';
+import { nodeToolDefinitions } from './tools/node-tools.js';
+import { validateToolDefinitions } from './tools/validate-tools.js';
 
-// Scene tools
-import {
-  sceneToolDefinitions,
-  handleCreateScene,
-  handleAddNode,
-  handleLoadSprite,
-  handleSaveScene,
-  handleExportMeshLibrary,
-  handleBatchSceneOperations,
-  handleManageUids,
-} from './tools/scene-tools.js';
-
-// Node tools
-import {
-  nodeToolDefinitions,
-  handleDeleteNode,
-  handleSetNodeProperty,
-  handleBatchSetNodeProperties,
-  handleGetNodeProperties,
-  handleBatchGetNodeProperties,
-  handleAttachScript,
-  handleGetSceneTree,
-  handleDuplicateNode,
-  handleGetNodeSignals,
-  handleConnectSignal,
-  handleDisconnectSignal,
-} from './tools/node-tools.js';
-
-// Validate tools
-import { validateToolDefinitions, handleValidate } from './tools/validate-tools.js';
+export const allToolDefinitions = [
+  ...projectToolDefinitions,
+  ...sceneToolDefinitions,
+  ...nodeToolDefinitions,
+  ...validateToolDefinitions,
+];
 
 class GodotMcpServer {
   private server: Server;
@@ -135,16 +87,8 @@ Key behaviors:
   }
 
   private setupToolHandlers() {
-    // Combine all tool definitions
-    const allTools = [
-      ...projectToolDefinitions,
-      ...sceneToolDefinitions,
-      ...nodeToolDefinitions,
-      ...validateToolDefinitions,
-    ];
-
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: allTools,
+      tools: allToolDefinitions,
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -153,96 +97,7 @@ Key behaviors:
 
       console.error(`[SERVER] Handling tool request: ${toolName}`);
 
-      switch (toolName) {
-        // Project tools
-        case 'launch_editor':
-          return await handleLaunchEditor(this.runner, args);
-        case 'run_project':
-          return await handleRunProject(this.runner, args);
-        case 'attach_project':
-          return await handleAttachProject(this.runner, args);
-        case 'detach_project':
-          return handleDetachProject(this.runner);
-        case 'get_debug_output':
-          return handleGetDebugOutput(this.runner, args);
-        case 'stop_project':
-          return handleStopProject(this.runner);
-        case 'list_projects':
-          return await handleListProjects(args);
-        case 'get_project_info':
-          return await handleGetProjectInfo(this.runner, args);
-        case 'take_screenshot':
-          return await handleTakeScreenshot(this.runner, args);
-        case 'simulate_input':
-          return await handleSimulateInput(this.runner, args);
-        case 'get_ui_elements':
-          return await handleGetUiElements(this.runner, args);
-        case 'run_script':
-          return await handleRunScript(this.runner, args);
-        case 'list_autoloads':
-          return await handleListAutoloads(args);
-        case 'add_autoload':
-          return await handleAddAutoload(args);
-        case 'remove_autoload':
-          return await handleRemoveAutoload(args);
-        case 'update_autoload':
-          return await handleUpdateAutoload(args);
-        case 'get_project_files':
-          return await handleGetProjectFiles(args);
-        case 'search_project':
-          return await handleSearchProject(args);
-        case 'get_scene_dependencies':
-          return await handleGetSceneDependencies(args);
-        case 'get_project_settings':
-          return await handleGetProjectSettings(args);
-
-        // Scene tools
-        case 'create_scene':
-          return await handleCreateScene(this.runner, args);
-        case 'add_node':
-          return await handleAddNode(this.runner, args);
-        case 'load_sprite':
-          return await handleLoadSprite(this.runner, args);
-        case 'save_scene':
-          return await handleSaveScene(this.runner, args);
-        case 'export_mesh_library':
-          return await handleExportMeshLibrary(this.runner, args);
-        case 'batch_scene_operations':
-          return await handleBatchSceneOperations(this.runner, args);
-        case 'manage_uids':
-          return await handleManageUids(this.runner, args);
-
-        // Node tools
-        case 'delete_node':
-          return await handleDeleteNode(this.runner, args);
-        case 'set_node_property':
-          return await handleSetNodeProperty(this.runner, args);
-        case 'batch_set_node_properties':
-          return await handleBatchSetNodeProperties(this.runner, args);
-        case 'get_node_properties':
-          return await handleGetNodeProperties(this.runner, args);
-        case 'batch_get_node_properties':
-          return await handleBatchGetNodeProperties(this.runner, args);
-        case 'attach_script':
-          return await handleAttachScript(this.runner, args);
-        case 'get_scene_tree':
-          return await handleGetSceneTree(this.runner, args);
-        case 'duplicate_node':
-          return await handleDuplicateNode(this.runner, args);
-        case 'get_node_signals':
-          return await handleGetNodeSignals(this.runner, args);
-        case 'connect_signal':
-          return await handleConnectSignal(this.runner, args);
-        case 'disconnect_signal':
-          return await handleDisconnectSignal(this.runner, args);
-
-        // Validate tools
-        case 'validate':
-          return await handleValidate(this.runner, args);
-
-        default:
-          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
-      }
+      return await dispatchToolCall(this.runner, toolName, args);
     });
   }
 
