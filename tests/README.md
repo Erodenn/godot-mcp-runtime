@@ -26,12 +26,12 @@ tests/
 | `unit/handlers/project-handlers.test.ts`      | Argument validation for non-runtime project handlers (autoload, fs, search, settings)                                    | Tmp dirs via `fs.mkdtempSync`            |
 | `unit/handlers/validate-handler.test.ts`      | `handleValidate` argument validation incl. single vs `targets[]` mode                                                    |                                          |
 | `unit/mcp-dispatch.test.ts`                   | Dispatch table ↔ tool-definition parity, unknown-tool error, `instructions` category coverage                            |                                          |
-| `integration/runner-executeOperation.test.ts` | _(planned, godot-integration)_ `executeOperation` for `validate` and `get_project_info`                                  | Requires `GODOT_PATH`                    |
-| `integration/scene-roundtrip.test.ts`         | _(planned, godot-integration)_ `add_node` / `set_node_property` / `delete_node` round-trip + auto-save invariant         | Requires `GODOT_PATH`; tmp fixture copy  |
-| `integration/runtime-smoke.test.ts`           | _(planned, godot-integration)_ `run_project` → `take_screenshot` smoke test                                              | Requires `GODOT_PATH`; may skip headless |
+| `integration/runner-executeOperation.test.ts` | `executeOperation` for `validate_resource` (scene + broken GDScript); `handleGetProjectInfo`                             | Requires `GODOT_PATH`                    |
+| `integration/scene-roundtrip.test.ts`         | `add_node` / `set_node_property` / `delete_node` round-trip + auto-save invariant (all 3 operations)                     | Requires `GODOT_PATH`; tmp fixture copy  |
+| `integration/runtime-smoke.test.ts`           | `run_project` → `take_screenshot` smoke test; skips gracefully if no display server                                      | Requires `GODOT_PATH`; may skip headless |
 | `integration/fixture.test.ts`                 | Smoke check that `tests/fixtures/godot-project/` is well-formed                                                          | No Godot required                        |
 
-(Workers update their row by removing the _(planned, ...)_ marker when their file lands. Add new rows here as additional test files land.)
+(Add new rows here as additional test files land.)
 
 ## Running
 
