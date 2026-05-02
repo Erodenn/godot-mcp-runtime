@@ -1,27 +1,28 @@
 # Godot MCP Runtime
+<a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server" />
+</a>
 
+[![](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![npm version](https://img.shields.io/npm/v/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
 [![npm downloads](https://img.shields.io/npm/dt/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
 [![License: MIT](https://badgen.net/github/license/Erodenn/godot-mcp-runtime)](LICENSE)
 [![Node.js](https://img.shields.io/node/v/godot-mcp-runtime)](https://nodejs.org/)
 
-An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running Godot 4.x game. Not just file editing, not just scene manipulation. Actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.
-
-When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
+A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running [Godot](https://godotengine.org/) 4.x game. Not just file editing, not just scene manipulation. Actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.
 
 **The distinction matters: the AI doesn't just write your game, it can check its work.**
 
-**No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon — something you install into your project, commit to version control, and manage as a dependency. This server does none of that. The bridge script is injected on `run_project` or `attach_project`, then removed on `stop_project` or `detach_project`. Your project files are left exactly as they were. All you need is Node.js and a Godot executable, no addon installation, no project modifications, no cleanup.
+When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
 
-Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), but for Godot. Playwright lets agents verify that a web app actually works by driving a real browser. This does the same thing for games: run the project, take a screenshot, simulate input, read what's on screen, execute a script against the live scene tree. The agent closes the loop on its own changes rather than handing off to you to verify.
+**No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon — something you install into your project, commit to version control, and manage as a dependency. All this server needs is Node.js and a Godot executable: no addon installation, no project modifications, no cleanup.
 
-This is not a playtesting replacement. It doesn't catch the subtle feel issues that only a human notices, and it won't tell you if your game is fun. What it does is let an agent confirm that a scene loads, a button responds, a value updated, a script ran without errors. That's a fundamentally different development workflow, and it's what this server is built for.
+Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), but for Godot. This does the same thing for games: run the project, take a screenshot, simulate input, read what's on screen, execute a script against the live scene tree. The agent closes the loop on its own changes rather than handing off to you to verify.
 
-Every operation is its own tool with only its relevant parameters, no operation discriminators, no conditional schemas. Each tool teaches agents how to use it through its description and response messages: what to call next, when to wait, and how to recover from errors.
+This is not a playtesting replacement. It doesn't catch the subtle feel issues that only a human notices, and it won't tell you if your game is fun. What it does is let an agent confirm that a scene loads, a button responds, a value updated, a script ran without errors. The ability to check work is crucial for AI driven workflows.
 
-<a href="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server" />
-</a>
+Each tool teaches agents how to use it through its description and response messages: what to call next, when to wait, and how to recover from errors. Every operation is its own tool with only its relevant parameters, no operation discriminators and no conditional schemas. This server is built for agents.
+
 
 ## What It Does
 
@@ -230,10 +231,6 @@ When `run_project` or `attach_project` is called:
 5. `stop_project` or `detach_project` removes the bridge script and autoload entry
 
 Files generated during runtime (screenshots, executed scripts) are stored in `.mcp/` inside the project directory. This directory is automatically added to `.gitignore` and has a `.gdignore` so Godot won't import it.
-
-## Broken Autoloads
-
-If any registered autoload fails to initialize (syntax error, missing resource, display dependency), Godot's headless process will crash before any operation runs. Use `list_autoloads` and `remove_autoload` to inspect and remove the failing autoload. These tools edit `project.godot` directly, with no Godot process involved.
 
 ## Acknowledgments
 
