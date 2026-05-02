@@ -38,3 +38,6 @@ Thumbs.db
 # Local-only Godot test project (ad hoc manual testing).
 # The committed shared fixture lives at tests/fixtures/godot-project/.
 .test-project/
+
+# Loose plans, scoping notes, follow-ups — local working docs only.
+plans/

@@ -8,6 +8,9 @@ import {
   handleDuplicateNode,
   handleConnectSignal,
   handleDisconnectSignal,
+  handleBatchSetNodeProperties,
+  handleBatchGetNodeProperties,
+  handleGetNodeSignals,
 } from '../../../src/tools/node-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError } from '../../helpers/assertions.js';
@@ -84,6 +87,19 @@ describe('handleDeleteNode', () => {
       nodePath: 'root/Node',
     });
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Node 'root/Sprite2D' deleted successfully",
+    });
+    const result = await handleDeleteNode(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite2D',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('deleted successfully');
   });
 });
 
@@ -168,6 +184,21 @@ describe('handleSetNodeProperty', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Property 'position' updated successfully on node 'root/Sprite2D'",
+    });
+    const result = await handleSetNodeProperty(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite2D',
+      property: 'position',
+      value: { x: 1, y: 2 },
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('updated successfully');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -226,6 +257,21 @@ describe('handleGetNodeProperties', () => {
       nodePath: 'root/Node',
     });
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: '{"nodePath":"root","nodeType":"Node2D","properties":{"position":{"x":0,"y":0}}}',
+    });
+    const result = await handleGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.nodePath).toBe('root');
+    expect(parsed.nodeType).toBe('Node2D');
   });
 });
 
@@ -313,6 +359,20 @@ describe('handleAttachScript', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Script 'res://placeholder.gd' attached successfully to node 'root/Sprite2D'",
+    });
+    const result = await handleAttachScript(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite2D',
+      scriptPath: 'placeholder.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('attached successfully');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +423,18 @@ describe('handleGetSceneTree', () => {
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleGetSceneTree(fake.asRunner, validBase);
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: '{"name":"root","type":"Node2D","path":"root","script":"","children":[]}',
+    });
+    const result = await handleGetSceneTree(fake.asRunner, validBase);
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.name).toBe('root');
+    expect(parsed.type).toBe('Node2D');
   });
 });
 
@@ -432,6 +504,19 @@ describe('handleDuplicateNode', () => {
       nodePath: 'root/Node',
     });
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Node duplicated successfully as 'Sprite2D2'",
+    });
+    const result = await handleDuplicateNode(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite2D',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('duplicated successfully');
   });
 });
 
@@ -535,6 +620,22 @@ describe('handleConnectSignal', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Signal 'pressed' connected from 'root/Button' to 'root/Receiver._on_pressed'",
+    });
+    const result = await handleConnectSignal(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('connected');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -636,5 +737,256 @@ describe('handleDisconnectSignal', () => {
       method: '_on_pressed',
     });
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Signal 'pressed' disconnected from 'root/Button' to 'root/Receiver._on_pressed'",
+    });
+    const result = await handleDisconnectSignal(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('disconnected');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleBatchSetNodeProperties
+// ---------------------------------------------------------------------------
+
+describe('handleBatchSetNodeProperties', () => {
+  const validUpdates = [{ nodePath: 'root/Sprite2D', property: 'visible', value: true }];
+
+  it('rejects missing projectPath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      scenePath: fixtureScenePath,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      projectPath: '../evil',
+      scenePath: fixtureScenePath,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      projectPath: '/ghost',
+      scenePath: fixtureScenePath,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects missing updates array', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSetNodeProperties(fake.asRunner, validBase);
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('treats empty Godot output as a failed operation', async () => {
+    const fake = createFakeRunner({ stdout: '' });
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      ...validBase,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('surfaces runner exceptions as a structured MCP error response', async () => {
+    const fake = createFakeRunner({ throws: new Error('boom') });
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      ...validBase,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: '{"results":[{"nodePath":"root/Sprite2D","property":"visible","success":true}]}',
+    });
+    const result = await handleBatchSetNodeProperties(fake.asRunner, {
+      ...validBase,
+      updates: validUpdates,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.results[0].success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleBatchGetNodeProperties
+// ---------------------------------------------------------------------------
+
+describe('handleBatchGetNodeProperties', () => {
+  const validNodes = [{ nodePath: 'root' }];
+
+  it('rejects missing projectPath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      scenePath: fixtureScenePath,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      projectPath: '../evil',
+      scenePath: fixtureScenePath,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      projectPath: '/ghost',
+      scenePath: fixtureScenePath,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects missing nodes array', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchGetNodeProperties(fake.asRunner, validBase);
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('treats empty Godot output as a failed operation', async () => {
+    const fake = createFakeRunner({ stdout: '' });
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('surfaces runner exceptions as a structured MCP error response', async () => {
+    const fake = createFakeRunner({ throws: new Error('boom') });
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: '{"results":[{"nodePath":"root","nodeType":"Node2D","properties":{}}]}',
+    });
+    const result = await handleBatchGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: validNodes,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.results[0].nodePath).toBe('root');
+    expect(parsed.results[0].nodeType).toBe('Node2D');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetNodeSignals
+// ---------------------------------------------------------------------------
+
+describe('handleGetNodeSignals', () => {
+  it('rejects missing projectPath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      scenePath: fixtureScenePath,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createFakeRunner();
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      projectPath: '../evil',
+      scenePath: fixtureScenePath,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createFakeRunner();
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      projectPath: '/ghost',
+      scenePath: fixtureScenePath,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects missing nodePath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleGetNodeSignals(fake.asRunner, validBase);
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects nodePath containing ..', async () => {
+    const fake = createFakeRunner();
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      ...validBase,
+      nodePath: '../escape',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('treats empty Godot output as a failed operation', async () => {
+    const fake = createFakeRunner({ stdout: '' });
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('surfaces runner exceptions as a structured MCP error response', async () => {
+    const fake = createFakeRunner({ throws: new Error('boom') });
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout:
+        '{"nodePath":"root/Button","nodeType":"Button","signals":[{"name":"pressed","connections":[]}]}',
+    });
+    const result = await handleGetNodeSignals(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.nodePath).toBe('root/Button');
+    expect(parsed.signals[0].name).toBe('pressed');
   });
 });

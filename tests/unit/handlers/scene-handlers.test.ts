@@ -6,6 +6,7 @@ import {
   handleSaveScene,
   handleExportMeshLibrary,
   handleManageUids,
+  handleBatchSceneOperations,
 } from '../../../src/tools/scene-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError } from '../../helpers/assertions.js';
@@ -72,6 +73,17 @@ describe('handleCreateScene', () => {
     });
     const text = (result as { content: Array<{ text: string }> }).content[0].text;
     expect(text).toContain('disk full');
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({ stdout: 'Scene created successfully at: scenes/x.tscn' });
+    const result = await handleCreateScene(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: 'scenes/x.tscn',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('created successfully');
   });
 });
 
@@ -149,6 +161,20 @@ describe('handleAddNode', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: "Node 'Foo' of type 'Node2D' added successfully",
+    });
+    const result = await handleAddNode(fake.asRunner, {
+      ...validBase,
+      nodeType: 'Node2D',
+      nodeName: 'Foo',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('added successfully');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -216,6 +242,20 @@ describe('handleLoadSprite', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: 'Sprite loaded successfully with texture: placeholder.png',
+    });
+    const result = await handleLoadSprite(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite',
+      texturePath: 'placeholder.png',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('loaded successfully');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -266,6 +306,14 @@ describe('handleSaveScene', () => {
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleSaveScene(fake.asRunner, validBase);
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({ stdout: 'Scene saved successfully to: main.tscn' });
+    const result = await handleSaveScene(fake.asRunner, validBase);
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('saved successfully');
   });
 });
 
@@ -335,6 +383,19 @@ describe('handleExportMeshLibrary', () => {
     });
     expect(hasError(result)).toBe(true);
   });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: 'MeshLibrary exported successfully with 3 items to: lib.res',
+    });
+    const result = await handleExportMeshLibrary(fake.asRunner, {
+      ...validBase,
+      outputPath: 'lib.res',
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('MeshLibrary exported');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -385,5 +446,110 @@ describe('handleManageUids', () => {
       projectPath: fixtureProjectPath,
     });
     expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result for get operation on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: 'uid://abcdef',
+      godotVersion: '4.4.1.stable',
+    });
+    const result = await handleManageUids(fake.asRunner, {
+      operation: 'get',
+      projectPath: fixtureProjectPath,
+      filePath: fixtureScenePath,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('uid://abcdef');
+    expect(text).toContain(fixtureScenePath);
+  });
+
+  it('returns parsed result for update operation on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: 'Resave operation complete. Scenes: 5 saved, 0 errors. UIDs generated: 2',
+      godotVersion: '4.4.1.stable',
+    });
+    const result = await handleManageUids(fake.asRunner, {
+      operation: 'update',
+      projectPath: fixtureProjectPath,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain('Resave operation complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleBatchSceneOperations
+// ---------------------------------------------------------------------------
+
+describe('handleBatchSceneOperations', () => {
+  const validOps = [
+    { operation: 'add_node', scenePath: fixtureScenePath, nodeType: 'Node2D', nodeName: 'Foo' },
+  ];
+
+  it('rejects missing projectPath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSceneOperations(fake.asRunner, { operations: validOps });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: '../evil',
+      operations: validOps,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: '/ghost',
+      operations: validOps,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('rejects missing operations array', async () => {
+    const fake = createFakeRunner();
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('treats empty Godot output as a failed operation', async () => {
+    const fake = createFakeRunner({ stdout: '' });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: validOps,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('surfaces runner exceptions as a structured MCP error response', async () => {
+    const fake = createFakeRunner({ throws: new Error('boom') });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: validOps,
+    });
+    expect(hasError(result)).toBe(true);
+  });
+
+  it('returns parsed result on successful runner output', async () => {
+    const fake = createFakeRunner({
+      stdout: `{"results":[{"operation":"add_node","scenePath":"${fixtureScenePath}","success":true}]}`,
+    });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: validOps,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed.results[0].success).toBe(true);
+    expect(parsed.results[0].operation).toBe('add_node');
   });
 });
