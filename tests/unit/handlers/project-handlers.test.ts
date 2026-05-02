@@ -1,7 +1,6 @@
-import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { describe, it, expect } from 'vitest';
+import { writeFileSync } from 'fs';
 import { join, sep } from 'path';
-import { tmpdir } from 'os';
 import {
   handleListAutoloads,
   handleAddAutoload,
@@ -13,41 +12,24 @@ import {
   handleGetProjectSettings,
   handleListProjects,
 } from '../../../src/tools/project-tools.js';
-import { hasError } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { useTmpDirs } from '../../helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Track every tmp directory the suite creates so afterAll can clean them up.
-// Mirrors the pattern in tests/unit/godot-runner-extended.test.ts.
-const tmpDirs: string[] = [];
-
-afterAll(() => {
-  for (const d of tmpDirs) {
-    try {
-      rmSync(d, { recursive: true, force: true });
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-  tmpDirs.length = 0;
-});
+const tmp = useTmpDirs();
 
 /** Create a minimal tmp Godot project (project.godot only). */
 function makeTmpProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'));
-  tmpDirs.push(dir);
-  writeFileSync(join(dir, 'project.godot'), 'config_version=5\n', 'utf8');
-  return dir;
+  return tmp.makeProject('mcp-test-');
 }
 
 /** Create an empty tmp directory (no project.godot inside). */
 function makeTmpEmptyDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'mcp-empty-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('mcp-empty-');
 }
 
 /** Create a minimal project with one autoload registered. */
@@ -65,17 +47,17 @@ function makeTmpProjectWithAutoload(name: string, path: string): string {
 describe('handleListAutoloads', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleListAutoloads({});
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
     const result = await handleListAutoloads({ projectPath: '../evil' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project directory', async () => {
     const result = await handleListAutoloads({ projectPath: '/does/not/exist' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('returns autoloads list for valid project', async () => {
@@ -94,7 +76,7 @@ describe('handleAddAutoload', () => {
       autoloadName: 'MyManager',
       autoloadPath: 'autoload/my.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -103,7 +85,7 @@ describe('handleAddAutoload', () => {
       autoloadName: 'MyManager',
       autoloadPath: 'autoload/my.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -112,7 +94,7 @@ describe('handleAddAutoload', () => {
       autoloadName: 'MyManager',
       autoloadPath: 'autoload/my.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing autoloadName', async () => {
@@ -158,7 +140,7 @@ describe('handleAddAutoload', () => {
 describe('handleRemoveAutoload', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleRemoveAutoload({ autoloadName: 'MyManager' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -166,7 +148,7 @@ describe('handleRemoveAutoload', () => {
       projectPath: '../evil',
       autoloadName: 'MyManager',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -174,7 +156,7 @@ describe('handleRemoveAutoload', () => {
       projectPath: '/ghost',
       autoloadName: 'MyManager',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing autoloadName', async () => {
@@ -204,7 +186,7 @@ describe('handleRemoveAutoload', () => {
 describe('handleUpdateAutoload', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleUpdateAutoload({ autoloadName: 'MyManager' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -212,7 +194,7 @@ describe('handleUpdateAutoload', () => {
       projectPath: '../evil',
       autoloadName: 'MyManager',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -220,7 +202,7 @@ describe('handleUpdateAutoload', () => {
       projectPath: '/ghost',
       autoloadName: 'MyManager',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing autoloadName', async () => {
@@ -264,17 +246,17 @@ describe('handleUpdateAutoload', () => {
 describe('handleGetProjectFiles', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleGetProjectFiles({});
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
     const result = await handleGetProjectFiles({ projectPath: '../evil' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
     const result = await handleGetProjectFiles({ projectPath: '/ghost' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('returns file tree for valid project', async () => {
@@ -290,17 +272,17 @@ describe('handleGetProjectFiles', () => {
 describe('handleSearchProject', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleSearchProject({ pattern: 'Node2D' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
     const result = await handleSearchProject({ projectPath: '../evil', pattern: 'Node2D' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
     const result = await handleSearchProject({ projectPath: '/ghost', pattern: 'Node2D' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing pattern', async () => {
@@ -324,7 +306,7 @@ describe('handleSearchProject', () => {
 describe('handleGetSceneDependencies', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleGetSceneDependencies({ scenePath: 'main.tscn' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -332,7 +314,7 @@ describe('handleGetSceneDependencies', () => {
       projectPath: '../evil',
       scenePath: 'main.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -340,12 +322,12 @@ describe('handleGetSceneDependencies', () => {
       projectPath: '/ghost',
       scenePath: 'main.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing scenePath', async () => {
     const result = await handleGetSceneDependencies({ projectPath: fixtureProjectPath });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /scenePath/i);
   });
 
   it('rejects scenePath containing ..', async () => {
@@ -353,7 +335,9 @@ describe('handleGetSceneDependencies', () => {
       projectPath: fixtureProjectPath,
       scenePath: '../outside.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    // handleGetSceneDependencies validates scenePath inline ("Invalid scenePath")
+    // rather than via validateSceneArgs ("Invalid scene path") — match either.
+    expectErrorMatching(result, /invalid scene\s?path/i);
   });
 
   it('returns isError when scene file does not exist', async () => {
@@ -380,17 +364,17 @@ describe('handleGetSceneDependencies', () => {
 describe('handleGetProjectSettings', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleGetProjectSettings({});
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
     const result = await handleGetProjectSettings({ projectPath: '../evil' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
     const result = await handleGetProjectSettings({ projectPath: '/ghost' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('returns settings for valid project', async () => {

@@ -1,7 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { describe, it, expect } from 'vitest';
 import {
   cleanOutput,
   normalizeForCompare,
@@ -9,6 +6,7 @@ import {
   validateSceneArgs,
 } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
+import { useTmpDirs } from '../helpers/tmp.js';
 
 // ─── cleanOutput ─────────────────────────────────────────────────────────────
 
@@ -90,18 +88,7 @@ describe('normalizeForCompare', () => {
 // ─── validateProjectArgs ─────────────────────────────────────────────────────
 
 describe('validateProjectArgs', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      try {
-        rmSync(d, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-    tmpDirs.length = 0;
-  });
+  const tmp = useTmpDirs();
 
   it('returns isError when projectPath is missing', () => {
     const result = validateProjectArgs({});
@@ -114,8 +101,7 @@ describe('validateProjectArgs', () => {
   });
 
   it('returns isError when directory exists but has no project.godot', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'godot-test-'));
-    tmpDirs.push(dir);
+    const dir = tmp.make('godot-test-');
     const result = validateProjectArgs({ projectPath: dir });
     expect('isError' in result).toBe(true);
   });
@@ -130,18 +116,7 @@ describe('validateProjectArgs', () => {
 // ─── validateSceneArgs ───────────────────────────────────────────────────────
 
 describe('validateSceneArgs', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      try {
-        rmSync(d, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-    tmpDirs.length = 0;
-  });
+  const tmp = useTmpDirs();
 
   it('returns isError when projectPath is missing', () => {
     const result = validateSceneArgs({});
@@ -154,8 +129,7 @@ describe('validateSceneArgs', () => {
   });
 
   it('returns isError when directory exists but has no project.godot', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'godot-test-'));
-    tmpDirs.push(dir);
+    const dir = tmp.make('godot-test-');
     const result = validateSceneArgs({ projectPath: dir });
     expect('isError' in result).toBe(true);
   });

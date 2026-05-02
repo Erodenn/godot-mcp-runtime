@@ -13,7 +13,7 @@ import {
   handleGetNodeSignals,
 } from '../../../src/tools/node-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ describe('handleDeleteNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -43,7 +43,7 @@ describe('handleDeleteNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -53,13 +53,13 @@ describe('handleDeleteNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
     const fake = createFakeRunner();
     const result = await handleDeleteNode(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects nodePath containing ..', async () => {
@@ -68,7 +68,7 @@ describe('handleDeleteNode', () => {
       ...validBase,
       nodePath: '../escape',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -86,7 +86,7 @@ describe('handleDeleteNode', () => {
       ...validBase,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -116,7 +116,7 @@ describe('handleSetNodeProperty', () => {
       property: 'visible',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -128,7 +128,7 @@ describe('handleSetNodeProperty', () => {
       property: 'visible',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -140,7 +140,7 @@ describe('handleSetNodeProperty', () => {
       property: 'visible',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
@@ -150,7 +150,7 @@ describe('handleSetNodeProperty', () => {
       property: 'visible',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects missing property', async () => {
@@ -160,7 +160,7 @@ describe('handleSetNodeProperty', () => {
       nodePath: 'root/Node',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /property/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -182,7 +182,7 @@ describe('handleSetNodeProperty', () => {
       property: 'visible',
       value: true,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -212,7 +212,7 @@ describe('handleGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -222,7 +222,7 @@ describe('handleGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -232,13 +232,13 @@ describe('handleGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
     const fake = createFakeRunner();
     const result = await handleGetNodeProperties(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -256,7 +256,7 @@ describe('handleGetNodeProperties', () => {
       ...validBase,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -287,7 +287,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: 'player.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -298,7 +298,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: 'player.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -309,7 +309,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: 'player.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
@@ -318,7 +318,7 @@ describe('handleAttachScript', () => {
       ...validBase,
       scriptPath: 'player.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects missing scriptPath', async () => {
@@ -327,7 +327,7 @@ describe('handleAttachScript', () => {
       ...validBase,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /scriptPath/i);
   });
 
   it('rejects scriptPath containing ..', async () => {
@@ -337,7 +337,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: '../outside.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /scriptPath|invalid/i);
   });
 
   it('rejects nonexistent script file', async () => {
@@ -347,7 +347,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: 'nonexistent_script.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /script file does not exist/i);
   });
 
   it('surfaces runner exceptions as a structured MCP error response', async () => {
@@ -357,7 +357,7 @@ describe('handleAttachScript', () => {
       nodePath: 'root/Node',
       scriptPath: 'placeholder.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -383,7 +383,7 @@ describe('handleGetSceneTree', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleGetSceneTree(fake.asRunner, { scenePath: fixtureScenePath });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -392,7 +392,7 @@ describe('handleGetSceneTree', () => {
       projectPath: '../evil',
       scenePath: fixtureScenePath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -401,7 +401,7 @@ describe('handleGetSceneTree', () => {
       projectPath: '/ghost',
       scenePath: fixtureScenePath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects parentPath containing ..', async () => {
@@ -410,7 +410,7 @@ describe('handleGetSceneTree', () => {
       ...validBase,
       parentPath: '../root',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /parentPath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -422,7 +422,7 @@ describe('handleGetSceneTree', () => {
   it('surfaces runner exceptions as a structured MCP error response', async () => {
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleGetSceneTree(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -449,7 +449,7 @@ describe('handleDuplicateNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -459,7 +459,7 @@ describe('handleDuplicateNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -469,13 +469,13 @@ describe('handleDuplicateNode', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
     const fake = createFakeRunner();
     const result = await handleDuplicateNode(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects targetParentPath containing ..', async () => {
@@ -485,7 +485,7 @@ describe('handleDuplicateNode', () => {
       nodePath: 'root/Node',
       targetParentPath: '../escape',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /targetParentPath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -503,7 +503,7 @@ describe('handleDuplicateNode', () => {
       ...validBase,
       nodePath: 'root/Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -534,7 +534,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -547,7 +547,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -560,7 +560,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
@@ -571,7 +571,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects missing signal', async () => {
@@ -582,7 +582,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /signal/i);
   });
 
   it('rejects targetNodePath containing ..', async () => {
@@ -594,7 +594,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: '../evil',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -618,7 +618,7 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -652,7 +652,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -665,7 +665,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -678,7 +678,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
@@ -689,7 +689,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects missing signal', async () => {
@@ -700,7 +700,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /signal/i);
   });
 
   it('rejects targetNodePath containing ..', async () => {
@@ -712,7 +712,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: '../evil',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -736,7 +736,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Label',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -769,7 +769,7 @@ describe('handleBatchSetNodeProperties', () => {
       scenePath: fixtureScenePath,
       updates: validUpdates,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -779,7 +779,7 @@ describe('handleBatchSetNodeProperties', () => {
       scenePath: fixtureScenePath,
       updates: validUpdates,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -789,13 +789,13 @@ describe('handleBatchSetNodeProperties', () => {
       scenePath: fixtureScenePath,
       updates: validUpdates,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing updates array', async () => {
     const fake = createFakeRunner();
     const result = await handleBatchSetNodeProperties(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /updates/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -813,7 +813,7 @@ describe('handleBatchSetNodeProperties', () => {
       ...validBase,
       updates: validUpdates,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -844,7 +844,7 @@ describe('handleBatchGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodes: validNodes,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -854,7 +854,7 @@ describe('handleBatchGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodes: validNodes,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -864,13 +864,13 @@ describe('handleBatchGetNodeProperties', () => {
       scenePath: fixtureScenePath,
       nodes: validNodes,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodes array', async () => {
     const fake = createFakeRunner();
     const result = await handleBatchGetNodeProperties(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodes/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -888,7 +888,7 @@ describe('handleBatchGetNodeProperties', () => {
       ...validBase,
       nodes: validNodes,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -918,7 +918,7 @@ describe('handleGetNodeSignals', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Button',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -928,7 +928,7 @@ describe('handleGetNodeSignals', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Button',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -938,13 +938,13 @@ describe('handleGetNodeSignals', () => {
       scenePath: fixtureScenePath,
       nodePath: 'root/Button',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
     const fake = createFakeRunner();
     const result = await handleGetNodeSignals(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects nodePath containing ..', async () => {
@@ -953,7 +953,7 @@ describe('handleGetNodeSignals', () => {
       ...validBase,
       nodePath: '../escape',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -971,7 +971,7 @@ describe('handleGetNodeSignals', () => {
       ...validBase,
       nodePath: 'root/Button',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {

@@ -61,6 +61,11 @@ Use a sibling directory under `tests/fixtures/` rather than mutating an existing
 
 If the fixture exercises tools that require Godot, add a row to the coverage map noting it requires `GODOT_PATH`.
 
+## Gotchas worth knowing before debugging a test
+
+- **`root/...` is a virtual path prefix, not the fixture's actual root node name.** The committed fixture's root node is `[node name="Main"]`, but tests address it as `root/Label`, `root/Sprite2D`, etc. The bridge in `src/scripts/godot_operations.gd::find_node_by_path` translates `root` → the actual scene root regardless of its name. Don't go hunting in the `.tscn` for a node literally called `root`.
+- **MCP tool name vs. GDScript op name.** Some tools have different names on each side of the bridge — most notably `set_node_property` (MCP) maps to `update_node_property` (GDScript). Integration tests that call `runner.executeOperation(...)` directly use the GDScript name. If you grep for `set_node_property` and find no integration test, search for the GDScript name too.
+
 ## Testing rubric
 
 CI does not install Godot. Godot-required tests run only when contributors run them locally with `GODOT_PATH` set. Everything else runs everywhere.

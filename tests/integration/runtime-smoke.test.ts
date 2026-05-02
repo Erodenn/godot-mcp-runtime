@@ -65,7 +65,7 @@ describe('runtime bridge smoke', () => {
 
   itGodot(
     'take_screenshot saves a PNG file after run_project',
-    async () => {
+    async (ctx) => {
       // Use a tmp copy so the injected McpBridge autoload does not pollute
       // the committed fixture project.godot
       const id = randomBytes(6).toString('hex');
@@ -79,12 +79,10 @@ describe('runtime bridge smoke', () => {
       if (!bridgeResult.ready) {
         // Distinguish "no display server" (acceptable skip) from "process exited
         // / port collision / bridge code is broken" (real failure that must not
-        // pass silently).
+        // pass silently). ctx.skip() reports the test as skipped — a bare
+        // `return` would silently mark it passed, hiding the no-display case.
         if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          console.error(
-            `[runtime-smoke] Skipping: display server unavailable (${bridgeResult.error}).`,
-          );
-          return;
+          ctx.skip(`display server unavailable (${bridgeResult.error})`);
         }
         throw new Error(
           `Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}. ` +

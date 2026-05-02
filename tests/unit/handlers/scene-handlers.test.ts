@@ -9,7 +9,7 @@ import {
   handleBatchSceneOperations,
 } from '../../../src/tools/scene-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ describe('handleCreateScene', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleCreateScene(fake.asRunner, { scenePath: 'new.tscn' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -35,7 +35,7 @@ describe('handleCreateScene', () => {
       projectPath: '../bad/path',
       scenePath: 'new.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project directory', async () => {
@@ -44,7 +44,7 @@ describe('handleCreateScene', () => {
       projectPath: '/does/not/exist',
       scenePath: 'new.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -62,7 +62,7 @@ describe('handleCreateScene', () => {
       projectPath: fixtureProjectPath,
       scenePath: 'new.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('includes the thrown message in the error response', async () => {
@@ -99,7 +99,7 @@ describe('handleAddNode', () => {
       nodeType: 'Node2D',
       nodeName: 'MyNode',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -110,7 +110,7 @@ describe('handleAddNode', () => {
       nodeType: 'Node2D',
       nodeName: 'MyNode',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -121,7 +121,7 @@ describe('handleAddNode', () => {
       nodeType: 'Node2D',
       nodeName: 'MyNode',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodeType', async () => {
@@ -130,7 +130,7 @@ describe('handleAddNode', () => {
       ...validBase,
       nodeName: 'MyNode',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodeType/i);
   });
 
   it('rejects missing nodeName', async () => {
@@ -139,7 +139,7 @@ describe('handleAddNode', () => {
       ...validBase,
       nodeType: 'Node2D',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodeName/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -159,7 +159,7 @@ describe('handleAddNode', () => {
       nodeType: 'Node2D',
       nodeName: 'MyNode',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -189,7 +189,7 @@ describe('handleLoadSprite', () => {
       nodePath: 'root/Sprite',
       texturePath: 'icon.png',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -200,7 +200,7 @@ describe('handleLoadSprite', () => {
       nodePath: 'root/Sprite',
       texturePath: 'icon.png',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -211,7 +211,7 @@ describe('handleLoadSprite', () => {
       nodePath: 'root/Sprite',
       texturePath: 'icon.png',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing nodePath', async () => {
@@ -220,7 +220,7 @@ describe('handleLoadSprite', () => {
       ...validBase,
       texturePath: 'icon.png',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /nodePath/i);
   });
 
   it('rejects missing texturePath', async () => {
@@ -229,7 +229,7 @@ describe('handleLoadSprite', () => {
       ...validBase,
       nodePath: 'root/Sprite',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /texturePath/i);
   });
 
   it('surfaces runner exceptions as a structured MCP error response', async () => {
@@ -240,7 +240,7 @@ describe('handleLoadSprite', () => {
       nodePath: 'root/Sprite',
       texturePath: 'placeholder.png',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -266,7 +266,7 @@ describe('handleSaveScene', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleSaveScene(fake.asRunner, { scenePath: fixtureScenePath });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -275,7 +275,7 @@ describe('handleSaveScene', () => {
       projectPath: '../../etc',
       scenePath: fixtureScenePath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -284,7 +284,7 @@ describe('handleSaveScene', () => {
       projectPath: '/ghost/project',
       scenePath: fixtureScenePath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects newPath containing ..', async () => {
@@ -293,7 +293,7 @@ describe('handleSaveScene', () => {
       ...validBase,
       newPath: '../outside/scene.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /newPath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -305,7 +305,7 @@ describe('handleSaveScene', () => {
   it('surfaces runner exceptions as a structured MCP error response', async () => {
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleSaveScene(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -328,7 +328,7 @@ describe('handleExportMeshLibrary', () => {
       scenePath: fixtureScenePath,
       outputPath: 'out.res',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -338,7 +338,7 @@ describe('handleExportMeshLibrary', () => {
       scenePath: fixtureScenePath,
       outputPath: 'out.res',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -348,13 +348,13 @@ describe('handleExportMeshLibrary', () => {
       scenePath: fixtureScenePath,
       outputPath: 'out.res',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing outputPath', async () => {
     const fake = createFakeRunner();
     const result = await handleExportMeshLibrary(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /outputPath/i);
   });
 
   it('rejects outputPath containing ..', async () => {
@@ -363,7 +363,7 @@ describe('handleExportMeshLibrary', () => {
       ...validBase,
       outputPath: '../escape.res',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /outputPath/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -381,7 +381,7 @@ describe('handleExportMeshLibrary', () => {
       ...validBase,
       outputPath: 'out.res',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {
@@ -406,7 +406,7 @@ describe('handleManageUids', () => {
   it('rejects missing operation', async () => {
     const fake = createFakeRunner();
     const result = await handleManageUids(fake.asRunner, { projectPath: fixtureProjectPath });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /operation/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -415,7 +415,7 @@ describe('handleManageUids', () => {
       operation: 'update',
       projectPath: '../evil',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -424,16 +424,33 @@ describe('handleManageUids', () => {
       operation: 'update',
       projectPath: '/ghost',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
-  it('returns isError when runner throws (treated as version check or op failure)', async () => {
+  it('surfaces runner exceptions as a structured MCP error response', async () => {
+    // Force the version gate open so the runner is actually invoked — otherwise
+    // the 4.4+ version check short-circuits before executeOperation and the
+    // throws branch is never exercised.
+    const fake = createFakeRunner({
+      throws: new Error('boom'),
+      godotVersion: '4.4.1.stable',
+    });
+    const result = await handleManageUids(fake.asRunner, {
+      operation: 'update',
+      projectPath: fixtureProjectPath,
+    });
+    expectErrorMatching(result, /boom/);
+  });
+
+  it('reports the version gate when Godot is older than 4.4', async () => {
+    // Default godotVersion is 4.3 — the version check should fire before any
+    // operation dispatch, regardless of what the runner is configured to do.
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleManageUids(fake.asRunner, {
       operation: 'update',
       projectPath: fixtureProjectPath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /godot 4\.4 or later/i);
   });
 
   it('rejects unknown operation when running on a version-gated Godot 4.4+ project', async () => {
@@ -445,7 +462,7 @@ describe('handleManageUids', () => {
       operation: 'bad_op',
       projectPath: fixtureProjectPath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /unknown operation|operation/i);
   });
 
   it('returns parsed result for get operation on successful runner output', async () => {
@@ -491,7 +508,7 @@ describe('handleBatchSceneOperations', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleBatchSceneOperations(fake.asRunner, { operations: validOps });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath/i);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -500,7 +517,7 @@ describe('handleBatchSceneOperations', () => {
       projectPath: '../evil',
       operations: validOps,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /invalid project path/i);
   });
 
   it('rejects nonexistent project', async () => {
@@ -509,7 +526,7 @@ describe('handleBatchSceneOperations', () => {
       projectPath: '/ghost',
       operations: validOps,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /not a valid godot project/i);
   });
 
   it('rejects missing operations array', async () => {
@@ -517,7 +534,7 @@ describe('handleBatchSceneOperations', () => {
     const result = await handleBatchSceneOperations(fake.asRunner, {
       projectPath: fixtureProjectPath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /operations/i);
   });
 
   it('treats empty Godot output as a failed operation', async () => {
@@ -535,7 +552,7 @@ describe('handleBatchSceneOperations', () => {
       projectPath: fixtureProjectPath,
       operations: validOps,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /boom/);
   });
 
   it('returns parsed result on successful runner output', async () => {

@@ -51,13 +51,11 @@ export interface FakeRunner {
   calls: FakeRunnerCall[];
   /** The runner cast to GodotRunner — pass directly to handlers. */
   asRunner: GodotRunner;
-  /** Mutate the default response after construction. */
-  setResponse(opts: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'>): void;
 }
 
 export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const calls: FakeRunnerCall[] = [];
-  let defaults: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'> = {
+  const defaults: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'> = {
     stdout: options.stdout ?? '',
     stderr: options.stderr ?? '',
     throws: options.throws,
@@ -72,9 +70,6 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
 
   const fake = {
     calls,
-    setResponse(opts: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'>) {
-      defaults = { ...defaults, ...opts };
-    },
     async executeOperation(
       operation: string,
       params: OperationParams,
@@ -100,6 +95,5 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   return {
     calls,
     asRunner: fake as unknown as GodotRunner,
-    setResponse: fake.setResponse,
   };
 }
