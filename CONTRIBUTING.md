@@ -16,7 +16,7 @@ Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exerc
 | Command                 | What it does                                            |
 | ----------------------- | ------------------------------------------------------- |
 | `npm run build`         | Compile TypeScript and copy GDScript files into `dist/` |
-| `npm run dev`           | Build and start the server                              |
+| `npm run dev`           | Build and launch the MCP server on stdio (needs a connected MCP client; use `npm run build` alone for a compilation check) |
 | `npm run typecheck`     | `tsc --noEmit` — fast type pass, no output              |
 | `npm run lint`          | ESLint over the repo                                    |
 | `npm run lint:fix`      | ESLint with autofix                                     |
@@ -27,7 +27,7 @@ Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exerc
 | `npm run test:coverage` | Vitest with v8 coverage                                 |
 | `npm run verify`        | Run everything CI runs, in order, stop on first failure |
 
-CI runs typecheck → lint → format:check → test → build on Node 18, 20, 22 for every push and PR to `main`.
+CI runs typecheck → lint → format:check → test → build on Node 20, 22, 24 for every push and PR to `main`.
 
 ## Branch and commit conventions
 
@@ -55,7 +55,7 @@ ESLint enforces this via `no-console` with `["error", "warn"]` allowed.
 
 ### Mutation operations auto-save
 
-Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_property`, `delete_node`, `attach_script`, `update_property`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too — `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
+Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_property`, `delete_node`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too — `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
 
 Never document or implement batch as "accumulate and require explicit save."
 
@@ -79,7 +79,7 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
    - Validate with `validateProjectArgs` or `validateSceneArgs`
    - Call the runner
    - Return the response (or `createErrorResponse` on failure)
-3. Export the handler and add a `case` to the `setupToolHandlers` switch in `src/index.ts`.
+3. Export the handler and add an entry mapping the tool name to the handler in the `toolDispatch` table in `src/dispatch.ts`.
 4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_init()`.
 5. Add a unit test for any pure helper logic; add an integration test if the tool touches scene files.
 
@@ -87,13 +87,9 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 
 1. Bump version in `package.json` and `src/index.ts`
 2. Commit and push to `main`
-3. `npm run build && npm publish`
-4. Create the GitHub release:
-   ```
-   gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."
-   ```
+3. Push a `vX.Y.Z` tag — `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
-Docker CI runs automatically on push to `main`. npm publishing is manual (90-day token expiry makes automation impractical).
+Docker CI runs automatically on push to `main`.
 
 ## Known limitations
 

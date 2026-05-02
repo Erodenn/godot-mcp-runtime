@@ -7,6 +7,7 @@ A minimal Godot 4.4 project used as a stable test surface for MCP tools. Committ
 Contents:
 - `project.godot` — minimal config, references `main.tscn` as main scene
 - `main.tscn` — `Node2D` root with `Label` and `Sprite2D` children
+- `placeholder.gd`, `placeholder.png` — empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 
 Use it from tests by passing the absolute path:
 

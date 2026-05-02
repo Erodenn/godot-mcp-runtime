@@ -23,7 +23,7 @@ tests/
 | `unit/tool-definitions.test.ts`               | Shape contract for every tool definition; no duplicate names                                                             |                                          |
 | `unit/handlers/scene-handlers.test.ts`        | Argument validation in `src/tools/scene-tools.ts` handlers                                                               | Uses `tests/helpers/fake-runner.ts`      |
 | `unit/handlers/node-handlers.test.ts`         | Argument validation in `src/tools/node-tools.ts` handlers                                                                | Uses `tests/helpers/fake-runner.ts`      |
-| `unit/handlers/project-handlers.test.ts`      | Argument validation for non-runtime project handlers (autoload, fs, search, settings)                                    | Tmp dirs via `fs.mkdtempSync`            |
+| `unit/handlers/project-handlers.test.ts`      | Argument validation for non-runtime project handlers (autoload, fs, search, settings)                                    | Tmp dirs via `useTmpDirs()` from `tests/helpers/tmp.ts` |
 | `unit/handlers/validate-handler.test.ts`      | `handleValidate` argument validation incl. single vs `targets[]` mode                                                    |                                          |
 | `unit/mcp-dispatch.test.ts`                   | Dispatch table ↔ tool-definition parity, unknown-tool error, `instructions` category coverage                            |                                          |
 | `integration/runner-executeOperation.test.ts` | `executeOperation` for `validate_resource` (scene + broken GDScript); `handleGetProjectInfo`                             | Requires `GODOT_PATH`                    |
@@ -43,7 +43,7 @@ npm run test:coverage # v8 coverage report (no enforcement, just visibility)
 
 ## Godot-required tests
 
-Tests that need a real Godot process gate themselves with `it.skipIf(!process.env.GODOT_PATH)`. Set `GODOT_PATH` to your Godot 4.x executable to run them locally:
+Tests that need a real Godot process gate themselves with the `itGodot` wrapper from `tests/helpers/godot-skip.ts` (which is `it.skipIf(!process.env.GODOT_PATH)`). Set `GODOT_PATH` to your Godot 4.x executable to run them locally:
 
 ```
 # bash / git bash
@@ -94,7 +94,7 @@ CI does not install Godot. Godot-required tests run only when contributors run t
 ### How to test
 
 - Prefer real integration when fast — vitest + the committed fixture, no Godot needed
-- For Godot-required tests, use `it.skipIf(!process.env.GODOT_PATH)` so the suite stays green without Godot installed
+- For Godot-required tests, use the `itGodot` wrapper from `tests/helpers/godot-skip.ts` so the suite stays green without Godot installed
 - Mock at the I/O boundary only: `child_process`, `dgram`, destructive `fs` ops. Never mock `godot-runner` from handler tests — pass a fake runner via the handler's runner parameter instead
 - One assertion per behavior; don't bundle three contracts into one test
 - Test names describe behavior: `"rejects scenePath containing .."` not `"validateSceneArgs handles bad input"`
