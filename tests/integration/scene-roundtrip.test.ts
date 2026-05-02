@@ -116,7 +116,7 @@ describe('set_node_property round-trip', () => {
     'get_node_properties reflects the updated text after set_node_property on Label',
     async () => {
       await runner.executeOperation(
-        'update_node_property',
+        'set_node_property',
         {
           scenePath: 'main.tscn',
           nodePath: 'root/Label',
@@ -143,7 +143,7 @@ describe('set_node_property round-trip', () => {
     'auto-save invariant: set_node_property persists to .tscn without an explicit save_scene call',
     async () => {
       await runner.executeOperation(
-        'update_node_property',
+        'set_node_property',
         {
           scenePath: 'main.tscn',
           nodePath: 'root/Label',

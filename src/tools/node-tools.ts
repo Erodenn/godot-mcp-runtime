@@ -302,7 +302,7 @@ export async function handleSetNodeProperty(runner: GodotRunner, args: Operation
       value: args.value,
     };
     const { stdout, stderr } = await runner.executeOperation(
-      'update_node_property',
+      'set_node_property',
       params,
       v.projectPath,
     );
@@ -341,7 +341,7 @@ export async function handleBatchSetNodeProperties(runner: GodotRunner, args: Op
       abortOnError: args.abortOnError ?? false,
     };
     const { stdout, stderr } = await runner.executeOperation(
-      'batch_update_node_properties',
+      'batch_set_node_properties',
       params,
       v.projectPath,
     );
@@ -601,7 +601,7 @@ export async function handleConnectSignal(runner: GodotRunner, args: OperationPa
       method: args.method,
     };
     const { stdout, stderr } = await runner.executeOperation(
-      'connect_node_signal',
+      'connect_signal',
       params,
       v.projectPath,
     );
@@ -645,7 +645,7 @@ export async function handleDisconnectSignal(runner: GodotRunner, args: Operatio
       method: args.method,
     };
     const { stdout, stderr } = await runner.executeOperation(
-      'disconnect_node_signal',
+      'disconnect_signal',
       params,
       v.projectPath,
     );

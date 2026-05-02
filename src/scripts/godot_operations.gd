@@ -68,8 +68,8 @@ func _init():
 		# New node operations
 		"delete_node":
 			delete_node(params)
-		"update_node_property":
-			update_node_property(params)
+		"set_node_property":
+			set_node_property(params)
 		"get_node_properties":
 			get_node_properties(params)
 		"list_nodes":
@@ -82,10 +82,10 @@ func _init():
 			duplicate_node(params)
 		"get_node_signals":
 			get_node_signals(params)
-		"connect_node_signal":
-			connect_node_signal(params)
-		"disconnect_node_signal":
-			disconnect_node_signal(params)
+		"connect_signal":
+			connect_signal(params)
+		"disconnect_signal":
+			disconnect_signal(params)
 		"validate_resource":
 			validate_resource(params)
 		# Batch operations
@@ -93,8 +93,8 @@ func _init():
 			validate_batch(params)
 		"batch_scene_operations":
 			batch_scene_operations(params)
-		"batch_update_node_properties":
-			batch_update_node_properties(params)
+		"batch_set_node_properties":
+			batch_set_node_properties(params)
 		"batch_get_node_properties":
 			batch_get_node_properties(params)
 		_:
@@ -570,7 +570,7 @@ func delete_node(params):
 		quit(1)
 
 # Update a single property on a node
-func update_node_property(params):
+func set_node_property(params):
 	printerr("Updating node property in scene: " + params.scene_path)
 
 	var scene_root = load_scene_instance(params.scene_path)
@@ -800,7 +800,7 @@ func get_node_signals(params):
 	}))
 
 # Connect a signal from one node to a method on another node
-func connect_node_signal(params):
+func connect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root: quit(1)
 
@@ -834,7 +834,7 @@ func connect_node_signal(params):
 		quit(1)
 
 # Disconnect a signal connection between two nodes
-func disconnect_node_signal(params):
+func disconnect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root: quit(1)
 
@@ -1069,7 +1069,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 	print(JSON.stringify({"results": results}))
 
 # Update multiple node properties in a single headless process (loads and saves scene once)
-func batch_update_node_properties(params: Dictionary) -> void:
+func batch_set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
