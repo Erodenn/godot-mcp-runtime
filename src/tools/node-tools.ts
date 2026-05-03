@@ -6,9 +6,9 @@ import {
   convertCamelToSnakeCase,
   validatePath,
   createErrorResponse,
-  extractGdError,
   validateSceneArgs,
 } from '../utils/godot-runner.js';
+import { executeSceneOp } from '../utils/handler-helpers.js';
 
 // --- Tool definitions ---
 
@@ -250,21 +250,16 @@ export async function handleDeleteNodes(runner: GodotRunner, args: OperationPara
     }
   }
 
-  try {
-    const params = { scenePath: args.scenePath, nodePaths: args.nodePaths };
-    const { stdout, stderr } = await runner.executeOperation('delete_nodes', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to delete nodes: ${extractGdError(stderr)}`, [
-        'Check if the node paths are correct',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to delete nodes: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = { scenePath: args.scenePath, nodePaths: args.nodePaths };
+  return executeSceneOp(
+    runner,
+    'delete_nodes',
+    params,
+    v.projectPath,
+    'Failed to delete nodes',
+    ['Check if the node paths are correct'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleSetNodeProperties(runner: GodotRunner, args: OperationParams) {
@@ -278,32 +273,23 @@ export async function handleSetNodeProperties(runner: GodotRunner, args: Operati
     ]);
   }
 
-  try {
-    const snakeUpdates = (args.updates as Array<Record<string, unknown>>).map((u) =>
-      convertCamelToSnakeCase(u as OperationParams),
-    );
-    const params = {
-      scenePath: args.scenePath,
-      updates: snakeUpdates,
-      abortOnError: args.abortOnError ?? false,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'set_node_properties',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to update properties: ${extractGdError(stderr)}`, [
-        'Check node paths and property names',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to set node properties: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const snakeUpdates = (args.updates as Array<Record<string, unknown>>).map((u) =>
+    convertCamelToSnakeCase(u as OperationParams),
+  );
+  const params = {
+    scenePath: args.scenePath,
+    updates: snakeUpdates,
+    abortOnError: args.abortOnError ?? false,
+  };
+  return executeSceneOp(
+    runner,
+    'set_node_properties',
+    params,
+    v.projectPath,
+    'Failed to set node properties',
+    ['Check node paths and property names'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleGetNodeProperties(runner: GodotRunner, args: OperationParams) {
@@ -317,28 +303,19 @@ export async function handleGetNodeProperties(runner: GodotRunner, args: Operati
     ]);
   }
 
-  try {
-    const snakeNodes = (args.nodes as Array<Record<string, unknown>>).map((n) =>
-      convertCamelToSnakeCase(n as OperationParams),
-    );
-    const params = { scenePath: args.scenePath, nodes: snakeNodes };
-    const { stdout, stderr } = await runner.executeOperation(
-      'get_node_properties',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to get properties: ${extractGdError(stderr)}`, [
-        'Check node paths',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get node properties: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const snakeNodes = (args.nodes as Array<Record<string, unknown>>).map((n) =>
+    convertCamelToSnakeCase(n as OperationParams),
+  );
+  const params = { scenePath: args.scenePath, nodes: snakeNodes };
+  return executeSceneOp(
+    runner,
+    'get_node_properties',
+    params,
+    v.projectPath,
+    'Failed to get node properties',
+    ['Check node paths'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleAttachScript(runner: GodotRunner, args: OperationParams) {
@@ -363,29 +340,20 @@ export async function handleAttachScript(runner: GodotRunner, args: OperationPar
     ]);
   }
 
-  try {
-    const params = {
-      scenePath: args.scenePath,
-      nodePath: args.nodePath,
-      scriptPath: args.scriptPath,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'attach_script',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to attach script: ${extractGdError(stderr)}`, [
-        'Ensure the script is valid for this node type',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to attach script: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: args.scenePath,
+    nodePath: args.nodePath,
+    scriptPath: args.scriptPath,
+  };
+  return executeSceneOp(
+    runner,
+    'attach_script',
+    params,
+    v.projectPath,
+    'Failed to attach script',
+    ['Ensure the script is valid for this node type'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleGetSceneTree(runner: GodotRunner, args: OperationParams) {
@@ -397,27 +365,18 @@ export async function handleGetSceneTree(runner: GodotRunner, args: OperationPar
     return createErrorResponse('Invalid parentPath', ['Provide a valid path without ".."']);
   }
 
-  try {
-    const params: OperationParams = { scenePath: args.scenePath };
-    if (args.parentPath) params.parentPath = args.parentPath;
-    if (typeof args.maxDepth === 'number') params.maxDepth = args.maxDepth;
-    const { stdout, stderr } = await runner.executeOperation(
-      'get_scene_tree',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to get scene tree: ${extractGdError(stderr)}`, [
-        'Ensure the scene is valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get scene tree: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = { scenePath: args.scenePath };
+  if (args.parentPath) params.parentPath = args.parentPath;
+  if (typeof args.maxDepth === 'number') params.maxDepth = args.maxDepth;
+  return executeSceneOp(
+    runner,
+    'get_scene_tree',
+    params,
+    v.projectPath,
+    'Failed to get scene tree',
+    ['Ensure the scene is valid'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleDuplicateNode(runner: GodotRunner, args: OperationParams) {
@@ -434,27 +393,18 @@ export async function handleDuplicateNode(runner: GodotRunner, args: OperationPa
     return createErrorResponse('Invalid targetParentPath', ['Provide a valid path without ".."']);
   }
 
-  try {
-    const params: OperationParams = { scenePath: args.scenePath, nodePath: args.nodePath };
-    if (args.newName) params.newName = args.newName;
-    if (args.targetParentPath) params.targetParentPath = args.targetParentPath;
-    const { stdout, stderr } = await runner.executeOperation(
-      'duplicate_node',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to duplicate node: ${extractGdError(stderr)}`, [
-        'Check if the node path and target parent path are correct',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to duplicate node: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = { scenePath: args.scenePath, nodePath: args.nodePath };
+  if (args.newName) params.newName = args.newName;
+  if (args.targetParentPath) params.targetParentPath = args.targetParentPath;
+  return executeSceneOp(
+    runner,
+    'duplicate_node',
+    params,
+    v.projectPath,
+    'Failed to duplicate node',
+    ['Check if the node path and target parent path are correct'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleGetNodeSignals(runner: GodotRunner, args: OperationParams) {
@@ -468,25 +418,16 @@ export async function handleGetNodeSignals(runner: GodotRunner, args: OperationP
     ]);
   }
 
-  try {
-    const params = { scenePath: args.scenePath, nodePath: args.nodePath };
-    const { stdout, stderr } = await runner.executeOperation(
-      'get_node_signals',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to get signals: ${extractGdError(stderr)}`, [
-        'Check if the node path is correct',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get node signals: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = { scenePath: args.scenePath, nodePath: args.nodePath };
+  return executeSceneOp(
+    runner,
+    'get_node_signals',
+    params,
+    v.projectPath,
+    'Failed to get node signals',
+    ['Check if the node path is correct'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 interface ValidatedSignalArgs {
@@ -531,31 +472,22 @@ export async function handleConnectSignal(runner: GodotRunner, args: OperationPa
   const v = validateSignalArgs(args);
   if ('isError' in v) return v;
 
-  try {
-    const params = {
-      scenePath: v.scenePath,
-      nodePath: v.nodePath,
-      signal: v.signal,
-      targetNodePath: v.targetNodePath,
-      method: v.method,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'connect_signal',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to connect signal: ${extractGdError(stderr)}`, [
-        'Ensure the signal exists on the source node and the method exists on the target node',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to connect signal: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: v.scenePath,
+    nodePath: v.nodePath,
+    signal: v.signal,
+    targetNodePath: v.targetNodePath,
+    method: v.method,
+  };
+  return executeSceneOp(
+    runner,
+    'connect_signal',
+    params,
+    v.projectPath,
+    'Failed to connect signal',
+    ['Ensure the signal exists on the source node and the method exists on the target node'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleDisconnectSignal(runner: GodotRunner, args: OperationParams) {
@@ -563,29 +495,20 @@ export async function handleDisconnectSignal(runner: GodotRunner, args: Operatio
   const v = validateSignalArgs(args);
   if ('isError' in v) return v;
 
-  try {
-    const params = {
-      scenePath: v.scenePath,
-      nodePath: v.nodePath,
-      signal: v.signal,
-      targetNodePath: v.targetNodePath,
-      method: v.method,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'disconnect_signal',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to disconnect signal: ${extractGdError(stderr)}`, [
-        'Ensure the signal connection exists before trying to disconnect it',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to disconnect signal: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: v.scenePath,
+    nodePath: v.nodePath,
+    signal: v.signal,
+    targetNodePath: v.targetNodePath,
+    method: v.method,
+  };
+  return executeSceneOp(
+    runner,
+    'disconnect_signal',
+    params,
+    v.projectPath,
+    'Failed to disconnect signal',
+    ['Ensure the signal connection exists before trying to disconnect it'],
+    ['Ensure Godot is installed correctly'],
+  );
 }

@@ -22,16 +22,22 @@ import {
   handleDetachProject,
   handleGetDebugOutput,
   handleStopProject,
-  handleListProjects,
-  handleGetProjectInfo,
   handleTakeScreenshot,
   handleSimulateInput,
   handleGetUiElements,
   handleRunScript,
+} from './tools/runtime-tools.js';
+
+import {
   handleListAutoloads,
   handleAddAutoload,
   handleRemoveAutoload,
   handleUpdateAutoload,
+} from './tools/autoload-tools.js';
+
+import {
+  handleListProjects,
+  handleGetProjectInfo,
   handleGetProjectFiles,
   handleSearchProject,
   handleGetSceneDependencies,

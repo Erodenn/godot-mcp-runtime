@@ -15,12 +15,16 @@ import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 
 import { dispatchToolCall } from './dispatch.js';
+import { runtimeToolDefinitions } from './tools/runtime-tools.js';
+import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
 import { sceneToolDefinitions } from './tools/scene-tools.js';
 import { nodeToolDefinitions } from './tools/node-tools.js';
 import { validateToolDefinitions } from './tools/validate-tools.js';
 
 export const allToolDefinitions = [
+  ...runtimeToolDefinitions,
+  ...autoloadToolDefinitions,
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
   ...nodeToolDefinitions,

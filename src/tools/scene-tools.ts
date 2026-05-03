@@ -6,10 +6,10 @@ import {
   convertCamelToSnakeCase,
   validatePath,
   createErrorResponse,
-  extractGdError,
   validateProjectArgs,
   validateSceneArgs,
 } from '../utils/godot-runner.js';
+import { executeSceneOp } from '../utils/handler-helpers.js';
 
 export const sceneToolDefinitions: ToolDefinition[] = [
   {
@@ -218,24 +218,19 @@ export async function handleCreateScene(runner: GodotRunner, args: OperationPara
   const v = validateSceneArgs(args, { sceneRequired: false });
   if ('isError' in v) return v;
 
-  try {
-    const params = {
-      scenePath: args.scenePath,
-      rootNodeType: args.rootNodeType || 'Node2D',
-    };
-    const { stdout, stderr } = await runner.executeOperation('create_scene', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to create scene: ${extractGdError(stderr)}`, [
-        'Check if the root node type is valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to create scene: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: args.scenePath,
+    rootNodeType: args.rootNodeType || 'Node2D',
+  };
+  return executeSceneOp(
+    runner,
+    'create_scene',
+    params,
+    v.projectPath,
+    'Failed to create scene',
+    ['Check if the root node type is valid'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleAddNode(runner: GodotRunner, args: OperationParams) {
@@ -265,28 +260,22 @@ export async function handleAddNode(runner: GodotRunner, args: OperationParams) 
     }
   }
 
-  try {
-    const params: OperationParams = {
-      scenePath: args.scenePath,
-      nodeType: args.nodeType,
-      nodeName: args.nodeName,
-    };
-    if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
-    if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
-    const { stdout, stderr } = await runner.executeOperation('add_node', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to add node: ${extractGdError(stderr)}`, [
-        'Check if the node type is valid',
-        'Ensure the parent node path exists',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to add node: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = {
+    scenePath: args.scenePath,
+    nodeType: args.nodeType,
+    nodeName: args.nodeName,
+  };
+  if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
+  if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
+  return executeSceneOp(
+    runner,
+    'add_node',
+    params,
+    v.projectPath,
+    'Failed to add node',
+    ['Check if the node type is valid', 'Ensure the parent node path exists'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleLoadSprite(runner: GodotRunner, args: OperationParams) {
@@ -309,25 +298,20 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
     ]);
   }
 
-  try {
-    const params = {
-      scenePath: args.scenePath,
-      nodePath: args.nodePath,
-      texturePath: args.texturePath,
-    };
-    const { stdout, stderr } = await runner.executeOperation('load_sprite', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to load sprite: ${extractGdError(stderr)}`, [
-        'Check if the node is a Sprite2D, Sprite3D, or TextureRect',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to load sprite: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: args.scenePath,
+    nodePath: args.nodePath,
+    texturePath: args.texturePath,
+  };
+  return executeSceneOp(
+    runner,
+    'load_sprite',
+    params,
+    v.projectPath,
+    'Failed to load sprite',
+    ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleSaveScene(runner: GodotRunner, args: OperationParams) {
@@ -339,22 +323,17 @@ export async function handleSaveScene(runner: GodotRunner, args: OperationParams
     return createErrorResponse('Invalid newPath', ['Provide a valid path without ".."']);
   }
 
-  try {
-    const params: OperationParams = { scenePath: args.scenePath };
-    if (args.newPath) params.newPath = args.newPath;
-    const { stdout, stderr } = await runner.executeOperation('save_scene', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to save scene: ${extractGdError(stderr)}`, [
-        'Check if the scene file is valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to save scene: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = { scenePath: args.scenePath };
+  if (args.newPath) params.newPath = args.newPath;
+  return executeSceneOp(
+    runner,
+    'save_scene',
+    params,
+    v.projectPath,
+    'Failed to save scene',
+    ['Check if the scene file is valid'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleExportMeshLibrary(runner: GodotRunner, args: OperationParams) {
@@ -368,31 +347,22 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
     ]);
   }
 
-  try {
-    const params: OperationParams = {
-      scenePath: args.scenePath,
-      outputPath: args.outputPath,
-    };
-    if (args.meshItemNames && Array.isArray(args.meshItemNames)) {
-      params.meshItemNames = args.meshItemNames;
-    }
-    const { stdout, stderr } = await runner.executeOperation(
-      'export_mesh_library',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to export mesh library: ${extractGdError(stderr)}`, [
-        'Check if the scene contains valid 3D meshes',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to export mesh library: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
+  const params: OperationParams = {
+    scenePath: args.scenePath,
+    outputPath: args.outputPath,
+  };
+  if (args.meshItemNames && Array.isArray(args.meshItemNames)) {
+    params.meshItemNames = args.meshItemNames;
   }
+  return executeSceneOp(
+    runner,
+    'export_mesh_library',
+    params,
+    v.projectPath,
+    'Failed to export mesh library',
+    ['Check if the scene contains valid 3D meshes'],
+    ['Ensure Godot is installed correctly'],
+  );
 }
 
 export async function handleBatchSceneOperations(runner: GodotRunner, args: OperationParams) {
@@ -406,30 +376,20 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
     ]);
   }
 
-  try {
-    const snakeOps = (args.operations as Array<Record<string, unknown>>).map((op) =>
-      convertCamelToSnakeCase(op as OperationParams),
-    );
-    const params = {
-      operations: snakeOps,
-      abortOnError: args.abortOnError ?? false,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'batch_scene_operations',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Batch scene operations failed: ${extractGdError(stderr)}`, [
-        'Check that all scene paths exist',
-        'Ensure node types are valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Batch scene operations failed: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const snakeOps = (args.operations as Array<Record<string, unknown>>).map((op) =>
+    convertCamelToSnakeCase(op as OperationParams),
+  );
+  const params = {
+    operations: snakeOps,
+    abortOnError: args.abortOnError ?? false,
+  };
+  return executeSceneOp(
+    runner,
+    'batch_scene_operations',
+    params,
+    v.projectPath,
+    'Batch scene operations failed',
+    ['Check that all scene paths exist', 'Ensure node types are valid'],
+    ['Ensure Godot is installed correctly'],
+  );
 }

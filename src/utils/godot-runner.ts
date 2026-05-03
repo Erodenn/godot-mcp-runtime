@@ -1,10 +1,11 @@
 import { fileURLToPath } from 'url';
 import { join, dirname, normalize } from 'path';
-import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
 import { createSocket } from 'dgram';
 import { randomBytes } from 'crypto';
+import { BridgeManager } from './bridge-manager.js';
 
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -95,8 +96,6 @@ export function cleanOutput(output: string): string {
   });
   return cleanedLines.join('\n');
 }
-
-const EMPTY_AUTOLOAD_SECTION_REGEX = /\[autoload\]\s*(?=\n\[|\n*$)/g;
 
 export function cleanStdout(stdout: string): string {
   if (stdout.includes('{') || stdout.includes('[')) {
@@ -369,9 +368,8 @@ export function validateSceneArgs(
 export class GodotRunner {
   private godotPath: string | null = null;
   private operationsScriptPath: string;
-  private bridgeScriptPath: string;
+  private bridge: BridgeManager;
   private validatedPaths: Map<string, boolean> = new Map();
-  private injectedProjects: Set<string> = new Set();
   private cachedVersion: string | null = null;
   public activeProcess: GodotProcess | null = null;
   public activeProjectPath: string | null = null;
@@ -379,7 +377,8 @@ export class GodotRunner {
 
   constructor(config?: GodotServerConfig) {
     this.operationsScriptPath = join(__dirname, '..', 'scripts', 'godot_operations.gd');
-    this.bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
+    const bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
+    this.bridge = new BridgeManager(bridgeScriptPath);
     logDebug(`Operations script path: ${this.operationsScriptPath}`);
 
     if (config?.godotPath) {
@@ -567,7 +566,7 @@ export class GodotRunner {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
-    this.repairOrphanedBridge(projectPath);
+    this.bridge.repairOrphaned(projectPath);
 
     const snakeCaseParams = convertCamelToSnakeCase(params);
     logDebug(`Converted snake_case params: ${JSON.stringify(snakeCaseParams)}`);
@@ -637,18 +636,18 @@ export class GodotRunner {
       logDebug('Killing existing Godot process before starting a new one');
       this.activeProcess.process.kill();
       if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
-        this.cleanupBridgeAutoload(this.activeProjectPath);
+        this.bridge.cleanup(this.activeProjectPath);
       }
     } else if (
       this.activeSessionMode === 'attached' &&
       this.activeProjectPath &&
       this.activeProjectPath !== projectPath
     ) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.bridge.cleanup(this.activeProjectPath);
     }
 
     try {
-      this.injectBridgeAutoload(projectPath);
+      this.bridge.inject(projectPath);
     } catch (err) {
       logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
     }
@@ -728,12 +727,12 @@ export class GodotRunner {
       this.activeProjectPath &&
       this.activeProjectPath !== projectPath
     ) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.bridge.cleanup(this.activeProjectPath);
       this.activeProjectPath = null;
       this.activeSessionMode = null;
     }
 
-    this.injectBridgeAutoload(projectPath);
+    this.bridge.inject(projectPath);
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
@@ -747,7 +746,7 @@ export class GodotRunner {
     if (this.activeSessionMode === 'attached') {
       const projectPath = this.activeProjectPath;
       if (projectPath) {
-        this.cleanupBridgeAutoload(projectPath);
+        this.bridge.cleanup(projectPath);
       }
       this.activeProjectPath = null;
       this.activeSessionMode = null;
@@ -774,7 +773,7 @@ export class GodotRunner {
     this.activeProcess = null;
 
     if (this.activeProjectPath) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.bridge.cleanup(this.activeProjectPath);
       this.activeProjectPath = null;
     }
     this.activeSessionMode = null;
@@ -790,141 +789,6 @@ export class GodotRunner {
       return this.activeProcess !== null && !this.activeProcess.hasExited;
     }
     return true;
-  }
-
-  private removeAutoloadEntry(
-    projectPath: string,
-    entryName: string,
-    scriptFilename: string,
-  ): void {
-    try {
-      const projectFile = join(projectPath, 'project.godot');
-      if (existsSync(projectFile)) {
-        let content = readFileSync(projectFile, 'utf8');
-        const autoloadEntry = `${entryName}="*res://${scriptFilename}"`;
-
-        if (content.includes(autoloadEntry)) {
-          content = content
-            .split('\n')
-            .filter((line) => line !== autoloadEntry)
-            .join('\n');
-          content = content.replace(EMPTY_AUTOLOAD_SECTION_REGEX, '');
-          content = content.trimEnd() + '\n';
-          writeFileSync(projectFile, content, 'utf8');
-          logDebug(`Removed ${entryName} autoload from project.godot`);
-        }
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to clean ${entryName} from project.godot: ${err}`);
-    }
-
-    try {
-      const scriptFile = join(projectPath, scriptFilename);
-      if (existsSync(scriptFile)) {
-        unlinkSync(scriptFile);
-        logDebug(`Removed ${scriptFilename} from project`);
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}: ${err}`);
-    }
-
-    try {
-      const uidFile = join(projectPath, `${scriptFilename}.uid`);
-      if (existsSync(uidFile)) {
-        unlinkSync(uidFile);
-        logDebug(`Removed ${scriptFilename}.uid from project`);
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}.uid: ${err}`);
-    }
-  }
-
-  /**
-   * Idempotent within a session: short-circuits on `injectedProjects` so a
-   * second `attach_project`/`run_project` call does not rewrite `project.godot`.
-   */
-  injectBridgeAutoload(projectPath: string): void {
-    if (this.injectedProjects.has(projectPath)) {
-      logDebug('Bridge already injected for this project, skipping');
-      return;
-    }
-
-    // Ensure .mcp/ directory exists with .gdignore so Godot skips it
-    const mcpDir = join(projectPath, '.mcp');
-    if (!existsSync(mcpDir)) {
-      mkdirSync(mcpDir, { recursive: true });
-    }
-    writeFileSync(join(mcpDir, '.gdignore'), '', 'utf8');
-    logDebug('Created .mcp/.gdignore');
-
-    // Also add .mcp/ to .gitignore if not already present
-    const gitignorePath = join(projectPath, '.gitignore');
-    const mcpGitignoreEntry = '.mcp/';
-    if (existsSync(gitignorePath)) {
-      const gitignoreContent = readFileSync(gitignorePath, 'utf8');
-      if (!gitignoreContent.includes(mcpGitignoreEntry)) {
-        const newline = gitignoreContent.endsWith('\n') ? '' : '\n';
-        writeFileSync(gitignorePath, gitignoreContent + newline + mcpGitignoreEntry + '\n', 'utf8');
-        logDebug('Added .mcp/ to existing .gitignore');
-      }
-    } else {
-      writeFileSync(gitignorePath, mcpGitignoreEntry + '\n', 'utf8');
-      logDebug('Created .gitignore with .mcp/ entry');
-    }
-
-    // Clean up legacy screenshot server if present
-    this.removeAutoloadEntry(projectPath, 'McpScreenshotServer', 'mcp_screenshot_server.gd');
-
-    const destScript = join(projectPath, 'mcp_bridge.gd');
-    copyFileSync(this.bridgeScriptPath, destScript);
-    logDebug(`Copied bridge autoload to ${destScript}`);
-
-    const projectFile = join(projectPath, 'project.godot');
-    let content = readFileSync(projectFile, 'utf8');
-
-    const autoloadEntry = 'McpBridge="*res://mcp_bridge.gd"';
-
-    if (content.includes(autoloadEntry)) {
-      logDebug('Bridge autoload already present, skipping injection');
-      if (!existsSync(destScript)) {
-        copyFileSync(this.bridgeScriptPath, destScript);
-        logDebug('Re-copied missing bridge script');
-      }
-      this.injectedProjects.add(projectPath);
-      return;
-    }
-
-    const autoloadSectionRegex = /^\[autoload\]\s*$/m;
-    if (autoloadSectionRegex.test(content)) {
-      content = content.replace(autoloadSectionRegex, `[autoload]\n${autoloadEntry}`);
-    } else {
-      content = content.trimEnd() + `\n\n[autoload]\n${autoloadEntry}\n`;
-    }
-
-    writeFileSync(projectFile, content, 'utf8');
-    logDebug('Injected bridge autoload into project.godot');
-    this.injectedProjects.add(projectPath);
-  }
-
-  cleanupBridgeAutoload(projectPath: string): void {
-    this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
-    this.injectedProjects.delete(projectPath);
-  }
-
-  private repairOrphanedBridge(projectPath: string): void {
-    const projectFile = join(projectPath, 'project.godot');
-    const bridgeScript = join(projectPath, 'mcp_bridge.gd');
-    if (!existsSync(projectFile)) return;
-    if (existsSync(bridgeScript)) return;
-    try {
-      const content = readFileSync(projectFile, 'utf8');
-      if (content.includes('McpBridge=')) {
-        this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
-        logDebug('Cleaned up orphaned McpBridge autoload entry');
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
-    }
   }
 
   sendCommand(
