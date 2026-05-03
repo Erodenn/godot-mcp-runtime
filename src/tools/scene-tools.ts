@@ -14,7 +14,9 @@ import {
 export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'create_scene',
-    description: 'Create a new Godot scene file. Saves automatically.',
+    description:
+      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D — pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns { success, scenePath } as JSON text.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -27,11 +29,18 @@ export const sceneToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'scenePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        scenePath: { type: 'string' },
+      },
+    },
   },
   {
     name: 'add_node',
     description:
-      'Add a node to a Godot scene. Saves automatically. Common spatial properties can be set directly as top-level params. For other properties, use the properties dict.',
+      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -90,7 +99,8 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'load_sprite',
     description:
-      'Set the texture on a Sprite2D, Sprite3D, or TextureRect node. Saves automatically.',
+      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. Use this when the node already exists; for new nodes, pass texture via add_node properties. Saves automatically. texturePath must be a real file under projectPath. Errors if the node is not one of those three classes, or the texture file does not exist.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -112,7 +122,8 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations auto-save, so this is only needed for save-as (newPath) or to re-canonicalize a .tscn file.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Errors if the scene file does not exist.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -129,7 +140,8 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'export_mesh_library',
-    description: 'Export a scene as a MeshLibrary .res file for use in GridMap.',
+    description:
+      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. Use this when authoring tile palettes for grid-based 3D levels; ignore for 2D or general scene work. The source scene must contain MeshInstance3D children. Pass meshItemNames to export a subset, or omit to export all. Saves the .res to outputPath, overwriting silently. Errors if the scene contains no valid meshes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -151,7 +163,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'batch_scene_operations',
     description:
-      'Execute multiple scene operations in a single Godot process. All mutations auto-save at the end. Use an explicit save op only for save-as (newPath). Returns { results: [{ operation, scenePath, success?, error? }] }.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns { results: [{ operation, scenePath, success?, error? }] }.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,7 +212,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_uids',
     description:
-      'Manage resource UIDs in a Godot 4.4+ project. Requires Godot 4.4 or later.\n\nOperations:\n- get: Get the UID string for a specific file (required: filePath)\n- update: Resave all project resources to regenerate UID references (use after reorganizing files)',
+      'Manage resource UIDs in a Godot 4.4+ project. Operations: get (UID for a specific file; requires filePath) | update (resave all project resources to regenerate UID references after reorganizing files). Errors on Godot < 4.4 or invalid operation.',
     inputSchema: {
       type: 'object',
       properties: {

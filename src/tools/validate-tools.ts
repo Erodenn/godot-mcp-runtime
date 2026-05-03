@@ -13,7 +13,8 @@ export const validateToolDefinitions: ToolDefinition[] = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene file integrity using headless Godot. Returns { valid, errors: [{ line?, message }] } — line numbers are present when Godot's error output includes them, which is not always the case. If valid is false, fix the reported errors and re-validate before calling attach_script or run_script.\n\nSingle-target: provide exactly one of scriptPath, source, or scenePath.\nBatch: provide a targets array where each item has one of { scriptPath, source, scenePath }. Runs all targets in a single Godot process. Returns { results: [{ target, valid, errors }] }.",
+      "Validate GDScript syntax or scene file integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Single-target: provide exactly one of scriptPath, source, or scenePath. Batch: provide a targets array — runs all in one Godot process. Returns { valid, errors: [{ line?, message }] } for single, or { results: [{ target, valid, errors }] } for batch. Line numbers appear when Godot's stderr includes them (not always). Returns valid:false on any parse error; never throws.",
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {

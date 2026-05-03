@@ -130,6 +130,14 @@ export interface OperationResult {
   stderr: string;
 }
 
+export interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+  title?: string;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -138,6 +146,12 @@ export interface ToolDefinition {
     properties: Record<string, unknown>;
     required: string[];
   };
+  outputSchema?: {
+    type: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+  annotations?: ToolAnnotations;
 }
 
 // Parameter mappings between snake_case and camelCase

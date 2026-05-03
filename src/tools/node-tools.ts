@@ -15,7 +15,9 @@ import {
 export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'delete_node',
-    description: 'Remove a node from a Godot scene file. Saves automatically.',
+    description:
+      'Remove a node and all its children from a Godot scene file. Use when pruning the scene tree; for replacing a node in place, pair with add_node. Saves automatically. Cannot delete the scene root. Errors if nodePath does not exist. Returns { success, nodePath }.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -35,7 +37,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'set_node_property',
     description:
-      'Set a property on a node in a Godot scene file. Saves automatically. Primitives (string, number, boolean, array, object) are passed as-is. Vector2 ({"x","y"}), Vector3 ({"x","y","z"}), and Color ({"r","g","b","a"}) are automatically converted. Use run_script for other complex GDScript types.',
+      'Set a single property on a node in a Godot scene file. For multiple properties on the same or different nodes, use batch_set_node_properties — one Godot process instead of N. Saves automatically. Primitives pass through; Vector2 ({x,y}), Vector3 ({x,y,z}), and Color ({r,g,b,a}) auto-convert. For other complex GDScript types (Resource, NodePath, etc.), use run_script. Errors if nodePath or property does not exist. Returns { success, nodePath, property }.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -55,7 +58,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'batch_set_node_properties',
     description:
-      'Set multiple node properties in a single Godot process. Saves automatically. Returns { results: [{ nodePath, property, success?, error? }] }.',
+      'Set multiple node properties in a single Godot process — preferred over chained set_node_property calls (avoids ~3s startup per call). Same value-conversion rules as set_node_property. abortOnError stops on first failure (default false continues). Saves once at the end. Returns { results: [{ nodePath, property, success?, error? }] }.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -84,7 +88,9 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'get_node_properties',
-    description: "Read a node's current property values from a Godot scene file.",
+    description:
+      "Read a node's current property values from a scene file. For multiple nodes, use batch_get_node_properties (one process). changedOnly:true filters out properties matching their class defaults — useful for compact diffs. Errors if nodePath does not exist. Returns { nodePath, nodeType, properties: { [key]: value } }.",
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -103,7 +109,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'batch_get_node_properties',
     description:
-      'Get properties from multiple nodes in a single Godot process. Returns { results: [{ nodePath, nodeType, properties?, error? }] }.',
+      'Get properties from multiple nodes in a single Godot process — preferred over chained get_node_properties calls. Per-node changedOnly toggles default-filtering individually. Returns { results: [{ nodePath, nodeType, properties?, error? }] }; failed reads include error and omit properties.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,7 +137,9 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'attach_script',
-    description: 'Attach a GDScript file to a node in a Godot scene. Saves automatically.',
+    description:
+      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Errors if scriptPath does not exist or nodePath is not found. Returns { success, nodePath, scriptPath }.',
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -149,7 +158,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_scene_tree',
     description:
-      'Get the scene hierarchy as a tree structure. Use maxDepth: 1 for a shallow listing of direct children only.',
+      'Get the scene hierarchy as a nested tree of { name, type, path, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Errors if scene does not exist or parentPath is not found.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -170,7 +180,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'duplicate_node',
-    description: 'Duplicate a node and its children in a Godot scene. Saves automatically.',
+    description:
+      'Duplicate a node and its descendants in a Godot scene. Use to clone a configured subtree without re-creating it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Errors if nodePath does not exist or targetParentPath cannot accept children. Returns { success, originalPath, newPath }.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -192,7 +203,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_node_signals',
     description:
-      'List all signals defined on a node and their current connections. Returns { nodePath, nodeType, signals: [{ name, connections: [{ signal, target, method }] }] }. Note: the target field uses Godot absolute path format (e.g. /root/Scene/Node) — convert to scene-root-relative (e.g. root/Node) before passing to connect_signal or disconnect_signal.',
+      'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. Returns { nodePath, nodeType, signals: [{ name, connections: [{ signal, target, method }] }] }. The target field uses Godot absolute path format (/root/Scene/Node) — convert to scene-root-relative (root/Node) before passing to connect/disconnect_signal. Errors if node not found.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {

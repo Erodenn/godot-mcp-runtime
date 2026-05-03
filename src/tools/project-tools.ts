@@ -133,7 +133,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project. The editor is a display application — it cannot be controlled programmatically and returns immediately. For headless project modification, use the scene and node editing tools (add_node, set_node_property, etc.) instead.',
+      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_property, etc.) instead — the editor cannot be controlled programmatically. Returns immediately after spawning. Errors if projectPath has no project.godot.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -148,7 +148,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'run_project',
     description:
-      'Run a Godot project with stdout/stderr captured. Preferred path for runtime tools. Required before calling take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output unless you intentionally use attach_project for a manually launched game. Verifies MCP bridge readiness before returning success. Call stop_project when done.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. This is the preferred entry to runtime tools — use whenever MCP can launch the game itself. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself (debugger attached, custom flags, IDE run), use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Errors if projectPath is not a Godot project or another run is already active.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -173,7 +173,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_project',
     description:
-      'Attach runtime MCP tools to a project without spawning Godot. This injects the McpBridge autoload and marks the project as the active runtime session so you can launch the game manually from your own shell, then use take_screenshot, simulate_input, get_ui_elements, and run_script against that running game. Set waitForBridge to true after launching Godot to block until the bridge is confirmed ready. Use detach_project or stop_project when done. get_debug_output is not available in attached mode because stdout/stderr are not captured.',
+      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use this only when the user is running Godot themselves (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload and marks the project active. Call once before launching Godot, then again with waitForBridge:true after launch to confirm the bridge is listening (up to 15s). Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -193,7 +193,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload without claiming that the manually launched Godot process was stopped.',
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. No-op if no attached session exists.',
+    annotations: { destructiveHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
@@ -203,7 +204,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_debug_output',
     description:
-      'Get stdout/stderr output from the running Godot project. Requires run_project first. Returns the last N lines of output and errors, a running flag, and an exit code if the process has ended. In attached mode, this reports that stdout/stderr capture is unavailable because Godot was launched outside MCP.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Requires run_project (not attach_project; attached mode does not capture output). Returns { output, errors, running, exitCode? } with the last `limit` lines (default 200, from the end). Reports attached-mode unavailability gracefully.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -218,7 +220,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'stop_project',
     description:
-      'Stop the running Godot project and clean up the MCP bridge. Always call this when done with runtime testing — even if the game crashed — to free the process slot so run_project can be called again.',
+      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. No-op if no session is active.',
+    annotations: { destructiveHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
@@ -227,7 +230,9 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'list_projects',
-    description: 'List Godot projects in a directory',
+    description:
+      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use get_project_info. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns { projects: [{ path, name }] }, empty array on no matches.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -246,7 +251,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_info',
     description:
-      'Retrieve metadata about a Godot project, or just the Godot version if no projectPath is provided',
+      'Get metadata about a Godot project: name, path, Godot version, and a structure summary (counts of scenes/scripts/assets/other). Omit projectPath to get just the Godot version (useful for capability checks). Returns { name, path, godotVersion, structure } or { godotVersion } when projectPath is omitted. Errors if projectPath is set but lacks project.godot.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -262,7 +268,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG screenshot of the running Godot viewport. Requires an active runtime session (run_project or attach_project). Returns the image inline. Screenshots are also saved to .mcp/screenshots/ in the project directory.',
+      'Capture a PNG screenshot of the running Godot viewport. Use after simulate_input or run_script to verify visual changes. Requires an active runtime session (run_project or attach_project). Returns the image inline as base64. Also saved to .mcp/screenshots/ in the project directory for later reference. Errors if no session is active or the bridge does not respond within timeout (default 10000ms).',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -277,7 +284,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'simulate_input',
     description:
-      'Simulate batched sequential input in a running Godot project. Requires an active runtime session (run_project or attach_project). Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)\n\nExamples:\n1. Press and release Space: [{type:"key",key:"Space",pressed:true},{type:"wait",ms:100},{type:"key",key:"Space",pressed:false}]\n2. Click a UI button (discover path with get_ui_elements first): [{type:"click_element",element:"StartButton"}]\n3. Left-click at viewport coordinates: [{type:"mouse_button",x:400,y:300,button:"left",pressed:true},{type:"mouse_button",x:400,y:300,button:"left",pressed:false}]\n4. Fire a Godot action: [{type:"action",action:"jump",pressed:true},{type:"wait",ms:200},{type:"action",action:"jump",pressed:false}]\n5. Type "hello": [{type:"key",key:"H",pressed:true},{type:"key",key:"H",pressed:false},{type:"key",key:"E",pressed:true},{type:"key",key:"E",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"O",pressed:true},{type:"key",key:"O",pressed:false}]',
+      'Simulate batched sequential input in a running Godot project. Requires an active runtime session (run_project or attach_project). Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)\n\nExamples:\n1. Press and release Space: [{type:"key",key:"Space",pressed:true},{type:"wait",ms:100},{type:"key",key:"Space",pressed:false}]\n2. Click a UI button (discover path with get_ui_elements first): [{type:"click_element",element:"StartButton"}]\n3. Left-click at viewport coordinates: [{type:"mouse_button",x:400,y:300,button:"left",pressed:true},{type:"mouse_button",x:400,y:300,button:"left",pressed:false}]\n4. Fire a Godot action: [{type:"action",action:"jump",pressed:true},{type:"wait",ms:200},{type:"action",action:"jump",pressed:false}]\n5. Type "hello": [{type:"key",key:"H",pressed:true},{type:"key",key:"H",pressed:false},{type:"key",key:"E",pressed:true},{type:"key",key:"E",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"O",pressed:true},{type:"key",key:"O",pressed:false}]\n\nReturns { success, actions_processed, warnings? }. Errors if no runtime session is active.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -359,7 +366,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_ui_elements',
     description:
-      'Get Control nodes from a running Godot project with their positions, sizes, types, and text. Requires an active runtime session (run_project or attach_project). Call this before simulate_input with click_element to discover valid element names and paths. Returns: { elements: [{ name, path, type, rect: {x,y,width,height}, visible, text? (Button/Label/LineEdit/TextEdit), disabled? (buttons), tooltip? }] }',
+      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns { elements: [{ name, path, type, rect, visible, text?, disabled?, tooltip? }] }.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -399,7 +407,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'list_autoloads',
     description:
-      'List all registered autoloads in a Godot project with paths and singleton status. No Godot process required — reads project.godot directly.',
+      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures — broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns { autoloads: [{ name, path, singleton }] }.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -411,7 +420,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a Godot project. No Godot process required. Warning: autoloads initialize in headless mode — if the script has errors, all headless operations will fail.',
+      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode — a broken script will crash every subsequent headless op; validate before adding. Errors if an autoload with the same name already exists; use update_autoload to modify.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -435,7 +444,9 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'remove_autoload',
-    description: 'Unregister an autoload from a Godot project by name. No Godot process required.',
+    description:
+      'Unregister an autoload from a project by name. Use to recover from a broken autoload that is crashing headless ops. No Godot process required. Errors if no autoload with that name exists.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -447,7 +458,9 @@ export const projectToolDefinitions: ToolDefinition[] = [
   },
   {
     name: 'update_autoload',
-    description: "Modify an existing autoload's path or singleton flag. No Godot process required.",
+    description:
+      "Modify an existing autoload's path or singleton flag. Pass either or both — omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Errors if autoloadName is not registered.",
+    annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -462,7 +475,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_files',
     description:
-      'Return a recursive file tree of a Godot project. Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } objects.',
+      'Return a recursive file tree of a Godot project as nested { name, type, path, extension?, children? } objects. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -484,7 +498,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'search_project',
     description:
-      'Plain-text search across project files. Returns { matches: [{ file, lineNumber, line }], truncated }. Skips hidden entries and the .mcp directory.',
+      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100 (truncated:true if hit). Returns { matches: [{ file, lineNumber, line }], truncated }. Skips hidden entries and the .mcp directory.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -504,7 +519,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_scene_dependencies',
     description:
-      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Returns { scene, dependencies: [{ path, type, uid? }] }.',
+      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to inspect what a scene depends on before refactoring or moving files. Returns { scene, dependencies: [{ path, type, uid? }] }. Errors if scene file does not exist.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -521,7 +537,8 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into structured JSON. Returns { settings: { [section]: { [key]: value } } }. Complex Godot types are returned as raw strings. Keys not under any section appear under __global__.',
+      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types are returned as raw strings; keys outside any section appear under __global__.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
