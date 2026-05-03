@@ -45,7 +45,7 @@ The bridge cleans itself up automatically when `stop_project` or `detach_project
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) v18+
+- [Node.js](https://nodejs.org/) v20+
 - [Godot 4.x](https://godotengine.org/)
 
 That's it. No Godot addon, no project modifications.
@@ -126,17 +126,23 @@ See [`docs/tools.md`](docs/tools.md) for the full tool reference, grouped by cat
 
 ```
 src/
-├── index.ts                # MCP server entry point, routes tool calls
+├── index.ts                # MCP server entry point, server setup
+├── dispatch.ts             # Tool-name → handler dispatch table
 ├── tools/
-│   ├── project-tools.ts    # Project, runtime, autoload, filesystem, search, settings
-│   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops, UIDs
+│   ├── project-tools.ts    # Project introspection (list_projects, get_project_info, files, search, settings)
+│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project, attach_project, take_screenshot, etc.)
+│   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
+│   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
 │   └── mcp_bridge.gd       # UDP autoload for runtime communication
 └── utils/
-    └── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
+    ├── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
+    ├── handler-helpers.ts  # executeSceneOp wrapper for headless-op handlers
+    ├── bridge-manager.ts   # McpBridge artifact lifecycle (inject, cleanup, repair)
+    └── autoload-ini.ts     # project.godot [autoload] INI primitives
 ```
 
 Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over UDP with the injected `McpBridge` autoload.

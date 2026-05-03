@@ -17,7 +17,7 @@ The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
-After `run_project`, or after `attach_project` plus launching Godot manually, wait 2-3 seconds for the bridge to initialize before using these tools.
+`run_project` waits for the bridge before returning success, so runtime tools are usable immediately after the call. With `attach_project`, pass `waitForBridge: true` once Godot is running to confirm readiness — otherwise allow a moment for the bridge to come up.
 
 | Tool              | Description                                                      |
 | ----------------- | ---------------------------------------------------------------- |
@@ -65,7 +65,7 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 | `add_autoload`           | Register a new autoload                                       |
 | `remove_autoload`        | Unregister an autoload by name                                |
 | `update_autoload`        | Modify an existing autoload's path or singleton flag          |
-| `get_project_settings`   | Read settings from `project.godot` by section and key         |
+| `get_project_settings`   | Read settings from `project.godot`, optionally filtered by `section` |
 | `get_project_files`      | Get the project file tree with types and extensions           |
 | `search_project`         | Search for a string across project source files               |
 | `get_scene_dependencies` | List all resources a scene depends on                         |

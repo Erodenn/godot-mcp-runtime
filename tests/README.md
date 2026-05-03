@@ -23,11 +23,13 @@ tests/
 | `unit/tool-definitions.test.ts`               | Shape contract for every tool definition; no duplicate names                                                             |                                                         |
 | `unit/handlers/scene-handlers.test.ts`        | Argument validation in `src/tools/scene-tools.ts` handlers                                                               | Uses `tests/helpers/fake-runner.ts`                     |
 | `unit/handlers/node-handlers.test.ts`         | Argument validation in `src/tools/node-tools.ts` handlers                                                                | Uses `tests/helpers/fake-runner.ts`                     |
-| `unit/handlers/project-handlers.test.ts`      | Argument validation for non-runtime project handlers (autoload, fs, search, settings)                                    | Tmp dirs via `useTmpDirs()` from `tests/helpers/tmp.ts` |
+| `unit/handlers/project-handlers.test.ts`      | Argument validation for project introspection handlers (files, search, scene deps, settings, list_projects)              | Tmp dirs via `useTmpDirs()` from `tests/helpers/tmp.ts` |
+| `unit/handlers/autoload-handlers.test.ts`     | Argument validation for `list/add/remove/update_autoload` handlers                                                       | Tmp dirs via `useTmpDirs()` from `tests/helpers/tmp.ts` |
 | `unit/handlers/validate-handler.test.ts`      | `handleValidate` argument validation incl. single vs `targets[]` mode                                                    |                                                         |
+| `unit/bridge-manager.test.ts`                 | `BridgeManager` inject/cleanup/repair lifecycle against tmp project fixtures                                             | Tmp dirs via `useTmpDirs()`                             |
 | `unit/mcp-dispatch.test.ts`                   | Dispatch table ↔ tool-definition parity, unknown-tool error, `instructions` category coverage                            |                                                         |
 | `integration/runner-executeOperation.test.ts` | `executeOperation` for `validate_resource` (scene + broken GDScript); `handleGetProjectInfo`                             | Requires `GODOT_PATH`                                   |
-| `integration/scene-roundtrip.test.ts`         | `add_node` / `set_node_property` / `delete_node` round-trip + auto-save invariant (all 3 operations)                     | Requires `GODOT_PATH`; tmp fixture copy                 |
+| `integration/scene-roundtrip.test.ts`         | `add_node` / `set_node_properties` / `delete_nodes` round-trip + auto-save invariant (all 3 operations)                  | Requires `GODOT_PATH`; tmp fixture copy                 |
 | `integration/runtime-smoke.test.ts`           | `run_project` → `take_screenshot` smoke test; skips gracefully if no display server                                      | Requires `GODOT_PATH`; may skip headless                |
 | `integration/fixture.test.ts`                 | Smoke check that `tests/fixtures/godot-project/` is well-formed                                                          | No Godot required                                       |
 
@@ -47,10 +49,10 @@ Tests that need a real Godot process gate themselves with the `itGodot` wrapper 
 
 ```
 # bash / git bash
-GODOT_PATH="D:/Godot/Godot_v4.5.1/Godot_v4.5.1-stable_mono_win64.exe" npm test
+GODOT_PATH="/path/to/godot" npm test
 
 # PowerShell
-$env:GODOT_PATH = "D:/Godot/Godot_v4.5.1/Godot_v4.5.1-stable_mono_win64.exe"; npm test
+$env:GODOT_PATH = "C:/path/to/godot.exe"; npm test
 ```
 
 CI does not install Godot, so those tests skip there. This is intentional — runtime/headless integration is verified locally before merge, not in the cloud.

@@ -13,19 +13,19 @@ Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exerc
 
 ## Commands
 
-| Command                 | What it does                                                                                                               |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `npm run build`         | Compile TypeScript and copy GDScript files into `dist/`                                                                    |
-| `npm run dev`           | Build and launch the MCP server on stdio (needs a connected MCP client; use `npm run build` alone for a compilation check) |
-| `npm run typecheck`     | `tsc --noEmit` — fast type pass, no output                                                                                 |
-| `npm run lint`          | ESLint over the repo                                                                                                       |
-| `npm run lint:fix`      | ESLint with autofix                                                                                                        |
-| `npm run format`        | Prettier write                                                                                                             |
-| `npm run format:check`  | Prettier check (CI uses this)                                                                                              |
-| `npm test`              | Vitest run                                                                                                                 |
-| `npm run test:watch`    | Vitest watch mode                                                                                                          |
-| `npm run test:coverage` | Vitest with v8 coverage                                                                                                    |
-| `npm run verify`        | Run everything CI runs, in order, stop on first failure                                                                    |
+| Command                 | What it does                                                                                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run build`         | Compile TypeScript and copy GDScript files into `dist/`                                                                                                   |
+| `npm run dev`           | Build and launch the MCP server on stdio (needs a connected MCP client; use `npm run build` alone for a compilation check)                                |
+| `npm run typecheck`     | `tsc --noEmit` — fast type pass, no output                                                                                                                |
+| `npm run lint`          | ESLint over the repo                                                                                                                                      |
+| `npm run lint:fix`      | ESLint with autofix                                                                                                                                       |
+| `npm run format`        | Prettier write                                                                                                                                            |
+| `npm run format:check`  | Prettier check (CI uses this)                                                                                                                             |
+| `npm test`              | Vitest run (only for isolated test runs — `verify` already runs the suite)                                                                                |
+| `npm run test:watch`    | Vitest watch mode                                                                                                                                         |
+| `npm run test:coverage` | Vitest with v8 coverage                                                                                                                                   |
+| `npm run verify`        | **Single entrypoint.** Runs typecheck → lint → format:check → test → build, stops on first failure. Set `GODOT_PATH` to also run Godot integration tests. |
 
 CI runs typecheck → lint → format:check → test → build on Node 20, 22, 24 for every push and PR to `main`.
 
@@ -37,7 +37,7 @@ CI runs typecheck → lint → format:check → test → build on Node 20, 22, 2
 
 ## Testing
 
-See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. Run `npm test` to execute the suite, or `npm run verify` to run everything CI runs.
+See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint — it runs the suite plus typecheck, lint, format:check, and build in the same order CI does. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
 
 ## Architectural invariants
 
@@ -55,7 +55,7 @@ ESLint enforces this via `no-console` with `["error", "warn"]` allowed.
 
 ### Mutation operations auto-save
 
-Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_property`, `delete_node`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too — `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
+Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_properties`, `delete_nodes`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too — `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
 
 Never document or implement batch as "accumulate and require explicit save."
 
