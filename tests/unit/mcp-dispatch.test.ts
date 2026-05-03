@@ -62,11 +62,10 @@ describe('serverInstructions category coverage', () => {
   const categories: [string, string][] = [
     ['Project management', 'launch_editor'],
     ['Scene editing', 'create_scene'],
-    ['Node editing', 'delete_node'],
+    ['Node editing', 'delete_nodes'],
     ['Runtime', 'take_screenshot'],
     ['Project config', 'list_autoloads'],
     ['Validation', 'validate'],
-    ['UIDs', 'manage_uids'],
   ];
 
   it.each(categories)(

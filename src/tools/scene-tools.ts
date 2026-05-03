@@ -209,27 +209,6 @@ export const sceneToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'operations'],
     },
   },
-  {
-    name: 'manage_uids',
-    description:
-      'Manage resource UIDs in a Godot 4.4+ project. Operations: get (UID for a specific file; requires filePath) | update (resave all project resources to regenerate UID references after reorganizing files). Errors on Godot < 4.4 or invalid operation.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: {
-          type: 'string',
-          enum: ['get', 'update'],
-          description: 'The UID operation to perform',
-        },
-        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
-        filePath: {
-          type: 'string',
-          description: '[get] Path to the file relative to the project (e.g. "scenes/player.tscn")',
-        },
-      },
-      required: ['operation', 'projectPath'],
-    },
-  },
 ];
 
 // --- Handlers ---
@@ -450,78 +429,6 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(`Batch scene operations failed: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
-}
-
-export async function handleManageUids(runner: GodotRunner, args: OperationParams) {
-  args = normalizeParameters(args);
-
-  const operation = args.operation as string;
-  if (!operation) {
-    return createErrorResponse('operation is required', ['Provide one of: get, update']);
-  }
-
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
-
-  try {
-    const version = await runner.getVersion();
-    if (!runner.isGodot44OrLater(version)) {
-      return createErrorResponse(
-        `UIDs are only supported in Godot 4.4 or later. Current version: ${version}`,
-        ['Upgrade to Godot 4.4 or later to use UIDs'],
-      );
-    }
-
-    switch (operation) {
-      case 'get': {
-        if (!args.filePath) {
-          return createErrorResponse('filePath is required for get operation', [
-            'Provide the file path relative to the project',
-          ]);
-        }
-        if (!validatePath(args.filePath as string)) {
-          return createErrorResponse('Invalid file path', ['Provide a valid path without ".."']);
-        }
-        const fileFullPath = join(v.projectPath, args.filePath as string);
-        if (!existsSync(fileFullPath)) {
-          return createErrorResponse(`File does not exist: ${args.filePath}`, [
-            'Ensure the file path is correct',
-          ]);
-        }
-        const params = { filePath: args.filePath };
-        const { stdout, stderr } = await runner.executeOperation('get_uid', params, v.projectPath);
-        if (!stdout.trim()) {
-          return createErrorResponse(`Failed to get UID: ${extractGdError(stderr)}`, [
-            'Check if the file is a valid Godot resource',
-          ]);
-        }
-        return { content: [{ type: 'text', text: `UID for ${args.filePath}: ${stdout.trim()}` }] };
-      }
-
-      case 'update': {
-        const params = { projectPath: v.projectPath };
-        const { stdout, stderr } = await runner.executeOperation(
-          'resave_resources',
-          params,
-          v.projectPath,
-        );
-        if (!stdout.trim()) {
-          return createErrorResponse(`Failed to update project UIDs: ${extractGdError(stderr)}`, [
-            'Check if the project is valid',
-          ]);
-        }
-        return { content: [{ type: 'text', text: stdout }] };
-      }
-
-      default:
-        return createErrorResponse(`Unknown operation: ${operation}`, ['Use one of: get, update']);
-    }
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to ${operation} UIDs: ${errorMessage}`, [
       'Ensure Godot is installed correctly',
     ]);
   }

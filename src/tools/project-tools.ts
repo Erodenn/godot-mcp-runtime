@@ -133,7 +133,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_property, etc.) instead — the editor cannot be controlled programmatically. Returns immediately after spawning. Errors if projectPath has no project.godot.',
+      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead — the editor cannot be controlled programmatically. Returns immediately after spawning. Errors if projectPath has no project.godot.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -640,7 +640,8 @@ function getProjectStructure(projectPath: string): {
         if (entry.isDirectory()) {
           scanDirectory(entryPath);
         } else if (entry.isFile()) {
-          const ext = entry.name.split('.').pop()?.toLowerCase();
+          const dotIdx = entry.name.lastIndexOf('.');
+          const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
 
           if (ext === 'tscn') {
             structure.scenes++;
@@ -667,17 +668,8 @@ function getProjectStructure(projectPath: string): {
 export async function handleLaunchEditor(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!args.projectPath) {
-    return createErrorResponse('Project path is required', [
-      'Provide a valid path to a Godot project directory',
-    ]);
-  }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', [
-      'Provide a valid path without ".." or other potentially unsafe characters',
-    ]);
-  }
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
 
   try {
     if (!runner.getGodotPath()) {
@@ -690,16 +682,8 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
       }
     }
 
-    const projectFile = join(args.projectPath as string, 'project.godot');
-    if (!existsSync(projectFile)) {
-      return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-        'Ensure the path points to a directory containing a project.godot file',
-        'Use list_projects to find valid Godot projects',
-      ]);
-    }
-
-    logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-    const process = runner.launchEditor(args.projectPath as string);
+    logDebug(`Launching Godot editor for project: ${v.projectPath}`);
+    const process = runner.launchEditor(v.projectPath);
 
     process.on('error', (err: Error) => {
       console.error('Failed to start Godot editor:', err);
@@ -709,7 +693,7 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
       content: [
         {
           type: 'text',
-          text: `Godot editor launched successfully for project at ${args.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_property, etc.) to modify the project headlessly without the editor.`,
+          text: `Godot editor launched successfully for project at ${v.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
         },
       ],
     };
@@ -725,29 +709,12 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
 export async function handleRunProject(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!args.projectPath) {
-    return createErrorResponse('Project path is required', [
-      'Provide a valid path to a Godot project directory',
-    ]);
-  }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', [
-      'Provide a valid path without ".." or other potentially unsafe characters',
-    ]);
-  }
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
 
   try {
-    const projectFile = join(args.projectPath as string, 'project.godot');
-    if (!existsSync(projectFile)) {
-      return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-        'Ensure the path points to a directory containing a project.godot file',
-        'Use list_projects to find valid Godot projects',
-      ]);
-    }
-
     const background = args.background === true;
-    runner.runProject(args.projectPath as string, args.scene as string | undefined, background);
+    runner.runProject(v.projectPath, args.scene as string | undefined, background);
 
     const bridgeResult = await runner.waitForBridge();
 
@@ -806,28 +773,11 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 export async function handleAttachProject(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!args.projectPath) {
-    return createErrorResponse('Project path is required', [
-      'Provide a valid path to a Godot project directory',
-    ]);
-  }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', [
-      'Provide a valid path without ".." or other potentially unsafe characters',
-    ]);
-  }
+  const v = validateProjectArgs(args);
+  if ('isError' in v) return v;
 
   try {
-    const projectFile = join(args.projectPath as string, 'project.godot');
-    if (!existsSync(projectFile)) {
-      return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-        'Ensure the path points to a directory containing a project.godot file',
-        'Use list_projects to find valid Godot projects',
-      ]);
-    }
-
-    runner.attachProject(args.projectPath as string);
+    runner.attachProject(v.projectPath);
 
     if (args.waitForBridge === true) {
       const bridgeResult = await runner.waitForBridgeAttached();
@@ -1048,23 +998,13 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
       };
     }
 
-    if (!validatePath(args.projectPath as string)) {
-      return createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
+    const v = validateProjectArgs(args);
+    if ('isError' in v) return v;
 
-    const projectFile = join(args.projectPath as string, 'project.godot');
-    if (!existsSync(projectFile)) {
-      return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-        'Ensure the path points to a directory containing a project.godot file',
-        'Use list_projects to find valid Godot projects',
-      ]);
-    }
+    const projectFile = join(v.projectPath, 'project.godot');
+    const projectStructure = getProjectStructure(v.projectPath);
 
-    const projectStructure = getProjectStructure(args.projectPath as string);
-
-    let projectName = basename(args.projectPath as string);
+    let projectName = basename(v.projectPath);
     try {
       const projectFileContent = readFileSync(projectFile, 'utf8');
       const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
@@ -1082,7 +1022,7 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
           type: 'text',
           text: JSON.stringify({
             name: projectName,
-            path: args.projectPath,
+            path: v.projectPath,
             godotVersion: version,
             structure: projectStructure,
           }),
@@ -1299,7 +1239,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
 
     const payload: Record<string, unknown> = {
       ...parsed,
-      tip: "Use simulate_input with type 'click_element' and a node_path or text value from this list to interact with these elements.",
+      tip: "Use simulate_input with type 'click_element' and a node_path or node name from this list to interact with these elements.",
     };
     if (runtimeErrors.length > 0) {
       payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
@@ -1482,7 +1422,8 @@ function buildFilesystemTree(
           ),
         );
       } else if (entry.isFile()) {
-        const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : '';
+        const dotIdx = entry.name.lastIndexOf('.');
+        const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
         if (extensions && !extensions.includes(ext)) continue;
         children.push({ name: entry.name, type: 'file', path: childRelPath, extension: ext });
       }
@@ -1529,7 +1470,8 @@ function searchInFiles(
       if (entry.isDirectory()) {
         searchDir(fullPath, childRelPath);
       } else if (entry.isFile()) {
-        const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : '';
+        const dotIdx = entry.name.lastIndexOf('.');
+        const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
         if (!fileTypes.includes(ext)) continue;
         let content: string;
         try {

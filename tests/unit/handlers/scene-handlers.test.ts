@@ -5,7 +5,6 @@ import {
   handleLoadSprite,
   handleSaveScene,
   handleExportMeshLibrary,
-  handleManageUids,
   handleBatchSceneOperations,
 } from '../../../src/tools/scene-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
@@ -395,104 +394,6 @@ describe('handleExportMeshLibrary', () => {
     expect(hasError(result)).toBe(false);
     const text = (result as { content: Array<{ text: string }> }).content[0].text;
     expect(text).toContain('MeshLibrary exported');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// handleManageUids
-// ---------------------------------------------------------------------------
-
-describe('handleManageUids', () => {
-  it('rejects missing operation', async () => {
-    const fake = createFakeRunner();
-    const result = await handleManageUids(fake.asRunner, { projectPath: fixtureProjectPath });
-    expectErrorMatching(result, /operation/i);
-  });
-
-  it('rejects projectPath containing ..', async () => {
-    const fake = createFakeRunner();
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'update',
-      projectPath: '../evil',
-    });
-    expectErrorMatching(result, /invalid project path/i);
-  });
-
-  it('rejects nonexistent project', async () => {
-    const fake = createFakeRunner();
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'update',
-      projectPath: '/ghost',
-    });
-    expectErrorMatching(result, /not a valid godot project/i);
-  });
-
-  it('surfaces runner exceptions as a structured MCP error response', async () => {
-    // Force the version gate open so the runner is actually invoked — otherwise
-    // the 4.4+ version check short-circuits before executeOperation and the
-    // throws branch is never exercised.
-    const fake = createFakeRunner({
-      throws: new Error('boom'),
-      godotVersion: '4.4.1.stable',
-    });
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'update',
-      projectPath: fixtureProjectPath,
-    });
-    expectErrorMatching(result, /boom/);
-  });
-
-  it('reports the version gate when Godot is older than 4.4', async () => {
-    // Default godotVersion is 4.3 — the version check should fire before any
-    // operation dispatch, regardless of what the runner is configured to do.
-    const fake = createFakeRunner({ throws: new Error('boom') });
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'update',
-      projectPath: fixtureProjectPath,
-    });
-    expectErrorMatching(result, /godot 4\.4 or later/i);
-  });
-
-  it('rejects unknown operation when running on a version-gated Godot 4.4+ project', async () => {
-    // Reports Godot 4.4+ so handleManageUids passes its version gate, then
-    // returns an empty stdout for the operation itself, which the handler
-    // surfaces as an error response.
-    const fake = createFakeRunner({ stdout: '', godotVersion: '4.4.1.stable' });
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'bad_op',
-      projectPath: fixtureProjectPath,
-    });
-    expectErrorMatching(result, /unknown operation|operation/i);
-  });
-
-  it('returns parsed result for get operation on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: 'uid://abcdef',
-      godotVersion: '4.4.1.stable',
-    });
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'get',
-      projectPath: fixtureProjectPath,
-      filePath: fixtureScenePath,
-    });
-    expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
-    expect(text).toContain('uid://abcdef');
-    expect(text).toContain(fixtureScenePath);
-  });
-
-  it('returns parsed result for update operation on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: 'Resave operation complete. Scenes: 5 saved, 0 errors. UIDs generated: 2',
-      godotVersion: '4.4.1.stable',
-    });
-    const result = await handleManageUids(fake.asRunner, {
-      operation: 'update',
-      projectPath: fixtureProjectPath,
-    });
-    expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
-    expect(text).toContain('Resave operation complete');
   });
 });
 

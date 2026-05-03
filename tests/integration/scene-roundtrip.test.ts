@@ -101,7 +101,7 @@ describe('add_node round-trip', () => {
   );
 });
 
-describe('set_node_property round-trip', () => {
+describe('set_node_properties round-trip', () => {
   const tmpDirs: string[] = [];
   let tmpProject: string;
 
@@ -113,15 +113,13 @@ describe('set_node_property round-trip', () => {
   afterAll(() => cleanup(tmpDirs));
 
   itGodot(
-    'get_node_properties reflects the updated text after set_node_property on Label',
+    'get_node_properties reflects the updated text after set_node_properties on Label',
     async () => {
       await runner.executeOperation(
-        'set_node_property',
+        'set_node_properties',
         {
           scenePath: 'main.tscn',
-          nodePath: 'root/Label',
-          property: 'text',
-          value: 'round-trip-value',
+          updates: [{ node_path: 'root/Label', property: 'text', value: 'round-trip-value' }],
         },
         tmpProject,
         30000,
@@ -129,26 +127,24 @@ describe('set_node_property round-trip', () => {
 
       const { stdout } = await runner.executeOperation(
         'get_node_properties',
-        { scenePath: 'main.tscn', nodePath: 'root/Label' },
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'root/Label' }] },
         tmpProject,
         30000,
       );
       const result = JSON.parse(extractJson(stdout));
-      expect(result.properties).toHaveProperty('text', 'round-trip-value');
+      expect(result.results[0].properties).toHaveProperty('text', 'round-trip-value');
     },
     60000,
   );
 
   itGodot(
-    'auto-save invariant: set_node_property persists to .tscn without an explicit save_scene call',
+    'auto-save invariant: set_node_properties persists to .tscn without an explicit save_scene call',
     async () => {
       await runner.executeOperation(
-        'set_node_property',
+        'set_node_properties',
         {
           scenePath: 'main.tscn',
-          nodePath: 'root/Label',
-          property: 'text',
-          value: 'persisted-text',
+          updates: [{ node_path: 'root/Label', property: 'text', value: 'persisted-text' }],
         },
         tmpProject,
         30000,
@@ -161,7 +157,7 @@ describe('set_node_property round-trip', () => {
   );
 });
 
-describe('delete_node round-trip', () => {
+describe('delete_nodes round-trip', () => {
   const tmpDirs: string[] = [];
   let tmpProject: string;
 
@@ -173,13 +169,13 @@ describe('delete_node round-trip', () => {
   afterAll(() => cleanup(tmpDirs));
 
   itGodot(
-    'get_scene_tree no longer lists the node after delete_node',
+    'get_scene_tree no longer lists the node after delete_nodes',
     async () => {
       // Fixture invariant: tests/fixtures/godot-project/main.tscn ships with a Sprite2D
       // child of the root Node2D — fixture.test.ts guards this shape.
       await runner.executeOperation(
-        'delete_node',
-        { scenePath: 'main.tscn', nodePath: 'root/Sprite2D' },
+        'delete_nodes',
+        { scenePath: 'main.tscn', nodePaths: ['root/Sprite2D'] },
         tmpProject,
         30000,
       );
@@ -197,11 +193,11 @@ describe('delete_node round-trip', () => {
   );
 
   itGodot(
-    'auto-save invariant: delete_node removal persists to .tscn without an explicit save_scene call',
+    'auto-save invariant: delete_nodes removal persists to .tscn without an explicit save_scene call',
     async () => {
       await runner.executeOperation(
-        'delete_node',
-        { scenePath: 'main.tscn', nodePath: 'root/Sprite2D' },
+        'delete_nodes',
+        { scenePath: 'main.tscn', nodePaths: ['root/Sprite2D'] },
         tmpProject,
         30000,
       );

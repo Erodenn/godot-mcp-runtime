@@ -61,19 +61,13 @@ func _init():
 			export_mesh_library(params)
 		"save_scene":
 			save_scene(params)
-		"get_uid":
-			get_uid(params)
-		"resave_resources":
-			resave_resources(params)
-		# New node operations
-		"delete_node":
-			delete_node(params)
-		"set_node_property":
-			set_node_property(params)
+		# Node operations (always-array)
+		"delete_nodes":
+			delete_nodes(params)
+		"set_node_properties":
+			set_node_properties(params)
 		"get_node_properties":
 			get_node_properties(params)
-		"list_nodes":
-			list_nodes(params)
 		"get_scene_tree":
 			get_scene_tree(params)
 		"attach_script":
@@ -93,10 +87,6 @@ func _init():
 			validate_batch(params)
 		"batch_scene_operations":
 			batch_scene_operations(params)
-		"batch_set_node_properties":
-			batch_set_node_properties(params)
-		"batch_get_node_properties":
-			batch_get_node_properties(params)
 		_:
 			log_error("Unknown operation: " + operation)
 			quit(1)
@@ -441,216 +431,91 @@ func save_scene(params):
 		log_error("Failed to save scene")
 		quit(1)
 
-# Find files with a specific extension recursively
-func find_files(path, extension):
-	var files = []
-	var dir = DirAccess.open(path)
+# ============================================
+# NODE OPERATIONS
+# ============================================
 
-	if dir:
-		dir.list_dir_begin()
-		var file_name = dir.get_next()
+# Delete one or more nodes from a scene (saves once)
+func delete_nodes(params):
+	printerr("Deleting nodes from scene: " + params.scene_path)
 
-		while file_name != "":
-			if dir.current_is_dir() and not file_name.begins_with("."):
-				files.append_array(find_files(path + file_name + "/", extension))
-			elif file_name.ends_with(extension):
-				files.append(path + file_name)
-
-			file_name = dir.get_next()
-
-	return files
-
-# Get UID for a specific file
-func get_uid(params):
-	if not params.has("file_path"):
-		log_error("File path is required")
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root:
 		quit(1)
 
-	var file_path = normalize_scene_path(params.file_path)
-	printerr("Getting UID for file: " + file_path)
+	var node_paths: Array = params.node_paths
+	var results: Array = []
+	var any_deleted := false
 
-	if not FileAccess.file_exists(file_path):
-		log_error("File does not exist: " + file_path)
-		quit(1)
-
-	var uid_path = file_path + ".uid"
-	var f = FileAccess.open(uid_path, FileAccess.READ)
-
-	if f:
-		var uid_content = f.get_as_text()
-		f.close()
-
-		var result = {
-			"file": file_path,
-			"uid": uid_content.strip_edges(),
-			"exists": true
-		}
-		print(JSON.stringify(result))
-	else:
-		var result = {
-			"file": file_path,
-			"exists": false,
-			"message": "UID file does not exist for this file. Use resave_resources to generate UIDs."
-		}
-		print(JSON.stringify(result))
-
-# Resave all resources to update UID references
-func resave_resources(params):
-	printerr("Resaving all resources to update UID references...")
-
-	var project_path = "res://"
-	if params.has("project_path"):
-		project_path = params.project_path
-		if not project_path.begins_with("res://"):
-			project_path = "res://" + project_path
-		if not project_path.ends_with("/"):
-			project_path += "/"
-
-	var scenes = find_files(project_path, ".tscn")
-	var success_count = 0
-	var error_count = 0
-
-	for scene_path in scenes:
-		var scene = load(scene_path)
-		if scene:
-			var error = ResourceSaver.save(scene, scene_path)
-			if error == OK:
-				success_count += 1
-			else:
-				error_count += 1
-				log_error("Failed to save: " + scene_path)
+	for node_path in node_paths:
+		var entry = {"nodePath": node_path}
+		var node = find_node_by_path(scene_root, node_path)
+		if not node:
+			entry["error"] = "Node not found: " + node_path
+		elif node == scene_root:
+			entry["error"] = "Cannot delete the root node"
 		else:
-			error_count += 1
-			log_error("Failed to load: " + scene_path)
+			var parent = node.get_parent()
+			parent.remove_child(node)
+			node.queue_free()
+			entry["success"] = true
+			any_deleted = true
+		results.append(entry)
 
-	var scripts = find_files(project_path, ".gd") + find_files(project_path, ".shader") + find_files(project_path, ".gdshader")
-	var generated_uids = 0
+	if any_deleted:
+		if not save_scene_to_path(scene_root, params.scene_path):
+			print(JSON.stringify({"error": "Failed to save scene after deleting nodes", "partial_results": results}))
+			return
 
-	for script_path in scripts:
-		var uid_path = script_path + ".uid"
-		var f = FileAccess.open(uid_path, FileAccess.READ)
-		if not f:
-			var res = load(script_path)
-			if res:
-				var error = ResourceSaver.save(res, script_path)
-				if error == OK:
-					generated_uids += 1
+	print(JSON.stringify({"results": results}))
 
-	print("Resave operation complete. Scenes: " + str(success_count) + " saved, " + str(error_count) + " errors. UIDs generated: " + str(generated_uids))
-
-# ============================================
-# NEW NODE OPERATIONS
-# ============================================
-
-# Delete a node from a scene
-func delete_node(params):
-	printerr("Deleting node from scene: " + params.scene_path)
-
+# Update one or more node properties in a single headless process (saves once)
+func set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		quit(1)
+		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		return
 
-	var node = find_node_by_path(scene_root, params.node_path)
-	if not node:
-		log_error("Node not found: " + params.node_path)
-		quit(1)
+	var abort_on_error = params.get("abort_on_error", false)
+	var results: Array = []
 
-	if node == scene_root:
-		log_error("Cannot delete the root node")
-		quit(1)
-
-	var parent = node.get_parent()
-	parent.remove_child(node)
-	node.queue_free()
+	for update in params.updates:
+		var result = {"nodePath": update.node_path, "property": update.property}
+		var node = find_node_by_path(scene_root, update.node_path)
+		if node == null:
+			result["error"] = "Node not found: " + update.node_path
+		else:
+			node.set(update.property, _coerce_property_value(update.value))
+			result["success"] = true
+		results.append(result)
+		if abort_on_error and result.has("error"):
+			break
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Node '" + params.node_path + "' deleted successfully")
+		print(JSON.stringify({"results": results}))
 	else:
-		log_error("Failed to save scene after deleting node")
-		quit(1)
+		print(JSON.stringify({"error": "Failed to save scene after updates", "partial_results": results}))
 
-# Update a single property on a node
-func set_node_property(params):
-	printerr("Updating node property in scene: " + params.scene_path)
-
+# Get properties from one or more nodes in a single headless process (loads scene once)
+func get_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		quit(1)
+		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		return
 
-	var node = find_node_by_path(scene_root, params.node_path)
-	if not node:
-		log_error("Node not found: " + params.node_path)
-		quit(1)
+	var results: Array = []
 
-	var property_name = params.property
-	var property_value = _coerce_property_value(params.value)
+	for node_spec in params.nodes:
+		var node_path = node_spec.get("node_path", "")
+		var changed_only = node_spec.get("changed_only", false)
+		var node = find_node_by_path(scene_root, node_path)
+		if node == null:
+			results.append({"nodePath": node_path, "error": "Node not found"})
+		else:
+			var props = _collect_node_properties(node, changed_only)
+			results.append({"nodePath": node_path, "nodeType": node.get_class(), "properties": props})
 
-	log_debug("Setting property '" + property_name + "' to: " + str(property_value))
-
-	node.set(property_name, property_value)
-
-	if save_scene_to_path(scene_root, params.scene_path):
-		print("Property '" + property_name + "' updated successfully on node '" + params.node_path + "'")
-	else:
-		log_error("Failed to save scene after updating property")
-		quit(1)
-
-# Get all properties of a specific node
-func get_node_properties(params):
-	printerr("Getting node properties from scene: " + params.scene_path)
-
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
-		quit(1)
-
-	var node = find_node_by_path(scene_root, params.node_path)
-	if not node:
-		log_error("Node not found: " + params.node_path)
-		quit(1)
-
-	var changed_only = params.has("changed_only") and params.changed_only
-	var properties = _collect_node_properties(node, changed_only)
-
-	var result = {
-		"nodePath": params.node_path,
-		"nodeType": node.get_class(),
-		"properties": properties
-	}
-
-	print(JSON.stringify(result))
-
-# List all child nodes under a parent
-func list_nodes(params):
-	printerr("Listing nodes in scene: " + params.scene_path)
-
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
-		quit(1)
-
-	var parent_path = "root"
-	if params.has("parent_path"):
-		parent_path = params.parent_path
-
-	var parent = find_node_by_path(scene_root, parent_path)
-	if not parent:
-		log_error("Parent node not found: " + parent_path)
-		quit(1)
-
-	var children = []
-	for child in parent.get_children():
-		children.append({
-			"name": child.name,
-			"type": child.get_class(),
-			"childCount": child.get_child_count()
-		})
-
-	var result = {
-		"parentPath": parent_path,
-		"parentType": parent.get_class(),
-		"children": children
-	}
-
-	print(JSON.stringify(result))
+	print(JSON.stringify({"results": results}))
 
 # Get full hierarchical tree structure of a scene
 func get_scene_tree(params):
@@ -660,11 +525,18 @@ func get_scene_tree(params):
 	if not scene_root:
 		quit(1)
 
+	var tree_root = scene_root
+	if params.has("parent_path") and params.parent_path:
+		tree_root = find_node_by_path(scene_root, params.parent_path)
+		if not tree_root:
+			log_error("Parent node not found: " + str(params.parent_path))
+			quit(1)
+
 	var max_depth = -1
 	if params.has("max_depth"):
 		max_depth = int(params.max_depth)
 
-	var tree = build_tree_recursive(scene_root, "", 0, max_depth)
+	var tree = build_tree_recursive(tree_root, "", 0, max_depth)
 	print(JSON.stringify(tree))
 
 func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: int = -1) -> Dictionary:
@@ -676,10 +548,9 @@ func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: i
 			children.append(build_tree_recursive(child, node_path, depth + 1, max_depth))
 
 	var script_path = ""
-	if node.get_script():
-		var script = node.get_script()
-		if script.resource_path:
-			script_path = script.resource_path
+	var script = node.get_script()
+	if script and script.resource_path:
+		script_path = script.resource_path
 
 	return {
 		"name": node.name,
@@ -1065,53 +936,5 @@ func batch_scene_operations(params: Dictionary) -> void:
 	# Auto-save any scenes that were mutated but not explicitly saved
 	for scene_path in scene_cache:
 		save_scene_to_path(scene_cache[scene_path], scene_path)
-
-	print(JSON.stringify({"results": results}))
-
-# Update multiple node properties in a single headless process (loads and saves scene once)
-func batch_set_node_properties(params: Dictionary) -> void:
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
-		return
-
-	var abort_on_error = params.get("abort_on_error", false)
-	var results: Array = []
-
-	for update in params.updates:
-		var result = {"nodePath": update.node_path, "property": update.property}
-		var node = find_node_by_path(scene_root, update.node_path)
-		if node == null:
-			result["error"] = "Node not found: " + update.node_path
-		else:
-			node.set(update.property, _coerce_property_value(update.value))
-			result["success"] = true
-		results.append(result)
-		if abort_on_error and result.has("error"):
-			break
-
-	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({"results": results}))
-	else:
-		print(JSON.stringify({"error": "Failed to save scene after batch updates", "partial_results": results}))
-
-# Get properties from multiple nodes in a single headless process (loads scene once)
-func batch_get_node_properties(params: Dictionary) -> void:
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
-		return
-
-	var results: Array = []
-
-	for node_spec in params.nodes:
-		var node_path = node_spec.get("node_path", "")
-		var changed_only = node_spec.get("changed_only", false)
-		var node = find_node_by_path(scene_root, node_path)
-		if node == null:
-			results.append({"nodePath": node_path, "error": "Node not found"})
-		else:
-			var props = _collect_node_properties(node, changed_only)
-			results.append({"nodePath": node_path, "nodeType": node.get_class(), "properties": props})
 
 	print(JSON.stringify({"results": results}))

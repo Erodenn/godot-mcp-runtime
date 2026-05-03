@@ -96,6 +96,15 @@ export function cleanOutput(output: string): string {
   return cleanedLines.join('\n');
 }
 
+const EMPTY_AUTOLOAD_SECTION_REGEX = /\[autoload\]\s*(?=\n\[|\n*$)/g;
+
+export function cleanStdout(stdout: string): string {
+  if (stdout.includes('{') || stdout.includes('[')) {
+    return extractJson(stdout);
+  }
+  return cleanOutput(stdout);
+}
+
 export interface GodotProcess {
   process: ChildProcess;
   output: string[];
@@ -118,7 +127,6 @@ export interface RuntimeStopResult {
 export interface GodotServerConfig {
   godotPath?: string;
   debugMode?: boolean;
-  strictPathValidation?: boolean;
 }
 
 export interface OperationParams {
@@ -364,13 +372,12 @@ export class GodotRunner {
   private bridgeScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private injectedProjects: Set<string> = new Set();
-  private strictPathValidation: boolean;
+  private cachedVersion: string | null = null;
   public activeProcess: GodotProcess | null = null;
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
 
   constructor(config?: GodotServerConfig) {
-    this.strictPathValidation = config?.strictPathValidation ?? false;
     this.operationsScriptPath = join(__dirname, '..', 'scripts', 'godot_operations.gd');
     this.bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
     logDebug(`Operations script path: ${this.operationsScriptPath}`);
@@ -507,32 +514,28 @@ export class GodotRunner {
       );
     }
 
-    for (const path of possiblePaths) {
-      const normalizedPath = normalize(path);
-      if (await this.isValidGodotPath(normalizedPath)) {
-        this.godotPath = normalizedPath;
-        logDebug(`Found Godot at: ${normalizedPath}`);
-        return;
-      }
+    const normalizedCandidates = possiblePaths.map((p) => normalize(p));
+    const probeResults = await Promise.all(
+      normalizedCandidates.map(async (p) => ({ path: p, valid: await this.isValidGodotPath(p) })),
+    );
+    const winner = probeResults.find((r) => r.valid);
+    if (winner) {
+      this.godotPath = winner.path;
+      logDebug(`Found Godot at: ${winner.path}`);
+      return;
     }
 
     logDebug(`Warning: Could not find Godot in common locations for ${osPlatform}`);
     logError(`Could not find Godot in common locations for ${osPlatform}`);
 
-    if (this.strictPathValidation) {
-      throw new Error(
-        'Could not find a valid Godot executable. Set GODOT_PATH or provide a valid path in config.',
-      );
+    if (osPlatform === 'win32') {
+      this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
+    } else if (osPlatform === 'darwin') {
+      this.godotPath = normalize('/Applications/Godot.app/Contents/MacOS/Godot');
     } else {
-      if (osPlatform === 'win32') {
-        this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
-      } else if (osPlatform === 'darwin') {
-        this.godotPath = normalize('/Applications/Godot.app/Contents/MacOS/Godot');
-      } else {
-        this.godotPath = normalize('/usr/bin/godot');
-      }
-      logDebug(`Using default path: ${this.godotPath}, but this may not work.`);
+      this.godotPath = normalize('/usr/bin/godot');
     }
+    logDebug(`Using default path: ${this.godotPath}, but this may not work.`);
   }
 
   getGodotPath(): string | null {
@@ -540,6 +543,9 @@ export class GodotRunner {
   }
 
   async getVersion(): Promise<string> {
+    if (this.cachedVersion !== null) {
+      return this.cachedVersion;
+    }
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
@@ -548,17 +554,8 @@ export class GodotRunner {
     }
 
     const { stdout } = await this.spawnAsync(this.godotPath, ['--version']);
-    return stdout.trim();
-  }
-
-  isGodot44OrLater(version: string): boolean {
-    const match = version.match(/^(\d+)\.(\d+)/);
-    if (match) {
-      const major = parseInt(match[1], 10);
-      const minor = parseInt(match[2], 10);
-      return major > 4 || (major === 4 && minor >= 4);
-    }
-    return false;
+    this.cachedVersion = stdout.trim();
+    return this.cachedVersion;
   }
 
   async executeOperation(
@@ -595,13 +592,6 @@ export class GodotRunner {
     ];
 
     logDebug(`Command: ${this.godotPath} ${args.join(' ')}`);
-
-    function cleanStdout(stdout: string): string {
-      if (stdout.includes('{') || stdout.includes('[')) {
-        return extractJson(stdout);
-      }
-      return cleanOutput(stdout);
-    }
 
     let stdout = '';
     let stderr = '';
@@ -814,11 +804,11 @@ export class GodotRunner {
         const autoloadEntry = `${entryName}="*res://${scriptFilename}"`;
 
         if (content.includes(autoloadEntry)) {
-          content = content.replace(
-            new RegExp(`\\n?${autoloadEntry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'),
-            '',
-          );
-          content = content.replace(/\[autoload\]\s*(?=\n\[|\n*$)/g, '');
+          content = content
+            .split('\n')
+            .filter((line) => line !== autoloadEntry)
+            .join('\n');
+          content = content.replace(EMPTY_AUTOLOAD_SECTION_REGEX, '');
           content = content.trimEnd() + '\n';
           writeFileSync(projectFile, content, 'utf8');
           logDebug(`Removed ${entryName} autoload from project.godot`);

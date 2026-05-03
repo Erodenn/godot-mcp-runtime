@@ -45,15 +45,12 @@ import {
   handleSaveScene,
   handleExportMeshLibrary,
   handleBatchSceneOperations,
-  handleManageUids,
 } from './tools/scene-tools.js';
 
 import {
-  handleDeleteNode,
-  handleSetNodeProperty,
-  handleBatchSetNodeProperties,
+  handleDeleteNodes,
+  handleSetNodeProperties,
   handleGetNodeProperties,
-  handleBatchGetNodeProperties,
   handleAttachScript,
   handleGetSceneTree,
   handleDuplicateNode,
@@ -104,14 +101,11 @@ export const toolDispatch: Record<string, ToolHandler> = {
   save_scene: (runner, args) => handleSaveScene(runner, args),
   export_mesh_library: (runner, args) => handleExportMeshLibrary(runner, args),
   batch_scene_operations: (runner, args) => handleBatchSceneOperations(runner, args),
-  manage_uids: (runner, args) => handleManageUids(runner, args),
 
   // Node tools
-  delete_node: (runner, args) => handleDeleteNode(runner, args),
-  set_node_property: (runner, args) => handleSetNodeProperty(runner, args),
-  batch_set_node_properties: (runner, args) => handleBatchSetNodeProperties(runner, args),
+  delete_nodes: (runner, args) => handleDeleteNodes(runner, args),
+  set_node_properties: (runner, args) => handleSetNodeProperties(runner, args),
   get_node_properties: (runner, args) => handleGetNodeProperties(runner, args),
-  batch_get_node_properties: (runner, args) => handleBatchGetNodeProperties(runner, args),
   attach_script: (runner, args) => handleAttachScript(runner, args),
   get_scene_tree: (runner, args) => handleGetSceneTree(runner, args),
   duplicate_node: (runner, args) => handleDuplicateNode(runner, args),
