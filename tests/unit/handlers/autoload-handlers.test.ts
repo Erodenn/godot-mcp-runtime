@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   handleListAutoloads,
@@ -7,9 +7,14 @@ import {
   handleRemoveAutoload,
   handleUpdateAutoload,
 } from '../../../src/tools/autoload-tools.js';
+import { parseAutoloads } from '../../../src/utils/autoload-ini.js';
 import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
+
+function readProjectGodot(dir: string): string {
+  return readFileSync(join(dir, 'project.godot'), 'utf8');
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,7 +117,7 @@ describe('handleAddAutoload', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('registers autoload in a fresh tmp project', async () => {
+  it('registers autoload in a fresh tmp project and writes the singleton entry to project.godot', async () => {
     const dir = makeTmpProject();
     const result = await handleAddAutoload({
       projectPath: dir,
@@ -120,6 +125,49 @@ describe('handleAddAutoload', () => {
       autoloadPath: 'scripts/test.gd',
     });
     expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('TestManager="*res://scripts/test.gd"');
+    expect(parseAutoloads(join(dir, 'project.godot'))).toContainEqual({
+      name: 'TestManager',
+      path: 'res://scripts/test.gd',
+      singleton: true,
+    });
+  });
+
+  it('defaults singleton to true when the param is omitted', async () => {
+    const dir = makeTmpProject();
+    await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'DefaultSingleton',
+      autoloadPath: 'a.gd',
+    });
+    const entry = parseAutoloads(join(dir, 'project.godot')).find(
+      (a) => a.name === 'DefaultSingleton',
+    );
+    expect(entry?.singleton).toBe(true);
+  });
+
+  it('writes singleton:false when explicitly opted out', async () => {
+    const dir = makeTmpProject();
+    await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'NotSingleton',
+      autoloadPath: 'b.gd',
+      singleton: false,
+    });
+    expect(readProjectGodot(dir)).toContain('NotSingleton="res://b.gd"');
+    expect(readProjectGodot(dir)).not.toContain('NotSingleton="*');
+  });
+
+  it('rejects a duplicate name and leaves project.godot unchanged', async () => {
+    const dir = makeTmpProjectWithAutoload('Dupe', 'orig.gd');
+    const before = readProjectGodot(dir);
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Dupe',
+      autoloadPath: 'overwrite.gd',
+    });
+    expectErrorMatching(result, /already exists/i);
+    expect(readProjectGodot(dir)).toBe(before);
   });
 });
 
@@ -162,10 +210,12 @@ describe('handleRemoveAutoload', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('removes an existing autoload in a tmp project', async () => {
+  it('removes an existing autoload and the entry is gone from project.godot', async () => {
     const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/test.gd');
     const result = await handleRemoveAutoload({ projectPath: dir, autoloadName: 'TestManager' });
     expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).not.toContain('TestManager');
+    expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([]);
   });
 });
 
@@ -218,7 +268,7 @@ describe('handleUpdateAutoload', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('updates an existing autoload in a tmp project', async () => {
+  it('updates the path of an existing autoload and writes the new path to project.godot', async () => {
     const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/old.gd');
     const result = await handleUpdateAutoload({
       projectPath: dir,
@@ -226,5 +276,21 @@ describe('handleUpdateAutoload', () => {
       autoloadPath: 'scripts/new.gd',
     });
     expect(hasError(result)).toBe(false);
+    const entries = parseAutoloads(join(dir, 'project.godot'));
+    expect(entries).toEqual([
+      { name: 'TestManager', path: 'res://scripts/new.gd', singleton: true },
+    ]);
+  });
+
+  it('flips singleton to false without touching the path when only singleton is provided', async () => {
+    const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/keep.gd');
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'TestManager',
+      singleton: false,
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('TestManager="res://scripts/keep.gd"');
+    expect(readProjectGodot(dir)).not.toContain('TestManager="*');
   });
 });

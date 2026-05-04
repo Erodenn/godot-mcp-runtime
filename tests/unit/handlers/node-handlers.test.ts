@@ -412,7 +412,7 @@ describe('handleGetSceneTree', () => {
   it('treats empty Godot output as a failed operation', async () => {
     const fake = createFakeRunner({ stdout: '' });
     const result = await handleGetSceneTree(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /scene tree|failed/i);
   });
 
   it('surfaces runner exceptions as a structured MCP error response', async () => {

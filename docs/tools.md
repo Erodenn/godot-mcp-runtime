@@ -59,16 +59,16 @@ All mutation operations save automatically. Property and delete tools take alway
 
 These tools edit `project.godot` directly or read the filesystem. Safe to use even when autoloads are broken.
 
-| Tool                     | Description                                                   |
-| ------------------------ | ------------------------------------------------------------- |
-| `list_autoloads`         | List all registered autoloads with paths and singleton status |
-| `add_autoload`           | Register a new autoload                                       |
-| `remove_autoload`        | Unregister an autoload by name                                |
-| `update_autoload`        | Modify an existing autoload's path or singleton flag          |
+| Tool                     | Description                                                          |
+| ------------------------ | -------------------------------------------------------------------- |
+| `list_autoloads`         | List all registered autoloads with paths and singleton status        |
+| `add_autoload`           | Register a new autoload                                              |
+| `remove_autoload`        | Unregister an autoload by name                                       |
+| `update_autoload`        | Modify an existing autoload's path or singleton flag                 |
 | `get_project_settings`   | Read settings from `project.godot`, optionally filtered by `section` |
-| `get_project_files`      | Get the project file tree with types and extensions           |
-| `search_project`         | Search for a string across project source files               |
-| `get_scene_dependencies` | List all resources a scene depends on                         |
+| `get_project_files`      | Get the project file tree with types and extensions                  |
+| `search_project`         | Search for a string across project source files                      |
+| `get_scene_dependencies` | List all resources a scene depends on                                |
 
 ## Validation: `validate`
 

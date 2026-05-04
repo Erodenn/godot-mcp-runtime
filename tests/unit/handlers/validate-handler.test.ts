@@ -85,15 +85,6 @@ describe('handleValidate', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('returns isError when runner throws (source mode)', async () => {
-    const fake = createFakeRunner({ throws: new Error('boom') });
-    const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
-      source: 'extends Node',
-    });
-    expect(hasError(result)).toBe(true);
-  });
-
   it('includes the thrown message in the error response', async () => {
     const fake = createFakeRunner({ throws: new Error('disk full') });
     const result = await handleValidate(fake.asRunner, {
@@ -121,6 +112,8 @@ describe('handleValidate', () => {
       source: 'extends Node',
     });
     expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.valid).toBe(false);
   });
 });
 

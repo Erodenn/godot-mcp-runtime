@@ -31,13 +31,13 @@ Examples are useful but **contracts**: an example with two array items will prod
 
 Every tool definition includes an `annotations` object. Pick from:
 
-| Annotation        | When to set                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `readOnlyHint`    | `true` when the tool only reads state, never mutates files, project, or running process.                                                                     |
-| `destructiveHint` | `true` when the tool removes or replaces something hard to recover.                                                                                          |
-| `idempotentHint`  | `true` when calling N times with the same args produces the same result as calling once. Setters with absolute values, not appenders.                        |
-| `openWorldHint`   | `true` when the tool reaches outside this server's domain (network, foreign filesystem, external service). Most tools here stay in-project — leave unset.    |
-| `title`           | Optional human-readable display name. Set when the tool name is awkward to read in client UIs; otherwise omit and the client falls back to the tool name.    |
+| Annotation        | When to set                                                                                                                                               |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readOnlyHint`    | `true` when the tool only reads state, never mutates files, project, or running process.                                                                  |
+| `destructiveHint` | `true` when the tool removes or replaces something hard to recover.                                                                                       |
+| `idempotentHint`  | `true` when calling N times with the same args produces the same result as calling once. Setters with absolute values, not appenders.                     |
+| `openWorldHint`   | `true` when the tool reaches outside this server's domain (network, foreign filesystem, external service). Most tools here stay in-project — leave unset. |
+| `title`           | Optional human-readable display name. Set when the tool name is awkward to read in client UIs; otherwise omit and the client falls back to the tool name. |
 
 Defaults: omit annotations only if none apply. `readOnlyHint` and `destructiveHint` should be mutually exclusive.
 

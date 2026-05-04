@@ -9,7 +9,7 @@
  * Requires GODOT_PATH. Skipped in CI.
  */
 
-import { describe, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
