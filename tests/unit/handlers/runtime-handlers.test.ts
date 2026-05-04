@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { existsSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   handleDetachProject,
@@ -700,6 +700,137 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       projectPath: '/p',
       process: makeRunningProcess(),
     });
+  });
+
+  let screenshotDir: string;
+  beforeEach(() => {
+    screenshotDir = tmp.make('mcp-screenshot-');
+  });
+
+  function writeScreenshot(name: string, content = 'png-data'): string {
+    const path = join(screenshotDir, name);
+    writeFileSync(path, content, 'utf8');
+    return path;
+  }
+
+  function parseMetadata(result: { content?: Array<{ type: string; text?: string }> }) {
+    const textContent = result.content?.filter((entry) => entry.type === 'text') ?? [];
+    const metadataEntry = textContent.find((entry) => entry.text?.startsWith('{'));
+    expect(metadataEntry?.text).toBeDefined();
+    return JSON.parse(metadataEntry!.text!);
+  }
+
+  it('defaults to full mode and returns the full inline PNG', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png', 'full-image');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, width: 1280, height: 720 }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, {});
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls[0]).toMatchObject({
+      command: 'screenshot',
+      params: {},
+    });
+    expect(result.content?.[0]).toMatchObject({
+      type: 'image',
+      data: Buffer.from('full-image').toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(parseMetadata(result)).toMatchObject({
+      responseMode: 'full',
+      path: screenshotPath,
+      size: { width: 1280, height: 720 },
+    });
+  });
+
+  it('returns a bounded preview image when responseMode is preview', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png', 'full-image');
+    const previewPath = writeScreenshot('preview.png', 'preview-image');
+    fake.setBridgeResponse(
+      JSON.stringify({
+        path: screenshotPath,
+        preview_path: previewPath,
+        width: 1280,
+        height: 720,
+        preview_width: 960,
+        preview_height: 540,
+      }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls[0]).toMatchObject({
+      command: 'screenshot',
+      params: { preview_max_width: 960, preview_max_height: 540 },
+    });
+    expect(result.content?.[0]).toMatchObject({
+      type: 'image',
+      data: Buffer.from('preview-image').toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(parseMetadata(result)).toMatchObject({
+      responseMode: 'preview',
+      path: screenshotPath,
+      previewPath,
+      previewSize: { width: 960, height: 540 },
+    });
+  });
+
+  it('uses caller-provided preview bounds', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png');
+    const previewPath = writeScreenshot('preview.png');
+    fake.setBridgeResponse(
+      JSON.stringify({
+        path: screenshotPath,
+        preview_path: previewPath,
+      }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, {
+      responseMode: 'preview',
+      previewMaxWidth: 480,
+      previewMaxHeight: 270,
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls[0].params).toEqual({ preview_max_width: 480, preview_max_height: 270 });
+  });
+
+  it('returns metadata only when responseMode is path_only', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    expect(result.content?.some((entry) => entry.type === 'image')).toBe(false);
+    expect(parseMetadata(result)).toMatchObject({
+      responseMode: 'path_only',
+      path: screenshotPath,
+    });
+  });
+
+  it('rejects invalid responseMode', async () => {
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'small' });
+    expectErrorMatching(result, /responseMode/);
+  });
+
+  it('rejects invalid preview dimensions', async () => {
+    const result = await handleTakeScreenshot(fake.asRunner, {
+      responseMode: 'preview',
+      previewMaxWidth: 0,
+    });
+    expectErrorMatching(result, /preview dimensions/);
+  });
+
+  it('returns isError when preview mode receives no preview path', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
+
+    expectErrorMatching(result, /no preview path/i);
   });
 
   it('returns isError when the bridge response is not JSON', async () => {
