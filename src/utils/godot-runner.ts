@@ -15,7 +15,7 @@ const __dirname = dirname(__filename);
 const DEBUG_MODE = process.env.DEBUG === 'true';
 
 // Bridge readiness polling
-const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
+export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
 const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
@@ -854,11 +854,7 @@ export class GodotRunner {
     return window.filter((line) => line.trim() !== '');
   }
 
-  private static readonly SCRIPT_ERROR_PATTERNS = [
-    'SCRIPT ERROR:',
-    'USER SCRIPT ERROR:',
-    'GDScript error',
-  ];
+  private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
 
   extractRuntimeErrors(lines: string[]): string[] {
     return lines.filter((line) => GodotRunner.SCRIPT_ERROR_PATTERNS.some((p) => line.includes(p)));

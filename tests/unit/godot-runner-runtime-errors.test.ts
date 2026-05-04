@@ -45,17 +45,17 @@ describe('GodotRunner.extractRuntimeErrors', () => {
     expect(runner.extractRuntimeErrors(lines)).toEqual(['USER SCRIPT ERROR: assertion failed']);
   });
 
-  it('matches the GDScript error substring (no colon)', () => {
+  it('does not match bare "GDScript error" substring (avoids false positives on user printerr)', () => {
     const lines = ['Parse Error: GDScript error at line 5', 'noise'];
-    expect(runner.extractRuntimeErrors(lines)).toEqual(['Parse Error: GDScript error at line 5']);
+    expect(runner.extractRuntimeErrors(lines)).toEqual([]);
   });
 
   it('returns matches in input order, preserving duplicates', () => {
-    const lines = ['SCRIPT ERROR: a', 'between', 'SCRIPT ERROR: b', 'GDScript error trailing'];
+    const lines = ['SCRIPT ERROR: a', 'between', 'SCRIPT ERROR: b', 'USER SCRIPT ERROR: trailing'];
     expect(runner.extractRuntimeErrors(lines)).toEqual([
       'SCRIPT ERROR: a',
       'SCRIPT ERROR: b',
-      'GDScript error trailing',
+      'USER SCRIPT ERROR: trailing',
     ]);
   });
 
@@ -63,7 +63,7 @@ describe('GodotRunner.extractRuntimeErrors', () => {
     // Documents current behavior. If Godot ever emits lowercase variants the
     // caller's warning channel will silently miss them; this test will need
     // updating alongside the patterns.
-    const lines = ['script error: lower', 'gdscript error lower', 'SCRIPT ERROR: kept'];
+    const lines = ['script error: lower', 'user script error: lower', 'SCRIPT ERROR: kept'];
     expect(runner.extractRuntimeErrors(lines)).toEqual(['SCRIPT ERROR: kept']);
   });
 

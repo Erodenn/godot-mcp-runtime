@@ -8,8 +8,8 @@
  *
  * Build a FakeRunner with `createFakeRunner({ stdout, stderr })` for the
  * happy path, or `createFakeRunner({ throws: new Error(...) })` to exercise
- * the catch branch. Pass `godotVersion` to satisfy version-gated handlers
- * (e.g. handleManageUids).
+ * the catch branch. Pass `godotVersion` to control what `getVersion()`
+ * returns for handlers that read it (e.g. handleGetProjectInfo).
  *
  * `runner.calls` is a spy surface — use it sparingly. The default rubric is
  * "assert outputs, not internal calls." Reach for `calls` only to confirm a

@@ -6,7 +6,9 @@ import {
   validateProjectArgs,
   createErrorResponse,
   logDebug,
+  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from '../utils/godot-runner.js';
+import { randomUUID } from 'crypto';
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
 
@@ -350,7 +352,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       }
 
       const lines = [
-        'Godot process started, but the MCP bridge did not respond within 8 seconds.',
+        `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
         '- The process is running — bridge may still be initializing',
         '- Use get_debug_output to investigate',
         '- Runtime tools may work if you retry after a moment',
@@ -820,7 +822,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       const scriptsDir = join(projectPath, '.mcp', 'scripts');
       mkdirSync(scriptsDir, { recursive: true });
       const timestamp = Date.now();
-      const scriptFile = join(scriptsDir, `${timestamp}.gd`);
+      const scriptFile = join(scriptsDir, `${timestamp}-${randomUUID()}.gd`);
       writeFileSync(scriptFile, script, 'utf8');
       logDebug(`Saved script to ${scriptFile}`);
     }

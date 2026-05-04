@@ -84,6 +84,13 @@ describe('parseAutoloads', () => {
     ]);
   });
 
+  it('tolerates an unquoted path (hand-edited project.godot)', () => {
+    const dir = makeProject('config_version=5\n\n[autoload]\nA=*res://a.gd\n');
+    expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([
+      { name: 'A', path: 'res://a.gd', singleton: true },
+    ]);
+  });
+
   it('stops parsing entries when a new section header begins', () => {
     const dir = makeProject(
       [

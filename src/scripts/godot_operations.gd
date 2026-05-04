@@ -464,7 +464,7 @@ func delete_nodes(params):
 
 	if any_deleted:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after deleting nodes", "partial_results": results}))
+			print(JSON.stringify({"error": "Failed to save scene after deleting nodes", "results": results}))
 			return
 
 	print(JSON.stringify({"results": results}))
@@ -494,7 +494,7 @@ func set_node_properties(params: Dictionary) -> void:
 	if save_scene_to_path(scene_root, params.scene_path):
 		print(JSON.stringify({"results": results}))
 	else:
-		print(JSON.stringify({"error": "Failed to save scene after updates", "partial_results": results}))
+		print(JSON.stringify({"error": "Failed to save scene after updates", "results": results}))
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:

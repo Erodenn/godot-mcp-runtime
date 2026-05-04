@@ -1,12 +1,10 @@
 import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
 import { logDebug } from './godot-runner.js';
-import { removeAutoloadEntry } from './autoload-ini.js';
+import { addAutoloadEntry, parseAutoloads, removeAutoloadEntry } from './autoload-ini.js';
 
 const BRIDGE_AUTOLOAD_NAME = 'McpBridge';
 const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd';
-const LEGACY_AUTOLOAD_NAME = 'McpScreenshotServer';
-const LEGACY_SCRIPT_FILENAME = 'mcp_screenshot_server.gd';
 const MCP_GITIGNORE_ENTRY = '.mcp/';
 
 /**
@@ -32,37 +30,22 @@ export class BridgeManager {
     this.ensureMcpGdignore(projectPath);
     this.ensureGitignored(projectPath);
 
-    // Clean up legacy screenshot server if present.
-    this.removeAutoloadArtifact(projectPath, LEGACY_AUTOLOAD_NAME, LEGACY_SCRIPT_FILENAME);
-
     const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
-    copyFileSync(this.bridgeScriptPath, destScript);
-    logDebug(`Copied bridge autoload to ${destScript}`);
+    if (!existsSync(destScript)) {
+      copyFileSync(this.bridgeScriptPath, destScript);
+      logDebug(`Copied bridge autoload to ${destScript}`);
+    }
 
     const projectFile = join(projectPath, 'project.godot');
-    let content = readFileSync(projectFile, 'utf8');
+    const existing = parseAutoloads(projectFile);
+    const alreadyRegistered = existing.some((a) => a.name === BRIDGE_AUTOLOAD_NAME);
 
-    const autoloadEntry = `${BRIDGE_AUTOLOAD_NAME}="*res://${BRIDGE_SCRIPT_FILENAME}"`;
-
-    if (content.includes(autoloadEntry)) {
+    if (alreadyRegistered) {
       logDebug('Bridge autoload already present, skipping injection');
-      if (!existsSync(destScript)) {
-        copyFileSync(this.bridgeScriptPath, destScript);
-        logDebug('Re-copied missing bridge script');
-      }
-      this.injectedProjects.add(projectPath);
-      return;
-    }
-
-    const autoloadSectionRegex = /^\[autoload\]\s*$/m;
-    if (autoloadSectionRegex.test(content)) {
-      content = content.replace(autoloadSectionRegex, `[autoload]\n${autoloadEntry}`);
     } else {
-      content = content.trimEnd() + `\n\n[autoload]\n${autoloadEntry}\n`;
+      addAutoloadEntry(projectFile, BRIDGE_AUTOLOAD_NAME, BRIDGE_SCRIPT_FILENAME, true);
+      logDebug('Injected bridge autoload into project.godot');
     }
-
-    writeFileSync(projectFile, content, 'utf8');
-    logDebug('Injected bridge autoload into project.godot');
     this.injectedProjects.add(projectPath);
   }
 

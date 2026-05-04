@@ -32,14 +32,7 @@ func _process(_delta: float) -> void:
 		if data.begins_with("{"):
 			_handle_json_command(peer, data)
 		else:
-			# Legacy plain-text commands
-			match data:
-				"screenshot":
-					_handle_screenshot(peer)
-				"ping":
-					peer.put_packet("pong".to_utf8_buffer())
-				_:
-					_send_response(peer, {"error": "Unknown command: %s" % data})
+			_send_response(peer, {"error": "Non-JSON packet (expected a JSON command object)"})
 
 func _handle_json_command(peer: PacketPeerUDP, data: String) -> void:
 	var json = JSON.new()

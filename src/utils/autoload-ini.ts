@@ -41,7 +41,7 @@ export function parseAutoloads(projectFilePath: string): AutoloadEntry[] {
     }
     if (!inAutoloadSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#'))
       continue;
-    const match = trimmed.match(/^(\w+)="(\*?)([^"]*)"$/);
+    const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
     if (match) {
       autoloads.push({ name: match[1], singleton: match[2] === '*', path: match[3] });
     }
@@ -127,7 +127,7 @@ export function updateAutoloadEntry(
       return line;
     }
     if (inAutoloadSection) {
-      const match = trimmed.match(/^(\w+)="(\*?)([^"]*)"$/);
+      const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
       if (match && match[1] === name) {
         const effectiveSingleton = singleton !== undefined ? singleton : match[2] === '*';
         const effectivePath = newPath !== undefined ? normalizeAutoloadPath(newPath) : match[3];

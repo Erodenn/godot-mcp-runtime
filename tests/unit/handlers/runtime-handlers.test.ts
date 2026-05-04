@@ -569,8 +569,8 @@ describe('handleRunScript', () => {
     const files = readdirSync(scriptsDir).filter((f) => f.endsWith('.gd'));
     expect(files).toHaveLength(1);
     expect(readFileSync(join(scriptsDir, files[0]), 'utf8')).toBe(VALID_SCRIPT);
-    // Filename is a numeric timestamp.
-    expect(files[0]).toMatch(/^\d+\.gd$/);
+    // Filename is a numeric timestamp + UUID suffix to avoid collisions.
+    expect(files[0]).toMatch(/^\d+-[0-9a-f-]+\.gd$/);
   });
 });
 

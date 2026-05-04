@@ -83,6 +83,29 @@ describe('BridgeManager.inject', () => {
     expect(matches.length).toBe(1);
   });
 
+  it('does not re-copy the bridge script when one already exists in the project', () => {
+    // First manager injects normally.
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const firstManager = new BridgeManager(bridgeSourcePath);
+    firstManager.inject(projectPath);
+
+    // Mutate the in-project bridge script to detect any re-copy.
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    writeFileSync(destScript, '# mutated locally\n', 'utf8');
+
+    // Fresh manager (no in-memory cache) re-injects against the same project.
+    const secondManager = new BridgeManager(bridgeSourcePath);
+    secondManager.inject(projectPath);
+
+    // Because destScript already existed, the copy must be skipped.
+    expect(readFileSync(destScript, 'utf8')).toBe('# mutated locally\n');
+
+    // Autoload entry remains a single, canonical line.
+    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    const matches = projectGodot.match(/McpBridge="\*res:\/\/mcp_bridge\.gd"/g) ?? [];
+    expect(matches.length).toBe(1);
+  });
+
   it('inserts McpBridge into an existing empty [autoload] section', () => {
     const { projectPath, manager } = setupProject({
       projectGodot: 'config_version=5\n\n[autoload]\n',
@@ -189,29 +212,6 @@ describe('BridgeManager.repairOrphaned', () => {
     manager.repairOrphaned(projectPath);
     const afterContent = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(afterContent).toBe(beforeContent);
-  });
-});
-
-describe('BridgeManager legacy cleanup', () => {
-  it('on inject, removes the legacy McpScreenshotServer autoload if present', () => {
-    const projectPath = tmp.makeProject(
-      'mcp-legacy-',
-      'config_version=5\n\n[autoload]\nMcpScreenshotServer="*res://mcp_screenshot_server.gd"\n',
-    );
-    // Simulate the legacy script file being present.
-    writeFileSync(join(projectPath, 'mcp_screenshot_server.gd'), '# legacy', 'utf8');
-
-    const sourceDir = tmp.make('mcp-bridge-src-');
-    const bridgeSourcePath = join(sourceDir, 'mcp_bridge.gd');
-    writeFileSync(bridgeSourcePath, BRIDGE_SOURCE_CONTENT, 'utf8');
-    const manager = new BridgeManager(bridgeSourcePath);
-
-    manager.inject(projectPath);
-
-    expect(existsSync(join(projectPath, 'mcp_screenshot_server.gd'))).toBe(false);
-    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    expect(projectGodot).not.toContain('McpScreenshotServer');
-    expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
   });
 });
 
