@@ -11,6 +11,27 @@ npm run build
 
 Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exercises.
 
+### Local MCP client wiring
+
+To exercise your changes against a real MCP client (Claude Code, Cursor, Claude Desktop), drop a project-scoped `.mcp.json` at the repo root pointing at the local build. `.mcp.json` is already gitignored.
+
+```json
+{
+  "mcpServers": {
+    "godot-dev": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "env": {
+        "GODOT_PATH": "<path-to-godot-executable>",
+        "DEBUG": "true"
+      }
+    }
+  }
+}
+```
+
+Dev loop: edit → `npm run build` → restart the MCP client (or reconnect the server) to pick up the new `dist/`. The server is stdio-only, so the client owns the process lifecycle.
+
 ## Commands
 
 | Command                 | What it does                                                                                                                                              |
