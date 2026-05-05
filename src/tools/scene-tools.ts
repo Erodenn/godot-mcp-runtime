@@ -6,10 +6,10 @@ import {
   convertCamelToSnakeCase,
   validatePath,
   createErrorResponse,
-  extractGdError,
   validateProjectArgs,
   validateSceneArgs,
 } from '../utils/godot-runner.js';
+import { executeSceneOp } from '../utils/handler-helpers.js';
 
 export const sceneToolDefinitions: ToolDefinition[] = [
   {
@@ -40,7 +40,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'add_node',
     description:
-      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
+      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Returns a plain-text confirmation message naming the new node and type. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,7 +99,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'load_sprite',
     description:
-      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. Use this when the node already exists; for new nodes, pass texture via add_node properties. Saves automatically. texturePath must be a real file under projectPath. Errors if the node is not one of those three classes, or the texture file does not exist.',
+      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. Use this when the node already exists; for new nodes, pass texture via add_node properties. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -122,7 +122,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Errors if the scene file does not exist.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -141,7 +141,8 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'export_mesh_library',
     description:
-      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. Use this when authoring tile palettes for grid-based 3D levels; ignore for 2D or general scene work. The source scene must contain MeshInstance3D children. Pass meshItemNames to export a subset, or omit to export all. Saves the .res to outputPath, overwriting silently. Errors if the scene contains no valid meshes.',
+      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. Use this when authoring tile palettes for grid-based 3D levels; ignore for 2D or general scene work. The source scene must contain MeshInstance3D children. Pass meshItemNames to export a subset, or omit to export all. Saves the .res to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -164,6 +165,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
     name: 'batch_scene_operations',
     description:
       'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns { results: [{ operation, scenePath, success?, error? }] }.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -209,27 +211,6 @@ export const sceneToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'operations'],
     },
   },
-  {
-    name: 'manage_uids',
-    description:
-      'Manage resource UIDs in a Godot 4.4+ project. Operations: get (UID for a specific file; requires filePath) | update (resave all project resources to regenerate UID references after reorganizing files). Errors on Godot < 4.4 or invalid operation.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: {
-          type: 'string',
-          enum: ['get', 'update'],
-          description: 'The UID operation to perform',
-        },
-        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
-        filePath: {
-          type: 'string',
-          description: '[get] Path to the file relative to the project (e.g. "scenes/player.tscn")',
-        },
-      },
-      required: ['operation', 'projectPath'],
-    },
-  },
 ];
 
 // --- Handlers ---
@@ -239,24 +220,13 @@ export async function handleCreateScene(runner: GodotRunner, args: OperationPara
   const v = validateSceneArgs(args, { sceneRequired: false });
   if ('isError' in v) return v;
 
-  try {
-    const params = {
-      scenePath: args.scenePath,
-      rootNodeType: args.rootNodeType || 'Node2D',
-    };
-    const { stdout, stderr } = await runner.executeOperation('create_scene', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to create scene: ${extractGdError(stderr)}`, [
-        'Check if the root node type is valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to create scene: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: args.scenePath,
+    rootNodeType: args.rootNodeType || 'Node2D',
+  };
+  return executeSceneOp(runner, 'create_scene', params, v.projectPath, 'Failed to create scene', [
+    'Check if the root node type is valid',
+  ]);
 }
 
 export async function handleAddNode(runner: GodotRunner, args: OperationParams) {
@@ -286,28 +256,17 @@ export async function handleAddNode(runner: GodotRunner, args: OperationParams) 
     }
   }
 
-  try {
-    const params: OperationParams = {
-      scenePath: args.scenePath,
-      nodeType: args.nodeType,
-      nodeName: args.nodeName,
-    };
-    if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
-    if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
-    const { stdout, stderr } = await runner.executeOperation('add_node', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to add node: ${extractGdError(stderr)}`, [
-        'Check if the node type is valid',
-        'Ensure the parent node path exists',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to add node: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = {
+    scenePath: args.scenePath,
+    nodeType: args.nodeType,
+    nodeName: args.nodeName,
+  };
+  if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
+  if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
+  return executeSceneOp(runner, 'add_node', params, v.projectPath, 'Failed to add node', [
+    'Check if the node type is valid',
+    'Ensure the parent node path exists',
+  ]);
 }
 
 export async function handleLoadSprite(runner: GodotRunner, args: OperationParams) {
@@ -330,25 +289,14 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
     ]);
   }
 
-  try {
-    const params = {
-      scenePath: args.scenePath,
-      nodePath: args.nodePath,
-      texturePath: args.texturePath,
-    };
-    const { stdout, stderr } = await runner.executeOperation('load_sprite', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to load sprite: ${extractGdError(stderr)}`, [
-        'Check if the node is a Sprite2D, Sprite3D, or TextureRect',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to load sprite: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params = {
+    scenePath: args.scenePath,
+    nodePath: args.nodePath,
+    texturePath: args.texturePath,
+  };
+  return executeSceneOp(runner, 'load_sprite', params, v.projectPath, 'Failed to load sprite', [
+    'Check if the node is a Sprite2D, Sprite3D, or TextureRect',
+  ]);
 }
 
 export async function handleSaveScene(runner: GodotRunner, args: OperationParams) {
@@ -360,22 +308,11 @@ export async function handleSaveScene(runner: GodotRunner, args: OperationParams
     return createErrorResponse('Invalid newPath', ['Provide a valid path without ".."']);
   }
 
-  try {
-    const params: OperationParams = { scenePath: args.scenePath };
-    if (args.newPath) params.newPath = args.newPath;
-    const { stdout, stderr } = await runner.executeOperation('save_scene', params, v.projectPath);
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to save scene: ${extractGdError(stderr)}`, [
-        'Check if the scene file is valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to save scene: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const params: OperationParams = { scenePath: args.scenePath };
+  if (args.newPath) params.newPath = args.newPath;
+  return executeSceneOp(runner, 'save_scene', params, v.projectPath, 'Failed to save scene', [
+    'Check if the scene file is valid',
+  ]);
 }
 
 export async function handleExportMeshLibrary(runner: GodotRunner, args: OperationParams) {
@@ -389,31 +326,21 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
     ]);
   }
 
-  try {
-    const params: OperationParams = {
-      scenePath: args.scenePath,
-      outputPath: args.outputPath,
-    };
-    if (args.meshItemNames && Array.isArray(args.meshItemNames)) {
-      params.meshItemNames = args.meshItemNames;
-    }
-    const { stdout, stderr } = await runner.executeOperation(
-      'export_mesh_library',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Failed to export mesh library: ${extractGdError(stderr)}`, [
-        'Check if the scene contains valid 3D meshes',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to export mesh library: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
+  const params: OperationParams = {
+    scenePath: args.scenePath,
+    outputPath: args.outputPath,
+  };
+  if (args.meshItemNames && Array.isArray(args.meshItemNames)) {
+    params.meshItemNames = args.meshItemNames;
   }
+  return executeSceneOp(
+    runner,
+    'export_mesh_library',
+    params,
+    v.projectPath,
+    'Failed to export mesh library',
+    ['Check if the scene contains valid 3D meshes'],
+  );
 }
 
 export async function handleBatchSceneOperations(runner: GodotRunner, args: OperationParams) {
@@ -427,102 +354,19 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
     ]);
   }
 
-  try {
-    const snakeOps = (args.operations as Array<Record<string, unknown>>).map((op) =>
-      convertCamelToSnakeCase(op as OperationParams),
-    );
-    const params = {
-      operations: snakeOps,
-      abortOnError: args.abortOnError ?? false,
-    };
-    const { stdout, stderr } = await runner.executeOperation(
-      'batch_scene_operations',
-      params,
-      v.projectPath,
-    );
-    if (!stdout.trim()) {
-      return createErrorResponse(`Batch scene operations failed: ${extractGdError(stderr)}`, [
-        'Check that all scene paths exist',
-        'Ensure node types are valid',
-      ]);
-    }
-    return { content: [{ type: 'text', text: stdout }] };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Batch scene operations failed: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
-}
-
-export async function handleManageUids(runner: GodotRunner, args: OperationParams) {
-  args = normalizeParameters(args);
-
-  const operation = args.operation as string;
-  if (!operation) {
-    return createErrorResponse('operation is required', ['Provide one of: get, update']);
-  }
-
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
-
-  try {
-    const version = await runner.getVersion();
-    if (!runner.isGodot44OrLater(version)) {
-      return createErrorResponse(
-        `UIDs are only supported in Godot 4.4 or later. Current version: ${version}`,
-        ['Upgrade to Godot 4.4 or later to use UIDs'],
-      );
-    }
-
-    switch (operation) {
-      case 'get': {
-        if (!args.filePath) {
-          return createErrorResponse('filePath is required for get operation', [
-            'Provide the file path relative to the project',
-          ]);
-        }
-        if (!validatePath(args.filePath as string)) {
-          return createErrorResponse('Invalid file path', ['Provide a valid path without ".."']);
-        }
-        const fileFullPath = join(v.projectPath, args.filePath as string);
-        if (!existsSync(fileFullPath)) {
-          return createErrorResponse(`File does not exist: ${args.filePath}`, [
-            'Ensure the file path is correct',
-          ]);
-        }
-        const params = { filePath: args.filePath };
-        const { stdout, stderr } = await runner.executeOperation('get_uid', params, v.projectPath);
-        if (!stdout.trim()) {
-          return createErrorResponse(`Failed to get UID: ${extractGdError(stderr)}`, [
-            'Check if the file is a valid Godot resource',
-          ]);
-        }
-        return { content: [{ type: 'text', text: `UID for ${args.filePath}: ${stdout.trim()}` }] };
-      }
-
-      case 'update': {
-        const params = { projectPath: v.projectPath };
-        const { stdout, stderr } = await runner.executeOperation(
-          'resave_resources',
-          params,
-          v.projectPath,
-        );
-        if (!stdout.trim()) {
-          return createErrorResponse(`Failed to update project UIDs: ${extractGdError(stderr)}`, [
-            'Check if the project is valid',
-          ]);
-        }
-        return { content: [{ type: 'text', text: stdout }] };
-      }
-
-      default:
-        return createErrorResponse(`Unknown operation: ${operation}`, ['Use one of: get, update']);
-    }
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to ${operation} UIDs: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-    ]);
-  }
+  const snakeOps = (args.operations as Array<Record<string, unknown>>).map((op) =>
+    convertCamelToSnakeCase(op as OperationParams),
+  );
+  const params = {
+    operations: snakeOps,
+    abortOnError: args.abortOnError ?? false,
+  };
+  return executeSceneOp(
+    runner,
+    'batch_scene_operations',
+    params,
+    v.projectPath,
+    'Batch scene operations failed',
+    ['Check that all scene paths exist', 'Ensure node types are valid'],
+  );
 }

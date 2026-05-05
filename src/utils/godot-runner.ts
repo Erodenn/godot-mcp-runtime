@@ -1,24 +1,41 @@
 import { fileURLToPath } from 'url';
 import { join, dirname, normalize } from 'path';
-import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
-import { createSocket } from 'dgram';
+import * as net from 'net';
 import { randomBytes } from 'crypto';
+import { BridgeManager } from './bridge-manager.js';
+import { encodeFrame, getBridgePort, parseFrames } from './bridge-protocol.js';
+import { logDebug, logError } from './logger.js';
+
+/**
+ * Thrown when the bridge socket closes (Godot exited, port closed, or peer
+ * dropped the connection mid-flight). Lets callers distinguish
+ * "session ended" from generic transport errors.
+ */
+export class BridgeDisconnectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BridgeDisconnectedError';
+  }
+}
 
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Debug mode from environment
 const DEBUG_MODE = process.env.DEBUG === 'true';
 
 // Bridge readiness polling
-const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
+export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
 const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
 const BRIDGE_PING_TIMEOUT_MS = 1000;
+const BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS = 500;
+const BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS = 1500;
+const BRIDGE_PROCESS_EXIT_TIMEOUT_MS = 2000;
 
 /**
  * Normalize a path for cross-platform comparison.
@@ -96,6 +113,13 @@ export function cleanOutput(output: string): string {
   return cleanedLines.join('\n');
 }
 
+export function cleanStdout(stdout: string): string {
+  if (stdout.includes('{') || stdout.includes('[')) {
+    return extractJson(stdout);
+  }
+  return cleanOutput(stdout);
+}
+
 export interface GodotProcess {
   process: ChildProcess;
   output: string[];
@@ -118,7 +142,6 @@ export interface RuntimeStopResult {
 export interface GodotServerConfig {
   godotPath?: string;
   debugMode?: boolean;
-  strictPathValidation?: boolean;
 }
 
 export interface OperationParams {
@@ -154,6 +177,17 @@ export interface ToolDefinition {
   annotations?: ToolAnnotations;
 }
 
+export interface ToolResponse {
+  content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+  isError?: boolean;
+  [k: string]: unknown;
+}
+
+export type ToolHandler = (
+  runner: GodotRunner,
+  args: OperationParams,
+) => Promise<ToolResponse> | ToolResponse;
+
 // Parameter mappings between snake_case and camelCase
 const parameterMappings: Record<string, string> = {
   project_path: 'projectPath',
@@ -175,16 +209,6 @@ const parameterMappings: Record<string, string> = {
 const reverseParameterMappings: Record<string, string> = {};
 for (const [snakeCase, camelCase] of Object.entries(parameterMappings)) {
   reverseParameterMappings[camelCase] = snakeCase;
-}
-
-export function logDebug(message: string): void {
-  if (DEBUG_MODE) {
-    console.error(`[DEBUG] ${message}`);
-  }
-}
-
-export function logError(message: string): void {
-  console.error(`[SERVER] ${message}`);
 }
 
 export function normalizeParameters(params: OperationParams): OperationParams {
@@ -358,21 +382,31 @@ export function validateSceneArgs(
   return { projectPath: projectResult.projectPath, scenePath: args.scenePath as string };
 }
 
+interface InFlightCommand {
+  command: string;
+  resolve: (value: string) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 export class GodotRunner {
   private godotPath: string | null = null;
   private operationsScriptPath: string;
-  private bridgeScriptPath: string;
+  private bridge: BridgeManager;
   private validatedPaths: Map<string, boolean> = new Map();
-  private injectedProjects: Set<string> = new Set();
-  private strictPathValidation: boolean;
+  private cachedVersion: string | null = null;
   public activeProcess: GodotProcess | null = null;
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
 
+  private socket: net.Socket | null = null;
+  private rxBuffer: Buffer = Buffer.alloc(0);
+  private inFlight: InFlightCommand | null = null;
+
   constructor(config?: GodotServerConfig) {
-    this.strictPathValidation = config?.strictPathValidation ?? false;
     this.operationsScriptPath = join(__dirname, '..', 'scripts', 'godot_operations.gd');
-    this.bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
+    const bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
+    this.bridge = new BridgeManager(bridgeScriptPath);
     logDebug(`Operations script path: ${this.operationsScriptPath}`);
 
     if (config?.godotPath) {
@@ -507,32 +541,28 @@ export class GodotRunner {
       );
     }
 
-    for (const path of possiblePaths) {
-      const normalizedPath = normalize(path);
-      if (await this.isValidGodotPath(normalizedPath)) {
-        this.godotPath = normalizedPath;
-        logDebug(`Found Godot at: ${normalizedPath}`);
-        return;
-      }
+    const normalizedCandidates = possiblePaths.map((p) => normalize(p));
+    const probeResults = await Promise.all(
+      normalizedCandidates.map(async (p) => ({ path: p, valid: await this.isValidGodotPath(p) })),
+    );
+    const winner = probeResults.find((r) => r.valid);
+    if (winner) {
+      this.godotPath = winner.path;
+      logDebug(`Found Godot at: ${winner.path}`);
+      return;
     }
 
     logDebug(`Warning: Could not find Godot in common locations for ${osPlatform}`);
     logError(`Could not find Godot in common locations for ${osPlatform}`);
 
-    if (this.strictPathValidation) {
-      throw new Error(
-        'Could not find a valid Godot executable. Set GODOT_PATH or provide a valid path in config.',
-      );
+    if (osPlatform === 'win32') {
+      this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
+    } else if (osPlatform === 'darwin') {
+      this.godotPath = normalize('/Applications/Godot.app/Contents/MacOS/Godot');
     } else {
-      if (osPlatform === 'win32') {
-        this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
-      } else if (osPlatform === 'darwin') {
-        this.godotPath = normalize('/Applications/Godot.app/Contents/MacOS/Godot');
-      } else {
-        this.godotPath = normalize('/usr/bin/godot');
-      }
-      logDebug(`Using default path: ${this.godotPath}, but this may not work.`);
+      this.godotPath = normalize('/usr/bin/godot');
     }
+    logDebug(`Using default path: ${this.godotPath}, but this may not work.`);
   }
 
   getGodotPath(): string | null {
@@ -540,6 +570,9 @@ export class GodotRunner {
   }
 
   async getVersion(): Promise<string> {
+    if (this.cachedVersion !== null) {
+      return this.cachedVersion;
+    }
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
@@ -548,17 +581,8 @@ export class GodotRunner {
     }
 
     const { stdout } = await this.spawnAsync(this.godotPath, ['--version']);
-    return stdout.trim();
-  }
-
-  isGodot44OrLater(version: string): boolean {
-    const match = version.match(/^(\d+)\.(\d+)/);
-    if (match) {
-      const major = parseInt(match[1], 10);
-      const minor = parseInt(match[2], 10);
-      return major > 4 || (major === 4 && minor >= 4);
-    }
-    return false;
+    this.cachedVersion = stdout.trim();
+    return this.cachedVersion;
   }
 
   async executeOperation(
@@ -570,7 +594,7 @@ export class GodotRunner {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
-    this.repairOrphanedBridge(projectPath);
+    this.bridge.repairOrphaned(projectPath);
 
     const snakeCaseParams = convertCamelToSnakeCase(params);
     logDebug(`Converted snake_case params: ${JSON.stringify(snakeCaseParams)}`);
@@ -595,13 +619,6 @@ export class GodotRunner {
     ];
 
     logDebug(`Command: ${this.godotPath} ${args.join(' ')}`);
-
-    function cleanStdout(stdout: string): string {
-      if (stdout.includes('{') || stdout.includes('[')) {
-        return extractJson(stdout);
-      }
-      return cleanOutput(stdout);
-    }
 
     let stdout = '';
     let stderr = '';
@@ -645,20 +662,22 @@ export class GodotRunner {
 
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       logDebug('Killing existing Godot process before starting a new one');
+      this.closeConnection();
       this.activeProcess.process.kill();
       if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
-        this.cleanupBridgeAutoload(this.activeProjectPath);
+        this.bridge.cleanup(this.activeProjectPath);
       }
     } else if (
       this.activeSessionMode === 'attached' &&
       this.activeProjectPath &&
       this.activeProjectPath !== projectPath
     ) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.closeConnection();
+      this.bridge.cleanup(this.activeProjectPath);
     }
 
     try {
-      this.injectBridgeAutoload(projectPath);
+      this.bridge.inject(projectPath);
     } catch (err) {
       logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
     }
@@ -730,34 +749,51 @@ export class GodotRunner {
     return this.activeProcess;
   }
 
-  attachProject(projectPath: string): void {
+  async attachProject(projectPath: string): Promise<void> {
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
-      this.stopProject();
+      await this.stopProject();
     } else if (
       this.activeSessionMode === 'attached' &&
       this.activeProjectPath &&
       this.activeProjectPath !== projectPath
     ) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      // Different project — detach the old one cleanly so its bridge
+      // releases the port before we inject into the new project.
+      try {
+        await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
+      } catch (err) {
+        logDebug(`Shutdown command failed during attach swap (ignored): ${err}`);
+      }
+      this.closeConnection();
+      this.bridge.cleanup(this.activeProjectPath);
       this.activeProjectPath = null;
       this.activeSessionMode = null;
     }
 
-    this.injectBridgeAutoload(projectPath);
+    this.bridge.inject(projectPath);
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
   }
 
-  stopProject(): RuntimeStopResult | null {
+  async stopProject(): Promise<RuntimeStopResult | null> {
     if (!this.activeSessionMode) {
       return null;
     }
 
     if (this.activeSessionMode === 'attached') {
+      // Ask the bridge to shut down so the user's still-running Godot
+      // releases the port. A timeout here is non-fatal — same end state
+      // as today, the bridge dies when the user closes Godot.
+      try {
+        await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
+      } catch (err) {
+        logDebug(`Attached shutdown timed out or failed (continuing cleanup): ${err}`);
+      }
+      this.closeConnection();
       const projectPath = this.activeProjectPath;
       if (projectPath) {
-        this.cleanupBridgeAutoload(projectPath);
+        this.bridge.cleanup(projectPath);
       }
       this.activeProjectPath = null;
       this.activeSessionMode = null;
@@ -774,8 +810,37 @@ export class GodotRunner {
       return null;
     }
 
+    // Spawned: try graceful shutdown so the bridge releases the port,
+    // then ensure the process actually exits.
+    try {
+      await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS);
+    } catch {
+      // Bridge may already be unreachable — proceed to kill.
+    }
+    this.closeConnection();
+
     logDebug('Stopping active Godot process');
-    this.activeProcess.process.kill();
+    const proc = this.activeProcess.process;
+    proc.kill();
+
+    // Wait up to BRIDGE_PROCESS_EXIT_TIMEOUT_MS for graceful exit; otherwise SIGKILL.
+    if (!this.activeProcess.hasExited) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // already dead
+          }
+          resolve();
+        }, BRIDGE_PROCESS_EXIT_TIMEOUT_MS);
+        proc.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+
     const result: RuntimeStopResult = {
       mode: 'spawned',
       output: this.activeProcess.output,
@@ -784,7 +849,7 @@ export class GodotRunner {
     this.activeProcess = null;
 
     if (this.activeProjectPath) {
-      this.cleanupBridgeAutoload(this.activeProjectPath);
+      this.bridge.cleanup(this.activeProjectPath);
       this.activeProjectPath = null;
     }
     this.activeSessionMode = null;
@@ -802,189 +867,160 @@ export class GodotRunner {
     return true;
   }
 
-  private removeAutoloadEntry(
-    projectPath: string,
-    entryName: string,
-    scriptFilename: string,
-  ): void {
-    try {
-      const projectFile = join(projectPath, 'project.godot');
-      if (existsSync(projectFile)) {
-        let content = readFileSync(projectFile, 'utf8');
-        const autoloadEntry = `${entryName}="*res://${scriptFilename}"`;
-
-        if (content.includes(autoloadEntry)) {
-          content = content.replace(
-            new RegExp(`\\n?${autoloadEntry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'),
-            '',
-          );
-          content = content.replace(/\[autoload\]\s*(?=\n\[|\n*$)/g, '');
-          content = content.trimEnd() + '\n';
-          writeFileSync(projectFile, content, 'utf8');
-          logDebug(`Removed ${entryName} autoload from project.godot`);
-        }
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to clean ${entryName} from project.godot: ${err}`);
-    }
-
-    try {
-      const scriptFile = join(projectPath, scriptFilename);
-      if (existsSync(scriptFile)) {
-        unlinkSync(scriptFile);
-        logDebug(`Removed ${scriptFilename} from project`);
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}: ${err}`);
-    }
-
-    try {
-      const uidFile = join(projectPath, `${scriptFilename}.uid`);
-      if (existsSync(uidFile)) {
-        unlinkSync(uidFile);
-        logDebug(`Removed ${scriptFilename}.uid from project`);
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}.uid: ${err}`);
-    }
-  }
-
   /**
-   * Idempotent within a session: short-circuits on `injectedProjects` so a
-   * second `attach_project`/`run_project` call does not rewrite `project.godot`.
+   * Send a JSON command to the McpBridge over a long-lived TCP connection.
+   *
+   * MCP serializes tool calls so we hold one in-flight command at a time. The
+   * socket is lazy-connected on first call and persists across commands until
+   * `closeConnection` (or a peer-side close). A close mid-flight rejects with
+   * `BridgeDisconnectedError`; a per-command timeout rejects but does NOT
+   * close the socket — a slow command does not invalidate the session.
    */
-  injectBridgeAutoload(projectPath: string): void {
-    if (this.injectedProjects.has(projectPath)) {
-      logDebug('Bridge already injected for this project, skipping');
-      return;
-    }
-
-    // Ensure .mcp/ directory exists with .gdignore so Godot skips it
-    const mcpDir = join(projectPath, '.mcp');
-    if (!existsSync(mcpDir)) {
-      mkdirSync(mcpDir, { recursive: true });
-    }
-    writeFileSync(join(mcpDir, '.gdignore'), '', 'utf8');
-    logDebug('Created .mcp/.gdignore');
-
-    // Also add .mcp/ to .gitignore if not already present
-    const gitignorePath = join(projectPath, '.gitignore');
-    const mcpGitignoreEntry = '.mcp/';
-    if (existsSync(gitignorePath)) {
-      const gitignoreContent = readFileSync(gitignorePath, 'utf8');
-      if (!gitignoreContent.includes(mcpGitignoreEntry)) {
-        const newline = gitignoreContent.endsWith('\n') ? '' : '\n';
-        writeFileSync(gitignorePath, gitignoreContent + newline + mcpGitignoreEntry + '\n', 'utf8');
-        logDebug('Added .mcp/ to existing .gitignore');
-      }
-    } else {
-      writeFileSync(gitignorePath, mcpGitignoreEntry + '\n', 'utf8');
-      logDebug('Created .gitignore with .mcp/ entry');
-    }
-
-    // Clean up legacy screenshot server if present
-    this.removeAutoloadEntry(projectPath, 'McpScreenshotServer', 'mcp_screenshot_server.gd');
-
-    const destScript = join(projectPath, 'mcp_bridge.gd');
-    copyFileSync(this.bridgeScriptPath, destScript);
-    logDebug(`Copied bridge autoload to ${destScript}`);
-
-    const projectFile = join(projectPath, 'project.godot');
-    let content = readFileSync(projectFile, 'utf8');
-
-    const autoloadEntry = 'McpBridge="*res://mcp_bridge.gd"';
-
-    if (content.includes(autoloadEntry)) {
-      logDebug('Bridge autoload already present, skipping injection');
-      if (!existsSync(destScript)) {
-        copyFileSync(this.bridgeScriptPath, destScript);
-        logDebug('Re-copied missing bridge script');
-      }
-      this.injectedProjects.add(projectPath);
-      return;
-    }
-
-    const autoloadSectionRegex = /^\[autoload\]\s*$/m;
-    if (autoloadSectionRegex.test(content)) {
-      content = content.replace(autoloadSectionRegex, `[autoload]\n${autoloadEntry}`);
-    } else {
-      content = content.trimEnd() + `\n\n[autoload]\n${autoloadEntry}\n`;
-    }
-
-    writeFileSync(projectFile, content, 'utf8');
-    logDebug('Injected bridge autoload into project.godot');
-    this.injectedProjects.add(projectPath);
-  }
-
-  cleanupBridgeAutoload(projectPath: string): void {
-    this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
-    this.injectedProjects.delete(projectPath);
-  }
-
-  private repairOrphanedBridge(projectPath: string): void {
-    const projectFile = join(projectPath, 'project.godot');
-    const bridgeScript = join(projectPath, 'mcp_bridge.gd');
-    if (!existsSync(projectFile)) return;
-    if (existsSync(bridgeScript)) return;
-    try {
-      const content = readFileSync(projectFile, 'utf8');
-      if (content.includes('McpBridge=')) {
-        this.removeAutoloadEntry(projectPath, 'McpBridge', 'mcp_bridge.gd');
-        logDebug('Cleaned up orphaned McpBridge autoload entry');
-      }
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
-    }
-  }
-
   sendCommand(
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      const socket = createSocket('udp4');
-      let settled = false;
+      if (this.inFlight) {
+        reject(
+          new Error(
+            `Command '${command}' rejected: another command ('${this.inFlight.command}') is in flight`,
+          ),
+        );
+        return;
+      }
+
+      const settle = (err: Error | null, value?: string): void => {
+        if (!this.inFlight) return;
+        const flight = this.inFlight;
+        this.inFlight = null;
+        clearTimeout(flight.timer);
+        if (err) {
+          flight.reject(err);
+        } else {
+          flight.resolve(value ?? '');
+        }
+      };
 
       const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          socket.close();
-          reject(
-            new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
-          );
+        // Destroy the socket on timeout. The bridge serializes commands
+        // (peer.handling gate), so a slow command's late response would
+        // otherwise correlate against the next command we send. The next
+        // sendCommand lazy-reconnects.
+        if (this.socket) {
+          const sock = this.socket;
+          this.socket = null;
+          sock.removeAllListeners();
+          sock.destroy();
         }
+        this.rxBuffer = Buffer.alloc(0);
+        settle(
+          new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
+        );
       }, timeoutMs);
 
-      socket.on('message', (msg) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          socket.close();
-          resolve(msg.toString('utf8'));
-        }
-      });
+      this.inFlight = { command, resolve, reject, timer };
 
-      socket.on('error', (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          socket.close();
-          reject(new Error(`UDP error for command '${command}': ${err.message}`));
+      const ensureSocket = (cb: (err?: Error) => void): void => {
+        if (this.socket) {
+          cb();
+          return;
         }
-      });
+        const port = getBridgePort();
+        const sock = net.connect(port, '127.0.0.1');
+        const onConnect = (): void => {
+          sock.setNoDelay(true);
+          sock.removeListener('error', onConnectError);
+          this.socket = sock;
+          this.rxBuffer = Buffer.alloc(0);
 
-      const payload = JSON.stringify({ command, ...params });
-      const message = Buffer.from(payload);
-      socket.send(message, 9900, '127.0.0.1', (err) => {
-        if (err && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          socket.close();
-          reject(new Error(`Failed to send command '${command}': ${err.message}`));
+          sock.on('data', (chunk: Buffer) => {
+            this.rxBuffer = Buffer.concat([this.rxBuffer, chunk]);
+            try {
+              const { frames, remainder } = parseFrames(this.rxBuffer);
+              this.rxBuffer = remainder;
+              for (const frame of frames) {
+                settle(null, frame.toString('utf8'));
+              }
+            } catch (parseErr) {
+              const message = parseErr instanceof Error ? parseErr.message : String(parseErr);
+              this.socket = null;
+              sock.destroy();
+              settle(new BridgeDisconnectedError(`Bridge framing error: ${message}`));
+            }
+          });
+
+          const onClose = (): void => {
+            this.socket = null;
+            settle(
+              new BridgeDisconnectedError(
+                `Bridge connection closed before '${command}' response was received`,
+              ),
+            );
+          };
+          sock.once('close', onClose);
+          sock.on('error', (sockErr: Error) => {
+            this.socket = null;
+            settle(
+              new BridgeDisconnectedError(
+                `Bridge socket error during '${command}': ${sockErr.message}`,
+              ),
+            );
+          });
+
+          cb();
+        };
+        const onConnectError = (connErr: Error): void => {
+          sock.destroy();
+          cb(connErr);
+        };
+        sock.once('connect', onConnect);
+        sock.once('error', onConnectError);
+      };
+
+      ensureSocket((err) => {
+        if (err) {
+          settle(
+            new BridgeDisconnectedError(
+              `Failed to connect to bridge for '${command}': ${err.message}`,
+            ),
+          );
+          return;
+        }
+        if (!this.socket) {
+          settle(new BridgeDisconnectedError(`Bridge socket unavailable for '${command}'`));
+          return;
+        }
+        try {
+          const payload = JSON.stringify({ command, ...params });
+          this.socket.write(encodeFrame(payload));
+        } catch (writeErr) {
+          const message = writeErr instanceof Error ? writeErr.message : String(writeErr);
+          settle(new Error(`Failed to send command '${command}': ${message}`));
         }
       });
     });
+  }
+
+  /**
+   * Tear down the bridge socket. Idempotent. Any in-flight command is
+   * rejected with a session-ended error.
+   */
+  closeConnection(): void {
+    if (this.inFlight) {
+      const flight = this.inFlight;
+      this.inFlight = null;
+      clearTimeout(flight.timer);
+      flight.reject(new BridgeDisconnectedError('Bridge session ended'));
+    }
+    if (this.socket) {
+      const sock = this.socket;
+      this.socket = null;
+      sock.removeAllListeners();
+      sock.destroy();
+    }
+    this.rxBuffer = Buffer.alloc(0);
   }
 
   getErrorCount(): number {
@@ -1000,11 +1036,9 @@ export class GodotRunner {
     return window.filter((line) => line.trim() !== '');
   }
 
-  private static readonly SCRIPT_ERROR_PATTERNS = [
-    'SCRIPT ERROR:',
-    'USER SCRIPT ERROR:',
-    'GDScript error',
-  ];
+  // Only the explicit `SCRIPT ERROR:` / `USER SCRIPT ERROR:` markers belong here — the looser
+  // `GDScript error` substring also matches user printerr output and produces false positives.
+  private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
 
   extractRuntimeErrors(lines: string[]): string[] {
     return lines.filter((line) => GodotRunner.SCRIPT_ERROR_PATTERNS.some((p) => line.includes(p)));

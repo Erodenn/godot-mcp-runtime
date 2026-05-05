@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// Integration tests share scarce resources (UDP port 9900, the godot binary,
+// Integration tests share scarce resources (TCP port 9900, the godot binary,
 // tmp directories that auto-clean per describe). Run them sequentially while
 // keeping unit tests parallel.
 export default defineConfig({

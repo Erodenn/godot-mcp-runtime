@@ -13,7 +13,12 @@
 
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
-import type { GodotRunner, OperationParams } from './utils/godot-runner.js';
+import type {
+  GodotRunner,
+  OperationParams,
+  ToolHandler,
+  ToolResponse,
+} from './utils/godot-runner.js';
 
 import {
   handleLaunchEditor,
@@ -22,16 +27,22 @@ import {
   handleDetachProject,
   handleGetDebugOutput,
   handleStopProject,
-  handleListProjects,
-  handleGetProjectInfo,
   handleTakeScreenshot,
   handleSimulateInput,
   handleGetUiElements,
   handleRunScript,
+} from './tools/runtime-tools.js';
+
+import {
   handleListAutoloads,
   handleAddAutoload,
   handleRemoveAutoload,
   handleUpdateAutoload,
+} from './tools/autoload-tools.js';
+
+import {
+  handleListProjects,
+  handleGetProjectInfo,
   handleGetProjectFiles,
   handleSearchProject,
   handleGetSceneDependencies,
@@ -45,15 +56,12 @@ import {
   handleSaveScene,
   handleExportMeshLibrary,
   handleBatchSceneOperations,
-  handleManageUids,
 } from './tools/scene-tools.js';
 
 import {
-  handleDeleteNode,
-  handleSetNodeProperty,
-  handleBatchSetNodeProperties,
+  handleDeleteNodes,
+  handleSetNodeProperties,
   handleGetNodeProperties,
-  handleBatchGetNodeProperties,
   handleAttachScript,
   handleGetSceneTree,
   handleDuplicateNode,
@@ -63,16 +71,6 @@ import {
 } from './tools/node-tools.js';
 
 import { handleValidate } from './tools/validate-tools.js';
-
-export interface ToolResponse {
-  content: Array<{ type: string; text?: string; [k: string]: unknown }>;
-  isError?: boolean;
-  [k: string]: unknown;
-}
-export type ToolHandler = (
-  runner: GodotRunner,
-  args: OperationParams,
-) => Promise<ToolResponse> | ToolResponse;
 
 export const toolDispatch: Record<string, ToolHandler> = {
   // Project tools
@@ -104,14 +102,11 @@ export const toolDispatch: Record<string, ToolHandler> = {
   save_scene: (runner, args) => handleSaveScene(runner, args),
   export_mesh_library: (runner, args) => handleExportMeshLibrary(runner, args),
   batch_scene_operations: (runner, args) => handleBatchSceneOperations(runner, args),
-  manage_uids: (runner, args) => handleManageUids(runner, args),
 
   // Node tools
-  delete_node: (runner, args) => handleDeleteNode(runner, args),
-  set_node_property: (runner, args) => handleSetNodeProperty(runner, args),
-  batch_set_node_properties: (runner, args) => handleBatchSetNodeProperties(runner, args),
+  delete_nodes: (runner, args) => handleDeleteNodes(runner, args),
+  set_node_properties: (runner, args) => handleSetNodeProperties(runner, args),
   get_node_properties: (runner, args) => handleGetNodeProperties(runner, args),
-  batch_get_node_properties: (runner, args) => handleBatchGetNodeProperties(runner, args),
   attach_script: (runner, args) => handleAttachScript(runner, args),
   get_scene_tree: (runner, args) => handleGetSceneTree(runner, args),
   duplicate_node: (runner, args) => handleDuplicateNode(runner, args),

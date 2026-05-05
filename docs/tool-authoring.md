@@ -31,11 +31,13 @@ Examples are useful but **contracts**: an example with two array items will prod
 
 Every tool definition includes an `annotations` object. Pick from:
 
-| Annotation        | When to set `true`                                                                                                        |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `readOnlyHint`    | Tool only reads state, never mutates files, project, or running process.                                                  |
-| `destructiveHint` | Tool removes or replaces something hard to recover.                                                                       |
-| `idempotentHint`  | Calling N times with the same args produces the same result as calling once. Setters with absolute values, not appenders. |
+| Annotation        | When to set                                                                                                                                               |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readOnlyHint`    | `true` when the tool only reads state, never mutates files, project, or running process.                                                                  |
+| `destructiveHint` | `true` when the tool removes or replaces something hard to recover.                                                                                       |
+| `idempotentHint`  | `true` when calling N times with the same args produces the same result as calling once. Setters with absolute values, not appenders.                     |
+| `openWorldHint`   | `true` when the tool reaches outside this server's domain (network, foreign filesystem, external service). Most tools here stay in-project — leave unset. |
+| `title`           | Optional human-readable display name. Set when the tool name is awkward to read in client UIs; otherwise omit and the client falls back to the tool name. |
 
 Defaults: omit annotations only if none apply. `readOnlyHint` and `destructiveHint` should be mutually exclusive.
 
@@ -60,7 +62,11 @@ If `outputSchema` is impractical (highly variable shape), document the return in
 
 The `batch_` prefix is **not** a naming convention — it's the symptom of a missed consolidation (see §5). If you're tempted to add `batch_foo`, reconsider whether `foos` should take an array.
 
-Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `godot-runner.ts` bridge them.
+Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/godot-runner.ts` bridge them.
+
+### Implementation helpers
+
+Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/handler-helpers.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
 
 ---
 

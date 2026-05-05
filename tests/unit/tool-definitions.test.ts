@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { runtimeToolDefinitions } from '../../src/tools/runtime-tools.js';
+import { autoloadToolDefinitions } from '../../src/tools/autoload-tools.js';
 import { projectToolDefinitions } from '../../src/tools/project-tools.js';
 import { sceneToolDefinitions } from '../../src/tools/scene-tools.js';
 import { nodeToolDefinitions } from '../../src/tools/node-tools.js';
@@ -6,6 +8,8 @@ import { validateToolDefinitions } from '../../src/tools/validate-tools.js';
 import type { ToolDefinition } from '../../src/utils/godot-runner.js';
 
 const allDefinitions: ToolDefinition[] = [
+  ...runtimeToolDefinitions,
+  ...autoloadToolDefinitions,
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
   ...nodeToolDefinitions,
@@ -65,7 +69,7 @@ describe('tool definitions — per-tool shape contract', () => {
 });
 
 describe('tool definitions — no duplicate names', () => {
-  it('all tool names are unique across all four definition arrays', () => {
+  it('all tool names are unique across all definition arrays', () => {
     const names = allDefinitions.map((t) => t.name);
     const unique = new Set(names);
     expect(unique.size).toBe(names.length);

@@ -10,7 +10,7 @@
  * They are skipped in CI where Godot is not installed.
  */
 
-import { describe, beforeAll } from 'vitest';
+import { describe, beforeAll, expect } from 'vitest';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { GodotRunner, extractJson } from '../../src/utils/godot-runner.js';

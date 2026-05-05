@@ -5,6 +5,7 @@ import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godo
 import {
   normalizeParameters,
   validatePath,
+  validateProjectArgs,
   createErrorResponse,
   extractGdError,
 } from '../utils/godot-runner.js';
@@ -153,22 +154,8 @@ function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> 
 export async function handleValidate(runner: GodotRunner, args: OperationParams) {
   args = normalizeParameters(args);
 
-  if (!args.projectPath) {
-    return createErrorResponse('projectPath is required', [
-      'Provide the path to a Godot project directory',
-    ]);
-  }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid projectPath', ['Provide a valid path without ".."']);
-  }
-
-  const projectFile = join(args.projectPath as string, 'project.godot');
-  if (!existsSync(projectFile)) {
-    return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-      'Ensure the path points to a directory containing a project.godot file',
-    ]);
-  }
+  const pv = validateProjectArgs(args);
+  if ('isError' in pv) return pv;
 
   // Batch mode: targets array
   if (args.targets && Array.isArray(args.targets)) {
@@ -185,7 +172,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       for (let i = 0; i < targets.length; i++) {
         const t = targets[i];
         if (t.source) {
-          const mcpDir = join(args.projectPath as string, '.mcp');
+          const mcpDir = join(pv.projectPath, '.mcp');
           if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true });
           const tempName = `validate_batch_${randomUUID()}.gd`;
           const tempPath = join(mcpDir, tempName);
@@ -204,7 +191,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       const { stdout, stderr } = await runner.executeOperation(
         'validate_batch',
         { targets: snakeTargets },
-        args.projectPath as string,
+        pv.projectPath,
       );
 
       if (!stdout.trim()) {
@@ -276,11 +263,11 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
   try {
     if (args.source) {
       // Write inline source to a temp file inside .mcp/
-      const mcpDir = join(args.projectPath as string, '.mcp');
+      const mcpDir = join(pv.projectPath, '.mcp');
       if (!existsSync(mcpDir)) {
         mkdirSync(mcpDir, { recursive: true });
       }
-      const tempFileName = `validate_temp_${Date.now()}.gd`;
+      const tempFileName = `validate_temp_${randomUUID()}.gd`;
       const tempFilePath = join(mcpDir, tempFileName);
       writeFileSync(tempFilePath, args.source as string, 'utf8');
       resolvedScriptPath = `.mcp/${tempFileName}`;
@@ -289,7 +276,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       if (!validatePath(args.scriptPath as string)) {
         return createErrorResponse('Invalid scriptPath', ['Provide a valid path without ".."']);
       }
-      const fullPath = join(args.projectPath as string, args.scriptPath as string);
+      const fullPath = join(pv.projectPath, args.scriptPath as string);
       if (!existsSync(fullPath)) {
         return createErrorResponse(`Script file does not exist: ${args.scriptPath}`, [
           'Ensure the path is correct relative to the project directory',
@@ -300,7 +287,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       if (!validatePath(args.scenePath as string)) {
         return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
       }
-      const fullPath = join(args.projectPath as string, args.scenePath as string);
+      const fullPath = join(pv.projectPath, args.scenePath as string);
       if (!existsSync(fullPath)) {
         return createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
           'Ensure the path is correct relative to the project directory',
@@ -316,7 +303,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     const { stdout, stderr } = await runner.executeOperation(
       'validate_resource',
       params,
-      args.projectPath as string,
+      pv.projectPath,
     );
 
     // Parse stdout for the base valid/invalid signal from GDScript
@@ -339,8 +326,12 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     // Merge errors: prefer detailed stderr errors when available, otherwise keep gdErrors
     const allErrors: ValidationError[] = stderrErrors.length > 0 ? stderrErrors : gdErrors;
 
+    // The GDScript-side `valid` flag is unreliable for malformed scripts: load()
+    // returns a non-null placeholder Resource even when parsing fails, so
+    // resource != null is true. Fall back to the parsed stderr errors as the
+    // authoritative signal — matches the batch branch above.
     const result = {
-      valid,
+      valid: valid && allErrors.length === 0,
       errors: allErrors,
     };
 
@@ -353,7 +344,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     ]);
   } finally {
     if (tempFile && resolvedScriptPath) {
-      const tempFilePath = join(args.projectPath as string, resolvedScriptPath);
+      const tempFilePath = join(pv.projectPath, resolvedScriptPath);
       try {
         unlinkSync(tempFilePath);
       } catch {

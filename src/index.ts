@@ -7,6 +7,7 @@
  * capture debug output, manipulate scenes and nodes, and more.
  */
 
+// Lower-level `Server` is deliberate; see CONTRIBUTING.md "MCP SDK: Server vs McpServer".
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -15,12 +16,16 @@ import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 
 import { dispatchToolCall } from './dispatch.js';
+import { runtimeToolDefinitions } from './tools/runtime-tools.js';
+import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
 import { sceneToolDefinitions } from './tools/scene-tools.js';
 import { nodeToolDefinitions } from './tools/node-tools.js';
 import { validateToolDefinitions } from './tools/validate-tools.js';
 
 export const allToolDefinitions = [
+  ...runtimeToolDefinitions,
+  ...autoloadToolDefinitions,
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
   ...nodeToolDefinitions,
@@ -32,14 +37,13 @@ export const serverInstructions = `Godot MCP Server — AI-driven Godot 4.x proj
 Tool categories:
 - Project management: launch_editor, run_project, attach_project, detach_project, stop_project, get_debug_output, list_projects, get_project_info
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
-- Node editing (headless): delete_node, set_node_property, batch_set_node_properties, get_node_properties, batch_get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
+- Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
 - Runtime (requires run_project or attach_project): take_screenshot, simulate_input, get_ui_elements, run_script
 - Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings
 - Validation: validate
-- UIDs (Godot 4.4+): manage_uids
 
 Key behaviors:
-- All mutation operations (add_node, set_node_property, delete_node, etc.) save the scene automatically. Only use save_scene for save-as (newPath) or re-canonicalization.
+- All mutation operations (add_node, set_node_properties, delete_nodes, etc.) save the scene automatically. Only use save_scene for save-as (newPath) or re-canonicalization.
 - Headless Godot initializes ALL registered autoloads. If any autoload is broken, headless operations will fail. Use list_autoloads / remove_autoload to diagnose.
 - run_project verifies bridge readiness before returning success. If it reports degraded status, retry runtime tools after a moment or check get_debug_output.
 - attach_project is the fallback path for a manually launched Godot process. It injects the bridge and marks the project active, but it does not spawn Godot or capture stdout/stderr.
@@ -57,7 +61,7 @@ class GodotMcpServer {
     this.server = new Server(
       {
         name: 'godot-mcp',
-        version: '2.3.0',
+        version: '3.0.0',
       },
       {
         capabilities: {
@@ -84,7 +88,7 @@ class GodotMcpServer {
 
   private async cleanup() {
     console.error('[SERVER] Cleaning up resources');
-    this.runner.stopProject();
+    await this.runner.stopProject();
     await this.server.close();
   }
 

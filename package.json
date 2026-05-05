@@ -1,6 +1,6 @@
 {
   "name": "godot-mcp-runtime",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "description": "A lightweight, zero-footprint TypeScript MCP server that lets AI assistants interact with the Godot 4.x game engine: not just editing files, but playing the game.",
   "main": "dist/index.js",
   "type": "module",
@@ -43,7 +43,7 @@
   "bugs": {
     "url": "https://github.com/Erodenn/godot-mcp-runtime/issues"
   },
-  "mcpName": "io.github.erodenn/godot-mcp-runtime",
+  "mcpName": "io.github.Erodenn/godot-mcp-runtime",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2"
   },

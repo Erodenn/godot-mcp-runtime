@@ -8,8 +8,8 @@
  *
  * Build a FakeRunner with `createFakeRunner({ stdout, stderr })` for the
  * happy path, or `createFakeRunner({ throws: new Error(...) })` to exercise
- * the catch branch. Pass `godotVersion` to satisfy version-gated handlers
- * (e.g. handleManageUids).
+ * the catch branch. Pass `godotVersion` to control what `getVersion()`
+ * returns for handlers that read it (e.g. handleGetProjectInfo).
  *
  * `runner.calls` is a spy surface — use it sparingly. The default rubric is
  * "assert outputs, not internal calls." Reach for `calls` only to confirm a
@@ -41,7 +41,7 @@ export interface FakeRunnerOptions {
   responses?: Array<Partial<Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'>>>;
   /**
    * Godot version string returned by getVersion() (e.g. "4.4.1.stable").
-   * isGodot44OrLater() is derived from it. Default: "4.3.stable".
+   * Default: "4.3.stable".
    */
   godotVersion?: string;
 }
@@ -63,11 +63,6 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const responses = options.responses ?? [];
   const godotVersion = options.godotVersion ?? '4.3.stable';
 
-  function parseMajorMinor(version: string): [number, number] {
-    const [major = '0', minor = '0'] = version.split('.');
-    return [Number(major) || 0, Number(minor) || 0];
-  }
-
   const fake = {
     calls,
     async executeOperation(
@@ -85,10 +80,6 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     },
     async getVersion(): Promise<string> {
       return godotVersion;
-    },
-    isGodot44OrLater(version: string = godotVersion): boolean {
-      const [major, minor] = parseMajorMinor(version);
-      return major > 4 || (major === 4 && minor >= 4);
     },
   };
 

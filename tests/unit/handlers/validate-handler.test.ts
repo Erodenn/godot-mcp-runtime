@@ -85,15 +85,6 @@ describe('handleValidate', () => {
     expect(hasError(result)).toBe(true);
   });
 
-  it('returns isError when runner throws (source mode)', async () => {
-    const fake = createFakeRunner({ throws: new Error('boom') });
-    const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
-      source: 'extends Node',
-    });
-    expect(hasError(result)).toBe(true);
-  });
-
   it('includes the thrown message in the error response', async () => {
     const fake = createFakeRunner({ throws: new Error('disk full') });
     const result = await handleValidate(fake.asRunner, {
@@ -121,6 +112,29 @@ describe('handleValidate', () => {
       source: 'extends Node',
     });
     expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.valid).toBe(false);
+  });
+
+  it('returns valid:false when stdout reports valid:true but stderr contains parse errors', async () => {
+    // Regression: GDScript-side _validate_single returns valid: resource != null,
+    // but load() returns a non-null placeholder for malformed scripts. The
+    // handler must override `valid` to false whenever stderr produced any
+    // parse-error entries.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stderr:
+        'SCRIPT ERROR: Parse Error: Unexpected token: Identifier:foo\n   at: res://.mcp/validate_temp_x.gd:3',
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      source: 'func bad( :',
+    });
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.valid).toBe(false);
+    expect(parsed.errors.length).toBeGreaterThan(0);
+    expect(parsed.errors[0].message).toContain('Unexpected token');
   });
 });
 

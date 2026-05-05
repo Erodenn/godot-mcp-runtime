@@ -1,19 +1,48 @@
 extends Node
 
-var udp_server: UDPServer
-var port: int = 9900
-var _is_processing_input: bool = false
+# KEEP IN SYNC: src/utils/bridge-protocol.ts implements the same framing on the
+# Node side. Any change here MUST be mirrored there (and vice versa).
+#
+# Wire format: 4-byte big-endian length prefix + UTF-8 JSON payload.
+# Max frame size 16 MiB; oversize frames close the offending peer.
+
+const DEFAULT_BRIDGE_PORT := 9900
+const MAX_FRAME_BYTES := 16 * 1024 * 1024
+const FRAME_HEADER_BYTES := 4
+
+class PeerState:
+	extends RefCounted
+	var stream: StreamPeerTCP
+	var buffer: PackedByteArray = PackedByteArray()
+	var expected_len: int = -1   # -1 = waiting on header
+	var handling: bool = false   # true while a command is awaiting a response
+
+var tcp_server: TCPServer
+var port: int = DEFAULT_BRIDGE_PORT
 var session_token: String = ""
+var _peers: Array = []   # Array[PeerState]
+
+func _resolve_port() -> int:
+	var raw := OS.get_environment("MCP_BRIDGE_PORT")
+	if raw == "":
+		return DEFAULT_BRIDGE_PORT
+	if not raw.is_valid_int():
+		return DEFAULT_BRIDGE_PORT
+	var parsed := int(raw)
+	if parsed <= 0 or parsed > 65535:
+		return DEFAULT_BRIDGE_PORT
+	return parsed
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
-	udp_server = UDPServer.new()
-	var err = udp_server.listen(port, "127.0.0.1")
+	port = _resolve_port()
+	tcp_server = TCPServer.new()
+	var err = tcp_server.listen(port, "127.0.0.1")
 	if err != OK:
 		push_error("McpBridge: Failed to listen on port %d (error %d)" % [port, err])
 	else:
-		print("McpBridge: Listening on UDP port %d" % port)
+		print("McpBridge: Listening on TCP port %d" % port)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
@@ -23,25 +52,87 @@ func _ready() -> void:
 		print("McpBridge: Background mode active - window hidden, physical input blocked")
 
 func _process(_delta: float) -> void:
-	udp_server.poll()
-	if udp_server.is_connection_available():
-		var peer: PacketPeerUDP = udp_server.take_connection()
-		var packet := peer.get_packet()
-		var data := packet.get_string_from_utf8().strip_edges()
+	if tcp_server == null or not tcp_server.is_listening():
+		return
 
-		if data.begins_with("{"):
-			_handle_json_command(peer, data)
-		else:
-			# Legacy plain-text commands
-			match data:
-				"screenshot":
-					_handle_screenshot(peer)
-				"ping":
-					peer.put_packet("pong".to_utf8_buffer())
-				_:
-					_send_response(peer, {"error": "Unknown command: %s" % data})
+	while tcp_server.is_connection_available():
+		var stream := tcp_server.take_connection()
+		if stream == null:
+			break
+		stream.set_no_delay(true)
+		var peer := PeerState.new()
+		peer.stream = stream
+		_peers.append(peer)
 
-func _handle_json_command(peer: PacketPeerUDP, data: String) -> void:
+	var dead: Array = []
+	for peer in _peers:
+		_poll_peer(peer)
+		if peer.stream == null or peer.stream.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+			dead.append(peer)
+
+	if not dead.is_empty():
+		for peer in dead:
+			_peers.erase(peer)
+
+func _poll_peer(peer: PeerState) -> void:
+	peer.stream.poll()
+	var status := peer.stream.get_status()
+	if status != StreamPeerTCP.STATUS_CONNECTED:
+		return
+
+	var available := peer.stream.get_available_bytes()
+	if available > 0:
+		var chunk: Array = peer.stream.get_partial_data(available)
+		# get_partial_data returns [error, PackedByteArray]
+		if chunk[0] == OK:
+			peer.buffer.append_array(chunk[1])
+
+	while true:
+		if peer.expected_len < 0:
+			if peer.buffer.size() < FRAME_HEADER_BYTES:
+				return
+			# Read u32 BE header.
+			var header := peer.buffer.slice(0, FRAME_HEADER_BYTES)
+			var b0 := int(header[0])
+			var b1 := int(header[1])
+			var b2 := int(header[2])
+			var b3 := int(header[3])
+			peer.expected_len = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+			peer.buffer = peer.buffer.slice(FRAME_HEADER_BYTES)
+			if peer.expected_len > MAX_FRAME_BYTES:
+				push_error("McpBridge: Frame header exceeds limit (%d), closing peer" % peer.expected_len)
+				peer.stream.disconnect_from_host()
+				peer.stream = null
+				return
+
+		if peer.handling:
+			return
+		if peer.buffer.size() < peer.expected_len:
+			return
+
+		var frame_bytes := peer.buffer.slice(0, peer.expected_len)
+		peer.buffer = peer.buffer.slice(peer.expected_len)
+		peer.expected_len = -1
+
+		var data := frame_bytes.get_string_from_utf8().strip_edges()
+		peer.handling = true
+		_dispatch_command(peer, data)
+		# _dispatch_command awaits internally on async branches (input, run_script,
+		# screenshot, shutdown), so control returns here at the first inner await.
+		# `peer.handling` is the gate that blocks re-entry; it is cleared by
+		# `_send_response` once the handler completes.
+
+# INVARIANT: every code path through this function and its handlers must
+# eventually reach `_send_response`. `peer.handling` is set to true by the
+# caller (`_poll_peer`) before dispatch and cleared inside `_send_response`.
+# A handler that exits without calling `_send_response` will deadlock the
+# peer — the next frame will never be polled. When adding a new branch,
+# ensure the early-exit calls `_send_response` with an error payload.
+func _dispatch_command(peer: PeerState, data: String) -> void:
+	if not data.begins_with("{"):
+		_send_response(peer, {"error": "Non-JSON frame (expected a JSON command object)"})
+		return
+
 	var json = JSON.new()
 	var err = json.parse(data)
 	if err != OK:
@@ -63,16 +154,15 @@ func _handle_json_command(peer: PacketPeerUDP, data: String) -> void:
 			if actions.is_empty():
 				_send_response(peer, {"error": "actions array is empty"})
 				return
-			if _is_processing_input:
-				_send_response(peer, {"error": "Input sequence already in progress"})
-				return
-			_handle_input(peer, actions)
+			await _handle_input(peer, actions)
 		"get_ui_elements":
 			_handle_get_ui_elements(peer, payload)
 		"run_script":
-			_handle_run_script(peer, payload)
+			await _handle_run_script(peer, payload)
 		"screenshot":
-			_handle_screenshot(peer)
+			await _handle_screenshot(peer)
+		"shutdown":
+			await _handle_shutdown(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
 		_:
@@ -80,7 +170,7 @@ func _handle_json_command(peer: PacketPeerUDP, data: String) -> void:
 
 # --- Screenshot ---
 
-func _handle_screenshot(peer: PacketPeerUDP) -> void:
+func _handle_screenshot(peer: PeerState) -> void:
 	await RenderingServer.frame_post_draw
 
 	var viewport := get_viewport()
@@ -108,8 +198,7 @@ func _handle_screenshot(peer: PacketPeerUDP) -> void:
 
 # --- Input Simulation ---
 
-func _handle_input(peer: PacketPeerUDP, actions: Array) -> void:
-	_is_processing_input = true
+func _handle_input(peer: PeerState, actions: Array) -> void:
 	var processed := 0
 	var error_msg := ""
 
@@ -156,8 +245,6 @@ func _handle_input(peer: PacketPeerUDP, actions: Array) -> void:
 
 		processed += 1
 
-	_is_processing_input = false
-
 	# Allow queued input events to dispatch and any signal handlers
 	# (and their runtime errors) to fire before we reply, so the
 	# Node-side stderr scan in sendCommandWithErrors sees them.
@@ -180,11 +267,22 @@ func _inject_key(action: Dictionary) -> String:
 
 	var event = InputEventKey.new()
 	event.keycode = keycode
+	event.physical_keycode = keycode
 	event.pressed = action.get("pressed", true)
 	event.echo = false
 	event.shift_pressed = action.get("shift", false)
 	event.ctrl_pressed = action.get("ctrl", false)
 	event.alt_pressed = action.get("alt", false)
+	# Text-entry Controls (LineEdit, TextEdit) consume `event.unicode`, not just
+	# the keycode — without it, typing into a focused LineEdit produces nothing.
+	# Auto-derive for ASCII letters and digits; fall back to caller-supplied
+	# `unicode` for symbols and non-ASCII.
+	if action.has("unicode"):
+		event.unicode = int(action.unicode)
+	elif keycode >= KEY_A and keycode <= KEY_Z:
+		event.unicode = keycode if event.shift_pressed else (keycode + 32)
+	elif keycode >= KEY_0 and keycode <= KEY_9:
+		event.unicode = keycode
 	Input.parse_input_event(event)
 	return ""
 
@@ -296,7 +394,7 @@ func _inject_click_element(action: Dictionary) -> String:
 
 # --- UI Element Discovery ---
 
-func _handle_get_ui_elements(peer: PacketPeerUDP, payload: Dictionary) -> void:
+func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 	var visible_only: bool = payload.get("visible_only", true)
 	var type_filter: String = payload.get("type_filter", "")
 	var root := get_tree().root
@@ -374,7 +472,7 @@ func _find_control_by_identifier(identifier: String) -> Control:
 
 # --- Script Execution ---
 
-func _handle_run_script(peer: PacketPeerUDP, payload: Dictionary) -> void:
+func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	var source: String = payload.get("source", "")
 	if source.strip_edges() == "":
 		_send_response(peer, {"error": "No script source provided"})
@@ -461,13 +559,53 @@ func _serialize_value(value: Variant) -> Variant:
 		_:
 			return str(value)
 
+# --- Shutdown ---
+
+func _handle_shutdown(peer: PeerState) -> void:
+	_send_response(peer, {"status": "shutting_down"})
+	# Let the response flush before we tear the listener down. A new command
+	# arriving in this 2-frame window would dispatch against a peer that's
+	# about to close; the response write fails gracefully and the Node side
+	# sees BridgeDisconnectedError. MCP serializes calls so this is theoretical.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_close_all_peers()
+	if tcp_server != null:
+		tcp_server.stop()
+	# Detach from the tree so subsequent _process ticks don't run.
+	queue_free()
+
 # --- Utility ---
 
-func _send_response(peer: PacketPeerUDP, data: Dictionary) -> void:
+func _send_response(peer: PeerState, data: Dictionary) -> void:
 	var resp := JSON.stringify(data)
-	peer.put_packet(resp.to_utf8_buffer())
+	var body := resp.to_utf8_buffer()
+	if body.size() > MAX_FRAME_BYTES:
+		push_error("McpBridge: Response exceeds %d bytes; dropping" % MAX_FRAME_BYTES)
+		peer.handling = false
+		return
+	if peer.stream != null and peer.stream.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		var header := PackedByteArray()
+		header.resize(FRAME_HEADER_BYTES)
+		var size := body.size()
+		header[0] = (size >> 24) & 0xFF
+		header[1] = (size >> 16) & 0xFF
+		header[2] = (size >> 8) & 0xFF
+		header[3] = size & 0xFF
+		peer.stream.put_data(header)
+		peer.stream.put_data(body)
+	peer.handling = false
+
+func _close_all_peers() -> void:
+	for peer in _peers:
+		if peer.stream != null:
+			peer.stream.disconnect_from_host()
+			peer.stream = null
+	_peers.clear()
 
 func _exit_tree() -> void:
-	if udp_server != null:
-		udp_server.stop()
+	_close_all_peers()
+	if tcp_server != null:
+		tcp_server.stop()
+		tcp_server = null
 		print("McpBridge: Stopped")

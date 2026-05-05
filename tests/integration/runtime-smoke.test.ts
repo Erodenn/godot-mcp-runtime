@@ -14,7 +14,7 @@
  * Requires GODOT_PATH. Skipped in CI.
  */
 
-import { describe, beforeAll, afterEach } from 'vitest';
+import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { cpSync, rmSync } from 'fs';
@@ -49,7 +49,7 @@ describe('runtime bridge smoke', () => {
 
   afterEach(async () => {
     try {
-      runner.stopProject();
+      await runner.stopProject();
     } catch {
       // already stopped
     }
@@ -72,7 +72,7 @@ describe('runtime bridge smoke', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-smoke-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      // Start the project — waitForBridge polls until the UDP ping responds
+      // Start the project — waitForBridge polls until the TCP ping responds
       runner.runProject(tmpProject);
       const bridgeResult = await runner.waitForBridge(12000);
 
@@ -115,6 +115,74 @@ describe('runtime bridge smoke', () => {
         screenshotPath.startsWith(screenshotDir.replace(/\\/g, '/')) ||
           screenshotPath.startsWith(screenshotDir),
       ).toBe(true);
+    },
+    60000,
+  );
+
+  itGodot(
+    'simulate_input key actions populate event.unicode for ASCII letters (Bug #6)',
+    async (ctx) => {
+      const id = randomBytes(6).toString('hex');
+      tmpProject = join(tmpdir(), `godot-mcp-runtime-input-${id}`);
+      cpSync(fixtureProjectPath, tmpProject, { recursive: true });
+
+      runner.runProject(tmpProject);
+      const bridgeResult = await runner.waitForBridge(12000);
+
+      if (!bridgeResult.ready) {
+        if (isHeadlessEnvironmentError(bridgeResult.error)) {
+          ctx.skip(`display server unavailable (${bridgeResult.error})`);
+        }
+        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
+      }
+
+      // Inject a LineEdit, focus it via run_script
+      const setupScript = `
+extends RefCounted
+func execute(scene_tree: SceneTree) -> Variant:
+	var le = LineEdit.new()
+	le.name = "TestEntry"
+	scene_tree.root.add_child(le)
+	le.text = ""
+	le.grab_focus()
+	return {"focused": le.has_focus()}
+`;
+      const setupResp = JSON.parse(
+        await runner.sendCommand('run_script', { source: setupScript }, 10000),
+      ) as { result?: { focused?: boolean }; error?: string };
+      expect(setupResp.error).toBeUndefined();
+      expect(setupResp.result?.focused).toBe(true);
+
+      // Send "H" (shift+H gives uppercase) then "i" via simulate_input bridge
+      await runner.sendCommand(
+        'input',
+        {
+          actions: [
+            { type: 'key', key: 'H', shift: true, pressed: true },
+            { type: 'key', key: 'H', shift: true, pressed: false },
+            { type: 'wait', ms: 30 },
+            { type: 'key', key: 'I', pressed: true },
+            { type: 'key', key: 'I', pressed: false },
+            { type: 'wait', ms: 30 },
+          ],
+        },
+        10000,
+      );
+
+      const readScript = `
+extends RefCounted
+func execute(scene_tree: SceneTree) -> Variant:
+	var le = scene_tree.root.find_child("TestEntry", true, false)
+	return {"text": le.text if le else ""}
+`;
+      const readResp = JSON.parse(
+        await runner.sendCommand('run_script', { source: readScript }, 10000),
+      ) as { result?: { text?: string }; error?: string };
+      expect(readResp.error).toBeUndefined();
+      // Expect "Hi": shift+H → 'H' (uppercase via auto-derive), then 'I' alone
+      // would be lowercase 'i' (no shift). The fix maps KEY_A..KEY_Z + shift to
+      // KEY_A..KEY_Z (uppercase), no-shift to lowercase.
+      expect(readResp.result?.text).toBe('Hi');
     },
     60000,
   );
