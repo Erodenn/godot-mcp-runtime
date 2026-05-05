@@ -43,7 +43,7 @@
   "bugs": {
     "url": "https://github.com/Erodenn/godot-mcp-runtime/issues"
   },
-  "mcpName": "io.github.erodenn/godot-mcp-runtime",
+  "mcpName": "io.github.Erodenn/godot-mcp-runtime",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2"
   },

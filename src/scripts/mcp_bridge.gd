@@ -21,7 +21,6 @@ var tcp_server: TCPServer
 var port: int = DEFAULT_BRIDGE_PORT
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
-var _shutdown_requested: bool = false
 
 func _resolve_port() -> int:
 	var raw := OS.get_environment("MCP_BRIDGE_PORT")
@@ -100,7 +99,7 @@ func _poll_peer(peer: PeerState) -> void:
 			var b3 := int(header[3])
 			peer.expected_len = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 			peer.buffer = peer.buffer.slice(FRAME_HEADER_BYTES)
-			if peer.expected_len < 0 or peer.expected_len > MAX_FRAME_BYTES:
+			if peer.expected_len > MAX_FRAME_BYTES:
 				push_error("McpBridge: Frame header exceeds limit (%d), closing peer" % peer.expected_len)
 				peer.stream.disconnect_from_host()
 				peer.stream = null
@@ -118,9 +117,17 @@ func _poll_peer(peer: PeerState) -> void:
 		var data := frame_bytes.get_string_from_utf8().strip_edges()
 		peer.handling = true
 		_dispatch_command(peer, data)
-		# _dispatch_command awaits internally; control returns here only after
-		# _send_response has cleared peer.handling.
+		# _dispatch_command awaits internally on async branches (input, run_script,
+		# screenshot, shutdown), so control returns here at the first inner await.
+		# `peer.handling` is the gate that blocks re-entry; it is cleared by
+		# `_send_response` once the handler completes.
 
+# INVARIANT: every code path through this function and its handlers must
+# eventually reach `_send_response`. `peer.handling` is set to true by the
+# caller (`_poll_peer`) before dispatch and cleared inside `_send_response`.
+# A handler that exits without calling `_send_response` will deadlock the
+# peer — the next frame will never be polled. When adding a new branch,
+# ensure the early-exit calls `_send_response` with an error payload.
 func _dispatch_command(peer: PeerState, data: String) -> void:
 	if not data.begins_with("{"):
 		_send_response(peer, {"error": "Non-JSON frame (expected a JSON command object)"})
@@ -545,10 +552,12 @@ func _serialize_value(value: Variant) -> Variant:
 
 func _handle_shutdown(peer: PeerState) -> void:
 	_send_response(peer, {"status": "shutting_down"})
-	# Let the response flush before we tear the listener down.
+	# Let the response flush before we tear the listener down. A new command
+	# arriving in this 2-frame window would dispatch against a peer that's
+	# about to close; the response write fails gracefully and the Node side
+	# sees BridgeDisconnectedError. MCP serializes calls so this is theoretical.
 	await get_tree().process_frame
 	await get_tree().process_frame
-	_shutdown_requested = true
 	_close_all_peers()
 	if tcp_server != null:
 		tcp_server.stop()

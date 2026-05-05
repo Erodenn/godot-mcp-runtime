@@ -6,8 +6,8 @@ import {
   validatePath,
   validateProjectArgs,
   createErrorResponse,
-  logDebug,
 } from '../utils/godot-runner.js';
+import { logDebug } from '../utils/logger.js';
 
 // --- Tool definitions ---
 
@@ -52,7 +52,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_files',
     description:
-      'Return a recursive file tree of a Godot project as nested { name, type, path, extension?, children? } objects. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory.',
+      'Return a recursive file tree of a Godot project. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } file tree.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',

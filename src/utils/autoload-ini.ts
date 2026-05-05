@@ -28,8 +28,8 @@ export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
 
-export function parseAutoloads(projectFilePath: string): AutoloadEntry[] {
-  const content = readFileSync(projectFilePath, 'utf8');
+export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
+  const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
   const autoloads: AutoloadEntry[] = [];
   let inAutoloadSection = false;
 
@@ -41,6 +41,9 @@ export function parseAutoloads(projectFilePath: string): AutoloadEntry[] {
     }
     if (!inAutoloadSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#'))
       continue;
+    // The surrounding `"?` are intentional: Godot always writes quotes, but
+    // hand-edited project.godot files sometimes omit them. Tolerating both
+    // shapes means a missing quote pair doesn't silently drop the entry.
     const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
     if (match) {
       autoloads.push({ name: match[1], singleton: match[2] === '*', path: match[3] });
@@ -54,8 +57,9 @@ export function addAutoloadEntry(
   name: string,
   path: string,
   singleton: boolean,
+  existingContent?: string,
 ): void {
-  const content = readFileSync(projectFilePath, 'utf8');
+  const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
   const lines = content.split('\n');
   const entry = `${name}="${singleton ? '*' : ''}${normalizeAutoloadPath(path)}"`;
 
@@ -127,6 +131,9 @@ export function updateAutoloadEntry(
       return line;
     }
     if (inAutoloadSection) {
+      // The surrounding `"?` are intentional: Godot always writes quotes, but
+      // hand-edited project.godot files sometimes omit them. Tolerating both
+      // shapes means a missing quote pair doesn't silently drop the entry.
       const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
       if (match && match[1] === name) {
         const effectiveSingleton = singleton !== undefined ? singleton : match[2] === '*';

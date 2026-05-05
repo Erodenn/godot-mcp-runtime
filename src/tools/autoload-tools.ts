@@ -1,4 +1,5 @@
 import { join } from 'path';
+import { readFileSync } from 'fs';
 import type { OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
   normalizeParameters,
@@ -32,7 +33,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode — a broken script will crash every subsequent headless op; validate before adding. Errors if an autoload with the same name already exists; use update_autoload to modify.',
+      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode — a broken script will crash every subsequent headless op; validate before adding. Returns plain-text confirmation with the registered name, path, and singleton flag. Errors if an autoload with the same name already exists; use update_autoload to modify.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,7 +58,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
   {
     name: 'remove_autoload',
     description:
-      'Unregister an autoload from a project by name. Use to recover from a broken autoload that is crashing headless ops. No Godot process required. Errors if no autoload with that name exists.',
+      'Unregister an autoload from a project by name. Use to recover from a broken autoload that is crashing headless ops. No Godot process required. Returns plain-text confirmation on success. Errors if no autoload with that name exists.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -71,7 +72,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
   {
     name: 'update_autoload',
     description:
-      "Modify an existing autoload's path or singleton flag. Pass either or both — omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Errors if autoloadName is not registered.",
+      "Modify an existing autoload's path or singleton flag. Pass either or both — omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Returns plain-text confirmation on success. Errors if autoloadName is not registered.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -121,7 +122,8 @@ export async function handleAddAutoload(args: OperationParams) {
 
   try {
     const projectFile = join(v.projectPath, 'project.godot');
-    const existing = parseAutoloads(projectFile);
+    const projectFileContent = readFileSync(projectFile, 'utf8');
+    const existing = parseAutoloads(projectFile, projectFileContent);
     if (existing.some((a) => a.name === (args.autoloadName as string))) {
       return createErrorResponse(`Autoload '${args.autoloadName}' already exists`, [
         'Use update_autoload to modify it',
@@ -134,6 +136,7 @@ export async function handleAddAutoload(args: OperationParams) {
       args.autoloadName as string,
       args.autoloadPath as string,
       isSingleton,
+      projectFileContent,
     );
     return {
       content: [

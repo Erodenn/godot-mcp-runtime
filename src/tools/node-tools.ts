@@ -128,7 +128,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_scene_tree',
     description:
-      'Get the scene hierarchy as a nested tree of { name, type, path, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Errors if scene does not exist or parentPath is not found.',
+      'Get the scene hierarchy as a nested tree of { name, type, path, script, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Returns the nested tree as JSON text. Errors if scene does not exist or parentPath is not found.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -188,7 +188,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal from one node to a method on another node. Saves automatically. Errors if the signal does not exist on the source node or the method does not exist on the target node.',
+      'Connect a signal on a source node to a method on a target node, persisting the connection in the .tscn. Use after get_node_signals to confirm the signal name on the source and the method name on the target. Connecting the same signal+method pair twice creates a duplicate connection — call get_node_signals first if uncertain. Saves automatically. Returns a plain-text confirmation naming the source, signal, target, and method. Errors if the signal does not exist on the source node or the method does not exist on the target node.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -214,7 +214,8 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'disconnect_signal',
     description:
-      'Disconnect a signal connection between two nodes. Saves automatically. Errors if the connection does not exist — use get_node_signals first to verify.',
+      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -251,15 +252,9 @@ export async function handleDeleteNodes(runner: GodotRunner, args: OperationPara
   }
 
   const params = { scenePath: args.scenePath, nodePaths: args.nodePaths };
-  return executeSceneOp(
-    runner,
-    'delete_nodes',
-    params,
-    v.projectPath,
-    'Failed to delete nodes',
-    ['Check if the node paths are correct'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'delete_nodes', params, v.projectPath, 'Failed to delete nodes', [
+    'Check if the node paths are correct',
+  ]);
 }
 
 export async function handleSetNodeProperties(runner: GodotRunner, args: OperationParams) {
@@ -288,7 +283,6 @@ export async function handleSetNodeProperties(runner: GodotRunner, args: Operati
     v.projectPath,
     'Failed to set node properties',
     ['Check node paths and property names'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -314,7 +308,6 @@ export async function handleGetNodeProperties(runner: GodotRunner, args: Operati
     v.projectPath,
     'Failed to get node properties',
     ['Check node paths'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -345,15 +338,9 @@ export async function handleAttachScript(runner: GodotRunner, args: OperationPar
     nodePath: args.nodePath,
     scriptPath: args.scriptPath,
   };
-  return executeSceneOp(
-    runner,
-    'attach_script',
-    params,
-    v.projectPath,
-    'Failed to attach script',
-    ['Ensure the script is valid for this node type'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'attach_script', params, v.projectPath, 'Failed to attach script', [
+    'Ensure the script is valid for this node type',
+  ]);
 }
 
 export async function handleGetSceneTree(runner: GodotRunner, args: OperationParams) {
@@ -375,7 +362,6 @@ export async function handleGetSceneTree(runner: GodotRunner, args: OperationPar
     v.projectPath,
     'Failed to get scene tree',
     ['Ensure the scene is valid'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -403,7 +389,6 @@ export async function handleDuplicateNode(runner: GodotRunner, args: OperationPa
     v.projectPath,
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -426,7 +411,6 @@ export async function handleGetNodeSignals(runner: GodotRunner, args: OperationP
     v.projectPath,
     'Failed to get node signals',
     ['Check if the node path is correct'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -486,7 +470,6 @@ export async function handleConnectSignal(runner: GodotRunner, args: OperationPa
     v.projectPath,
     'Failed to connect signal',
     ['Ensure the signal exists on the source node and the method exists on the target node'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -509,6 +492,5 @@ export async function handleDisconnectSignal(runner: GodotRunner, args: Operatio
     v.projectPath,
     'Failed to disconnect signal',
     ['Ensure the signal connection exists before trying to disconnect it'],
-    ['Ensure Godot is installed correctly'],
   );
 }

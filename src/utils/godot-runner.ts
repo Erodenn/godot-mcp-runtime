@@ -7,6 +7,7 @@ import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeManager } from './bridge-manager.js';
 import { encodeFrame, getBridgePort, parseFrames } from './bridge-protocol.js';
+import { logDebug, logError } from './logger.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -24,7 +25,6 @@ export class BridgeDisconnectedError extends Error {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Debug mode from environment
 const DEBUG_MODE = process.env.DEBUG === 'true';
 
 // Bridge readiness polling
@@ -177,6 +177,17 @@ export interface ToolDefinition {
   annotations?: ToolAnnotations;
 }
 
+export interface ToolResponse {
+  content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+  isError?: boolean;
+  [k: string]: unknown;
+}
+
+export type ToolHandler = (
+  runner: GodotRunner,
+  args: OperationParams,
+) => Promise<ToolResponse> | ToolResponse;
+
 // Parameter mappings between snake_case and camelCase
 const parameterMappings: Record<string, string> = {
   project_path: 'projectPath',
@@ -198,16 +209,6 @@ const parameterMappings: Record<string, string> = {
 const reverseParameterMappings: Record<string, string> = {};
 for (const [snakeCase, camelCase] of Object.entries(parameterMappings)) {
   reverseParameterMappings[camelCase] = snakeCase;
-}
-
-export function logDebug(message: string): void {
-  if (DEBUG_MODE) {
-    console.error(`[DEBUG] ${message}`);
-  }
-}
-
-export function logError(message: string): void {
-  console.error(`[SERVER] ${message}`);
 }
 
 export function normalizeParameters(params: OperationParams): OperationParams {
@@ -661,6 +662,7 @@ export class GodotRunner {
 
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       logDebug('Killing existing Godot process before starting a new one');
+      this.closeConnection();
       this.activeProcess.process.kill();
       if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
         this.bridge.cleanup(this.activeProjectPath);
@@ -670,6 +672,7 @@ export class GodotRunner {
       this.activeProjectPath &&
       this.activeProjectPath !== projectPath
     ) {
+      this.closeConnection();
       this.bridge.cleanup(this.activeProjectPath);
     }
 
@@ -901,8 +904,17 @@ export class GodotRunner {
       };
 
       const timer = setTimeout(() => {
-        // Timeout rejects but leaves the socket open — a single slow command
-        // should not poison the session.
+        // Destroy the socket on timeout. The bridge serializes commands
+        // (peer.handling gate), so a slow command's late response would
+        // otherwise correlate against the next command we send. The next
+        // sendCommand lazy-reconnects.
+        if (this.socket) {
+          const sock = this.socket;
+          this.socket = null;
+          sock.removeAllListeners();
+          sock.destroy();
+        }
+        this.rxBuffer = Buffer.alloc(0);
         settle(
           new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
         );
@@ -1024,6 +1036,8 @@ export class GodotRunner {
     return window.filter((line) => line.trim() !== '');
   }
 
+  // Only the explicit `SCRIPT ERROR:` / `USER SCRIPT ERROR:` markers belong here — the looser
+  // `GDScript error` substring also matches user printerr output and produces false positives.
   private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
 
   extractRuntimeErrors(lines: string[]): string[] {

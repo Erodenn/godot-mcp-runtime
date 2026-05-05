@@ -5,9 +5,9 @@ import {
   normalizeParameters,
   validateProjectArgs,
   createErrorResponse,
-  logDebug,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from '../utils/godot-runner.js';
+import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
@@ -18,7 +18,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead — the editor cannot be controlled programmatically. Returns immediately after spawning. Errors if projectPath has no project.godot.',
+      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead — the editor cannot be controlled programmatically. Returns plain-text confirmation after spawning the editor process. Errors if projectPath has no project.godot.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -33,7 +33,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. This is the preferred entry to runtime tools — use whenever MCP can launch the game itself. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself (debugger attached, custom flags, IDE run), use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Errors if projectPath is not a Godot project or another run is already active.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. Preferred entry to runtime tools — required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Returns plain-text status confirming the bridge is ready. Errors if projectPath is not a Godot project or another run is already active.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -58,7 +59,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_project',
     description:
-      "Attach runtime MCP tools to a manually launched Godot process without spawning one. Use this only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond before returning. If you (the agent) are the one launching Godot separately, kick the launch off in parallel with this call so the wait absorbs Godot's startup — do not block on launch first. If a human is launching Godot, the call fails if they do not launch within 15s; bridge.inject is idempotent, so just retry. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured).",
+      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond. If you are launching Godot in parallel, kick the launch off concurrently with this call so the wait absorbs startup. bridge.inject is idempotent, so retrying after a missed window is safe. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured). Returns plain-text status confirming the bridge is ready in attached mode.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,8 +75,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. No-op if no attached session exists.',
-    annotations: { destructiveHint: true, idempotentHint: true },
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns { message, externalProcessPreserved }. Errors if called outside an attached session.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
@@ -100,8 +102,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. No-op if no session is active.',
-    annotations: { destructiveHint: true, idempotentHint: true },
+      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. Returns { message, mode, externalProcessPreserved, finalOutput, finalErrors }. Errors if no session is active.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
@@ -111,7 +113,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG screenshot of the running Godot viewport. Use after simulate_input or run_script to verify visual changes. Requires an active runtime session (run_project or attach_project). Returns the image inline as base64. Also saved to .mcp/screenshots/ in the project directory for later reference. Errors if no session is active or the bridge does not respond within timeout (default 10000ms).',
+      'Capture a PNG screenshot of the running Godot viewport. Use after simulate_input or run_script to verify visual changes. Requires an active runtime session (run_project or attach_project). Returns inline base64 PNG image content plus saved-path text; includes a warnings array if runtime errors are detected. Also saved to .mcp/screenshots/ for later reference. Errors if no session is active or the bridge does not respond within timeout (default 10000ms).',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -127,7 +129,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'simulate_input',
     description:
-      'Simulate batched sequential input in a running Godot project. Requires an active runtime session (run_project or attach_project). Use get_ui_elements first to discover element names and paths for click_element actions.\n\nEach action object requires a "type" field. Valid types and their specific fields:\n- key: keyboard event (key: string, pressed: bool, shift/ctrl/alt: bool)\n- mouse_button: click at coordinates (x, y: number, button: "left"|"right"|"middle", pressed: bool, double_click: bool)\n- mouse_motion: move cursor (x, y: number, relative_x, relative_y: number)\n- click_element: click a UI element by node path or node name (element: string, button, double_click)\n- action: fire a Godot input action (action: string, pressed: bool, strength: 0–1)\n- wait: pause between actions (ms: number)\n\nExamples:\n1. Press and release Space: [{type:"key",key:"Space",pressed:true},{type:"wait",ms:100},{type:"key",key:"Space",pressed:false}]\n2. Click a UI button (discover path with get_ui_elements first): [{type:"click_element",element:"StartButton"}]\n3. Left-click at viewport coordinates: [{type:"mouse_button",x:400,y:300,button:"left",pressed:true},{type:"mouse_button",x:400,y:300,button:"left",pressed:false}]\n4. Fire a Godot action: [{type:"action",action:"jump",pressed:true},{type:"wait",ms:200},{type:"action",action:"jump",pressed:false}]\n5. Type "hello": [{type:"key",key:"H",pressed:true},{type:"key",key:"H",pressed:false},{type:"key",key:"E",pressed:true},{type:"key",key:"E",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"L",pressed:true},{type:"key",key:"L",pressed:false},{type:"key",key:"O",pressed:true},{type:"key",key:"O",pressed:false}]\n\nReturns { success, actions_processed, warnings? }. Errors if no runtime session is active.',
+      'Simulate batched sequential input in a running Godot project. Each action specifies its type ("key", "mouse_button", "mouse_motion", "click_element", "action", or "wait") plus per-type fields documented in inputSchema. For click_element, call get_ui_elements first to discover element node names and paths — element resolution is path/name only, not visible text. Press/release pairs require two separate actions; insert "wait" actions between them when the game needs frame ticks. Requires an active runtime session (run_project or attach_project). Returns { success, actions_processed, warnings? }. Errors if no session is active or any action fails parameter validation.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -230,7 +233,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'run_script',
     description:
-      'Execute a custom GDScript in the live running project with full scene tree access. Requires run_project first. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings are supported). Use print() for debug output — it appears in get_debug_output, not in the script result. In spawned mode, runtime errors emitted to stderr are detected and either escalated (when the script returns null) or surfaced as warnings. In attached mode a null result includes a caveat since stderr is not captured.',
+      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output — it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns { success, result, warnings? } where result is the JSON-serialized return value of execute().',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {

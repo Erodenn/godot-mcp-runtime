@@ -154,6 +154,19 @@ describe('addAutoloadEntry', () => {
     expect(readProject(dir)).toContain('Plain="res://plain.gd"');
     expect(readProject(dir)).not.toContain('Plain="*');
   });
+
+  // The primitive itself is intentionally permissive about duplicates — handler
+  // code (handleAddAutoload) guards via parseAutoloads first. This test pins
+  // that contract so a future change to addAutoloadEntry that rejects duplicates
+  // breaks loudly and prompts the reviewer to update both layers in lockstep.
+  it('appends a duplicate entry when called twice with the same name', () => {
+    const dir = makeProject('config_version=5\n');
+    const file = join(dir, 'project.godot');
+    addAutoloadEntry(file, 'Dup', 'one.gd', true);
+    addAutoloadEntry(file, 'Dup', 'two.gd', true);
+    const entries = parseAutoloads(file).filter((e) => e.name === 'Dup');
+    expect(entries).toHaveLength(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

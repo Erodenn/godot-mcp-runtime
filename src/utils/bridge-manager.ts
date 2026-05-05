@@ -1,6 +1,6 @@
 import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
-import { logDebug } from './godot-runner.js';
+import { logDebug } from './logger.js';
 import { addAutoloadEntry, parseAutoloads, removeAutoloadEntry } from './autoload-ini.js';
 
 const BRIDGE_AUTOLOAD_NAME = 'McpBridge';
@@ -76,44 +76,36 @@ export class BridgeManager {
   }
 
   private removeBridgeArtifacts(projectPath: string): void {
-    this.removeAutoloadArtifact(projectPath, BRIDGE_AUTOLOAD_NAME, BRIDGE_SCRIPT_FILENAME);
-  }
-
-  private removeAutoloadArtifact(
-    projectPath: string,
-    entryName: string,
-    scriptFilename: string,
-  ): void {
     try {
       const projectFile = join(projectPath, 'project.godot');
       if (existsSync(projectFile)) {
-        const removed = removeAutoloadEntry(projectFile, entryName);
+        const removed = removeAutoloadEntry(projectFile, BRIDGE_AUTOLOAD_NAME);
         if (removed) {
-          logDebug(`Removed ${entryName} autoload from project.godot`);
+          logDebug(`Removed ${BRIDGE_AUTOLOAD_NAME} autoload from project.godot`);
         }
       }
     } catch (err) {
-      logDebug(`Non-fatal: Failed to clean ${entryName} from project.godot: ${err}`);
+      logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
     }
 
     try {
-      const scriptFile = join(projectPath, scriptFilename);
+      const scriptFile = join(projectPath, BRIDGE_SCRIPT_FILENAME);
       if (existsSync(scriptFile)) {
         unlinkSync(scriptFile);
-        logDebug(`Removed ${scriptFilename} from project`);
+        logDebug(`Removed ${BRIDGE_SCRIPT_FILENAME} from project`);
       }
     } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}: ${err}`);
+      logDebug(`Non-fatal: Failed to remove ${BRIDGE_SCRIPT_FILENAME}: ${err}`);
     }
 
     try {
-      const uidFile = join(projectPath, `${scriptFilename}.uid`);
+      const uidFile = join(projectPath, `${BRIDGE_SCRIPT_FILENAME}.uid`);
       if (existsSync(uidFile)) {
         unlinkSync(uidFile);
-        logDebug(`Removed ${scriptFilename}.uid from project`);
+        logDebug(`Removed ${BRIDGE_SCRIPT_FILENAME}.uid from project`);
       }
     } catch (err) {
-      logDebug(`Non-fatal: Failed to remove ${scriptFilename}.uid: ${err}`);
+      logDebug(`Non-fatal: Failed to remove ${BRIDGE_SCRIPT_FILENAME}.uid: ${err}`);
     }
   }
 

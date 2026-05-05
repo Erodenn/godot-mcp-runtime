@@ -129,7 +129,7 @@ src/
 ├── index.ts                # MCP server entry point, server setup
 ├── dispatch.ts             # Tool-name → handler dispatch table
 ├── tools/
-│   ├── project-tools.ts    # Project introspection (list_projects, get_project_info, files, search, settings)
+│   ├── project-tools.ts    # Project introspection (list_projects, get_project_info, files, search, settings, scene_dependencies)
 │   ├── runtime-tools.ts    # Runtime/lifecycle (run_project, attach_project, take_screenshot, etc.)
 │   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
@@ -142,7 +142,9 @@ src/
     ├── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
     ├── handler-helpers.ts  # executeSceneOp wrapper for headless-op handlers
     ├── bridge-manager.ts   # McpBridge artifact lifecycle (inject, cleanup, repair)
-    └── autoload-ini.ts     # project.godot [autoload] INI primitives
+    ├── bridge-protocol.ts  # TCP framing (length-prefixed frames, port resolution)
+    ├── autoload-ini.ts     # project.godot [autoload] INI primitives
+    └── logger.ts           # logDebug / logError helpers
 ```
 
 Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).

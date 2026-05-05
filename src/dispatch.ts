@@ -13,7 +13,12 @@
 
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
-import type { GodotRunner, OperationParams } from './utils/godot-runner.js';
+import type {
+  GodotRunner,
+  OperationParams,
+  ToolHandler,
+  ToolResponse,
+} from './utils/godot-runner.js';
 
 import {
   handleLaunchEditor,
@@ -66,16 +71,6 @@ import {
 } from './tools/node-tools.js';
 
 import { handleValidate } from './tools/validate-tools.js';
-
-export interface ToolResponse {
-  content: Array<{ type: string; text?: string; [k: string]: unknown }>;
-  isError?: boolean;
-  [k: string]: unknown;
-}
-export type ToolHandler = (
-  runner: GodotRunner,
-  args: OperationParams,
-) => Promise<ToolResponse> | ToolResponse;
 
 export const toolDispatch: Record<string, ToolHandler> = {
   // Project tools

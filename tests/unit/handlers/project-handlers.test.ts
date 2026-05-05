@@ -80,9 +80,7 @@ describe('handleGetProjectFiles', () => {
     const files = collectFiles(tree);
     // Fixture has placeholder.gd but not, e.g., main.tscn at extension=gd.
     expect(files.length).toBeGreaterThan(0);
-    for (const f of files) {
-      expect(f.extension).toBe('gd');
-    }
+    expect(files.every((f) => f.extension === 'gd')).toBe(true);
   });
 });
 
@@ -121,18 +119,23 @@ describe('handleSearchProject', () => {
       truncated: boolean;
     }>(result);
     expect(parsed.matches.length).toBeGreaterThan(0);
-    for (const m of parsed.matches) {
-      expect(typeof m.file).toBe('string');
-      expect(typeof m.lineNumber).toBe('number');
-      expect(m.lineNumber).toBeGreaterThan(0);
-      expect(m.line).toContain('Node2D');
-    }
+    expect(
+      parsed.matches.every(
+        (m) =>
+          typeof m.file === 'string' &&
+          typeof m.lineNumber === 'number' &&
+          m.lineNumber > 0 &&
+          m.line.includes('Node2D'),
+      ),
+    ).toBe(true);
   });
 
   it('respects maxResults and reports truncated:true when hit', async () => {
     const result = await handleSearchProject({
       projectPath: fixtureProjectPath,
-      pattern: 'node', // case-insensitive default — many matches
+      // main.tscn has 3 [node ...] header lines matching 'node' case-insensitively;
+      // maxResults:1 forces truncated:true.
+      pattern: 'node',
       maxResults: 1,
     });
     const parsed = parseText<{ matches: unknown[]; truncated: boolean }>(result);
@@ -299,6 +302,7 @@ describe('handleGetProjectInfo', () => {
     const result = await handleGetProjectInfo(fake.asRunner, {
       projectPath: fixtureProjectPath,
     });
+    expect(hasError(result)).toBe(false);
     const parsed = parseText<{
       name: string;
       path: string;
@@ -318,6 +322,7 @@ describe('handleGetProjectInfo', () => {
     const dir = tmp.makeProject('no-name-', 'config_version=5\n');
     const fake = createFakeRunner({ godotVersion: '4.3.stable' });
     const result = await handleGetProjectInfo(fake.asRunner, { projectPath: dir });
+    expect(hasError(result)).toBe(false);
     const parsed = parseText<{ name: string }>(result);
     expect(parsed.name).toBe(dir.split(sep).pop());
   });

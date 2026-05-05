@@ -60,6 +60,15 @@ describe('handleDeleteNodes', () => {
     expectErrorMatching(result, /nodePaths/i);
   });
 
+  it('rejects an empty nodePaths array', async () => {
+    const fake = createFakeRunner({ stdout: '{}' });
+    const result = await handleDeleteNodes(fake.asRunner, {
+      ...validBase,
+      nodePaths: [],
+    });
+    expectErrorMatching(result, /nodePaths/i);
+  });
+
   it('rejects nodePath entry containing ..', async () => {
     const fake = createFakeRunner();
     const result = await handleDeleteNodes(fake.asRunner, {

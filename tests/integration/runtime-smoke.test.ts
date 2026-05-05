@@ -14,7 +14,7 @@
  * Requires GODOT_PATH. Skipped in CI.
  */
 
-import { describe, beforeAll, afterEach } from 'vitest';
+import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { cpSync, rmSync } from 'fs';

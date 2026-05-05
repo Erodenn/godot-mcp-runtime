@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as net from 'net';
 import type { AddressInfo } from 'net';
 import { GodotRunner, BridgeDisconnectedError } from '../../src/utils/godot-runner.js';
-import { encodeFrame, parseFrames, MAX_FRAME_BYTES } from '../../src/utils/bridge-protocol.js';
+import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
 
 interface MockBridge {
   port: number;
@@ -135,17 +135,43 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
   });
 
-  it('timeout rejects but leaves the socket open for the next command', async () => {
+  it('timeout closes the socket; next command reconnects cleanly', async () => {
     const pending = runner.sendCommand('hangs', {}, 50);
     await bridge.nextFrame();
     await expect(pending).rejects.toThrow(/timed out/);
 
-    // Socket should still be live: a follow-up command should reuse it.
+    // Socket is destroyed on timeout. Next command must lazy-reconnect.
     const next = runner.sendCommand('ping');
     const recv = await bridge.nextFrame();
     expect(JSON.parse(recv)).toEqual({ command: 'ping' });
     bridge.reply('{"status":"pong"}');
     await expect(next).resolves.toContain('pong');
+  });
+
+  it('late reply for a timed-out command does not poison the next command', async () => {
+    // Without socket destruction on timeout, the bridge's late reply for A
+    // would correlate against B's promise (since the bridge serializes
+    // commands and only sees A's slot first). Closing the socket on timeout
+    // forces B to a new connection, making cross-talk impossible.
+    const slow = runner.sendCommand('slow', {}, 50);
+    await bridge.nextFrame();
+    await expect(slow).rejects.toThrow(/timed out/);
+
+    // Simulate the bridge eventually replying for the timed-out command on
+    // the now-destroyed socket. The write either errors silently or hits a
+    // closed socket — either way, B must not see this payload.
+    try {
+      bridge.reply('{"this":"is the late slow reply"}');
+    } catch {
+      // expected on some platforms — the peer may already be gone
+    }
+
+    const next = runner.sendCommand('fresh');
+    const recv = await bridge.nextFrame();
+    expect(JSON.parse(recv)).toEqual({ command: 'fresh' });
+    bridge.reply('{"this":"is the fresh reply"}');
+    const r = JSON.parse(await next);
+    expect(r).toEqual({ this: 'is the fresh reply' });
   });
 
   it('handles a large response (1 MiB+) that would have been truncated under UDP', async () => {
@@ -156,23 +182,6 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     const response = await pending;
     expect(response.length).toBe(big.length);
     expect(JSON.parse(response).blob.length).toBe(1024 * 1024);
-  });
-
-  it('rejects with BridgeDisconnectedError when the bridge advertises an oversize frame', async () => {
-    const pending = runner.sendCommand('overflow');
-    await bridge.nextFrame();
-    // Manually send an oversize header — bypasses encodeFrame's guard.
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
-    // Reach into the bridge's last peer to write raw bytes:
-    // (currentPeer is private, but we can connect a fresh control to inject)
-    // Simpler: write through reply() with a sentinel large body would actually
-    // exceed the cap on the server side. Use the underlying peer instead via
-    // a fresh socket would not target the same peer. Skip this edge for now
-    // and assert via the encodeFrame test instead.
-    pending.catch(() => {}); // avoid unhandled rejection if cleanup wins
-    bridge.closePeer();
-    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
   });
 
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {

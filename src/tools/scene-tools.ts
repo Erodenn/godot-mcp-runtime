@@ -40,7 +40,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'add_node',
     description:
-      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
+      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Returns a plain-text confirmation message naming the new node and type. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,7 +99,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'load_sprite',
     description:
-      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. Use this when the node already exists; for new nodes, pass texture via add_node properties. Saves automatically. texturePath must be a real file under projectPath. Errors if the node is not one of those three classes, or the texture file does not exist.',
+      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. Use this when the node already exists; for new nodes, pass texture via add_node properties. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -122,7 +122,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Errors if the scene file does not exist.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -141,7 +141,8 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'export_mesh_library',
     description:
-      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. Use this when authoring tile palettes for grid-based 3D levels; ignore for 2D or general scene work. The source scene must contain MeshInstance3D children. Pass meshItemNames to export a subset, or omit to export all. Saves the .res to outputPath, overwriting silently. Errors if the scene contains no valid meshes.',
+      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. Use this when authoring tile palettes for grid-based 3D levels; ignore for 2D or general scene work. The source scene must contain MeshInstance3D children. Pass meshItemNames to export a subset, or omit to export all. Saves the .res to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -164,6 +165,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
     name: 'batch_scene_operations',
     description:
       'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns { results: [{ operation, scenePath, success?, error? }] }.',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,15 +224,9 @@ export async function handleCreateScene(runner: GodotRunner, args: OperationPara
     scenePath: args.scenePath,
     rootNodeType: args.rootNodeType || 'Node2D',
   };
-  return executeSceneOp(
-    runner,
-    'create_scene',
-    params,
-    v.projectPath,
-    'Failed to create scene',
-    ['Check if the root node type is valid'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'create_scene', params, v.projectPath, 'Failed to create scene', [
+    'Check if the root node type is valid',
+  ]);
 }
 
 export async function handleAddNode(runner: GodotRunner, args: OperationParams) {
@@ -267,15 +263,10 @@ export async function handleAddNode(runner: GodotRunner, args: OperationParams) 
   };
   if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
   if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
-  return executeSceneOp(
-    runner,
-    'add_node',
-    params,
-    v.projectPath,
-    'Failed to add node',
-    ['Check if the node type is valid', 'Ensure the parent node path exists'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'add_node', params, v.projectPath, 'Failed to add node', [
+    'Check if the node type is valid',
+    'Ensure the parent node path exists',
+  ]);
 }
 
 export async function handleLoadSprite(runner: GodotRunner, args: OperationParams) {
@@ -303,15 +294,9 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
     nodePath: args.nodePath,
     texturePath: args.texturePath,
   };
-  return executeSceneOp(
-    runner,
-    'load_sprite',
-    params,
-    v.projectPath,
-    'Failed to load sprite',
-    ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'load_sprite', params, v.projectPath, 'Failed to load sprite', [
+    'Check if the node is a Sprite2D, Sprite3D, or TextureRect',
+  ]);
 }
 
 export async function handleSaveScene(runner: GodotRunner, args: OperationParams) {
@@ -325,15 +310,9 @@ export async function handleSaveScene(runner: GodotRunner, args: OperationParams
 
   const params: OperationParams = { scenePath: args.scenePath };
   if (args.newPath) params.newPath = args.newPath;
-  return executeSceneOp(
-    runner,
-    'save_scene',
-    params,
-    v.projectPath,
-    'Failed to save scene',
-    ['Check if the scene file is valid'],
-    ['Ensure Godot is installed correctly'],
-  );
+  return executeSceneOp(runner, 'save_scene', params, v.projectPath, 'Failed to save scene', [
+    'Check if the scene file is valid',
+  ]);
 }
 
 export async function handleExportMeshLibrary(runner: GodotRunner, args: OperationParams) {
@@ -361,7 +340,6 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
     v.projectPath,
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
-    ['Ensure Godot is installed correctly'],
   );
 }
 
@@ -390,6 +368,5 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
     v.projectPath,
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
-    ['Ensure Godot is installed correctly'],
   );
 }

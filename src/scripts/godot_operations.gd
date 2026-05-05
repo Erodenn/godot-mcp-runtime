@@ -478,6 +478,7 @@ func set_node_properties(params: Dictionary) -> void:
 
 	var abort_on_error = params.get("abort_on_error", false)
 	var results: Array = []
+	var any_set := false
 
 	for update in params.updates:
 		var result = {"nodePath": update.node_path, "property": update.property}
@@ -487,14 +488,17 @@ func set_node_properties(params: Dictionary) -> void:
 		else:
 			node.set(update.property, _coerce_property_value(update.value))
 			result["success"] = true
+			any_set = true
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
 
-	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({"results": results}))
-	else:
-		print(JSON.stringify({"error": "Failed to save scene after updates", "results": results}))
+	if any_set:
+		if not save_scene_to_path(scene_root, params.scene_path):
+			print(JSON.stringify({"error": "Failed to save scene after updates", "results": results}))
+			return
+
+	print(JSON.stringify({"results": results}))
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:

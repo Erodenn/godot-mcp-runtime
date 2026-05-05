@@ -23,7 +23,11 @@ import {
   handleSimulateInput,
   handleGetUiElements,
   handleRunScript,
+  handleRunProject,
+  handleAttachProject,
+  handleLaunchEditor,
 } from '../../../src/tools/runtime-tools.js';
+import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import type {
   GodotRunner,
   GodotProcess,
@@ -53,6 +57,8 @@ interface RuntimeFake {
   }): void;
   setBridgeResponse(response: string, runtimeErrors?: string[]): void;
   setStopResult(result: RuntimeStopResult | null): void;
+  setGodotPath(path: string): void;
+  setBridgeReady(ready: boolean, error?: string): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -64,6 +70,9 @@ function createRuntimeFake(): RuntimeFake {
     output: [],
     errors: [],
   };
+  let godotPath = '';
+  let bridgeReady = true;
+  let bridgeError: string | undefined;
 
   const state: {
     activeSessionMode: RuntimeSessionMode | null;
@@ -97,6 +106,31 @@ function createRuntimeFake(): RuntimeFake {
       return stopResult;
     },
     closeConnection() {},
+    getGodotPath() {
+      return godotPath;
+    },
+    async detectGodotPath() {
+      return godotPath;
+    },
+    launchEditor(_projectPath: string) {
+      const proc = { on: () => proc };
+      return proc as unknown as GodotProcess['process'];
+    },
+    runProject(projectPath: string, _scene?: string, _background?: boolean) {
+      state.activeSessionMode = 'spawned';
+      state.activeProjectPath = projectPath;
+      state.activeProcess = makeRunningProcess();
+    },
+    async attachProject(projectPath: string) {
+      state.activeSessionMode = 'attached';
+      state.activeProjectPath = projectPath;
+    },
+    async waitForBridge() {
+      return { ready: bridgeReady, error: bridgeError };
+    },
+    async waitForBridgeAttached() {
+      return { ready: bridgeReady, error: bridgeError };
+    },
   };
 
   return {
@@ -113,6 +147,13 @@ function createRuntimeFake(): RuntimeFake {
     },
     setStopResult(result) {
       stopResult = result;
+    },
+    setGodotPath(path: string) {
+      godotPath = path;
+    },
+    setBridgeReady(ready: boolean, error?: string) {
+      bridgeReady = ready;
+      bridgeError = error;
     },
   };
 }
@@ -132,6 +173,77 @@ function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
     sessionToken: 'tok',
   };
 }
+
+// ---------------------------------------------------------------------------
+// Validation paths for handleRunProject / handleAttachProject / handleLaunchEditor
+// ---------------------------------------------------------------------------
+
+describe('handleRunProject validation', () => {
+  it('rejects missing projectPath', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, {});
+    expectErrorMatching(result, /projectPath/i);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, { projectPath: '../evil' });
+    expectErrorMatching(result, /invalid project path/i);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, { projectPath: '/ghost' });
+    expectErrorMatching(result, /not a valid godot project/i);
+  });
+});
+
+describe('handleAttachProject validation', () => {
+  it('rejects missing projectPath', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleAttachProject(fake.asRunner, {});
+    expectErrorMatching(result, /projectPath/i);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleAttachProject(fake.asRunner, { projectPath: '../evil' });
+    expectErrorMatching(result, /invalid project path/i);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleAttachProject(fake.asRunner, { projectPath: '/ghost' });
+    expectErrorMatching(result, /not a valid godot project/i);
+  });
+});
+
+describe('handleLaunchEditor validation', () => {
+  it('rejects missing projectPath', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleLaunchEditor(fake.asRunner, {});
+    expectErrorMatching(result, /projectPath/i);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: '../evil' });
+    expectErrorMatching(result, /invalid project path/i);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: '/ghost' });
+    expectErrorMatching(result, /not a valid godot project/i);
+  });
+
+  it('rejects when no Godot executable can be detected', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('');
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /Could not find a valid Godot executable/i);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // ensureRuntimeSession (via handleTakeScreenshot — same gate every runtime

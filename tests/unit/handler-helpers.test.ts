@@ -12,7 +12,7 @@ import { executeSceneOp } from '../../src/utils/handler-helpers.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching } from '../helpers/assertions.js';
 
-const FAILURE_PREFIX = 'Failed to add node';
+const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
 const EXCEPTION_SOLUTIONS = ['exc: a', 'exc: b'];
 
@@ -24,7 +24,7 @@ describe('executeSceneOp', () => {
       'add_node',
       { foo: 1 },
       '/p',
-      FAILURE_PREFIX,
+      TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
@@ -39,7 +39,7 @@ describe('executeSceneOp', () => {
       'delete_nodes',
       { nodePaths: ['a', 'b'] },
       '/some/project',
-      FAILURE_PREFIX,
+      TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
@@ -61,11 +61,11 @@ describe('executeSceneOp', () => {
       'delete_nodes',
       {},
       '/p',
-      FAILURE_PREFIX,
+      TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
-    expectErrorMatching(result, /Failed to add node/);
+    expectErrorMatching(result, /Failed to op/);
     expectErrorMatching(result, /node not found at root\/Missing/);
     // Empty-stdout-specific solutions surface in the secondary text block.
     const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
@@ -80,7 +80,7 @@ describe('executeSceneOp', () => {
       'delete_nodes',
       {},
       '/p',
-      FAILURE_PREFIX,
+      TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
@@ -94,11 +94,11 @@ describe('executeSceneOp', () => {
       'add_node',
       {},
       '/p',
-      FAILURE_PREFIX,
+      TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
-    expectErrorMatching(result, /Failed to add node: spawn ENOENT/);
+    expectErrorMatching(result, /Failed to op: spawn ENOENT/);
     const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
     expect(solutionsText).toContain('exc: a');
     expect(solutionsText).not.toContain('empty: a');

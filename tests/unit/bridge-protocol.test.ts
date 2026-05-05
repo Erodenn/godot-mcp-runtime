@@ -35,14 +35,15 @@ describe('encodeFrame / parseFrames round trip', () => {
 });
 
 describe('parseFrames partial input', () => {
-  it('returns empty frames and full buffer when only 1-3 header bytes are present', () => {
-    for (const len of [1, 2, 3]) {
+  it.each([1, 2, 3])(
+    'returns empty frames and full buffer when only %i header bytes are present',
+    (len) => {
       const partial = Buffer.alloc(len);
       const { frames, remainder } = parseFrames(partial);
       expect(frames).toEqual([]);
       expect(remainder.length).toBe(len);
-    }
-  });
+    },
+  );
 
   it('returns empty frames when header is complete but body is short', () => {
     const payload = 'hello';
@@ -128,13 +129,17 @@ describe('getBridgePort', () => {
     }
   });
 
-  it('falls back to DEFAULT_BRIDGE_PORT for invalid values', () => {
-    const prev = process.env.MCP_BRIDGE_PORT;
-    for (const bad of ['', 'abc', '0', '-1', '99999']) {
+  it.each(['', 'abc', '0', '-1', '99999'])(
+    'falls back to DEFAULT_BRIDGE_PORT for invalid value %j',
+    (bad) => {
+      const prev = process.env.MCP_BRIDGE_PORT;
       process.env.MCP_BRIDGE_PORT = bad;
-      expect(getBridgePort()).toBe(DEFAULT_BRIDGE_PORT);
-    }
-    if (prev === undefined) delete process.env.MCP_BRIDGE_PORT;
-    else process.env.MCP_BRIDGE_PORT = prev;
-  });
+      try {
+        expect(getBridgePort()).toBe(DEFAULT_BRIDGE_PORT);
+      } finally {
+        if (prev === undefined) delete process.env.MCP_BRIDGE_PORT;
+        else process.env.MCP_BRIDGE_PORT = prev;
+      }
+    },
+  );
 });

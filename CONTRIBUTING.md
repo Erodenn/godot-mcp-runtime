@@ -49,7 +49,7 @@ stdout is reserved for the MCP protocol. Any `console.log` in this server corrup
 
 - `console.error` for operational messages
 - `console.warn` sparingly
-- `logError(message)` and `logDebug(message)` from `src/utils/godot-runner.ts` when you want the `[SERVER]` / `[DEBUG]` prefix and `DEBUG=true` gating
+- `logError(message)` and `logDebug(message)` from `src/utils/logger.ts` when you want the `[SERVER]` / `[DEBUG]` prefix and `DEBUG=true` gating
 
 ESLint enforces this via `no-console` with `["error", "warn"]` allowed.
 
@@ -70,6 +70,12 @@ Tool handlers return `createErrorResponse(message, possibleSolutions[])`, not ra
 ### TypeScript camelCase, GDScript snake_case
 
 Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/godot-runner.ts`.
+
+### MCP SDK: `Server` vs `McpServer`
+
+`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our ~30 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" — that's us.
+
+The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build — leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is planned post-v3.
 
 ## Adding a new tool
 

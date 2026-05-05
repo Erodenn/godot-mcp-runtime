@@ -1,6 +1,5 @@
-import type { GodotRunner, OperationParams } from './godot-runner.js';
+import type { GodotRunner, OperationParams, ToolResponse } from './godot-runner.js';
 import { createErrorResponse, extractGdError } from './godot-runner.js';
-import type { ToolResponse } from '../dispatch.js';
 
 /**
  * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
@@ -20,7 +19,7 @@ export async function executeSceneOp(
   projectPath: string,
   failurePrefix: string,
   emptyStdoutSolutions: string[],
-  exceptionSolutions: string[],
+  exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
 ): Promise<ToolResponse> {
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
