@@ -58,18 +58,13 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_project',
     description:
-      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use this only when the user is running Godot themselves (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload and marks the project active. Call once before launching Godot, then again with waitForBridge:true after launch to confirm the bridge is listening (up to 15s). Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured).',
+      "Attach runtime MCP tools to a manually launched Godot process without spawning one. Use this only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond before returning. If you (the agent) are the one launching Godot separately, kick the launch off in parallel with this call so the wait absorbs Godot's startup — do not block on launch first. If a human is launching Godot, the call fails if they do not launch within 15s; bridge.inject is idempotent, so just retry. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured).",
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: {
           type: 'string',
           description: 'Path to the Godot project directory',
-        },
-        waitForBridge: {
-          type: 'boolean',
-          description:
-            'If true, poll the bridge until it responds (up to 15 seconds). Use this after Godot is already running to confirm runtime tools are ready. Defaults to false.',
         },
       },
       required: ['projectPath'],
@@ -353,17 +348,17 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
       const lines = [
         `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
-        '- The process is running — bridge may still be initializing',
-        '- Use get_debug_output to investigate',
-        '- Runtime tools may work if you retry after a moment',
-        '- Call stop_project when done',
+        '- The process is still running but the bridge listener never came up — likely an early _ready error or a stuck process holding the port',
+        '- Runtime tools will not work against this session',
+        '- Call stop_project, then run_project again',
       ];
       if (background) {
         lines.push('- Background mode: window hidden, physical input blocked');
       }
       return createErrorResponse(lines.join('\n'), [
         'Use get_debug_output to inspect the last captured logs',
-        'Check that UDP port 9900 is not occupied by another Godot process',
+        'Check for broken autoloads with list_autoloads',
+        'Check that the bridge port (default 9900) is not occupied by another Godot process',
         'Call stop_project to clean up, then run_project again',
       ]);
     }
@@ -397,36 +392,21 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
   if ('isError' in v) return v;
 
   try {
-    runner.attachProject(v.projectPath);
+    await runner.attachProject(v.projectPath);
 
-    if (args.waitForBridge === true) {
-      const bridgeResult = await runner.waitForBridgeAttached();
+    const bridgeResult = await runner.waitForBridgeAttached();
 
-      if (!bridgeResult.ready) {
-        return createErrorResponse(
-          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
-          [
-            'Verify Godot is running with this project',
-            'The McpBridge autoload must be initialized and listening on UDP port 9900',
-            'Check that no other Godot project is occupying port 9900',
-            'Use detach_project or stop_project when done',
-          ],
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: [
-              'Project attached and MCP bridge is ready.',
-              '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
-              '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
-              '- Use detach_project or stop_project when done to clean up the injected bridge state',
-            ].join('\n'),
-          },
+    if (!bridgeResult.ready) {
+      return createErrorResponse(
+        `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
+        [
+          'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup — do not sequentialize',
+          'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
+          'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
+          'Check that no other Godot project is occupying the bridge port (default 9900)',
+          'Use detach_project or stop_project when done',
         ],
-      };
+      );
     }
 
     return {
@@ -434,9 +414,8 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
         {
           type: 'text',
           text: [
-            'Project attached for manual runtime use.',
-            '- Launch Godot yourself, then call attach_project again with waitForBridge: true to confirm readiness',
-            '- Or use runtime tools directly — they will fail with a clear error if the bridge is not yet listening',
+            'Project attached and MCP bridge is ready.',
+            '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
             '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
             '- Use detach_project or stop_project when done to clean up the injected bridge state',
           ].join('\n'),
@@ -452,7 +431,7 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
   }
 }
 
-export function handleDetachProject(runner: GodotRunner) {
+export async function handleDetachProject(runner: GodotRunner) {
   if (runner.activeSessionMode !== 'attached') {
     return createErrorResponse('No attached project to detach.', [
       'Use attach_project first for manual-launch workflows',
@@ -460,7 +439,7 @@ export function handleDetachProject(runner: GodotRunner) {
     ]);
   }
 
-  const result = runner.stopProject()!;
+  const result = (await runner.stopProject())!;
 
   return {
     content: [
@@ -539,8 +518,8 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
   };
 }
 
-export function handleStopProject(runner: GodotRunner) {
-  const result = runner.stopProject();
+export async function handleStopProject(runner: GodotRunner) {
+  const result = await runner.stopProject();
 
   if (!result) {
     return createErrorResponse('No active Godot process to stop.', [
@@ -590,21 +569,22 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
       parsed = JSON.parse(responseStr);
     } catch {
       return createErrorResponse(`Invalid response from screenshot server: ${responseStr}`, [
-        'The game may not have fully initialized yet',
-        'Try again after a few seconds',
+        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
+        'If the issue persists, call stop_project and run_project again',
       ]);
     }
 
     if (parsed.error) {
       return createErrorResponse(`Screenshot server error: ${parsed.error}`, [
-        'Ensure the game viewport is active',
-        'Try again after a moment',
+        'Ensure the project has a viewport (a headless project with no display server cannot render)',
+        'Check disk space and permissions on the project directory (.mcp/screenshots/)',
       ]);
     }
 
     if (!parsed.path) {
       return createErrorResponse('Screenshot server returned no file path', [
-        'Try again after a few seconds',
+        'The bridge response is missing the expected `path` field — this is a bridge bug, not a timing issue',
+        'Check get_debug_output for runtime errors during the screenshot save',
       ]);
     }
 
@@ -646,9 +626,9 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(`Failed to take screenshot: ${errorMessage}`, [
-      'Ensure the project is running (use run_project first)',
-      'The bridge may not be ready yet — use get_debug_output to investigate',
-      'Check that UDP port 9900 is not blocked',
+      'Check get_debug_output for crash backtraces or runtime errors',
+      'If the game has exited, call stop_project, then run_project again',
+      'For slow renders, increase the timeout parameter',
     ]);
   }
 }
@@ -694,8 +674,8 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       parsed = JSON.parse(responseStr);
     } catch {
       return createErrorResponse(`Invalid response from bridge: ${responseStr}`, [
-        'The game may not have fully initialized yet',
-        'Try again after a few seconds',
+        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
+        'If the issue persists, call stop_project and run_project again',
       ]);
     }
 
@@ -726,9 +706,8 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(`Failed to simulate input: ${errorMessage}`, [
-      'Ensure the project is running (use run_project first)',
-      'The bridge may not be ready yet — use get_debug_output to investigate',
-      'Check that UDP port 9900 is not blocked',
+      'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
+      'If the game has exited, call stop_project, then run_project again',
     ]);
   }
 }
@@ -756,8 +735,8 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       parsed = JSON.parse(responseStr);
     } catch {
       return createErrorResponse(`Invalid response from bridge: ${responseStr}`, [
-        'The game may not have fully initialized yet',
-        'Try again after a few seconds',
+        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
+        'If the issue persists, call stop_project and run_project again',
       ]);
     }
 
@@ -786,9 +765,8 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(`Failed to get UI elements: ${errorMessage}`, [
-      'Ensure the project is running (use run_project first)',
-      'The bridge may not be ready yet — use get_debug_output to investigate',
-      'Check that UDP port 9900 is not blocked',
+      'Check get_debug_output for crash backtraces or runtime errors',
+      'If the game has exited, call stop_project, then run_project again',
     ]);
   }
 }
@@ -904,9 +882,8 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return createErrorResponse(`Failed to execute script: ${errorMessage}`, [
-      'Ensure the project is running (use run_project first)',
-      'The bridge may not be ready yet — wait 2-3 seconds after starting, then check get_debug_output if the issue persists',
-      'Check that UDP port 9900 is not blocked',
+      'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
+      'If the game has exited, call stop_project, then run_project again',
       'For long-running scripts, increase the timeout parameter',
     ]);
   }

@@ -17,7 +17,7 @@ The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
-`run_project` waits for the bridge before returning success, so runtime tools are usable immediately after the call. With `attach_project`, pass `waitForBridge: true` once Godot is running to confirm readiness — otherwise allow a moment for the bridge to come up.
+Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 15 s for the externally launched Godot process to come up. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup — don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent).
 
 | Tool              | Description                                                      |
 | ----------------- | ---------------------------------------------------------------- |

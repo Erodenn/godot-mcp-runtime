@@ -87,7 +87,7 @@ class GodotMcpServer {
 
   private async cleanup() {
     console.error('[SERVER] Cleaning up resources');
-    this.runner.stopProject();
+    await this.runner.stopProject();
     await this.server.close();
   }
 

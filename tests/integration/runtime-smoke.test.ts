@@ -49,7 +49,7 @@ describe('runtime bridge smoke', () => {
 
   afterEach(async () => {
     try {
-      runner.stopProject();
+      await runner.stopProject();
     } catch {
       // already stopped
     }
@@ -72,7 +72,7 @@ describe('runtime bridge smoke', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-smoke-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      // Start the project — waitForBridge polls until the UDP ping responds
+      // Start the project — waitForBridge polls until the TCP ping responds
       runner.runProject(tmpProject);
       const bridgeResult = await runner.waitForBridge(12000);
 

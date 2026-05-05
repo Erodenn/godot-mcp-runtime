@@ -73,7 +73,7 @@ CI does not install Godot. Godot-required tests run only when contributors run t
 
 ### When to write a test
 
-1. The function bridges a boundary — TS↔GDScript, MCP client↔handler, UDP, child process, fs
+1. The function bridges a boundary — TS↔GDScript, MCP client↔handler, TCP, child process, fs
 2. The function encodes a contract another part of the system depends on — MCP response shape, error response shape, tool input schema, parameter casing
 3. The function has more than one branch that `tsc` can't catch — argument validation, error fallbacks, output parsing
 4. There's a documented invariant — `console.log` ban, auto-save, `..` rejection, `-d` debugger trap
@@ -89,7 +89,7 @@ CI does not install Godot. Godot-required tests run only when contributors run t
 ### What to test
 
 - **Behavior** (input → output), not implementation (which methods got called)
-- **Boundaries**: shape of data crossing TS↔GDScript, MCP↔handler, UDP↔bridge
+- **Boundaries**: shape of data crossing TS↔GDScript, MCP↔handler, TCP↔bridge
 - **Error paths** with the same care as happy paths — the error response shape is the MCP contract
 - **Invariants**: auto-save, path validation, error-response structure, parameter casing round-trip
 
@@ -97,7 +97,7 @@ CI does not install Godot. Godot-required tests run only when contributors run t
 
 - Prefer real integration when fast — vitest + the committed fixture, no Godot needed
 - For Godot-required tests, use the `itGodot` wrapper from `tests/helpers/godot-skip.ts` so the suite stays green without Godot installed
-- Mock at the I/O boundary only: `child_process`, `dgram`, destructive `fs` ops. Never mock `godot-runner` from handler tests — pass a fake runner via the handler's runner parameter instead
+- Mock at the I/O boundary only: `child_process`, `net` (bridge transport), destructive `fs` ops. Never mock `godot-runner` from handler tests — pass a fake runner via the handler's runner parameter instead
 - One assertion per behavior; don't bundle three contracts into one test
 - Test names describe behavior: `"rejects scenePath containing .."` not `"validateSceneArgs handles bad input"`
 - Don't write coverage targets. Coverage is a side effect of testing the right things, not a goal

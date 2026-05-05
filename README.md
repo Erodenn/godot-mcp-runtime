@@ -14,7 +14,7 @@ A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI assis
 
 **The distinction matters: the AI doesn't just write your game, it can check its work.**
 
-When you run a project through this server, it injects a lightweight UDP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
+When you run a project through this server, it injects a lightweight TCP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
 
 **No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon — something you install into your project, commit to version control, and manage as a dependency. All this server needs is Node.js and a Godot executable: no addon installation, no project modifications, no cleanup.
 
@@ -28,7 +28,7 @@ Each tool teaches agents how to use it through its description and response mess
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, manage UIDs, validate GDScript. All the standard operations, no editor window required.
 
-**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a UDP channel on port 9900 (localhost only) and enables:
+**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a TCP listener on port 9900 (localhost only, override with `MCP_BRIDGE_PORT`) and enables:
 
 - **Screenshots:** Capture the viewport at any point during gameplay
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, and timed waits
@@ -137,7 +137,7 @@ src/
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
-│   └── mcp_bridge.gd       # UDP autoload for runtime communication
+│   └── mcp_bridge.gd       # TCP autoload for runtime communication
 └── utils/
     ├── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
     ├── handler-helpers.ts  # executeSceneOp wrapper for headless-op handlers
@@ -145,7 +145,7 @@ src/
     └── autoload-ini.ts     # project.godot [autoload] INI primitives
 ```
 
-Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over UDP with the injected `McpBridge` autoload.
+Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).
 
 ## How the Bridge Works
 
@@ -153,9 +153,9 @@ When `run_project` or `attach_project` is called:
 
 1. `mcp_bridge.gd` is copied into the project directory
 2. It's registered as an autoload in `project.godot`
-3. Godot launches with the bridge listening on `127.0.0.1:9900`. With `run_project`, MCP spawns the process; with `attach_project`, you launch it yourself.
-4. Runtime tools send JSON commands to the bridge and await responses
-5. `stop_project` or `detach_project` removes the bridge script and autoload entry
+3. Godot launches with the bridge listening on `127.0.0.1:9900` (override with `MCP_BRIDGE_PORT`). With `run_project`, MCP spawns the process; with `attach_project`, you launch it yourself.
+4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
+5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes the bridge script and autoload entry
 
 Files generated during runtime (screenshots, executed scripts) are stored in `.mcp/` inside the project directory. This directory is automatically added to `.gitignore` and has a `.gdignore` so Godot won't import it.
 

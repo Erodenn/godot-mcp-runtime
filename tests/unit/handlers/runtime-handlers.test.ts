@@ -93,9 +93,10 @@ function createRuntimeFake(): RuntimeFake {
       bridgeCalls.push({ command, params, timeoutMs });
       return { response: bridgeResponse, runtimeErrors: bridgeRuntimeErrors };
     },
-    stopProject() {
+    async stopProject() {
       return stopResult;
     },
+    closeConnection() {},
   };
 
   return {
@@ -264,10 +265,10 @@ describe('handleGetDebugOutput', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleStopProject', () => {
-  it('returns the spawned-stopped message when stopProject reports mode:spawned', () => {
+  it('returns the spawned-stopped message when stopProject reports mode:spawned', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({ mode: 'spawned', output: ['o1'], errors: ['e1'] });
-    const result = handleStopProject(fake.asRunner);
+    const result = await handleStopProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
     expect(parsed.message).toBe('Godot project stopped');
@@ -275,7 +276,7 @@ describe('handleStopProject', () => {
     expect(parsed.externalProcessPreserved).toBe(false);
   });
 
-  it('returns the attached-detached message when stopProject reports mode:attached', () => {
+  it('returns the attached-detached message when stopProject reports mode:attached', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({
       mode: 'attached',
@@ -283,17 +284,17 @@ describe('handleStopProject', () => {
       errors: [],
       externalProcessPreserved: true,
     });
-    const result = handleStopProject(fake.asRunner);
+    const result = await handleStopProject(fake.asRunner);
     const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
     expect(parsed.message).toBe('Attached project detached and MCP bridge state cleaned up');
     expect(parsed.mode).toBe('attached');
     expect(parsed.externalProcessPreserved).toBe(true);
   });
 
-  it('returns isError when no session was active', () => {
+  it('returns isError when no session was active', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult(null);
-    const result = handleStopProject(fake.asRunner);
+    const result = await handleStopProject(fake.asRunner);
     expectErrorMatching(result, /No active Godot process/i);
   });
 });
@@ -303,24 +304,24 @@ describe('handleStopProject', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleDetachProject', () => {
-  it('rejects when there is no session at all', () => {
+  it('rejects when there is no session at all', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: null });
-    const result = handleDetachProject(fake.asRunner);
+    const result = await handleDetachProject(fake.asRunner);
     expectErrorMatching(result, /No attached project to detach/i);
   });
 
-  it('rejects when an active session is spawned (must use stop_project)', () => {
+  it('rejects when an active session is spawned (must use stop_project)', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
-    const result = handleDetachProject(fake.asRunner);
+    const result = await handleDetachProject(fake.asRunner);
     expectErrorMatching(result, /No attached project to detach/i);
     // Solutions block points at stop_project for the spawned case.
     const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/stop_project/);
   });
 
-  it('detaches and reports externalProcessPreserved when mode is attached', () => {
+  it('detaches and reports externalProcessPreserved when mode is attached', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'attached', projectPath: '/p' });
     fake.setStopResult({
@@ -329,7 +330,7 @@ describe('handleDetachProject', () => {
       errors: [],
       externalProcessPreserved: true,
     });
-    const result = handleDetachProject(fake.asRunner);
+    const result = await handleDetachProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
     expect(parsed.externalProcessPreserved).toBe(true);
