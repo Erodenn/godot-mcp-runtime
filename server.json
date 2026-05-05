@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.erodenn/godot-mcp-runtime",
+  "name": "io.github.Erodenn/godot-mcp-runtime",
   "title": "Godot MCP Runtime",
   "description": "Zero-addon MCP server for Godot 4: agents edit, run, and play-test the game.",
   "repository": {
     "url": "https://github.com/Erodenn/godot-mcp-runtime",
     "source": "github"
   },
-  "version": "2.3.0",
+  "version": "3.0.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "godot-mcp-runtime",
-      "version": "2.3.0",
+      "version": "3.0.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
