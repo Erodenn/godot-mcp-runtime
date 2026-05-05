@@ -326,8 +326,12 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
     // Merge errors: prefer detailed stderr errors when available, otherwise keep gdErrors
     const allErrors: ValidationError[] = stderrErrors.length > 0 ? stderrErrors : gdErrors;
 
+    // The GDScript-side `valid` flag is unreliable for malformed scripts: load()
+    // returns a non-null placeholder Resource even when parsing fails, so
+    // resource != null is true. Fall back to the parsed stderr errors as the
+    // authoritative signal — matches the batch branch above.
     const result = {
-      valid,
+      valid: valid && allErrors.length === 0,
       errors: allErrors,
     };
 

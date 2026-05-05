@@ -267,11 +267,22 @@ func _inject_key(action: Dictionary) -> String:
 
 	var event = InputEventKey.new()
 	event.keycode = keycode
+	event.physical_keycode = keycode
 	event.pressed = action.get("pressed", true)
 	event.echo = false
 	event.shift_pressed = action.get("shift", false)
 	event.ctrl_pressed = action.get("ctrl", false)
 	event.alt_pressed = action.get("alt", false)
+	# Text-entry Controls (LineEdit, TextEdit) consume `event.unicode`, not just
+	# the keycode — without it, typing into a focused LineEdit produces nothing.
+	# Auto-derive for ASCII letters and digits; fall back to caller-supplied
+	# `unicode` for symbols and non-ASCII.
+	if action.has("unicode"):
+		event.unicode = int(action.unicode)
+	elif keycode >= KEY_A and keycode <= KEY_Z:
+		event.unicode = keycode if event.shift_pressed else (keycode + 32)
+	elif keycode >= KEY_0 and keycode <= KEY_9:
+		event.unicode = keycode
 	Input.parse_input_event(event)
 	return ""
 

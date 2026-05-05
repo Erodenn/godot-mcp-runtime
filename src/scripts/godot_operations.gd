@@ -210,14 +210,22 @@ func load_scene_instance(scene_path: String):
 
 	return instance
 
-# Helper to find a node by path
+# Helper to find a node by path. Accepts "root", ".", "" (all → scene_root),
+# the actual scene root's name (e.g. "Main"), or a path with either as the first
+# segment (e.g. "root/Button" or "Main/Button"). Bare paths ("Button") resolve
+# normally via get_node_or_null.
 func find_node_by_path(scene_root: Node, node_path: String) -> Node:
-	if node_path == "root" or node_path.is_empty():
+	if node_path == "" or node_path == "." or node_path == "root":
+		return scene_root
+	if node_path == String(scene_root.name):
 		return scene_root
 
 	var path = node_path
-	if path.begins_with("root/"):
-		path = path.substr(5)
+	var first_slash = path.find("/")
+	if first_slash != -1:
+		var first_segment = path.substr(0, first_slash)
+		if first_segment == "root" or first_segment == String(scene_root.name):
+			path = path.substr(first_slash + 1)
 
 	if path.is_empty():
 		return scene_root
@@ -308,7 +316,7 @@ func add_node(params):
 		var properties = params.properties
 		for property in properties:
 			log_debug("Setting property: " + property + " = " + str(properties[property]))
-			new_node.set(property, properties[property])
+			new_node.set(property, _coerce_property_value(properties[property]))
 
 	parent.add_child(new_node)
 	new_node.owner = scene_root
@@ -340,6 +348,14 @@ func load_sprite(params):
 	var texture = load(full_texture_path)
 	if not texture:
 		log_error("Failed to load texture: " + full_texture_path)
+		quit(1)
+	if not (texture is Texture2D):
+		log_error("Loaded resource is not a Texture2D: " + full_texture_path)
+		quit(1)
+	# A texture without a resource_path is a runtime-only object — PackedScene.pack()
+	# cannot serialize it, so the assignment would silently vanish on save.
+	if texture.resource_path == "":
+		log_error("Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets.")
 		quit(1)
 
 	sprite_node.texture = texture
@@ -697,7 +713,9 @@ func connect_signal(params):
 		log_error("Method does not exist: " + params.method + " on " + target.get_class())
 		quit(1)
 
-	var err = source.connect(params.signal, Callable(target, params.method))
+	# CONNECT_PERSIST is required for the connection to be serialized into the
+	# packed scene; without it the connection is runtime-only and disappears on save.
+	var err = source.connect(params.signal, Callable(target, params.method), CONNECT_PERSIST)
 	if err != OK:
 		log_error("Failed to connect signal: " + str(err))
 		quit(1)
@@ -851,7 +869,7 @@ func _batch_add_node(scene_root: Node, op: Dictionary) -> String:
 	new_node.name = op.node_name
 	if op.has("properties"):
 		for property in op.properties:
-			new_node.set(property, op.properties[property])
+			new_node.set(property, _coerce_property_value(op.properties[property]))
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	return ""
@@ -870,6 +888,10 @@ func _batch_load_sprite(scene_root: Node, op: Dictionary) -> String:
 	var texture = load(normalize_scene_path(op.texture_path))
 	if not texture:
 		return "Failed to load texture: " + op.texture_path
+	if not (texture is Texture2D):
+		return "Loaded resource is not a Texture2D: " + op.texture_path
+	if texture.resource_path == "":
+		return "Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."
 	sprite_node.texture = texture
 	return ""
 

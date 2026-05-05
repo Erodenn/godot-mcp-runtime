@@ -129,7 +129,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'simulate_input',
     description:
-      'Simulate batched sequential input in a running Godot project. Each action specifies its type ("key", "mouse_button", "mouse_motion", "click_element", "action", or "wait") plus per-type fields documented in inputSchema. For click_element, call get_ui_elements first to discover element node names and paths — element resolution is path/name only, not visible text. Press/release pairs require two separate actions; insert "wait" actions between them when the game needs frame ticks. Requires an active runtime session (run_project or attach_project). Returns { success, actions_processed, warnings? }. Errors if no session is active or any action fails parameter validation.',
+      'Simulate batched sequential input in a running Godot project. Each action specifies its type ("key", "mouse_button", "mouse_motion", "click_element", "action", or "wait") plus per-type fields documented in inputSchema. For click_element, call get_ui_elements first to discover element node names and paths — element resolution is path/name only, not visible text. For text-entry into LineEdit/TextEdit, key actions auto-fill the InputEventKey.unicode field for ASCII letters and digits (respecting shift); for symbols or non-ASCII, pass the explicit "unicode" field. Press/release pairs require two separate actions; insert "wait" actions between them when the game needs frame ticks. Requires an active runtime session (run_project or attach_project). Returns { success, actions_processed, warnings? }. Errors if no session is active or any action fails parameter validation.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -158,6 +158,11 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
               shift: { type: 'boolean', description: '[key] Shift modifier' },
               ctrl: { type: 'boolean', description: '[key] Ctrl modifier' },
               alt: { type: 'boolean', description: '[key] Alt modifier' },
+              unicode: {
+                type: 'number',
+                description:
+                  '[key] Unicode codepoint for text-entry Controls (LineEdit, TextEdit). Auto-derived for ASCII letters/digits (respecting shift); pass explicitly for symbols or non-ASCII. E.g. 33 for "!", 64 for "@".',
+              },
               button: {
                 type: 'string',
                 enum: ['left', 'right', 'middle'],
