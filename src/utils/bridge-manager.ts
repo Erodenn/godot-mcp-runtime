@@ -13,8 +13,11 @@ const MCP_GITIGNORE_ENTRY = '.mcp/';
  * `.gitignore` augmentation. GodotRunner delegates to this for inject/cleanup
  * during run_project / attach_project / stop_project flows.
  *
- * Idempotent within a session via `injectedProjects`: a second `inject()` call
- * for the same path short-circuits without rewriting project.godot.
+ * The project-root bridge script is runtime-owned and refreshed on first
+ * injection for a manager session so a rebuilt server cannot talk to stale
+ * GDScript from an earlier run. Idempotent within a session via
+ * `injectedProjects`: a second `inject()` call for the same path short-circuits
+ * without rewriting project.godot.
  */
 export class BridgeManager {
   private injectedProjects: Set<string> = new Set();
@@ -31,10 +34,8 @@ export class BridgeManager {
     this.ensureGitignored(projectPath);
 
     const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
-    if (!existsSync(destScript)) {
-      copyFileSync(this.bridgeScriptPath, destScript);
-      logDebug(`Copied bridge autoload to ${destScript}`);
-    }
+    copyFileSync(this.bridgeScriptPath, destScript);
+    logDebug(`Refreshed bridge autoload at ${destScript}`);
 
     const projectFile = join(projectPath, 'project.godot');
     const existing = parseAutoloads(projectFile);
