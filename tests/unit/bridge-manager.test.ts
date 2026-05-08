@@ -83,13 +83,13 @@ describe('BridgeManager.inject', () => {
     expect(matches.length).toBe(1);
   });
 
-  it('does not re-copy the bridge script when one already exists in the project', () => {
+  it('refreshes an existing bridge script from the current source', () => {
     // First manager injects normally.
     const { projectPath, bridgeSourcePath } = setupProject();
     const firstManager = new BridgeManager(bridgeSourcePath);
     firstManager.inject(projectPath);
 
-    // Mutate the in-project bridge script to detect any re-copy.
+    // Mutate the in-project bridge script to detect the refresh.
     const destScript = join(projectPath, 'mcp_bridge.gd');
     writeFileSync(destScript, '# mutated locally\n', 'utf8');
 
@@ -97,8 +97,8 @@ describe('BridgeManager.inject', () => {
     const secondManager = new BridgeManager(bridgeSourcePath);
     secondManager.inject(projectPath);
 
-    // Because destScript already existed, the copy must be skipped.
-    expect(readFileSync(destScript, 'utf8')).toBe('# mutated locally\n');
+    // The bridge script is runtime-owned, so a fresh inject refreshes it.
+    expect(readFileSync(destScript, 'utf8')).toBe(BRIDGE_SOURCE_CONTENT);
 
     // Autoload entry remains a single, canonical line.
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');

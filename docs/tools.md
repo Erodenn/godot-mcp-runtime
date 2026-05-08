@@ -19,12 +19,14 @@ The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `
 
 Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 15 s for the externally launched Godot process to come up. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup — don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent).
 
-| Tool              | Description                                                      |
-| ----------------- | ---------------------------------------------------------------- |
-| `take_screenshot` | Capture a PNG of the running viewport                            |
-| `simulate_input`  | Send batched input: key, mouse, click_element, action, wait      |
-| `get_ui_elements` | Get all visible Control nodes with positions, types, and text    |
-| `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access |
+| Tool              | Description                                                                                        |
+| ----------------- | -------------------------------------------------------------------------------------------------- |
+| `take_screenshot` | Capture a PNG of the running viewport; use `responseMode: "preview"` for token-sensitive workflows |
+| `simulate_input`  | Send batched input: key, mouse, click_element, action, wait                                        |
+| `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                      |
+| `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                   |
+
+`take_screenshot` defaults to the full inline PNG for compatibility. Pass `responseMode: "preview"` to keep the original screenshot on disk while returning a bounded preview inline, or `responseMode: "path_only"` when the caller only needs saved-path metadata.
 
 ## Scene Editing (headless)
 

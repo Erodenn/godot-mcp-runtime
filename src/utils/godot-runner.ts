@@ -203,6 +203,9 @@ const parameterMappings: Record<string, string> = {
   new_path: 'newPath',
   file_path: 'filePath',
   script_path: 'scriptPath',
+  response_mode: 'responseMode',
+  preview_max_width: 'previewMaxWidth',
+  preview_max_height: 'previewMaxHeight',
 };
 
 // Reverse mapping from camelCase to snake_case

@@ -160,7 +160,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 		"run_script":
 			await _handle_run_script(peer, payload)
 		"screenshot":
-			await _handle_screenshot(peer)
+			await _handle_screenshot(peer, payload)
 		"shutdown":
 			await _handle_shutdown(peer)
 		"ping":
@@ -170,7 +170,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 
 # --- Screenshot ---
 
-func _handle_screenshot(peer: PeerState) -> void:
+func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
 	await RenderingServer.frame_post_draw
 
 	var viewport := get_viewport()
@@ -183,7 +183,7 @@ func _handle_screenshot(peer: PeerState) -> void:
 		_send_response(peer, {"error": "Failed to capture viewport image"})
 		return
 
-	var timestamp := str(Time.get_unix_time_from_system()).replace(".", "_")
+	var timestamp := "%s_%d" % [str(Time.get_unix_time_from_system()).replace(".", "_"), Time.get_ticks_msec()]
 	var screenshot_dir := ProjectSettings.globalize_path("res://.mcp/screenshots")
 	DirAccess.make_dir_recursive_absolute(screenshot_dir)
 	var file_path := screenshot_dir.path_join("screenshot_%s.png" % timestamp)
@@ -194,7 +194,36 @@ func _handle_screenshot(peer: PeerState) -> void:
 		return
 
 	var safe_path := file_path.replace("\\", "/")
-	_send_response(peer, {"path": safe_path})
+	var response: Dictionary = {
+		"path": safe_path,
+		"width": image.get_width(),
+		"height": image.get_height(),
+	}
+
+	var preview_max_width: int = int(payload.get("preview_max_width", 0))
+	var preview_max_height: int = int(payload.get("preview_max_height", 0))
+	if preview_max_width > 0 and preview_max_height > 0:
+		var scale: float = min(
+			1.0,
+			min(
+				float(preview_max_width) / float(image.get_width()),
+				float(preview_max_height) / float(image.get_height())
+			)
+		)
+		var preview_width: int = max(1, int(floor(float(image.get_width()) * scale)))
+		var preview_height: int = max(1, int(floor(float(image.get_height()) * scale)))
+		# Full image already saved to disk — resize in-place to avoid a redundant copy
+		image.resize(preview_width, preview_height, Image.INTERPOLATE_LANCZOS)
+		var preview_path: String = screenshot_dir.path_join("screenshot_%s_preview.png" % timestamp)
+		var preview_err: Error = image.save_png(preview_path)
+		if preview_err != OK:
+			_send_response(peer, {"error": "Failed to save screenshot preview (error %d)" % preview_err})
+			return
+		response["preview_path"] = preview_path.replace("\\", "/")
+		response["preview_width"] = preview_width
+		response["preview_height"] = preview_height
+
+	_send_response(peer, response)
 
 # --- Input Simulation ---
 
