@@ -9,6 +9,8 @@
  * Max frame size is 16 MiB; oversize frames are rejected on receive.
  */
 
+import * as net from 'net';
+
 export const DEFAULT_BRIDGE_PORT = 9900;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const FRAME_HEADER_BYTES = 4;
@@ -25,6 +27,29 @@ export function getBridgePort(): number {
     return DEFAULT_BRIDGE_PORT;
   }
   return parsed;
+}
+
+/**
+ * Find an available TCP port by binding to port 0 (OS-assigned ephemeral port),
+ * reading the assigned port, and closing the listener. The brief TOCTOU window
+ * between close and the consumer's listen is acceptable — if a collision occurs,
+ * the bridge readiness check will surface the failure.
+ */
+export function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') {
+        srv.close();
+        reject(new Error('Failed to determine assigned port'));
+        return;
+      }
+      const port = addr.port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
 }
 
 /**

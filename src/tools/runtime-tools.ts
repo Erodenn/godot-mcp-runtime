@@ -72,6 +72,11 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
           description:
             'If true, hides the Godot window off-screen and blocks all physical keyboard and mouse input, while keeping programmatic input (simulate_input, run_script) and screenshots fully active. Useful for automated agent-driven testing where the window should not be visible or interactive.',
         },
+        bridgePort: {
+          type: 'number',
+          description:
+            'TCP port for the MCP bridge. Omit to auto-select a free port. Specify to use a fixed port (e.g. when coordinating with external tools).',
+        },
       },
       required: ['projectPath'],
     },
@@ -87,6 +92,11 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
         projectPath: {
           type: 'string',
           description: 'Path to the Godot project directory',
+        },
+        bridgePort: {
+          type: 'number',
+          description:
+            'TCP port where the MCP bridge is listening (default: MCP_BRIDGE_PORT env or 9900). Specify when the externally launched Godot uses a non-default port.',
         },
       },
       required: ['projectPath'],
@@ -373,7 +383,13 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
   try {
     const background = args.background === true;
-    runner.runProject(v.projectPath, args.scene as string | undefined, background);
+    const bridgePort = typeof args.bridgePort === 'number' ? args.bridgePort : undefined;
+    await runner.runProject(
+      v.projectPath,
+      args.scene as string | undefined,
+      background,
+      bridgePort,
+    );
 
     const bridgeResult = await runner.waitForBridge();
 
@@ -414,8 +430,9 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       ]);
     }
 
+    const port = runner.activeBridgePort;
     const lines = [
-      'Godot project started and MCP bridge is ready.',
+      `Godot project started and MCP bridge is ready (port ${port}).`,
       '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
       '- Use get_debug_output to check runtime output and errors',
       '- Call stop_project when done',
@@ -428,7 +445,15 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       content: [{ type: 'text', text: lines.join('\n') }],
     };
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to run Godot project: ${getErrorMessage(error)}`, [
+    const errorMessage = getErrorMessage(error);
+    if (errorMessage.includes('No display server available')) {
+      return createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+        'Use attach_project with an externally launched Godot process',
+        'Set DISPLAY or WAYLAND_DISPLAY environment variables',
+        'Run from a graphical shell session',
+      ]);
+    }
+    return createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
       'Ensure Godot is installed correctly',
       'Check if the GODOT_PATH environment variable is set correctly',
     ]);
@@ -442,7 +467,8 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
   if ('isError' in v) return v;
 
   try {
-    await runner.attachProject(v.projectPath);
+    const attachBridgePort = typeof args.bridgePort === 'number' ? args.bridgePort : undefined;
+    await runner.attachProject(v.projectPath, attachBridgePort);
 
     const bridgeResult = await runner.waitForBridgeAttached();
 
@@ -461,12 +487,13 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
       );
     }
 
+    const attachedPort = runner.activeBridgePort;
     return {
       content: [
         {
           type: 'text',
           text: [
-            'Project attached and MCP bridge is ready.',
+            `Project attached and MCP bridge is ready (port ${attachedPort}).`,
             '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
             '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
             '- Use detach_project or stop_project when done to clean up the injected bridge state',

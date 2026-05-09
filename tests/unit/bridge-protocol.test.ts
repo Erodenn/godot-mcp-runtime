@@ -3,6 +3,7 @@ import {
   DEFAULT_BRIDGE_PORT,
   MAX_FRAME_BYTES,
   encodeFrame,
+  findFreePort,
   getBridgePort,
   parseFrames,
 } from '../../src/utils/bridge-protocol.js';
@@ -104,6 +105,20 @@ describe('encodeFrame oversize rejection', () => {
     // approach to avoid actually allocating ~16 MiB.
     const oversize = 'a'.repeat(MAX_FRAME_BYTES + 1);
     expect(() => encodeFrame(oversize)).toThrow(/too large/);
+  });
+});
+
+describe('findFreePort', () => {
+  it('returns a valid port number', async () => {
+    const port = await findFreePort();
+    expect(port).toBeGreaterThan(0);
+    expect(port).toBeLessThanOrEqual(65535);
+  });
+
+  it('returns different ports on consecutive calls', async () => {
+    const a = await findFreePort();
+    const b = await findFreePort();
+    expect(a).not.toBe(b);
   });
 });
 

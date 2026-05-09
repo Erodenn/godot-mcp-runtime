@@ -21,6 +21,7 @@ var tcp_server: TCPServer
 var port: int = DEFAULT_BRIDGE_PORT
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
+var _shutting_down: bool = false
 
 func _resolve_port() -> int:
 	var raw := OS.get_environment("MCP_BRIDGE_PORT")
@@ -591,6 +592,7 @@ func _serialize_value(value: Variant) -> Variant:
 # --- Shutdown ---
 
 func _handle_shutdown(peer: PeerState) -> void:
+	_shutting_down = true
 	_send_response(peer, {"status": "shutting_down"})
 	# Let the response flush before we tear the listener down. A new command
 	# arriving in this 2-frame window would dispatch against a peer that's
@@ -633,6 +635,8 @@ func _close_all_peers() -> void:
 	_peers.clear()
 
 func _exit_tree() -> void:
+	if not _shutting_down:
+		push_warning("McpBridge: removed from tree without shutdown — bridge connection will be lost")
 	_close_all_peers()
 	if tcp_server != null:
 		tcp_server.stop()

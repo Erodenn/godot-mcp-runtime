@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   cleanOutput,
   normalizeForCompare,
   validateProjectArgs,
   validateSceneArgs,
+  checkDisplayAvailable,
 } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -178,5 +179,55 @@ describe('validateSceneArgs', () => {
     expect('isError' in result).toBe(false);
     const typed = result as { projectPath: string; scenePath: string };
     expect(typed.scenePath).toBe('ghost.tscn');
+  });
+});
+
+// ─── checkDisplayAvailable ──────────────────────────────────────────────────
+
+describe('checkDisplayAvailable', () => {
+  const originalPlatform = process.platform;
+  const originalDisplay = process.env.DISPLAY;
+  const originalWayland = process.env.WAYLAND_DISPLAY;
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+    if (originalDisplay !== undefined) {
+      process.env.DISPLAY = originalDisplay;
+    } else {
+      delete process.env.DISPLAY;
+    }
+    if (originalWayland !== undefined) {
+      process.env.WAYLAND_DISPLAY = originalWayland;
+    } else {
+      delete process.env.WAYLAND_DISPLAY;
+    }
+  });
+
+  it('returns true on non-Linux platforms regardless of env', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    delete process.env.DISPLAY;
+    delete process.env.WAYLAND_DISPLAY;
+    expect(checkDisplayAvailable()).toBe(true);
+  });
+
+  it('returns true on Linux when DISPLAY is set', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    process.env.DISPLAY = ':0';
+    delete process.env.WAYLAND_DISPLAY;
+    expect(checkDisplayAvailable()).toBe(true);
+  });
+
+  it('returns true on Linux when WAYLAND_DISPLAY is set', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    delete process.env.DISPLAY;
+    process.env.WAYLAND_DISPLAY = 'wayland-0';
+    expect(checkDisplayAvailable()).toBe(true);
+  });
+
+  it('returns false on Linux when neither DISPLAY nor WAYLAND_DISPLAY is set', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    delete process.env.DISPLAY;
+    delete process.env.WAYLAND_DISPLAY;
+    expect(checkDisplayAvailable()).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeManager } from './bridge-manager.js';
-import { encodeFrame, getBridgePort, parseFrames } from './bridge-protocol.js';
+import { encodeFrame, findFreePort, getBridgePort, parseFrames } from './bridge-protocol.js';
 import { logDebug, logError } from './logger.js';
 
 /**
@@ -206,6 +206,7 @@ const parameterMappings: Record<string, string> = {
   response_mode: 'responseMode',
   preview_max_width: 'previewMaxWidth',
   preview_max_height: 'previewMaxHeight',
+  bridge_port: 'bridgePort',
 };
 
 // Reverse mapping from camelCase to snake_case
@@ -260,6 +261,16 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
   }
 
   return result;
+}
+
+/**
+ * Check whether a display server (X11 / Wayland) is available on the current
+ * platform.  On macOS and Windows the display subsystem is always present;
+ * on Linux we probe the standard environment variables.
+ */
+export function checkDisplayAvailable(): boolean {
+  if (process.platform !== 'linux') return true;
+  return !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
 export function validatePath(path: string): boolean {
@@ -418,6 +429,7 @@ export class GodotRunner {
   public activeProcess: GodotProcess | null = null;
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
+  public activeBridgePort: number | null = null;
 
   private socket: net.Socket | null = null;
   private rxBuffer: Buffer = Buffer.alloc(0);
@@ -675,7 +687,12 @@ export class GodotRunner {
     return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
   }
 
-  runProject(projectPath: string, scene?: string, background: boolean = false): GodotProcess {
+  async runProject(
+    projectPath: string,
+    scene?: string,
+    background: boolean = false,
+    bridgePort?: number,
+  ): Promise<GodotProcess> {
     if (!this.godotPath) {
       throw new Error('Godot path not set. Call detectGodotPath first.');
     }
@@ -696,6 +713,16 @@ export class GodotRunner {
       this.bridge.cleanup(this.activeProjectPath);
     }
 
+    if (!checkDisplayAvailable()) {
+      throw new Error(
+        'No display server available (DISPLAY and WAYLAND_DISPLAY are both unset). ' +
+          'Godot requires a display to run a project window.',
+      );
+    }
+
+    const port = bridgePort ?? (await findFreePort());
+    this.activeBridgePort = port;
+
     try {
       this.bridge.inject(projectPath);
     } catch (err) {
@@ -710,11 +737,15 @@ export class GodotRunner {
       cmdArgs.push(scene);
     }
 
-    logDebug(`Running Godot project: ${projectPath}`);
+    logDebug(`Running Godot project: ${projectPath} (bridge port ${port})`);
     const sessionToken = randomBytes(16).toString('hex');
     const spawnOptions: SpawnOptions = {
       stdio: 'pipe',
-      env: { ...process.env, MCP_SESSION_TOKEN: sessionToken },
+      env: {
+        ...process.env,
+        MCP_SESSION_TOKEN: sessionToken,
+        MCP_BRIDGE_PORT: String(port),
+      },
     };
     if (background) {
       spawnOptions.env = { ...spawnOptions.env, MCP_BACKGROUND: '1' };
@@ -773,7 +804,7 @@ export class GodotRunner {
     return this.activeProcess;
   }
 
-  async attachProject(projectPath: string): Promise<void> {
+  async attachProject(projectPath: string, bridgePort?: number): Promise<void> {
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       await this.stopProject();
     } else if (
@@ -795,6 +826,7 @@ export class GodotRunner {
     }
 
     this.bridge.inject(projectPath);
+    this.activeBridgePort = bridgePort ?? getBridgePort();
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
@@ -821,6 +853,7 @@ export class GodotRunner {
       }
       this.activeProjectPath = null;
       this.activeSessionMode = null;
+      this.activeBridgePort = null;
       this.activeProcess = null;
       return {
         mode: 'attached',
@@ -877,6 +910,7 @@ export class GodotRunner {
       this.activeProjectPath = null;
     }
     this.activeSessionMode = null;
+    this.activeBridgePort = null;
 
     return result;
   }
@@ -951,7 +985,7 @@ export class GodotRunner {
           cb();
           return;
         }
-        const port = getBridgePort();
+        const port = this.activeBridgePort ?? getBridgePort();
         const sock = net.connect(port, '127.0.0.1');
         const onConnect = (): void => {
           sock.setNoDelay(true);
@@ -1063,9 +1097,31 @@ export class GodotRunner {
   // Only the explicit `SCRIPT ERROR:` / `USER SCRIPT ERROR:` markers belong here — the looser
   // `GDScript error` substring also matches user printerr output and produces false positives.
   private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
+  private static readonly RETRYABLE_BRIDGE_COMMANDS = new Set(['get_ui_elements', 'screenshot']);
 
   extractRuntimeErrors(lines: string[]): string[] {
     return lines.filter((line) => GodotRunner.SCRIPT_ERROR_PATTERNS.some((p) => line.includes(p)));
+  }
+
+  private async sendCommandWithReconnect(
+    command: string,
+    params: Record<string, unknown> = {},
+    timeoutMs: number = 10000,
+  ): Promise<string> {
+    try {
+      return await this.sendCommand(command, params, timeoutMs);
+    } catch (err) {
+      if (
+        err instanceof BridgeDisconnectedError &&
+        this.activeSessionMode &&
+        GodotRunner.RETRYABLE_BRIDGE_COMMANDS.has(command)
+      ) {
+        this.closeConnection();
+        await new Promise((r) => setTimeout(r, 1000));
+        return this.sendCommand(command, params, timeoutMs);
+      }
+      throw err;
+    }
   }
 
   async sendCommandWithErrors(
@@ -1074,7 +1130,7 @@ export class GodotRunner {
     timeoutMs: number = 10000,
   ): Promise<{ response: string; runtimeErrors: string[] }> {
     const marker = this.getErrorCount();
-    const response = await this.sendCommand(command, params, timeoutMs);
+    const response = await this.sendCommandWithReconnect(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
     const runtimeErrors =
       this.activeSessionMode === 'spawned' ? this.extractRuntimeErrors(newErrors) : [];

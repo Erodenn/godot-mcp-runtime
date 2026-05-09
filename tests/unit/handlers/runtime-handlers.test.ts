@@ -59,6 +59,7 @@ interface RuntimeFake {
   setStopResult(result: RuntimeStopResult | null): void;
   setGodotPath(path: string): void;
   setBridgeReady(ready: boolean, error?: string): void;
+  setRunProjectError(error: Error | null): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -73,6 +74,7 @@ function createRuntimeFake(): RuntimeFake {
   let godotPath = '';
   let bridgeReady = true;
   let bridgeError: string | undefined;
+  let runProjectError: Error | null = null;
 
   const state: {
     activeSessionMode: RuntimeSessionMode | null;
@@ -116,14 +118,18 @@ function createRuntimeFake(): RuntimeFake {
       const proc = { on: () => proc };
       return proc as unknown as GodotProcess['process'];
     },
-    runProject(projectPath: string, _scene?: string, _background?: boolean) {
+    activeBridgePort: null as number | null,
+    runProject(projectPath: string, _scene?: string, _background?: boolean, bridgePort?: number) {
+      if (runProjectError) throw runProjectError;
       state.activeSessionMode = 'spawned';
       state.activeProjectPath = projectPath;
       state.activeProcess = makeRunningProcess();
+      fake.activeBridgePort = bridgePort ?? 19900;
     },
-    async attachProject(projectPath: string) {
+    async attachProject(projectPath: string, bridgePort?: number) {
       state.activeSessionMode = 'attached';
       state.activeProjectPath = projectPath;
+      fake.activeBridgePort = bridgePort ?? 9900;
     },
     async waitForBridge() {
       return { ready: bridgeReady, error: bridgeError };
@@ -154,6 +160,9 @@ function createRuntimeFake(): RuntimeFake {
     setBridgeReady(ready: boolean, error?: string) {
       bridgeReady = ready;
       bridgeError = error;
+    },
+    setRunProjectError(error: Error | null) {
+      runProjectError = error;
     },
   };
 }
@@ -195,6 +204,78 @@ describe('handleRunProject validation', () => {
     const fake = createRuntimeFake();
     const result = await handleRunProject(fake.asRunner, { projectPath: '/ghost' });
     expectErrorMatching(result, /not a valid godot project/i);
+  });
+
+  it('returns display-unavailable error with attach_project suggestion', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setRunProjectError(
+      new Error(
+        'No display server available (DISPLAY and WAYLAND_DISPLAY are both unset). ' +
+          'Godot requires a display to run a project window.',
+      ),
+    );
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /No display server available/);
+    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    expect(solutionsText).toMatch(/attach_project/);
+  });
+
+  it('cleans up bridge artifacts when process exits before bridge readiness', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'Process exited with code 1');
+    let stopCalled = false;
+    const runner = fake.asRunner;
+    const originalStop = runner.stopProject.bind(runner);
+    (runner as unknown as Record<string, unknown>).stopProject = async () => {
+      stopCalled = true;
+      return originalStop();
+    };
+    // runProject sets activeProcess to a running process; override it to an
+    // exited process after the call so waitForBridge sees the early exit.
+    const origRun = runner.runProject.bind(runner);
+    (runner as unknown as Record<string, unknown>).runProject = (
+      pp: string,
+      s?: string,
+      b?: boolean,
+    ) => {
+      origRun(pp, s, b);
+      fake.setSession({
+        mode: 'spawned',
+        projectPath: pp,
+        process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+      });
+    };
+    const result = await handleRunProject(runner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /exited before.*bridge/i);
+    expect(stopCalled).toBe(true);
+  });
+});
+
+describe('handleRunProject bridge port', () => {
+  it('includes the assigned bridge port in the success response', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toMatch(/port \d+/);
+  });
+});
+
+describe('handleAttachProject bridge port', () => {
+  it('includes the assigned bridge port in the success response', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(true);
+    const result = await handleAttachProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      bridgePort: 12345,
+    });
+    expect(hasError(result)).toBe(false);
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toMatch(/port 12345/);
   });
 });
 

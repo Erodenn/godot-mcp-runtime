@@ -193,3 +193,94 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     process.env.MCP_BRIDGE_PORT = String(bridge.port);
   });
 });
+
+describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
+  let bridge: MockBridge;
+  let runner: GodotRunner;
+  let prevPort: string | undefined;
+
+  beforeEach(async () => {
+    bridge = await startMockBridge();
+    prevPort = process.env.MCP_BRIDGE_PORT;
+    process.env.MCP_BRIDGE_PORT = String(bridge.port);
+    runner = new GodotRunner({ godotPath: 'godot' });
+  });
+
+  afterEach(async () => {
+    runner.closeConnection();
+    await bridge.shutdown();
+    if (prevPort === undefined) delete process.env.MCP_BRIDGE_PORT;
+    else process.env.MCP_BRIDGE_PORT = prevPort;
+  });
+
+  it('retries once on BridgeDisconnectedError during an active session', async () => {
+    // Simulate an active session so reconnect logic kicks in.
+    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+
+    const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
+    await bridge.nextFrame();
+    // Drop the connection mid-flight to trigger BridgeDisconnectedError.
+    bridge.closePeer();
+
+    // The reconnect delay is 1s, then it retries. The mock bridge accepts
+    // a new connection and receives the retry.
+    const retryFrame = await bridge.nextFrame();
+    expect(JSON.parse(retryFrame)).toEqual({ command: 'get_ui_elements' });
+    bridge.reply('{"nodes":[]}');
+
+    const result = await pending;
+    expect(JSON.parse(result.response)).toEqual({ nodes: [] });
+  }, 10000);
+
+  it('does not retry when no session is active', async () => {
+    // No activeSessionMode set — should fail immediately.
+    const pending = runner.sendCommand('ping');
+    await bridge.nextFrame();
+    bridge.closePeer();
+    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
+  });
+
+  it('does not retry shutdown commands', async () => {
+    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+
+    const pending = runner.sendCommandWithErrors('shutdown', {}, 5000);
+    await bridge.nextFrame();
+    bridge.closePeer();
+    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
+  });
+
+  it('does not retry input commands because they are not idempotent', async () => {
+    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+
+    const pending = runner.sendCommandWithErrors('input', { actions: [] }, 5000);
+    await bridge.nextFrame();
+    bridge.closePeer();
+    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
+  });
+
+  it('does not retry run_script commands because they may have side effects', async () => {
+    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+
+    const pending = runner.sendCommandWithErrors(
+      'run_script',
+      { source: 'extends RefCounted' },
+      5000,
+    );
+    await bridge.nextFrame();
+    bridge.closePeer();
+    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
+  });
+
+  it('propagates error if retry also fails', async () => {
+    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+
+    const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
+    await bridge.nextFrame();
+    bridge.closePeer();
+
+    // Stop accepting connections so the retry also fails.
+    await bridge.stopAccepting();
+
+    await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
+  }, 10000);
+});

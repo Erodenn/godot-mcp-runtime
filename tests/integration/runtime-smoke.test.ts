@@ -73,7 +73,7 @@ describe('runtime bridge smoke', () => {
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
       // Start the project — waitForBridge polls until the TCP ping responds
-      runner.runProject(tmpProject);
+      await runner.runProject(tmpProject);
       const bridgeResult = await runner.waitForBridge(12000);
 
       if (!bridgeResult.ready) {
@@ -126,7 +126,7 @@ describe('runtime bridge smoke', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-input-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      runner.runProject(tmpProject);
+      await runner.runProject(tmpProject);
       const bridgeResult = await runner.waitForBridge(12000);
 
       if (!bridgeResult.ready) {
