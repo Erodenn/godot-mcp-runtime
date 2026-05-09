@@ -74,18 +74,18 @@ import { handleValidate } from './tools/validate-tools.js';
 
 export const toolDispatch: Record<string, ToolHandler> = {
   // Project tools
-  launch_editor: (runner, args) => handleLaunchEditor(runner, args),
-  run_project: (runner, args) => handleRunProject(runner, args),
-  attach_project: (runner, args) => handleAttachProject(runner, args),
-  detach_project: (runner) => handleDetachProject(runner),
-  get_debug_output: (runner, args) => handleGetDebugOutput(runner, args),
-  stop_project: (runner) => handleStopProject(runner),
+  launch_editor: handleLaunchEditor,
+  run_project: handleRunProject,
+  attach_project: handleAttachProject,
+  detach_project: handleDetachProject,
+  get_debug_output: handleGetDebugOutput,
+  stop_project: handleStopProject,
   list_projects: (_runner, args) => handleListProjects(args),
-  get_project_info: (runner, args) => handleGetProjectInfo(runner, args),
-  take_screenshot: (runner, args) => handleTakeScreenshot(runner, args),
-  simulate_input: (runner, args) => handleSimulateInput(runner, args),
-  get_ui_elements: (runner, args) => handleGetUiElements(runner, args),
-  run_script: (runner, args) => handleRunScript(runner, args),
+  get_project_info: handleGetProjectInfo,
+  take_screenshot: handleTakeScreenshot,
+  simulate_input: handleSimulateInput,
+  get_ui_elements: handleGetUiElements,
+  run_script: handleRunScript,
   list_autoloads: (_runner, args) => handleListAutoloads(args),
   add_autoload: (_runner, args) => handleAddAutoload(args),
   remove_autoload: (_runner, args) => handleRemoveAutoload(args),
@@ -96,26 +96,26 @@ export const toolDispatch: Record<string, ToolHandler> = {
   get_project_settings: (_runner, args) => handleGetProjectSettings(args),
 
   // Scene tools
-  create_scene: (runner, args) => handleCreateScene(runner, args),
-  add_node: (runner, args) => handleAddNode(runner, args),
-  load_sprite: (runner, args) => handleLoadSprite(runner, args),
-  save_scene: (runner, args) => handleSaveScene(runner, args),
-  export_mesh_library: (runner, args) => handleExportMeshLibrary(runner, args),
-  batch_scene_operations: (runner, args) => handleBatchSceneOperations(runner, args),
+  create_scene: handleCreateScene,
+  add_node: handleAddNode,
+  load_sprite: handleLoadSprite,
+  save_scene: handleSaveScene,
+  export_mesh_library: handleExportMeshLibrary,
+  batch_scene_operations: handleBatchSceneOperations,
 
   // Node tools
-  delete_nodes: (runner, args) => handleDeleteNodes(runner, args),
-  set_node_properties: (runner, args) => handleSetNodeProperties(runner, args),
-  get_node_properties: (runner, args) => handleGetNodeProperties(runner, args),
-  attach_script: (runner, args) => handleAttachScript(runner, args),
-  get_scene_tree: (runner, args) => handleGetSceneTree(runner, args),
-  duplicate_node: (runner, args) => handleDuplicateNode(runner, args),
-  get_node_signals: (runner, args) => handleGetNodeSignals(runner, args),
-  connect_signal: (runner, args) => handleConnectSignal(runner, args),
-  disconnect_signal: (runner, args) => handleDisconnectSignal(runner, args),
+  delete_nodes: handleDeleteNodes,
+  set_node_properties: handleSetNodeProperties,
+  get_node_properties: handleGetNodeProperties,
+  attach_script: handleAttachScript,
+  get_scene_tree: handleGetSceneTree,
+  duplicate_node: handleDuplicateNode,
+  get_node_signals: handleGetNodeSignals,
+  connect_signal: handleConnectSignal,
+  disconnect_signal: handleDisconnectSignal,
 
   // Validate tools
-  validate: (runner, args) => handleValidate(runner, args),
+  validate: handleValidate,
 };
 
 export async function dispatchToolCall(

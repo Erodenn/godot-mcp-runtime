@@ -526,6 +526,9 @@ func get_node_properties(params: Dictionary) -> void:
 		return
 
 	var results: Array = []
+	# Class-name → default-instance cache. Reused across all nodes in this call
+	# so we don't instantiate a fresh default per node when changed_only is true.
+	var defaults_cache: Dictionary = {}
 
 	for node_spec in params.nodes:
 		var node_path = node_spec.get("node_path", "")
@@ -534,8 +537,14 @@ func get_node_properties(params: Dictionary) -> void:
 		if node == null:
 			results.append({"nodePath": node_path, "error": "Node not found"})
 		else:
-			var props = _collect_node_properties(node, changed_only)
+			var props = _collect_node_properties(node, changed_only, defaults_cache)
 			results.append({"nodePath": node_path, "nodeType": node.get_class(), "properties": props})
+
+	# Free cached default instances; they were created via instantiate_class.
+	for klass in defaults_cache:
+		var inst = defaults_cache[klass]
+		if inst:
+			inst.free()
 
 	print(JSON.stringify({"results": results}))
 
@@ -784,11 +793,20 @@ func _coerce_property_value(value):
 			return Color(value.r, value.g, value.b, a)
 	return value
 
-# Helper: collect node properties into a serializable Dictionary
-func _collect_node_properties(node: Node, changed_only: bool) -> Dictionary:
+# Helper: collect node properties into a serializable Dictionary. When
+# changed_only is true, compares each property against a default instance of
+# the node's class. The defaults_cache dict is keyed by class name so the
+# caller can reuse default instances across many nodes (caller is responsible
+# for freeing the cache when done).
+func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Dictionary) -> Dictionary:
 	var default_node = null
 	if changed_only:
-		default_node = instantiate_class(node.get_class())
+		var klass = node.get_class()
+		if defaults_cache.has(klass):
+			default_node = defaults_cache[klass]
+		else:
+			default_node = instantiate_class(klass)
+			defaults_cache[klass] = default_node
 
 	var properties = {}
 	var property_list = node.get_property_list()
@@ -822,9 +840,6 @@ func _collect_node_properties(node: Node, changed_only: bool) -> Dictionary:
 				properties[prop_name] = value
 			else:
 				properties[prop_name] = str(value)
-
-	if default_node:
-		default_node.free()
 
 	return properties
 

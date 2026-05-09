@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -12,7 +12,7 @@ describe('handleValidate', () => {
   it('rejects missing projectPath in single-target mode', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, { source: 'extends Node' });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath is required/);
   });
 
   it('rejects projectPath containing ..', async () => {
@@ -21,7 +21,7 @@ describe('handleValidate', () => {
       projectPath: '../evil',
       source: 'extends Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Invalid project path/);
   });
 
   it('rejects nonexistent project directory', async () => {
@@ -30,13 +30,13 @@ describe('handleValidate', () => {
       projectPath: '/does/not/exist',
       source: 'extends Node',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Not a valid Godot project/);
   });
 
   it('rejects when none of scriptPath, source, scenePath, or targets is provided', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, { projectPath: fixtureProjectPath });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /One of scriptPath, source, or scenePath is required/);
   });
 
   it('rejects when more than one of scriptPath, source, scenePath is provided', async () => {
@@ -46,7 +46,7 @@ describe('handleValidate', () => {
       source: 'extends Node',
       scenePath: fixtureScenePath,
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Provide exactly one of scriptPath, source, or scenePath/);
   });
 
   it('rejects scriptPath containing ..', async () => {
@@ -55,7 +55,7 @@ describe('handleValidate', () => {
       projectPath: fixtureProjectPath,
       scriptPath: '../outside.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Invalid scriptPath/);
   });
 
   it('rejects nonexistent scriptPath', async () => {
@@ -64,7 +64,7 @@ describe('handleValidate', () => {
       projectPath: fixtureProjectPath,
       scriptPath: 'nonexistent.gd',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Script file does not exist/);
   });
 
   it('rejects scenePath containing ..', async () => {
@@ -73,7 +73,7 @@ describe('handleValidate', () => {
       projectPath: fixtureProjectPath,
       scenePath: '../outside.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Invalid scenePath/);
   });
 
   it('rejects nonexistent scenePath', async () => {
@@ -82,7 +82,7 @@ describe('handleValidate', () => {
       projectPath: fixtureProjectPath,
       scenePath: 'ghost.tscn',
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Scene file does not exist/);
   });
 
   it('includes the thrown message in the error response', async () => {
@@ -166,7 +166,7 @@ describe('handleValidate batch mode', () => {
       projectPath: fixtureProjectPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Batch validate failed/);
   });
 
   it('surfaces runner exceptions as a structured MCP error response in batch mode', async () => {
@@ -175,7 +175,7 @@ describe('handleValidate batch mode', () => {
       projectPath: fixtureProjectPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Batch validation failed.*boom/);
   });
 
   it('handles empty targets array (batch mode with no items)', async () => {
@@ -196,7 +196,7 @@ describe('handleValidate batch mode', () => {
     const result = await handleValidate(fake.asRunner, {
       targets: [{ scenePath: fixtureScenePath }],
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /projectPath is required/);
   });
 
   it('rejects projectPath containing .. in batch mode', async () => {
@@ -205,7 +205,7 @@ describe('handleValidate batch mode', () => {
       projectPath: '../evil',
       targets: [{ scenePath: fixtureScenePath }],
     });
-    expect(hasError(result)).toBe(true);
+    expectErrorMatching(result, /Invalid project path/);
   });
 
   it('reports valid:false for parse-broken targets via secondary "Failed to load script" message', async () => {

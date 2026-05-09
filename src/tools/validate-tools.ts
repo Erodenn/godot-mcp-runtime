@@ -155,6 +155,24 @@ function parseGodotErrors(stderr: string): ValidationError[] {
 }
 
 /**
+ * Write inline GDScript source to a uniquely-named file under <projectPath>/.mcp/
+ * for validation. Returns the project-relative path (e.g. ".mcp/validate_temp_xxx.gd")
+ * that the runner consumes plus the absolute path the caller cleans up.
+ */
+function writeTempGdScript(
+  projectPath: string,
+  source: string,
+  prefix: 'validate_temp' | 'validate_batch',
+): { resPath: string; absPath: string } {
+  const mcpDir = join(projectPath, '.mcp');
+  if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true });
+  const name = `${prefix}_${randomUUID()}.gd`;
+  const absPath = join(mcpDir, name);
+  writeFileSync(absPath, source, 'utf8');
+  return { resPath: `.mcp/${name}`, absPath };
+}
+
+/**
  * Group Godot stderr errors by their res:// file path.
  * Used for batch validation where multiple files produce output in one stderr stream.
  */
@@ -190,13 +208,13 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       for (let i = 0; i < targets.length; i++) {
         const t = targets[i];
         if (t.source) {
-          const mcpDir = join(pv.projectPath, '.mcp');
-          if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true });
-          const tempName = `validate_batch_${randomUUID()}.gd`;
-          const tempPath = join(mcpDir, tempName);
-          writeFileSync(tempPath, t.source, 'utf8');
-          tempFiles.push(tempPath);
-          snakeTargets.push({ script_path: `.mcp/${tempName}` });
+          const { resPath, absPath } = writeTempGdScript(
+            pv.projectPath,
+            t.source,
+            'validate_batch',
+          );
+          tempFiles.push(absPath);
+          snakeTargets.push({ script_path: resPath });
         } else if (t.scriptPath) {
           snakeTargets.push({ script_path: t.scriptPath });
         } else if (t.scenePath) {
@@ -279,15 +297,8 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
   try {
     if (args.source) {
-      // Write inline source to a temp file inside .mcp/
-      const mcpDir = join(pv.projectPath, '.mcp');
-      if (!existsSync(mcpDir)) {
-        mkdirSync(mcpDir, { recursive: true });
-      }
-      const tempFileName = `validate_temp_${randomUUID()}.gd`;
-      const tempFilePath = join(mcpDir, tempFileName);
-      writeFileSync(tempFilePath, args.source as string, 'utf8');
-      resolvedScriptPath = `.mcp/${tempFileName}`;
+      const { resPath } = writeTempGdScript(pv.projectPath, args.source as string, 'validate_temp');
+      resolvedScriptPath = resPath;
       tempFile = true;
     } else if (args.scriptPath) {
       if (!validatePath(args.scriptPath as string)) {

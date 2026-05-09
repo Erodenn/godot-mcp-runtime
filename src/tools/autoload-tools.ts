@@ -90,7 +90,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
 
 // --- Handlers ---
 
-export async function handleListAutoloads(args: OperationParams) {
+export function handleListAutoloads(args: OperationParams) {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -106,7 +106,7 @@ export async function handleListAutoloads(args: OperationParams) {
   }
 }
 
-export async function handleAddAutoload(args: OperationParams) {
+export function handleAddAutoload(args: OperationParams) {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -153,7 +153,7 @@ export async function handleAddAutoload(args: OperationParams) {
   }
 }
 
-export async function handleRemoveAutoload(args: OperationParams) {
+export function handleRemoveAutoload(args: OperationParams) {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -182,7 +182,7 @@ export async function handleRemoveAutoload(args: OperationParams) {
   }
 }
 
-export async function handleUpdateAutoload(args: OperationParams) {
+export function handleUpdateAutoload(args: OperationParams) {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;

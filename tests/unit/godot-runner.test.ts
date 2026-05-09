@@ -6,6 +6,7 @@ import {
   extractGdError,
   createErrorResponse,
   extractJson,
+  cleanStdout,
 } from '../../src/utils/godot-runner.js';
 
 describe('normalizeParameters', () => {
@@ -138,5 +139,27 @@ describe('extractJson', () => {
   it('parses cleanly when no bracket-noise precedes the JSON', () => {
     const out = 'INFO: starting up\n{"ok": true}';
     expect(JSON.parse(extractJson(out))).toEqual({ ok: true });
+  });
+});
+
+describe('cleanStdout', () => {
+  it('routes JSON-object output through extractJson (strips banner)', () => {
+    const out = 'Godot Engine v4.5.stable\nINFO line\n{"ok": true}';
+    expect(JSON.parse(cleanStdout(out))).toEqual({ ok: true });
+  });
+
+  it('routes JSON-array output through extractJson (no `{` present)', () => {
+    const out = 'Godot Engine v4.5.stable\n[1, 2, 3]';
+    expect(JSON.parse(cleanStdout(out))).toEqual([1, 2, 3]);
+  });
+
+  it('routes plain non-JSON output through cleanOutput (drops banner)', () => {
+    // No `{` or `[` anywhere — takes the cleanOutput branch.
+    const out = 'Godot Engine v4.5.stable\nplain success';
+    expect(cleanStdout(out)).toBe('plain success');
+  });
+
+  it('handles empty stdout', () => {
+    expect(cleanStdout('')).toBe('');
   });
 });

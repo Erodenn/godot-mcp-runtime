@@ -6,7 +6,14 @@ import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeManager } from './bridge-manager.js';
-import { encodeFrame, findFreePort, getBridgePort, parseFrames } from './bridge-protocol.js';
+import {
+  encodeFrame,
+  findFreePort,
+  getBridgePort,
+  parseFrames,
+  FRAME_HEADER_BYTES,
+  MAX_FRAME_BYTES,
+} from './bridge-protocol.js';
 import { logDebug, logError } from './logger.js';
 
 /**
@@ -420,6 +427,25 @@ interface InFlightCommand {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * Read the first `n` bytes from a chunk array without concatenating the
+ * entire array. If the first chunk already has enough bytes, returns a
+ * zero-copy subarray; otherwise copies just `n` bytes into a fresh buffer.
+ * Caller must ensure total length across chunks is >= n.
+ */
+function readBytesFromChunks(chunks: Buffer[], n: number): Buffer {
+  if (chunks[0].length >= n) return chunks[0].subarray(0, n);
+  const result = Buffer.allocUnsafe(n);
+  let copied = 0;
+  for (const c of chunks) {
+    const take = Math.min(c.length, n - copied);
+    c.copy(result, copied, 0, take);
+    copied += take;
+    if (copied >= n) break;
+  }
+  return result;
+}
+
 export class GodotRunner {
   private godotPath: string | null = null;
   private operationsScriptPath: string;
@@ -432,7 +458,12 @@ export class GodotRunner {
   public activeBridgePort: number | null = null;
 
   private socket: net.Socket | null = null;
-  private rxBuffer: Buffer = Buffer.alloc(0);
+  // Receive buffer kept as an array of chunks until at least one complete frame
+  // is available. Avoids re-copying accumulated bytes on every TCP data event
+  // (the old `Buffer.concat([rxBuffer, chunk])` pattern was O(n²) on large
+  // frames split across many chunks).
+  private rxChunks: Buffer[] = [];
+  private rxTotal = 0;
   private inFlight: InFlightCommand | null = null;
 
   constructor(config?: GodotServerConfig) {
@@ -972,7 +1003,7 @@ export class GodotRunner {
           sock.removeAllListeners();
           sock.destroy();
         }
-        this.rxBuffer = Buffer.alloc(0);
+        this.resetRxBuffer();
         settle(
           new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
         );
@@ -991,13 +1022,43 @@ export class GodotRunner {
           sock.setNoDelay(true);
           sock.removeListener('error', onConnectError);
           this.socket = sock;
-          this.rxBuffer = Buffer.alloc(0);
+          this.resetRxBuffer();
 
           sock.on('data', (chunk: Buffer) => {
-            this.rxBuffer = Buffer.concat([this.rxBuffer, chunk]);
+            this.rxChunks.push(chunk);
+            this.rxTotal += chunk.length;
+
+            // Defer the (potentially expensive) concat until we know at least
+            // one complete frame is ready. Peek the 4-byte header without
+            // copying all accumulated chunks first.
+            if (this.rxTotal < FRAME_HEADER_BYTES) return;
+            const header = readBytesFromChunks(this.rxChunks, FRAME_HEADER_BYTES);
+            const firstLen = header.readUInt32BE(0);
+            if (firstLen > MAX_FRAME_BYTES) {
+              this.socket = null;
+              sock.destroy();
+              settle(
+                new BridgeDisconnectedError(
+                  `Bridge frame header advertises ${firstLen} bytes, exceeds limit ${MAX_FRAME_BYTES}`,
+                ),
+              );
+              return;
+            }
+            if (this.rxTotal < FRAME_HEADER_BYTES + firstLen) return;
+
             try {
-              const { frames, remainder } = parseFrames(this.rxBuffer);
-              this.rxBuffer = remainder;
+              const buffer =
+                this.rxChunks.length === 1
+                  ? this.rxChunks[0]
+                  : Buffer.concat(this.rxChunks, this.rxTotal);
+              const { frames, remainder } = parseFrames(buffer);
+              if (remainder.length === 0) {
+                this.rxChunks = [];
+                this.rxTotal = 0;
+              } else {
+                this.rxChunks = [remainder];
+                this.rxTotal = remainder.length;
+              }
               for (const frame of frames) {
                 settle(null, frame.toString('utf8'));
               }
@@ -1078,7 +1139,12 @@ export class GodotRunner {
       sock.removeAllListeners();
       sock.destroy();
     }
-    this.rxBuffer = Buffer.alloc(0);
+    this.resetRxBuffer();
+  }
+
+  private resetRxBuffer(): void {
+    this.rxChunks = [];
+    this.rxTotal = 0;
   }
 
   getErrorCount(): number {

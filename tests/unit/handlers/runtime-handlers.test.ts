@@ -50,6 +50,8 @@ interface BridgeCall {
 interface RuntimeFake {
   asRunner: GodotRunner;
   bridgeCalls: BridgeCall[];
+  /** Number of times stopProject() has been invoked. */
+  stopCalls(): number;
   setSession(opts: {
     mode: RuntimeSessionMode | null;
     projectPath?: string | null;
@@ -75,6 +77,7 @@ function createRuntimeFake(): RuntimeFake {
   let bridgeReady = true;
   let bridgeError: string | undefined;
   let runProjectError: Error | null = null;
+  let stopCallCount = 0;
 
   const state: {
     activeSessionMode: RuntimeSessionMode | null;
@@ -105,6 +108,13 @@ function createRuntimeFake(): RuntimeFake {
       return { response: bridgeResponse, runtimeErrors: bridgeRuntimeErrors };
     },
     async stopProject() {
+      stopCallCount++;
+      // Bridge-failure paths in handleRunProject tear down the session before
+      // returning the error, so reset the mode/project state to mirror the
+      // real runner's stopProject behavior.
+      state.activeSessionMode = null;
+      state.activeProjectPath = null;
+      state.activeProcess = null;
       return stopResult;
     },
     closeConnection() {},
@@ -137,11 +147,17 @@ function createRuntimeFake(): RuntimeFake {
     async waitForBridgeAttached() {
       return { ready: bridgeReady, error: bridgeError };
     },
+    getRecentErrors(_n: number): string[] {
+      return [];
+    },
   };
 
   return {
     asRunner: fake as unknown as GodotRunner,
     bridgeCalls,
+    stopCalls() {
+      return stopCallCount;
+    },
     setSession({ mode, projectPath = null, process = null }) {
       state.activeSessionMode = mode;
       state.activeProjectPath = projectPath;
@@ -276,6 +292,49 @@ describe('handleAttachProject bridge port', () => {
     expect(hasError(result)).toBe(false);
     const text = (result as { content: Array<{ text: string }> }).content[0].text;
     expect(text).toMatch(/port 12345/);
+  });
+});
+
+describe('handleRunProject bridge failure paths', () => {
+  it('returns "exited before MCP bridge could initialize" error when process exits during wait', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'process gone');
+    // Replace the default runProject so the post-state has hasExited=true.
+    // The handler must take the "process exited" branch (not the timeout
+    // branch) and tear down before returning.
+    const runProjectExited = (projectPath: string): unknown => {
+      fake.setSession({
+        mode: 'spawned',
+        projectPath,
+        process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+      });
+      return undefined;
+    };
+    (fake.asRunner as unknown as { runProject: unknown }).runProject = runProjectExited;
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /exited before the MCP bridge could initialize/);
+    // Handler must tear down before returning so retry works cleanly.
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('returns "bridge did not respond" error and tears down when bridge times out', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'timeout after 5s');
+    // The default fake.runProject sets process with hasExited=false, so the
+    // handler takes the timeout branch (not the process-exited branch).
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /bridge did not respond/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+});
+
+describe('handleAttachProject bridge failure paths', () => {
+  it('returns "bridge is not ready" error and tears down when bridge wait fails', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /bridge is not ready/);
+    expect(fake.stopCalls()).toBe(1);
   });
 });
 

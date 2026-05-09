@@ -24,6 +24,21 @@ export interface AutoloadEntry {
  */
 export const EMPTY_AUTOLOAD_SECTION_REGEX = /\[autoload\]\s*(?=\n\[|\n*$)/g;
 
+/**
+ * Mirrors the parser's `\w+` assumption (parseAutoloads / removeAutoloadEntry).
+ * Enforced on write paths to prevent a name with newlines or INI section
+ * delimiters from corrupting project.godot.
+ */
+export const VALID_AUTOLOAD_NAME_REGEX = /^\w+$/;
+
+function assertValidName(name: string): void {
+  if (!VALID_AUTOLOAD_NAME_REGEX.test(name)) {
+    throw new Error(
+      `Invalid autoload name '${name}': must contain only word characters (letters, digits, underscore)`,
+    );
+  }
+}
+
 export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
@@ -59,6 +74,7 @@ export function addAutoloadEntry(
   singleton: boolean,
   existingContent?: string,
 ): void {
+  assertValidName(name);
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
   const lines = content.split('\n');
   const entry = `${name}="${singleton ? '*' : ''}${normalizeAutoloadPath(path)}"`;
@@ -119,6 +135,7 @@ export function updateAutoloadEntry(
   newPath?: string,
   singleton?: boolean,
 ): boolean {
+  assertValidName(name);
   const content = readFileSync(projectFilePath, 'utf8');
   const lines = content.split('\n');
   let inAutoloadSection = false;

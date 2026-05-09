@@ -13,7 +13,7 @@ import * as net from 'net';
 
 export const DEFAULT_BRIDGE_PORT = 9900;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
-const FRAME_HEADER_BYTES = 4;
+export const FRAME_HEADER_BYTES = 4;
 
 /**
  * Resolve the bridge port. Reads `MCP_BRIDGE_PORT` from the environment, falls
@@ -60,9 +60,10 @@ export function encodeFrame(payload: string): Buffer {
   if (body.length > MAX_FRAME_BYTES) {
     throw new Error(`Bridge frame too large: ${body.length} bytes (limit ${MAX_FRAME_BYTES})`);
   }
-  const header = Buffer.alloc(FRAME_HEADER_BYTES);
-  header.writeUInt32BE(body.length, 0);
-  return Buffer.concat([header, body], FRAME_HEADER_BYTES + body.length);
+  const frame = Buffer.allocUnsafe(FRAME_HEADER_BYTES + body.length);
+  frame.writeUInt32BE(body.length, 0);
+  body.copy(frame, FRAME_HEADER_BYTES);
+  return frame;
 }
 
 export interface ParseFramesResult {

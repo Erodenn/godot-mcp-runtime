@@ -11,6 +11,11 @@ import {
 } from '../utils/godot-runner.js';
 import { logDebug } from '../utils/logger.js';
 
+function fileExtension(name: string): string {
+  const dotIdx = name.lastIndexOf('.');
+  return dotIdx >= 0 ? name.slice(dotIdx + 1).toLowerCase() : '';
+}
+
 // --- Tool definitions ---
 
 export const projectToolDefinitions: ToolDefinition[] = [
@@ -196,8 +201,7 @@ function getProjectStructure(projectPath: string): {
         if (entry.isDirectory()) {
           scanDirectory(entryPath);
         } else if (entry.isFile()) {
-          const dotIdx = entry.name.lastIndexOf('.');
-          const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
+          const ext = fileExtension(entry.name);
 
           if (ext === 'tscn') {
             structure.scenes++;
@@ -261,8 +265,7 @@ function buildFilesystemTree(
           ),
         );
       } else if (entry.isFile()) {
-        const dotIdx = entry.name.lastIndexOf('.');
-        const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
+        const ext = fileExtension(entry.name);
         if (extensions && !extensions.includes(ext)) continue;
         children.push({ name: entry.name, type: 'file', path: childRelPath, extension: ext });
       }
@@ -309,8 +312,7 @@ function searchInFiles(
       if (entry.isDirectory()) {
         searchDir(fullPath, childRelPath);
       } else if (entry.isFile()) {
-        const dotIdx = entry.name.lastIndexOf('.');
-        const ext = dotIdx >= 0 ? entry.name.slice(dotIdx + 1).toLowerCase() : '';
+        const ext = fileExtension(entry.name);
         if (!fileTypes.includes(ext)) continue;
         let content: string;
         try {

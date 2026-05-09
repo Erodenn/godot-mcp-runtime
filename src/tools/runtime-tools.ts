@@ -1,4 +1,4 @@
-import { join, sep } from 'path';
+import { join, sep, isAbsolute } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
@@ -380,6 +380,15 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
+
+  if (typeof args.scene === 'string') {
+    if (isAbsolute(args.scene) || args.scene.includes('..')) {
+      return createErrorResponse(
+        `Invalid scene path: must be project-relative without ".." (got: ${args.scene})`,
+        ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
+      );
+    }
+  }
 
   try {
     const background = args.background === true;
