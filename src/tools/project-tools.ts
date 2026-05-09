@@ -6,6 +6,8 @@ import {
   validatePath,
   validateProjectArgs,
   createErrorResponse,
+  getErrorMessage,
+  projectGodotPath,
 } from '../utils/godot-runner.js';
 import { logDebug } from '../utils/logger.js';
 
@@ -140,7 +142,7 @@ function findGodotProjects(
   const projects: Array<{ path: string; name: string }> = [];
 
   try {
-    const projectFile = join(directory, 'project.godot');
+    const projectFile = projectGodotPath(directory);
     if (existsSync(projectFile)) {
       projects.push({
         path: directory,
@@ -152,7 +154,7 @@ function findGodotProjects(
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
       const subdir = join(directory, entry.name);
-      if (existsSync(join(subdir, 'project.godot'))) {
+      if (existsSync(projectGodotPath(subdir))) {
         projects.push({ path: subdir, name: entry.name });
       } else if (recursive) {
         projects.push(...findGodotProjects(subdir, true));
@@ -405,8 +407,7 @@ export async function handleListProjects(args: OperationParams) {
       content: [{ type: 'text', text: JSON.stringify(projects) }],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to list projects: ${errorMessage}`, [
+    return createErrorResponse(`Failed to list projects: ${getErrorMessage(error)}`, [
       'Ensure the directory exists and is accessible',
       'Check if you have permission to read the directory',
     ]);
@@ -429,7 +430,7 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
     const v = validateProjectArgs(args);
     if ('isError' in v) return v;
 
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const projectStructure = getProjectStructure(v.projectPath);
 
     let projectName = basename(v.projectPath);
@@ -458,8 +459,7 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get project info: ${errorMessage}`, [
+    return createErrorResponse(`Failed to get project info: ${getErrorMessage(error)}`, [
       'Ensure Godot is installed correctly',
       'Check if the GODOT_PATH environment variable is set correctly',
     ]);
@@ -479,8 +479,7 @@ export async function handleGetProjectFiles(args: OperationParams) {
     const tree = buildFilesystemTree(v.projectPath, '', maxDepth, 0, extensions);
     return { content: [{ type: 'text', text: JSON.stringify(tree) }] };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get project files: ${errorMessage}`, [
+    return createErrorResponse(`Failed to get project files: ${getErrorMessage(error)}`, [
       'Check if the project directory is accessible',
     ]);
   }
@@ -510,8 +509,7 @@ export async function handleSearchProject(args: OperationParams) {
     );
     return { content: [{ type: 'text', text: JSON.stringify(result) }] };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to search project: ${errorMessage}`, [
+    return createErrorResponse(`Failed to search project: ${getErrorMessage(error)}`, [
       'Check if the project directory is accessible',
     ]);
   }
@@ -562,8 +560,7 @@ export async function handleGetSceneDependencies(args: OperationParams) {
       content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get scene dependencies: ${errorMessage}`, [
+    return createErrorResponse(`Failed to get scene dependencies: ${getErrorMessage(error)}`, [
       'Check if the scene file is accessible',
     ]);
   }
@@ -575,7 +572,7 @@ export async function handleGetProjectSettings(args: OperationParams) {
   if ('isError' in v) return v;
 
   try {
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const allSettings = parseProjectSettings(projectFile);
     if (args.section && typeof args.section === 'string') {
       const sectionData = allSettings[args.section as string] ?? {};
@@ -583,8 +580,7 @@ export async function handleGetProjectSettings(args: OperationParams) {
     }
     return { content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get project settings: ${errorMessage}`, [
+    return createErrorResponse(`Failed to get project settings: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
     ]);
   }

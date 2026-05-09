@@ -250,6 +250,20 @@ func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 
 	return true
 
+# Ensure the parent directory of a res:// path exists, creating it recursively
+# if needed. Returns true on success or when the directory already exists.
+func _ensure_res_dir(full_res_path: String) -> bool:
+	var dir_path = full_res_path.get_base_dir()
+	if dir_path == "res://" or dir_path.is_empty():
+		return true
+	var dir = DirAccess.open("res://")
+	if not dir:
+		return false
+	var relative_dir = dir_path.substr(6) if dir_path.begins_with("res://") else dir_path
+	if relative_dir.is_empty() or dir.dir_exists(relative_dir):
+		return true
+	return dir.make_dir_recursive(relative_dir) == OK
+
 # Create a new scene with a specified root node type
 func create_scene(params):
 	printerr("Creating scene: " + params.scene_path)
@@ -270,17 +284,9 @@ func create_scene(params):
 	scene_root.name = "root"
 	scene_root.owner = scene_root
 
-	# Ensure directory exists
-	var scene_dir = full_scene_path.get_base_dir()
-	if scene_dir != "res://" and not scene_dir.is_empty():
-		var dir = DirAccess.open("res://")
-		if dir:
-			var relative_dir = scene_dir.substr(6) if scene_dir.begins_with("res://") else scene_dir
-			if not relative_dir.is_empty() and not dir.dir_exists(relative_dir):
-				var make_error = dir.make_dir_recursive(relative_dir)
-				if make_error != OK:
-					log_error("Failed to create directory: " + relative_dir)
-					quit(1)
+	if not _ensure_res_dir(full_scene_path):
+		log_error("Failed to create directory for scene: " + full_scene_path)
+		quit(1)
 
 	if save_scene_to_path(scene_root, full_scene_path):
 		print("Scene created successfully at: " + params.scene_path)
@@ -404,22 +410,16 @@ func export_mesh_library(params):
 					mesh_library.set_item_shapes(item_id, [collision_child.shape])
 					break
 
-			if mesh_instance.mesh:
-				mesh_library.set_item_preview(item_id, mesh_instance.mesh)
+			mesh_library.set_item_preview(item_id, mesh_instance.mesh)
 
 			item_id += 1
 
 	if item_id > 0:
 		var full_output_path = normalize_scene_path(params.output_path)
 
-		# Ensure output directory exists
-		var output_dir = full_output_path.get_base_dir()
-		if output_dir != "res://":
-			var dir = DirAccess.open("res://")
-			if dir:
-				var relative_dir = output_dir.substr(6) if output_dir.begins_with("res://") else output_dir
-				if not relative_dir.is_empty() and not dir.dir_exists(relative_dir):
-					dir.make_dir_recursive(relative_dir)
+		if not _ensure_res_dir(full_output_path):
+			log_error("Failed to create directory for MeshLibrary: " + full_output_path)
+			quit(1)
 
 		var error = ResourceSaver.save(mesh_library, full_output_path)
 		if error == OK:

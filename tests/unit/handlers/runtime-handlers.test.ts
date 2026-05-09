@@ -871,7 +871,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
   it('returns isError when the bridge response is not JSON', async () => {
     fake.setBridgeResponse('not json at all');
     const result = await handleTakeScreenshot(fake.asRunner, {});
-    expectErrorMatching(result, /Invalid response from screenshot server/);
+    expectErrorMatching(result, /Invalid response from bridge \(screenshot\)/);
   });
 
   it('returns isError when the bridge response carries an error field', async () => {

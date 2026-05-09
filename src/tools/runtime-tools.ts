@@ -5,12 +5,17 @@ import {
   normalizeParameters,
   validateProjectArgs,
   createErrorResponse,
+  getErrorMessage,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from '../utils/godot-runner.js';
+import {
+  attachRuntimeWarnings,
+  parseBridgeJson,
+  MAX_RUNTIME_ERROR_CONTEXT_LINES,
+} from '../utils/handler-helpers.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
 
-const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
 const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
@@ -353,8 +358,7 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to launch Godot editor: ${errorMessage}`, [
+    return createErrorResponse(`Failed to launch Godot editor: ${getErrorMessage(error)}`, [
       'Ensure Godot is installed correctly',
       'Check if the GODOT_PATH environment variable is set correctly',
     ]);
@@ -375,31 +379,38 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
     if (!bridgeResult.ready) {
       if (runner.activeProcess && runner.activeProcess.hasExited) {
+        // Tear down the spawned-mode session state so a retry of run_project
+        // works without an intervening stop_project.
+        await runner.stopProject();
         return createErrorResponse(
           `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}`,
           [
             'Check get_debug_output for runtime errors',
             'Verify a display server is available (Wayland/X11)',
             'Check for broken autoloads with list_autoloads',
-            'Call stop_project to clean up, then try again',
+            'Retry run_project once the underlying issue is resolved',
           ],
         );
       }
 
+      const recentErrors = runner.getRecentErrors(20);
+      const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
       const lines = [
         `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
-        '- The process is still running but the bridge listener never came up — likely an early _ready error or a stuck process holding the port',
-        '- Runtime tools will not work against this session',
-        '- Call stop_project, then run_project again',
+        '- The bridge listener never came up — likely an early _ready error or a stuck process holding the port',
+        '- Session has been torn down; retry run_project to start a new one',
+        errorTail,
       ];
       if (background) {
         lines.push('- Background mode: window hidden, physical input blocked');
       }
+      // Tear down before returning so hasActiveRuntimeSession() reports false
+      // and the next run_project lazy-reconnects cleanly.
+      await runner.stopProject();
       return createErrorResponse(lines.join('\n'), [
-        'Use get_debug_output to inspect the last captured logs',
         'Check for broken autoloads with list_autoloads',
         'Check that the bridge port (default 9900) is not occupied by another Godot process',
-        'Call stop_project to clean up, then run_project again',
+        'Retry run_project',
       ]);
     }
 
@@ -417,8 +428,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       content: [{ type: 'text', text: lines.join('\n') }],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+    return createErrorResponse(`Failed to run Godot project: ${getErrorMessage(error)}`, [
       'Ensure Godot is installed correctly',
       'Check if the GODOT_PATH environment variable is set correctly',
     ]);
@@ -437,6 +447,9 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
     const bridgeResult = await runner.waitForBridgeAttached();
 
     if (!bridgeResult.ready) {
+      // Tear down the attached-mode session state so retrying with
+      // attach_project (or run_project) works without a manual detach first.
+      await runner.stopProject();
       return createErrorResponse(
         `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
         [
@@ -444,7 +457,6 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
           'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
           'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
           'Check that no other Godot project is occupying the bridge port (default 9900)',
-          'Use detach_project or stop_project when done',
         ],
       );
     }
@@ -463,8 +475,7 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to attach project: ${errorMessage}`, [
+    return createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
       'Ensure MCP can write the bridge autoload into the project',
     ]);
@@ -642,15 +653,9 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
       timeout,
     );
 
-    let parsed: ScreenshotBridgeResponse;
-    try {
-      parsed = JSON.parse(responseStr);
-    } catch {
-      return createErrorResponse(`Invalid response from screenshot server: ${responseStr}`, [
-        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
-        'If the issue persists, call stop_project and run_project again',
-      ]);
-    }
+    const parsedResult = parseBridgeJson<ScreenshotBridgeResponse>(responseStr, 'screenshot');
+    if (!parsedResult.ok) return parsedResult.response;
+    const parsed = parsedResult.data;
 
     if (parsed.error) {
       return createErrorResponse(`Screenshot server error: ${parsed.error}`, [
@@ -715,16 +720,13 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
       metadata.previewSize = { width: parsed.preview_width, height: parsed.preview_height };
     }
 
-    if (runtimeErrors.length > 0) {
-      metadata.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
-    }
+    attachRuntimeWarnings(metadata, runtimeErrors);
 
     content.push({ type: 'text', text: JSON.stringify(metadata) });
 
     return { content };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to take screenshot: ${errorMessage}`, [
+    return createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors',
       'If the game has exited, call stop_project, then run_project again',
       'For slow renders, increase the timeout parameter',
@@ -768,15 +770,13 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       timeoutMs,
     );
 
-    let parsed: { success?: boolean; error?: string; actions_processed?: number };
-    try {
-      parsed = JSON.parse(responseStr);
-    } catch {
-      return createErrorResponse(`Invalid response from bridge: ${responseStr}`, [
-        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
-        'If the issue persists, call stop_project and run_project again',
-      ]);
-    }
+    const parsedResult = parseBridgeJson<{
+      success?: boolean;
+      error?: string;
+      actions_processed?: number;
+    }>(responseStr, 'simulate_input');
+    if (!parsedResult.ok) return parsedResult.response;
+    const parsed = parsedResult.data;
 
     if (parsed.error) {
       return createErrorResponse(`Input simulation error: ${parsed.error}`, [
@@ -790,9 +790,7 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       actions_processed: parsed.actions_processed,
       tip: 'Call take_screenshot to verify the input had the intended visual effect.',
     };
-    if (runtimeErrors.length > 0) {
-      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
-    }
+    attachRuntimeWarnings(payload, runtimeErrors);
 
     return {
       content: [
@@ -803,8 +801,7 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to simulate input: ${errorMessage}`, [
+    return createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
       'If the game has exited, call stop_project, then run_project again',
     ]);
@@ -829,15 +826,12 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       cmdParams,
     );
 
-    let parsed: { elements?: unknown[]; error?: string };
-    try {
-      parsed = JSON.parse(responseStr);
-    } catch {
-      return createErrorResponse(`Invalid response from bridge: ${responseStr}`, [
-        'The bridge sent a non-JSON frame — check get_debug_output for runtime errors that may have aborted the response',
-        'If the issue persists, call stop_project and run_project again',
-      ]);
-    }
+    const parsedResult = parseBridgeJson<{ elements?: unknown[]; error?: string }>(
+      responseStr,
+      'get_ui_elements',
+    );
+    if (!parsedResult.ok) return parsedResult.response;
+    const parsed = parsedResult.data;
 
     if (parsed.error) {
       return createErrorResponse(`UI element query error: ${parsed.error}`, [
@@ -849,9 +843,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       ...parsed,
       tip: "Use simulate_input with type 'click_element' and a node_path or node name from this list to interact with these elements.",
     };
-    if (runtimeErrors.length > 0) {
-      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
-    }
+    attachRuntimeWarnings(payload, runtimeErrors);
 
     return {
       content: [
@@ -862,8 +854,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to get UI elements: ${errorMessage}`, [
+    return createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors',
       'If the game has exited, call stop_project, then run_project again',
     ]);
@@ -916,15 +907,13 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       timeout,
     );
 
-    let parsed: { success?: boolean; result?: unknown; error?: string };
-    try {
-      parsed = JSON.parse(responseStr);
-    } catch {
-      return createErrorResponse(`Invalid response from bridge: ${responseStr}`, [
-        'The script may have produced non-JSON output',
-        'Check get_debug_output for print() statements',
-      ]);
-    }
+    const parsedResult = parseBridgeJson<{
+      success?: boolean;
+      result?: unknown;
+      error?: string;
+    }>(responseStr, 'run_script');
+    if (!parsedResult.ok) return parsedResult.response;
+    const parsed = parsedResult.data;
 
     if (parsed.error) {
       return createErrorResponse(`Script execution error: ${parsed.error}`, [
@@ -966,9 +955,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       result: parsed.result,
       tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
     };
-    if (runtimeErrors.length > 0) {
-      payload.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
-    }
+    attachRuntimeWarnings(payload, runtimeErrors);
 
     return {
       content: [
@@ -979,8 +966,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to execute script: ${errorMessage}`, [
+    return createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
       'If the game has exited, call stop_project, then run_project again',
       'For long-running scripts, increase the timeout parameter',

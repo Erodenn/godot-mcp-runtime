@@ -8,6 +8,7 @@ import {
   validateProjectArgs,
   createErrorResponse,
   extractGdError,
+  getErrorMessage,
 } from '../utils/godot-runner.js';
 
 export const validateToolDefinitions: ToolDefinition[] = [
@@ -226,8 +227,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
       return { content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] };
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return createErrorResponse(`Batch validation failed: ${errorMessage}`, [
+      return createErrorResponse(`Batch validation failed: ${getErrorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
       ]);
@@ -337,8 +337,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Validation failed: ${errorMessage}`, [
+    return createErrorResponse(`Validation failed: ${getErrorMessage(error)}`, [
       'Ensure Godot is installed correctly',
       'Check if the GODOT_PATH environment variable is set correctly',
     ]);

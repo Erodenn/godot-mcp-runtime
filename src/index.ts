@@ -13,7 +13,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotServerConfig } from './utils/godot-runner.js';
-import { GodotRunner } from './utils/godot-runner.js';
+import { GodotRunner, getErrorMessage } from './utils/godot-runner.js';
 
 import { dispatchToolCall } from './dispatch.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
@@ -124,8 +124,7 @@ class GodotMcpServer {
       await this.server.connect(transport);
       console.error('Godot MCP server running on stdio');
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[SERVER] Failed to start:', errorMessage);
+      console.error('[SERVER] Failed to start:', getErrorMessage(error));
       process.exit(1);
     }
   }
@@ -134,7 +133,6 @@ class GodotMcpServer {
 // Create and run the server
 const server = new GodotMcpServer();
 server.run().catch((error: unknown) => {
-  const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-  console.error('Failed to run server:', errorMessage);
+  console.error('Failed to run server:', getErrorMessage(error));
   process.exit(1);
 });

@@ -25,17 +25,20 @@ export class BridgeManager {
   constructor(private bridgeScriptPath: string) {}
 
   inject(projectPath: string): void {
+    // Always refresh the bridge script — a server rebuild updates the source
+    // GDScript, and a same-session re-inject must propagate that to the
+    // project copy or the running game would talk to stale code.
+    const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
+    copyFileSync(this.bridgeScriptPath, destScript);
+    logDebug(`Refreshed bridge autoload at ${destScript}`);
+
     if (this.injectedProjects.has(projectPath)) {
-      logDebug('Bridge already injected for this project, skipping');
+      logDebug('Bridge already injected for this project; refreshed script only.');
       return;
     }
 
     this.ensureMcpGdignore(projectPath);
     this.ensureGitignored(projectPath);
-
-    const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
-    copyFileSync(this.bridgeScriptPath, destScript);
-    logDebug(`Refreshed bridge autoload at ${destScript}`);
 
     const projectFile = join(projectPath, 'project.godot');
     const existing = parseAutoloads(projectFile);

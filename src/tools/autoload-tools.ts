@@ -1,4 +1,3 @@
-import { join } from 'path';
 import { readFileSync } from 'fs';
 import type { OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
@@ -6,6 +5,8 @@ import {
   validatePath,
   validateProjectArgs,
   createErrorResponse,
+  getErrorMessage,
+  projectGodotPath,
 } from '../utils/godot-runner.js';
 import {
   parseAutoloads,
@@ -95,12 +96,11 @@ export async function handleListAutoloads(args: OperationParams) {
   if ('isError' in v) return v;
 
   try {
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const autoloads = parseAutoloads(projectFile);
     return { content: [{ type: 'text', text: JSON.stringify({ autoloads }) }] };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to list autoloads: ${errorMessage}`, [
+    return createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
     ]);
   }
@@ -121,7 +121,7 @@ export async function handleAddAutoload(args: OperationParams) {
   }
 
   try {
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const projectFileContent = readFileSync(projectFile, 'utf8');
     const existing = parseAutoloads(projectFile, projectFileContent);
     if (existing.some((a) => a.name === (args.autoloadName as string))) {
@@ -147,8 +147,7 @@ export async function handleAddAutoload(args: OperationParams) {
       ],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to add autoload: ${errorMessage}`, [
+    return createErrorResponse(`Failed to add autoload: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
     ]);
   }
@@ -166,7 +165,7 @@ export async function handleRemoveAutoload(args: OperationParams) {
   }
 
   try {
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
     if (!removed) {
       return createErrorResponse(`Autoload '${args.autoloadName}' not found`, [
@@ -177,8 +176,7 @@ export async function handleRemoveAutoload(args: OperationParams) {
       content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to remove autoload: ${errorMessage}`, [
+    return createErrorResponse(`Failed to remove autoload: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
     ]);
   }
@@ -199,7 +197,7 @@ export async function handleUpdateAutoload(args: OperationParams) {
   }
 
   try {
-    const projectFile = join(v.projectPath, 'project.godot');
+    const projectFile = projectGodotPath(v.projectPath);
     const updated = updateAutoloadEntry(
       projectFile,
       args.autoloadName as string,
@@ -216,8 +214,7 @@ export async function handleUpdateAutoload(args: OperationParams) {
       content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }],
     };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return createErrorResponse(`Failed to update autoload: ${errorMessage}`, [
+    return createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',
     ]);
   }

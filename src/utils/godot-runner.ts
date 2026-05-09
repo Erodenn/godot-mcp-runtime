@@ -270,6 +270,23 @@ export function validatePath(path: string): boolean {
 }
 
 /**
+ * Return `error.message` when `error` is an `Error`, otherwise `'Unknown error'`.
+ * Centralizes the catch-block boilerplate so handlers can build error responses
+ * without repeating the `instanceof Error` ternary.
+ */
+export function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error';
+}
+
+/**
+ * Build the absolute path to a project's `project.godot` manifest. Use this
+ * instead of `join(dir, 'project.godot')` ad hoc.
+ */
+export function projectGodotPath(projectDir: string): string {
+  return join(projectDir, 'project.godot');
+}
+
+/**
  * Extract the first [ERROR] message from GDScript stderr output.
  * Falls back to a generic message if no [ERROR] line is found.
  */
@@ -338,7 +355,7 @@ export function validateProjectArgs(
     ]);
   }
 
-  const projectFile = join(args.projectPath as string, 'project.godot');
+  const projectFile = projectGodotPath(args.projectPath as string);
   if (!existsSync(projectFile)) {
     return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
       'Ensure the path points to a directory containing a project.godot file',
@@ -720,9 +737,11 @@ export class GodotRunner {
       const lines = data.toString().split('\n');
       output.push(...lines);
       if (output.length > 500) output.splice(0, output.length - 500);
-      lines.forEach((line: string) => {
-        if (line.trim()) logDebug(`[Godot stdout] ${line}`);
-      });
+      if (DEBUG_MODE) {
+        lines.forEach((line: string) => {
+          if (line.trim()) logDebug(`[Godot stdout] ${line}`);
+        });
+      }
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
@@ -730,9 +749,11 @@ export class GodotRunner {
       godotProcess.totalErrorsWritten += lines.length;
       errors.push(...lines);
       if (errors.length > 500) errors.splice(0, errors.length - 500);
-      lines.forEach((line: string) => {
-        if (line.trim()) logDebug(`[Godot stderr] ${line}`);
-      });
+      if (DEBUG_MODE) {
+        lines.forEach((line: string) => {
+          if (line.trim()) logDebug(`[Godot stderr] ${line}`);
+        });
+      }
     });
 
     proc.on('exit', (code: number | null) => {
@@ -1060,26 +1081,45 @@ export class GodotRunner {
     return { response, runtimeErrors };
   }
 
-  async waitForBridgeAttached(
-    timeoutMs: number = BRIDGE_WAIT_ATTACHED_TIMEOUT_MS,
-    intervalMs: number = BRIDGE_WAIT_ATTACHED_INTERVAL_MS,
-  ): Promise<{ ready: boolean; error?: string }> {
-    const deadline = Date.now() + timeoutMs;
-    const expectedPath = this.activeProjectPath
-      ? normalizeForCompare(this.activeProjectPath)
-      : null;
+  /**
+   * Shared poll loop for `waitForBridge` (spawned) and `waitForBridgeAttached`.
+   * Sends `ping` payloads until the bridge replies with a pong that
+   * `validatePong` accepts, the deadline passes, or `shouldAbort` reports
+   * the spawned process has exited.
+   */
+  private async pollBridge(opts: {
+    expectedPath: string | null;
+    timeoutMs: number;
+    intervalMs: number;
+    timeoutError: string;
+    pingPayload: Record<string, unknown>;
+    validatePong: (parsed: { status?: string; [k: string]: unknown }) => boolean;
+    shouldAbort?: () => { aborted: boolean; tail: string[] };
+  }): Promise<{ ready: boolean; error?: string }> {
+    const deadline = Date.now() + opts.timeoutMs;
 
     while (Date.now() < deadline) {
+      if (opts.shouldAbort) {
+        const abort = opts.shouldAbort();
+        if (abort.aborted) {
+          const errorText = abort.tail.length > 0 ? `\nLast stderr:\n${abort.tail.join('\n')}` : '';
+          return {
+            ready: false,
+            error: `Process exited with code ${this.activeProcess?.exitCode ?? '?'} before bridge was ready.${errorText}`,
+          };
+        }
+      }
+
       try {
-        const response = await this.sendCommand('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+        const response = await this.sendCommand('ping', opts.pingPayload, BRIDGE_PING_TIMEOUT_MS);
         const parsed = JSON.parse(response);
-        if (parsed.status === 'pong') {
-          if (expectedPath && parsed.project_path) {
-            const bridgePath = normalizeForCompare(parsed.project_path);
-            if (bridgePath !== expectedPath) {
+        if (opts.validatePong(parsed)) {
+          if (opts.expectedPath && parsed.project_path) {
+            const bridgePath = normalizeForCompare(parsed.project_path as string);
+            if (bridgePath !== opts.expectedPath) {
               return {
                 ready: false,
-                error: `Bridge is running for a different project (${bridgePath}), expected ${expectedPath}`,
+                error: `Bridge reports project ${bridgePath}, expected ${opts.expectedPath}`,
               };
             }
           }
@@ -1089,70 +1129,48 @@ export class GodotRunner {
         // Expected: ping will fail until bridge is listening
       }
 
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
     }
 
-    return {
-      ready: false,
-      error:
+    return { ready: false, error: opts.timeoutError };
+  }
+
+  async waitForBridgeAttached(
+    timeoutMs: number = BRIDGE_WAIT_ATTACHED_TIMEOUT_MS,
+    intervalMs: number = BRIDGE_WAIT_ATTACHED_INTERVAL_MS,
+  ): Promise<{ ready: boolean; error?: string }> {
+    return this.pollBridge({
+      expectedPath: this.activeProjectPath ? normalizeForCompare(this.activeProjectPath) : null,
+      timeoutMs,
+      intervalMs,
+      timeoutError:
         'Bridge did not respond within timeout — is Godot running with the McpBridge autoload?',
-    };
+      pingPayload: {},
+      validatePong: (parsed) => parsed.status === 'pong',
+    });
   }
 
   async waitForBridge(
     timeoutMs: number = BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
     intervalMs: number = BRIDGE_WAIT_SPAWNED_INTERVAL_MS,
   ): Promise<{ ready: boolean; error?: string }> {
-    const deadline = Date.now() + timeoutMs;
     const expectedToken = this.activeProcess?.sessionToken;
-    const expectedPath = this.activeProjectPath
-      ? normalizeForCompare(this.activeProjectPath)
-      : null;
-
     if (!expectedToken) {
       return { ready: false, error: 'No active spawned Godot process to verify' };
     }
 
-    while (Date.now() < deadline) {
-      if (this.activeProcess && this.activeProcess.hasExited) {
-        const lastErrors = this.getRecentErrors(20);
-        const errorText = lastErrors.length > 0 ? `\nLast stderr:\n${lastErrors.join('\n')}` : '';
-        return {
-          ready: false,
-          error: `Process exited with code ${this.activeProcess.exitCode} before bridge was ready.${errorText}`,
-        };
-      }
-
-      try {
-        const response = await this.sendCommand(
-          'ping',
-          { session_token: expectedToken },
-          BRIDGE_PING_TIMEOUT_MS,
-        );
-        const parsed = JSON.parse(response);
-        if (parsed.status === 'pong' && parsed.session_token === expectedToken) {
-          if (expectedPath && parsed.project_path) {
-            const bridgePath = normalizeForCompare(parsed.project_path);
-            if (bridgePath !== expectedPath) {
-              return {
-                ready: false,
-                error: `Bridge reports project ${bridgePath}, expected ${expectedPath}`,
-              };
-            }
-          }
-          return { ready: true };
-        }
-      } catch {
-        // Expected: ping will fail until bridge is listening
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-
-    return {
-      ready: false,
-      error: 'Bridge did not respond with the expected session token within timeout',
-    };
+    return this.pollBridge({
+      expectedPath: this.activeProjectPath ? normalizeForCompare(this.activeProjectPath) : null,
+      timeoutMs,
+      intervalMs,
+      timeoutError: 'Bridge did not respond with the expected session token within timeout',
+      pingPayload: { session_token: expectedToken },
+      validatePong: (parsed) => parsed.status === 'pong' && parsed.session_token === expectedToken,
+      shouldAbort: () => ({
+        aborted: this.activeProcess !== null && this.activeProcess.hasExited,
+        tail: this.getRecentErrors(20),
+      }),
+    });
   }
 
   getRecentErrors(count: number = 20): string[] {
