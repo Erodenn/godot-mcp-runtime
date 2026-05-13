@@ -165,7 +165,7 @@ function writeTempGdScript(
   prefix: 'validate_temp' | 'validate_batch',
 ): { resPath: string; absPath: string } {
   const mcpDir = join(projectPath, '.mcp');
-  if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true });
+  mkdirSync(mcpDir, { recursive: true });
   const name = `${prefix}_${randomUUID()}.gd`;
   const absPath = join(mcpDir, name);
   writeFileSync(absPath, source, 'utf8');

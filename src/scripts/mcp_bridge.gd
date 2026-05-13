@@ -65,15 +65,15 @@ func _process(_delta: float) -> void:
 		peer.stream = stream
 		_peers.append(peer)
 
-	var dead: Array = []
-	for peer in _peers:
+	# Backwards iteration so remove_at() doesn't shift entries we haven't seen
+	# yet, and avoids the O(n) cost of Array.erase() per removal.
+	var i := _peers.size()
+	while i > 0:
+		i -= 1
+		var peer = _peers[i]
 		_poll_peer(peer)
 		if peer.stream == null or peer.stream.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-			dead.append(peer)
-
-	if not dead.is_empty():
-		for peer in dead:
-			_peers.erase(peer)
+			_peers.remove_at(i)
 
 func _poll_peer(peer: PeerState) -> void:
 	peer.stream.poll()

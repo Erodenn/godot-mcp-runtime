@@ -1041,9 +1041,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
 
   it('refuses to read a bridge preview_path outside .mcp/screenshots/', async () => {
     const screenshotPath = writeScreenshot('screenshot.png');
-    fake.setBridgeResponse(
-      JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }),
-    );
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
     expectErrorMatching(result, /preview path outside \.mcp\/screenshots\//i);
   });

@@ -295,6 +295,56 @@ func create_scene(params):
 		quit(1)
 
 # Add a node to an existing scene
+# Apply an add_node mutation without saving. Shared by standalone add_node
+# and batch_scene_operations so both paths validate identically.
+# Returns {"ok": bool, "error": String}; error is empty on success.
+func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
+	var parent_path = "root"
+	if op.has("parent_node_path"):
+		parent_path = op.parent_node_path
+	var parent = find_node_by_path(scene_root, parent_path)
+	if not parent:
+		return {"ok": false, "error": "Parent node not found: " + parent_path}
+	if not op.has("node_type") or op.node_type == "":
+		return {"ok": false, "error": "node_type is required for add_node"}
+	if not op.has("node_name") or op.node_name == "":
+		return {"ok": false, "error": "node_name is required for add_node"}
+	var new_node = instantiate_class(op.node_type)
+	if not new_node:
+		return {"ok": false, "error": "Failed to instantiate node of type: " + op.node_type}
+	new_node.name = op.node_name
+	if op.has("properties"):
+		for property in op.properties:
+			new_node.set(property, _coerce_property_value(op.properties[property]))
+	parent.add_child(new_node)
+	new_node.owner = scene_root
+	return {"ok": true, "error": ""}
+
+# Apply a load_sprite mutation without saving. Shared by standalone load_sprite
+# and batch_scene_operations.
+func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
+	if not op.has("node_path") or op.node_path == "":
+		return {"ok": false, "error": "node_path is required for load_sprite"}
+	if not op.has("texture_path") or op.texture_path == "":
+		return {"ok": false, "error": "texture_path is required for load_sprite"}
+	var sprite_node = find_node_by_path(scene_root, op.node_path)
+	if not sprite_node:
+		return {"ok": false, "error": "Node not found: " + op.node_path}
+	if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
+		return {"ok": false, "error": "Node is not a sprite-compatible type: " + sprite_node.get_class()}
+	var full_texture_path = normalize_scene_path(op.texture_path)
+	var texture = load(full_texture_path)
+	if not texture:
+		return {"ok": false, "error": "Failed to load texture: " + full_texture_path}
+	if not (texture is Texture2D):
+		return {"ok": false, "error": "Loaded resource is not a Texture2D: " + full_texture_path}
+	# A texture without a resource_path is a runtime-only object — PackedScene.pack()
+	# cannot serialize it, so the assignment would silently vanish on save.
+	if texture.resource_path == "":
+		return {"ok": false, "error": "Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+	sprite_node.texture = texture
+	return {"ok": true, "error": ""}
+
 func add_node(params):
 	printerr("Adding node to scene: " + params.scene_path)
 
@@ -302,30 +352,10 @@ func add_node(params):
 	if not scene_root:
 		quit(1)
 
-	var parent_path = "root"
-	if params.has("parent_node_path"):
-		parent_path = params.parent_node_path
-
-	var parent = find_node_by_path(scene_root, parent_path)
-	if not parent:
-		log_error("Parent node not found: " + parent_path)
+	var result = _apply_add_node(scene_root, params)
+	if not result.ok:
+		log_error(result.error)
 		quit(1)
-
-	var new_node = instantiate_class(params.node_type)
-	if not new_node:
-		log_error("Failed to instantiate node of type: " + params.node_type)
-		quit(1)
-
-	new_node.name = params.node_name
-
-	if params.has("properties"):
-		var properties = params.properties
-		for property in properties:
-			log_debug("Setting property: " + property + " = " + str(properties[property]))
-			new_node.set(property, _coerce_property_value(properties[property]))
-
-	parent.add_child(new_node)
-	new_node.owner = scene_root
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Node '" + params.node_name + "' of type '" + params.node_type + "' added successfully")
@@ -341,30 +371,10 @@ func load_sprite(params):
 	if not scene_root:
 		quit(1)
 
-	var sprite_node = find_node_by_path(scene_root, params.node_path)
-	if not sprite_node:
-		log_error("Node not found: " + params.node_path)
+	var result = _apply_load_sprite(scene_root, params)
+	if not result.ok:
+		log_error(result.error)
 		quit(1)
-
-	if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
-		log_error("Node is not a sprite-compatible type: " + sprite_node.get_class())
-		quit(1)
-
-	var full_texture_path = normalize_scene_path(params.texture_path)
-	var texture = load(full_texture_path)
-	if not texture:
-		log_error("Failed to load texture: " + full_texture_path)
-		quit(1)
-	if not (texture is Texture2D):
-		log_error("Loaded resource is not a Texture2D: " + full_texture_path)
-		quit(1)
-	# A texture without a resource_path is a runtime-only object — PackedScene.pack()
-	# cannot serialize it, so the assignment would silently vanish on save.
-	if texture.resource_path == "":
-		log_error("Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets.")
-		quit(1)
-
-	sprite_node.texture = texture
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Sprite loaded successfully with texture: " + params.texture_path)
@@ -655,20 +665,18 @@ func duplicate_node(params):
 
 	parent.add_child(duplicate)
 	duplicate.owner = scene_root
-	# Recursively set owner on all descendants
-	for child in duplicate.get_children():
-		set_owner_recursive(child, scene_root)
+	# Iterative BFS to set owner on all descendants — avoids recursion depth.
+	var queue: Array = duplicate.get_children()
+	while not queue.is_empty():
+		var current = queue.pop_front()
+		current.owner = scene_root
+		queue.append_array(current.get_children())
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Node duplicated successfully as '" + duplicate.name + "'")
 	else:
 		log_error("Failed to save scene after duplicating node")
 		quit(1)
-
-func set_owner_recursive(node: Node, owner: Node):
-	node.owner = owner
-	for child in node.get_children():
-		set_owner_recursive(child, owner)
 
 # List signals defined on a node and their current connections
 func get_node_signals(params):
@@ -868,50 +876,6 @@ func validate_batch(params: Dictionary) -> void:
 		results.append(_validate_single(target))
 	print(JSON.stringify({"results": results}))
 
-# Helper: add a node to a scene root without saving (returns error string or "")
-func _batch_add_node(scene_root: Node, op: Dictionary) -> String:
-	var parent_path = "root"
-	if op.has("parent_node_path"):
-		parent_path = op.parent_node_path
-	var parent = find_node_by_path(scene_root, parent_path)
-	if not parent:
-		return "Parent node not found: " + parent_path
-	if not op.has("node_type") or op.node_type == "":
-		return "node_type is required for add_node"
-	if not op.has("node_name") or op.node_name == "":
-		return "node_name is required for add_node"
-	var new_node = instantiate_class(op.node_type)
-	if not new_node:
-		return "Failed to instantiate node of type: " + op.node_type
-	new_node.name = op.node_name
-	if op.has("properties"):
-		for property in op.properties:
-			new_node.set(property, _coerce_property_value(op.properties[property]))
-	parent.add_child(new_node)
-	new_node.owner = scene_root
-	return ""
-
-# Helper: set a sprite texture without saving (returns error string or "")
-func _batch_load_sprite(scene_root: Node, op: Dictionary) -> String:
-	if not op.has("node_path") or op.node_path == "":
-		return "node_path is required for load_sprite"
-	if not op.has("texture_path") or op.texture_path == "":
-		return "texture_path is required for load_sprite"
-	var sprite_node = find_node_by_path(scene_root, op.node_path)
-	if not sprite_node:
-		return "Node not found: " + op.node_path
-	if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
-		return "Node is not sprite-compatible: " + sprite_node.get_class()
-	var texture = load(normalize_scene_path(op.texture_path))
-	if not texture:
-		return "Failed to load texture: " + op.texture_path
-	if not (texture is Texture2D):
-		return "Loaded resource is not a Texture2D: " + op.texture_path
-	if texture.resource_path == "":
-		return "Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."
-	sprite_node.texture = texture
-	return ""
-
 # Execute multiple scene operations in a single headless process
 # Scenes are loaded once and cached in memory; mutations accumulate until a save op
 func batch_scene_operations(params: Dictionary) -> void:
@@ -942,18 +906,18 @@ func batch_scene_operations(params: Dictionary) -> void:
 				if scene_root == null:
 					result["error"] = "scene_path required for add_node"
 				else:
-					var err = _batch_add_node(scene_root, op)
-					if err != "":
-						result["error"] = err
+					var apply_result = _apply_add_node(scene_root, op)
+					if not apply_result.ok:
+						result["error"] = apply_result.error
 					else:
 						result["success"] = true
 			"load_sprite":
 				if scene_root == null:
 					result["error"] = "scene_path required for load_sprite"
 				else:
-					var err = _batch_load_sprite(scene_root, op)
-					if err != "":
-						result["error"] = err
+					var apply_result = _apply_load_sprite(scene_root, op)
+					if not apply_result.ok:
+						result["error"] = apply_result.error
 					else:
 						result["success"] = true
 			"save":

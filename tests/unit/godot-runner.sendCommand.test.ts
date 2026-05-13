@@ -186,11 +186,11 @@ describe('GodotRunner.sendCommand (TCP)', () => {
 
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {
     // Point the runner at a port nobody is listening on.
+    // afterEach restores MCP_BRIDGE_PORT — no inline cleanup needed.
     process.env.MCP_BRIDGE_PORT = '1';
     const r = new GodotRunner({ godotPath: 'godot' });
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
     r.closeConnection();
-    process.env.MCP_BRIDGE_PORT = String(bridge.port);
   });
 });
 

@@ -3,7 +3,6 @@ import { join } from 'path';
 import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
   normalizeParameters,
-  convertCamelToSnakeCase,
   validateSubPath,
   createErrorResponse,
   validateSceneArgs,
@@ -268,12 +267,9 @@ export async function handleSetNodeProperties(runner: GodotRunner, args: Operati
     ]);
   }
 
-  const snakeUpdates = (args.updates as Array<Record<string, unknown>>).map((u) =>
-    convertCamelToSnakeCase(u as OperationParams),
-  );
   const params = {
     scenePath: args.scenePath,
-    updates: snakeUpdates,
+    updates: args.updates,
     abortOnError: args.abortOnError ?? false,
   };
   return executeSceneOp(
@@ -297,10 +293,7 @@ export async function handleGetNodeProperties(runner: GodotRunner, args: Operati
     ]);
   }
 
-  const snakeNodes = (args.nodes as Array<Record<string, unknown>>).map((n) =>
-    convertCamelToSnakeCase(n as OperationParams),
-  );
-  const params = { scenePath: args.scenePath, nodes: snakeNodes };
+  const params = { scenePath: args.scenePath, nodes: args.nodes };
   return executeSceneOp(
     runner,
     'get_node_properties',

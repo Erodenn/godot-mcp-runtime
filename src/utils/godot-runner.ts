@@ -14,7 +14,7 @@ import {
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
 } from './bridge-protocol.js';
-import { logDebug, logError } from './logger.js';
+import { logDebug, logError, DEBUG_MODE } from './logger.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -31,8 +31,6 @@ export class BridgeDisconnectedError extends Error {
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-const DEBUG_MODE = process.env.DEBUG === 'true';
 
 // Bridge readiness polling
 export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
@@ -196,15 +194,22 @@ export type ToolHandler = (
 ) => Promise<ToolResponse> | ToolResponse;
 
 // Parameter mappings between snake_case and camelCase
+// Add new entries whenever a tool surfaces a new compound parameter — the
+// strict converter throws in test env on unmapped keys to catch oversights.
 const parameterMappings: Record<string, string> = {
   project_path: 'projectPath',
   scene_path: 'scenePath',
   root_node_type: 'rootNodeType',
   parent_node_path: 'parentNodePath',
+  parent_path: 'parentPath',
   node_type: 'nodeType',
   node_name: 'nodeName',
   texture_path: 'texturePath',
   node_path: 'nodePath',
+  node_paths: 'nodePaths',
+  target_node_path: 'targetNodePath',
+  target_parent_path: 'targetParentPath',
+  new_name: 'newName',
   output_path: 'outputPath',
   mesh_item_names: 'meshItemNames',
   new_path: 'newPath',
@@ -214,6 +219,12 @@ const parameterMappings: Record<string, string> = {
   preview_max_width: 'previewMaxWidth',
   preview_max_height: 'previewMaxHeight',
   bridge_port: 'bridgePort',
+  abort_on_error: 'abortOnError',
+  max_depth: 'maxDepth',
+  changed_only: 'changedOnly',
+  case_sensitive: 'caseSensitive',
+  file_types: 'fileTypes',
+  max_results: 'maxResults',
 };
 
 // Reverse mapping from camelCase to snake_case
@@ -249,21 +260,40 @@ export function normalizeParameters(params: OperationParams): OperationParams {
   return result;
 }
 
+function convertCamelToSnakeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => convertCamelToSnakeValue(entry));
+  }
+  if (typeof value === 'object' && value !== null) {
+    return convertCamelToSnakeCase(value as OperationParams);
+  }
+  return value;
+}
+
 export function convertCamelToSnakeCase(params: OperationParams): OperationParams {
   const result: OperationParams = {};
+  const isTestEnv = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
 
   for (const key in params) {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
-      const snakeKey =
-        reverseParameterMappings[key] ||
-        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-
-      const value = params[key];
-      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-        result[snakeKey] = convertCamelToSnakeCase(value as OperationParams);
+      const mapped = reverseParameterMappings[key];
+      let snakeKey: string;
+      if (mapped) {
+        snakeKey = mapped;
+      } else if (/[A-Z]/.test(key)) {
+        // Unmapped camelCase key — tolerated in production via regex fallback,
+        // but in tests we throw to catch missing entries in parameterMappings.
+        if (isTestEnv) {
+          throw new Error(
+            `convertCamelToSnakeCase: unmapped camelCase key '${key}'. ` +
+              `Add it to parameterMappings in src/utils/godot-runner.ts so snake/camel conversion stays explicit.`,
+          );
+        }
+        snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
       } else {
-        result[snakeKey] = value;
+        snakeKey = key;
       }
+      result[snakeKey] = convertCamelToSnakeValue(params[key]) as OperationParams[string];
     }
   }
 
@@ -828,11 +858,9 @@ export class GodotRunner {
       const lines = data.toString().split('\n');
       output.push(...lines);
       if (output.length > 500) output.splice(0, output.length - 500);
-      if (DEBUG_MODE) {
-        lines.forEach((line: string) => {
-          if (line.trim()) logDebug(`[Godot stdout] ${line}`);
-        });
-      }
+      lines.forEach((line: string) => {
+        if (line.trim()) logDebug(`[Godot stdout] ${line}`);
+      });
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
@@ -840,11 +868,9 @@ export class GodotRunner {
       godotProcess.totalErrorsWritten += lines.length;
       errors.push(...lines);
       if (errors.length > 500) errors.splice(0, errors.length - 500);
-      if (DEBUG_MODE) {
-        lines.forEach((line: string) => {
-          if (line.trim()) logDebug(`[Godot stderr] ${line}`);
-        });
-      }
+      lines.forEach((line: string) => {
+        if (line.trim()) logDebug(`[Godot stderr] ${line}`);
+      });
     });
 
     proc.on('exit', (code: number | null) => {

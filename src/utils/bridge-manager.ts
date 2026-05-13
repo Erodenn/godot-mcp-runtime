@@ -1,11 +1,34 @@
 import { join } from 'path';
-import { existsSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync } from 'fs';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  copyFileSync,
+  unlinkSync,
+  mkdirSync,
+  statSync,
+} from 'fs';
 import { logDebug } from './logger.js';
 import { addAutoloadEntry, parseAutoloads, removeAutoloadEntry } from './autoload-ini.js';
 
 const BRIDGE_AUTOLOAD_NAME = 'McpBridge';
 const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd';
 const MCP_GITIGNORE_ENTRY = '.mcp/';
+
+/**
+ * Cheap equality check by size + mtime — sufficient for the bridge artifact
+ * since the manager is the only writer. Avoids reading and hashing both files
+ * on every inject call.
+ */
+function isSameFile(a: string, b: string): boolean {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.size === sb.size && sa.mtimeMs === sb.mtimeMs;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Owns the McpBridge autoload artifact: the script copy in the target project,
@@ -21,16 +44,20 @@ const MCP_GITIGNORE_ENTRY = '.mcp/';
  */
 export class BridgeManager {
   private injectedProjects: Set<string> = new Set();
+  private repairedProjects: Set<string> = new Set();
 
   constructor(private bridgeScriptPath: string) {}
 
   inject(projectPath: string): void {
     // Always refresh the bridge script — a server rebuild updates the source
     // GDScript, and a same-session re-inject must propagate that to the
-    // project copy or the running game would talk to stale code.
+    // project copy or the running game would talk to stale code. Short-circuit
+    // the copy when the destination already matches source size + mtime.
     const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
-    copyFileSync(this.bridgeScriptPath, destScript);
-    logDebug(`Refreshed bridge autoload at ${destScript}`);
+    if (!isSameFile(this.bridgeScriptPath, destScript)) {
+      copyFileSync(this.bridgeScriptPath, destScript);
+      logDebug(`Refreshed bridge autoload at ${destScript}`);
+    }
 
     if (this.injectedProjects.has(projectPath)) {
       logDebug('Bridge already injected for this project; refreshed script only.');
@@ -56,24 +83,33 @@ export class BridgeManager {
   cleanup(projectPath: string): void {
     this.removeBridgeArtifacts(projectPath);
     this.injectedProjects.delete(projectPath);
+    this.repairedProjects.delete(projectPath);
   }
 
   /**
    * If project.godot still has an `McpBridge=` line but the script file is
    * missing, the autoload would crash every subsequent headless op. Detect and
    * clean the orphan before running an operation.
+   *
+   * Cached per project: once a path has been checked clean, skip the file
+   * reads on subsequent ops in the same session.
    */
   repairOrphaned(projectPath: string): void {
+    if (this.repairedProjects.has(projectPath)) return;
     const projectFile = join(projectPath, 'project.godot');
     const bridgeScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
     if (!existsSync(projectFile)) return;
-    if (existsSync(bridgeScript)) return;
+    if (existsSync(bridgeScript)) {
+      this.repairedProjects.add(projectPath);
+      return;
+    }
     try {
       const content = readFileSync(projectFile, 'utf8');
       if (content.includes(`${BRIDGE_AUTOLOAD_NAME}=`)) {
         this.removeBridgeArtifacts(projectPath);
         logDebug('Cleaned up orphaned McpBridge autoload entry');
       }
+      this.repairedProjects.add(projectPath);
     } catch (err) {
       logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
     }
@@ -115,9 +151,7 @@ export class BridgeManager {
 
   private ensureMcpGdignore(projectPath: string): void {
     const mcpDir = join(projectPath, '.mcp');
-    if (!existsSync(mcpDir)) {
-      mkdirSync(mcpDir, { recursive: true });
-    }
+    mkdirSync(mcpDir, { recursive: true });
     writeFileSync(join(mcpDir, '.gdignore'), '', 'utf8');
     logDebug('Created .mcp/.gdignore');
   }

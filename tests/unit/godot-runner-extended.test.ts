@@ -8,6 +8,7 @@ import {
 } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
+import { expectErrorMatching } from '../helpers/assertions.js';
 
 // ─── cleanOutput ─────────────────────────────────────────────────────────────
 
@@ -92,19 +93,19 @@ describe('validateProjectArgs', () => {
   const tmp = useTmpDirs();
 
   it('returns isError when projectPath is missing', () => {
-    const result = validateProjectArgs({});
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(validateProjectArgs({}), /projectPath is required/);
   });
 
   it('returns isError when projectPath contains ..', () => {
-    const result = validateProjectArgs({ projectPath: '/some/../path' });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(
+      validateProjectArgs({ projectPath: '/some/../path' }),
+      /Invalid project path/,
+    );
   });
 
   it('returns isError when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    const result = validateProjectArgs({ projectPath: dir });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(validateProjectArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
   it('returns validated shape with projectPath for a valid Godot project', () => {
@@ -120,43 +121,49 @@ describe('validateSceneArgs', () => {
   const tmp = useTmpDirs();
 
   it('returns isError when projectPath is missing', () => {
-    const result = validateSceneArgs({});
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(validateSceneArgs({}), /projectPath is required/);
   });
 
   it('returns isError when projectPath contains ..', () => {
-    const result = validateSceneArgs({ projectPath: '/some/../path' });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(
+      validateSceneArgs({ projectPath: '/some/../path' }),
+      /Invalid project path/,
+    );
   });
 
   it('returns isError when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    const result = validateSceneArgs({ projectPath: dir });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(validateSceneArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
   it('returns isError when scenePath contains ..', () => {
-    const result = validateSceneArgs({
-      projectPath: fixtureProjectPath,
-      scenePath: '../outside.tscn',
-    });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(
+      validateSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: '../outside.tscn',
+      }),
+      /Invalid scene path/,
+    );
   });
 
   it('returns isError when scenePath is an absolute path that escapes the project', () => {
-    const result = validateSceneArgs({
-      projectPath: fixtureProjectPath,
-      scenePath: '/etc/passwd',
-    });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(
+      validateSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: '/etc/passwd',
+      }),
+      /Invalid scene path/,
+    );
   });
 
   it('returns isError when sceneRequired (default) and scene file does not exist', () => {
-    const result = validateSceneArgs({
-      projectPath: fixtureProjectPath,
-      scenePath: 'nonexistent.tscn',
-    });
-    expect('isError' in result).toBe(true);
+    expectErrorMatching(
+      validateSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: 'nonexistent.tscn',
+      }),
+      /Scene file does not exist/,
+    );
   });
 
   it('returns { projectPath, scenePath: "" } when sceneRequired:false and scenePath is absent', () => {

@@ -54,8 +54,24 @@ describe('convertCamelToSnakeCase', () => {
     expect(convertCamelToSnakeCase(input)).toEqual({ project_path: '/p', scene_path: 's.tscn' });
   });
 
-  it('falls back to regex conversion for unmapped camelCase keys', () => {
-    expect(convertCamelToSnakeCase({ someCustomKey: 1 })).toEqual({ some_custom_key: 1 });
+  it('throws in test env when an unmapped camelCase key falls through', () => {
+    expect(() => convertCamelToSnakeCase({ someCustomKey: 1 })).toThrow(
+      /unmapped camelCase key 'someCustomKey'/,
+    );
+  });
+
+  it('falls back to regex conversion in production env', () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevVitest = process.env.VITEST;
+    process.env.NODE_ENV = 'production';
+    delete process.env.VITEST;
+    try {
+      expect(convertCamelToSnakeCase({ someCustomKey: 1 })).toEqual({ some_custom_key: 1 });
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevVitest !== undefined) process.env.VITEST = prevVitest;
+    }
   });
 
   it('round-trips through normalizeParameters', () => {
@@ -69,6 +85,27 @@ describe('convertCamelToSnakeCase', () => {
     expect(convertCamelToSnakeCase(input)).toEqual({
       project_path: '/p',
       nested: { node_path: 'root' },
+    });
+  });
+
+  it('walks arrays and converts nested object keys', () => {
+    const input = {
+      updates: [
+        { nodePath: 'root/A', property: 'position', value: 1 },
+        { nodePath: 'root/B', property: 'rotation', value: 2 },
+      ],
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual({
+      updates: [
+        { node_path: 'root/A', property: 'position', value: 1 },
+        { node_path: 'root/B', property: 'rotation', value: 2 },
+      ],
+    });
+  });
+
+  it('preserves arrays of primitives as-is', () => {
+    expect(convertCamelToSnakeCase({ meshItemNames: ['a', 'b'] })).toEqual({
+      mesh_item_names: ['a', 'b'],
     });
   });
 });

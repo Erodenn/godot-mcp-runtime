@@ -3,7 +3,6 @@ import { existsSync } from 'fs';
 import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
   normalizeParameters,
-  convertCamelToSnakeCase,
   validateSubPath,
   createErrorResponse,
   validateProjectArgs,
@@ -356,11 +355,8 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
     ]);
   }
 
-  const snakeOps = (args.operations as Array<Record<string, unknown>>).map((op) =>
-    convertCamelToSnakeCase(op as OperationParams),
-  );
   const params = {
-    operations: snakeOps,
+    operations: args.operations,
     abortOnError: args.abortOnError ?? false,
   };
   return executeSceneOp(
