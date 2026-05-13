@@ -21,7 +21,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
   {
     name: 'list_autoloads',
     description:
-      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures — broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns { autoloads: [{ name, path, singleton }] }.',
+      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures — broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns: [{ name, path, singleton }].',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -98,7 +98,7 @@ export function handleListAutoloads(args: OperationParams) {
   try {
     const projectFile = projectGodotPath(v.projectPath);
     const autoloads = parseAutoloads(projectFile);
-    return { content: [{ type: 'text', text: JSON.stringify({ autoloads }) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(autoloads) }] };
   } catch (error: unknown) {
     return createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [
       'Check if project.godot is accessible',

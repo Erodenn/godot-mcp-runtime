@@ -13,7 +13,7 @@ Every tool description states, in this order:
 1. **Purpose** — what the tool does, in one sentence, in the agent's vocabulary (the outcome it achieves), not the implementation.
 2. **Behavior** — non-obvious side effects. Especially: auto-save behavior, overwrite policy, what happens when the target doesn't exist.
 3. **Parameter intent** — anything the schema can't express. Defaults, conditional requirements, parameter interactions, auto-conversions (e.g. Vector2/Color from `{x, y}` / `{r, g, b, a}`).
-4. **Returns** — explicit return shape. Either an `outputSchema` field, or a `Returns: { … }` line in the description. Never both ambiguous.
+4. **Returns** — explicit return shape. A `Returns:` sentence in the description for the agent, and an `outputSchema` field for programmatic clients (see §3). The two are complementary, not substitutes.
 5. **Use when / prefer X when** — when an agent should pick this tool over a sibling. Especially important when the server has multiple tools that touch the same resource.
 6. **Error disclosure** — one short line per likely failure mode. "Errors if node not found." / "Overwrites silently." / "Returns empty array on no match."
 
@@ -45,11 +45,22 @@ Why this matters: clients ask for extra confirmation when a tool lacks a `readOn
 
 ---
 
-## 3. `outputSchema`
+## 3. `outputSchema` and `Returns:` — two audiences
 
-Add an `outputSchema` field when the return shape is non-trivial — anything richer than a simple success/error string. JSON Schema, same shape as `inputSchema`.
+These are complementary, not alternatives. They speak to different consumers and convey different things:
 
-If `outputSchema` is impractical (highly variable shape), document the return inline with a `Returns: { … }` line in the description. Don't leave reviewers and agents to guess.
+- **`outputSchema`** is the machine-readable contract for programmatic clients (validators, type generators, IDE tooling). JSON Schema, same shape as `inputSchema`. Top-level `type` must be `"object"` (MCP SDK constraint); bare-array or shape-variable returns omit it. Clients currently do not surface `outputSchema` to the LLM — it is invisible to the agent reading the tool.
+- **`Returns:` sentence in the description** is the agent-facing summary. It names the key fields and adds what the schema can't express — when fields are present, what values imply, how the agent should use them. One short sentence; the description budget (§1) is tight.
+
+When both are present, they must be consistent — same field names, same semantics — but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
+
+When `outputSchema` is impractical (oneOf variants, bare-array, recursive trees, opaque values), the `Returns:` sentence is the only return-shape signal and carries the full load.
+
+### Harness visibility — what the agent actually sees
+
+Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` — including every per-property `description` — into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.
+
+When a tool is too complex to cover in the top-level description budget (~500 chars), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
 
 ---
 
