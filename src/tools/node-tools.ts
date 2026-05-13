@@ -15,7 +15,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root — that entry returns an error and the rest still process. Returns { results: [{ nodePath, success?, error? }] }.',
+      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root — that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message).',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -33,11 +33,27 @@ export const nodeToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'scenePath', 'nodePaths'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              nodePath: { type: 'string' },
+              success: { type: 'boolean' },
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
   },
   {
     name: 'set_node_properties',
     description:
-      'Set one or more node properties on a scene in a single Godot process. Always-array: pass a single-element updates array for one-off edits. Vector2 ({x,y}), Vector3 ({x,y,z}), and Color ({r,g,b,a}) auto-convert; primitives pass through. For other complex GDScript types (Resource, NodePath, etc.), use run_script. abortOnError stops on first failure (default false continues). Saves once at the end. Returns { results: [{ nodePath, property, success?, error? }] }.',
+      'Set one or more node properties on a scene in a single Godot process. Always-array: pass a single-element updates array for one-off edits. Vector2 ({x,y}), Vector3 ({x,y,z}), and Color ({r,g,b,a}) auto-convert; primitives pass through. For other complex GDScript types (Resource, NodePath, etc.), use run_script. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error).',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -71,11 +87,28 @@ export const nodeToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'scenePath', 'updates'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              nodePath: { type: 'string' },
+              property: { type: 'string' },
+              success: { type: 'boolean' },
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
   },
   {
     name: 'get_node_properties',
     description:
-      "Read one or more nodes' current property values from a scene file in a single Godot process. Always-array: pass a single-element nodes array for one-off reads. Per-node changedOnly:true filters out properties matching class defaults (useful for compact diffs). Returns { results: [{ nodePath, nodeType, properties?, error? }] }; failed reads include error and omit properties.",
+      "Read one or more nodes' current property values from a scene file in a single Godot process. Always-array: pass a single-element nodes array for one-off reads. Per-node changedOnly:true filters out properties matching class defaults (useful for compact diffs). Returns: { results: [{ nodePath, nodeType, properties?, error? }] }; failed reads include error and omit properties.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -107,7 +140,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_script',
     description:
-      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Errors if scriptPath does not exist or nodePath is not found. Returns { success, nodePath, scriptPath }.',
+      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Returns: success with the resolved nodePath and scriptPath that were attached. Errors if scriptPath does not exist or nodePath is not found.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -122,6 +155,14 @@ export const nodeToolDefinitions: ToolDefinition[] = [
         },
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'scriptPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        nodePath: { type: 'string' },
+        scriptPath: { type: 'string' },
+      },
     },
   },
   {
@@ -150,7 +191,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a Godot scene. Use to clone a configured subtree without re-creating it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Errors if nodePath does not exist or targetParentPath cannot accept children. Returns { success, originalPath, newPath }.',
+      'Duplicate a node and its descendants in a Godot scene. Use to clone a configured subtree without re-creating it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives — use newPath for follow-up edits. Errors if nodePath does not exist or targetParentPath cannot accept children.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -168,11 +209,19 @@ export const nodeToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'scenePath', 'nodePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        originalPath: { type: 'string' },
+        newPath: { type: 'string' },
+      },
+    },
   },
   {
     name: 'get_node_signals',
     description:
-      'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. Returns { nodePath, nodeType, signals: [{ name, connections: [{ signal, target, method }] }] }. The target field uses Godot absolute path format (/root/Scene/Node) — convert to scene-root-relative (root/Node) before passing to connect/disconnect_signal. Errors if node not found.',
+      'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. The connections[].target field uses Godot absolute path format (/root/Scene/Node) — convert to scene-root-relative (root/Node) before passing to connect/disconnect_signal. Returns: nodeType and signals[], each with name and current connections (signal/target/method). Errors if node not found.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -182,6 +231,33 @@ export const nodeToolDefinitions: ToolDefinition[] = [
         nodePath: { type: 'string', description: 'Node path from scene root (e.g. "root/Button")' },
       },
       required: ['projectPath', 'scenePath', 'nodePath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        nodePath: { type: 'string' },
+        nodeType: { type: 'string' },
+        signals: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              connections: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    signal: { type: 'string' },
+                    target: { type: 'string' },
+                    method: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     },
   },
   {

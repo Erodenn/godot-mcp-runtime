@@ -106,18 +106,25 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns { message, externalProcessPreserved }. Errors if called outside an attached session.',
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors if called outside an attached session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
       required: [],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        externalProcessPreserved: { type: 'boolean' },
+      },
+    },
   },
   {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Requires run_project (not attach_project; attached mode does not capture output). Returns { output, errors, running, exitCode? } with the last `limit` lines (default 200, from the end). Reports attached-mode unavailability gracefully.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -129,22 +136,43 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
       required: [],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        output: { type: 'array', items: { type: 'string' } },
+        errors: { type: 'array', items: { type: 'string' } },
+        running: { type: ['boolean', 'null'] },
+        exitCode: { type: ['number', 'null'] },
+        attached: { type: 'boolean' },
+        tip: { type: 'string' },
+      },
+    },
   },
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. Returns { message, mode, externalProcessPreserved, finalOutput, finalErrors }. Errors if no session is active.',
+      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. Returns: message, mode ("spawned"/"attached"), externalProcessPreserved (true only for attached), finalOutput and finalErrors (last 200 lines each). Errors if no session is active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {},
       required: [],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        mode: { type: 'string' },
+        externalProcessPreserved: { type: 'boolean' },
+        finalOutput: { type: 'array', items: { type: 'string' } },
+        finalErrors: { type: 'array', items: { type: 'string' } },
+      },
+    },
   },
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport. responseMode: preview (default — saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/screenshots. Returns: { responseMode, path, size, previewPath?, previewSize?, warnings? } as JSON text, plus an inline image for full/preview. Errors if no session or bridge times out (default 10000ms).',
+      'Capture a PNG of the running viewport. responseMode: preview (default — saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/screenshots. Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -172,11 +200,36 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
       required: [],
     },
+    // The handler also emits an inline `image` content block for full/preview modes;
+    // outputSchema only describes the structured JSON text payload per MCP spec.
+    outputSchema: {
+      type: 'object',
+      properties: {
+        responseMode: { type: 'string' },
+        path: { type: 'string' },
+        size: {
+          type: 'object',
+          properties: {
+            width: { type: 'number' },
+            height: { type: 'number' },
+          },
+        },
+        previewPath: { type: 'string' },
+        previewSize: {
+          type: 'object',
+          properties: {
+            width: { type: 'number' },
+            height: { type: 'number' },
+          },
+        },
+        warnings: { type: 'array', items: { type: 'string' } },
+      },
+    },
   },
   {
     name: 'simulate_input',
     description:
-      "Simulate sequential input in a running project. Each action's `type` (key, mouse_button, mouse_motion, click_element, action, wait) gates which other fields apply — see per-property docs. For click_element use get_ui_elements first; resolution is by path/name, not visible text. Press/release require two actions; insert wait between for frame ticks. Returns: { success, actions_processed, warnings? }. Errors if no session or any action fails validation.",
+      "Simulate sequential input in a running project. Each action's `type` (key, mouse_button, mouse_motion, click_element, action, wait) gates which other fields apply — see per-property docs. For click_element use get_ui_elements first; resolution is by path/name, not visible text. Press/release require two actions; insert wait between for frame ticks. Returns: success, actions_processed, warnings for runtime errors fired by input handlers. Errors if no session or any action fails validation.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -195,12 +248,13 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
               },
               key: {
                 type: 'string',
-                description: '[key] Key name (e.g. "W", "Space", "Escape", "Up")',
+                description:
+                  '[key] Godot KEY_* constant name without the prefix (e.g. "W", "Space", "Escape", "Enter", "Tab", "Up", "PageUp"). Errors on unrecognized names.',
               },
               pressed: {
                 type: 'boolean',
                 description:
-                  '[key, mouse_button, action] Whether the input is pressed (true) or released (false)',
+                  '[key, mouse_button, action] Whether the input is pressed (true) or released (false). For mouse_button: omit to auto-click (press+release in one action); set explicitly only for hold/release. For key: defaults to true and does NOT auto-release — emit a second action with pressed:false to release.',
               },
               shift: { type: 'boolean', description: '[key] Shift modifier' },
               ctrl: { type: 'boolean', description: '[key] Ctrl modifier' },
@@ -217,11 +271,13 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
               },
               x: {
                 type: 'number',
-                description: '[mouse_button, mouse_motion] X position in viewport pixels',
+                description:
+                  '[mouse_button, mouse_motion] X position in viewport pixels (0,0 = top-left)',
               },
               y: {
                 type: 'number',
-                description: '[mouse_button, mouse_motion] Y position in viewport pixels',
+                description:
+                  '[mouse_button, mouse_motion] Y position in viewport pixels (0,0 = top-left)',
               },
               relative_x: {
                 type: 'number',
@@ -251,7 +307,8 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
               },
               ms: {
                 type: 'number',
-                description: '[wait] Duration in milliseconds to pause before the next action',
+                description:
+                  '[wait] Duration in milliseconds to pause before the next action (~16ms = one frame at 60fps).',
               },
             },
             required: ['type'],
@@ -260,11 +317,20 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
       required: ['actions'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        actions_processed: { type: 'number' },
+        warnings: { type: 'array', items: { type: 'string' } },
+        tip: { type: 'string' },
+      },
+    },
   },
   {
     name: 'get_ui_elements',
     description:
-      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns { elements: [{ name, path, type, rect, visible, text?, disabled?, tooltip? }] }.',
+      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -281,11 +347,43 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
       required: [],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        elements: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              path: { type: 'string' },
+              type: { type: 'string' },
+              rect: {
+                type: 'object',
+                properties: {
+                  x: { type: 'number' },
+                  y: { type: 'number' },
+                  width: { type: 'number' },
+                  height: { type: 'number' },
+                },
+              },
+              visible: { type: 'boolean' },
+              text: { type: 'string' },
+              placeholder: { type: 'string' },
+              disabled: { type: 'boolean' },
+              tooltip: { type: 'string' },
+            },
+          },
+        },
+        warnings: { type: 'array', items: { type: 'string' } },
+        tip: { type: 'string' },
+      },
+    },
   },
   {
     name: 'run_script',
     description:
-      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output — it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns { success, result, warnings? } where result is the JSON-serialized return value of execute().',
+      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output — it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

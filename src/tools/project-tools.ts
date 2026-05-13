@@ -23,7 +23,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use get_project_info. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns { projects: [{ path, name }] }, empty array on no matches.',
+      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use get_project_info. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -43,7 +43,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_info',
     description:
-      'Get metadata about a Godot project: name, path, Godot version, and a structure summary (counts of scenes/scripts/assets/other). Omit projectPath to get just the Godot version (useful for capability checks). Returns { name, path, godotVersion, structure } or { godotVersion } when projectPath is omitted. Errors if projectPath is set but lacks project.godot.',
+      'Get metadata about a Godot project: name, path, Godot version, and a structure summary (counts of scenes/scripts/assets/other). Omit projectPath to get just the Godot version (useful for capability checks). Returns: { name, path, godotVersion, structure } or { godotVersion } when projectPath is omitted. Errors if projectPath is set but lacks project.godot.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -60,7 +60,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'get_project_files',
     description:
-      'Return a recursive file tree of a Godot project. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns nested { name, type, path, extension?, children? } file tree.',
+      'Return a recursive file tree of a Godot project. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns: { name, type, path, extension?, children? } (nested tree).',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -83,7 +83,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
   {
     name: 'search_project',
     description:
-      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100 (truncated:true if hit). Returns { matches: [{ file, lineNumber, line }], truncated }. Skips hidden entries and the .mcp directory.',
+      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text) and truncated:true when maxResults was hit — consider raising it.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -100,11 +100,28 @@ export const projectToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'pattern'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        matches: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              file: { type: 'string' },
+              lineNumber: { type: 'number' },
+              line: { type: 'string' },
+            },
+          },
+        },
+        truncated: { type: 'boolean' },
+      },
+    },
   },
   {
     name: 'get_scene_dependencies',
     description:
-      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to inspect what a scene depends on before refactoring or moving files. Returns { scene, dependencies: [{ path, type, uid? }] }. Errors if scene file does not exist.',
+      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to inspect what a scene depends on before refactoring or moving files. Returns: the queried scene path and dependencies[] from ext_resource refs (path, type, optional uid). Errors if scene file does not exist.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -118,11 +135,28 @@ export const projectToolDefinitions: ToolDefinition[] = [
       },
       required: ['projectPath', 'scenePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        scene: { type: 'string' },
+        dependencies: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              type: { type: 'string' },
+              uid: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
   },
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types are returned as raw strings; keys outside any section appear under __global__.',
+      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns: { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types are returned as raw strings; keys outside any section appear under __global__.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',

@@ -14,7 +14,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'create_scene',
     description:
-      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D — pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns { success, scenePath } as JSON text.',
+      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D — pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -163,7 +163,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns { results: [{ operation, scenePath, success?, error? }] }.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -208,6 +208,23 @@ export const sceneToolDefinitions: ToolDefinition[] = [
         },
       },
       required: ['projectPath', 'operations'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              operation: { type: 'string' },
+              scenePath: { type: 'string' },
+              success: { type: 'boolean' },
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
     },
   },
 ];
