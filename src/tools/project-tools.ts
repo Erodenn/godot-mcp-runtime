@@ -4,6 +4,7 @@ import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godo
 import {
   normalizeParameters,
   validatePath,
+  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   getErrorMessage,
@@ -529,8 +530,10 @@ export async function handleGetSceneDependencies(args: OperationParams) {
       'Provide a path relative to the project root, e.g. "scenes/main.tscn"',
     ]);
   }
-  if (!validatePath(args.scenePath as string)) {
-    return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
+  if (!validateSubPath(v.projectPath, args.scenePath as string)) {
+    return createErrorResponse('Invalid scenePath', [
+      'Provide a valid relative path without ".." that stays inside the project directory',
+    ]);
   }
 
   try {

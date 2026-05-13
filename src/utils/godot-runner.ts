@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'url';
-import { join, dirname, normalize } from 'path';
+import { join, dirname, normalize, resolve, sep } from 'path';
 import { existsSync } from 'fs';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
@@ -288,6 +288,35 @@ export function validatePath(path: string): boolean {
 }
 
 /**
+ * Stricter check for paths that must stay inside `projectPath`. Rejects `..`
+ * (via `validatePath`) and absolute paths that escape the project root.
+ * `path.join('/project', '/etc/passwd')` resolves to `/etc/passwd`, so the
+ * basic `..`-substring check alone permits absolute-path traversal.
+ *
+ * Tolerates a leading `res://` (Godot's project-root URI) by stripping it
+ * before resolving — autoload entries and resource paths use this prefix.
+ */
+export function validateSubPath(projectPath: string, userPath: string): boolean {
+  if (!validatePath(userPath)) return false;
+  const stripped = userPath.startsWith('res://') ? userPath.slice('res://'.length) : userPath;
+  if (!stripped) return false;
+  const projectRoot = resolve(projectPath);
+  const resolved = resolve(projectRoot, stripped);
+  return resolved === projectRoot || resolved.startsWith(projectRoot + sep);
+}
+
+/**
+ * True when `child` resolves to `parent` or a path beneath it. Used by
+ * defense-in-depth checks on bridge-returned paths (e.g. screenshot files
+ * that must live under `.mcp/screenshots/`).
+ */
+export function isUnderDir(parent: string, child: string): boolean {
+  const parentResolved = resolve(parent);
+  const childResolved = resolve(child);
+  return childResolved === parentResolved || childResolved.startsWith(parentResolved + sep);
+}
+
+/**
  * Return `error.message` when `error` is an `Error`, otherwise `'Unknown error'`.
  * Centralizes the catch-block boilerplate so handlers can build error responses
  * without repeating the `instanceof Error` ternary.
@@ -401,9 +430,9 @@ export function validateSceneArgs(
     return { projectPath: projectResult.projectPath, scenePath: '' };
   }
 
-  if (!validatePath(args.scenePath as string)) {
+  if (!validateSubPath(projectResult.projectPath, args.scenePath as string)) {
     return createErrorResponse('Invalid scene path', [
-      'Provide a valid path without ".." or other potentially unsafe characters',
+      'Provide a valid relative path without ".." that stays inside the project directory',
     ]);
   }
 
@@ -763,7 +792,7 @@ export class GodotRunner {
     this.activeSessionMode = 'spawned';
 
     const cmdArgs = ['--path', projectPath];
-    if (scene && validatePath(scene)) {
+    if (scene && validateSubPath(projectPath, scene)) {
       logDebug(`Adding scene parameter: ${scene}`);
       cmdArgs.push(scene);
     }

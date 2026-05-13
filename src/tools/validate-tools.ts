@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
   normalizeParameters,
-  validatePath,
+  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   extractGdError,
@@ -301,8 +301,10 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       resolvedScriptPath = resPath;
       tempFile = true;
     } else if (args.scriptPath) {
-      if (!validatePath(args.scriptPath as string)) {
-        return createErrorResponse('Invalid scriptPath', ['Provide a valid path without ".."']);
+      if (!validateSubPath(pv.projectPath, args.scriptPath as string)) {
+        return createErrorResponse('Invalid scriptPath', [
+          'Provide a valid relative path without ".." that stays inside the project directory',
+        ]);
       }
       const fullPath = join(pv.projectPath, args.scriptPath as string);
       if (!existsSync(fullPath)) {
@@ -312,8 +314,10 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       }
       resolvedScriptPath = args.scriptPath as string;
     } else if (args.scenePath) {
-      if (!validatePath(args.scenePath as string)) {
-        return createErrorResponse('Invalid scenePath', ['Provide a valid path without ".."']);
+      if (!validateSubPath(pv.projectPath, args.scenePath as string)) {
+        return createErrorResponse('Invalid scenePath', [
+          'Provide a valid relative path without ".." that stays inside the project directory',
+        ]);
       }
       const fullPath = join(pv.projectPath, args.scenePath as string);
       if (!existsSync(fullPath)) {

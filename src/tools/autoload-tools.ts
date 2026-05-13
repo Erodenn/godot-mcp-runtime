@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import type { OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
   normalizeParameters,
-  validatePath,
+  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   getErrorMessage,
@@ -116,8 +116,10 @@ export function handleAddAutoload(args: OperationParams) {
       'Provide the autoload node name and script/scene path',
     ]);
   }
-  if (!validatePath(args.autoloadPath as string)) {
-    return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
+  if (!validateSubPath(v.projectPath, args.autoloadPath as string)) {
+    return createErrorResponse('Invalid autoload path', [
+      'Provide a valid relative path or res:// URI that stays inside the project directory',
+    ]);
   }
 
   try {
@@ -192,8 +194,10 @@ export function handleUpdateAutoload(args: OperationParams) {
       'Provide the name of the autoload to update',
     ]);
   }
-  if (args.autoloadPath && !validatePath(args.autoloadPath as string)) {
-    return createErrorResponse('Invalid autoload path', ['Provide a valid path without ".."']);
+  if (args.autoloadPath && !validateSubPath(v.projectPath, args.autoloadPath as string)) {
+    return createErrorResponse('Invalid autoload path', [
+      'Provide a valid relative path or res:// URI that stays inside the project directory',
+    ]);
   }
 
   try {

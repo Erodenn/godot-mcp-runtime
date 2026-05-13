@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { resolve, sep } from 'path';
 import {
   normalizeParameters,
   convertCamelToSnakeCase,
   validatePath,
+  validateSubPath,
+  isUnderDir,
   extractGdError,
   createErrorResponse,
   extractJson,
@@ -86,6 +89,76 @@ describe('validatePath', () => {
 
   it('accepts absolute paths', () => {
     expect(validatePath('/abs/path/to/project')).toBe(true);
+  });
+});
+
+describe('validateSubPath', () => {
+  const project = resolve('/project');
+
+  it('rejects empty paths', () => {
+    expect(validateSubPath(project, '')).toBe(false);
+  });
+
+  it('rejects paths containing ..', () => {
+    expect(validateSubPath(project, '../etc/passwd')).toBe(false);
+    expect(validateSubPath(project, 'foo/../../bar')).toBe(false);
+  });
+
+  it('rejects absolute paths that escape the project', () => {
+    expect(validateSubPath(project, '/etc/passwd')).toBe(false);
+    expect(validateSubPath(project, resolve('/elsewhere/file.gd'))).toBe(false);
+  });
+
+  it('accepts simple sub-paths', () => {
+    expect(validateSubPath(project, 'scenes/main.tscn')).toBe(true);
+  });
+
+  it('accepts nested sub-paths', () => {
+    expect(validateSubPath(project, 'a/b/c/d.gd')).toBe(true);
+  });
+
+  it('accepts an absolute path that resolves inside the project', () => {
+    const inside = resolve(project, 'sub/file.gd');
+    expect(validateSubPath(project, inside)).toBe(true);
+  });
+
+  it('tolerates a leading res:// prefix', () => {
+    expect(validateSubPath(project, 'res://autoload/foo.gd')).toBe(true);
+  });
+
+  it('rejects a res:// path that escapes via ..', () => {
+    expect(validateSubPath(project, 'res://../escape.gd')).toBe(false);
+  });
+
+  it('rejects a res:// prefix on its own', () => {
+    expect(validateSubPath(project, 'res://')).toBe(false);
+  });
+
+  it('does not match a sibling directory with the same prefix', () => {
+    // path.resolve('/project', '../project-evil') would equal '/project-evil',
+    // which must not pass the startsWith(projectRoot + sep) check.
+    expect(validateSubPath(project, '../project-evil/file.gd')).toBe(false);
+  });
+});
+
+describe('isUnderDir', () => {
+  const parent = resolve('/parent');
+
+  it('returns true for the parent itself', () => {
+    expect(isUnderDir(parent, parent)).toBe(true);
+  });
+
+  it('returns true for a child path', () => {
+    expect(isUnderDir(parent, resolve(parent, 'child/file.txt'))).toBe(true);
+  });
+
+  it('returns false for a sibling with the same prefix', () => {
+    const sibling = parent + '-evil' + sep + 'file.txt';
+    expect(isUnderDir(parent, sibling)).toBe(false);
+  });
+
+  it('returns false for an unrelated absolute path', () => {
+    expect(isUnderDir(parent, resolve('/elsewhere/file.txt'))).toBe(false);
   });
 });
 

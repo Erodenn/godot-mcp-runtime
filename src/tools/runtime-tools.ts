@@ -1,4 +1,4 @@
-import { join, sep, isAbsolute } from 'path';
+import { join, sep, isAbsolute, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
 import {
@@ -6,6 +6,7 @@ import {
   validateProjectArgs,
   createErrorResponse,
   getErrorMessage,
+  isUnderDir,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from '../utils/godot-runner.js';
 import {
@@ -710,6 +711,20 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
     // Normalize path for the local filesystem (forward slashes from GDScript)
     const screenshotPath = normalizeScreenshotPath(parsed.path);
 
+    // Defense-in-depth: the bridge runs in user-controlled GDScript and could
+    // be patched to return any path. Refuse to read anything outside the
+    // project's own .mcp/screenshots/ directory.
+    const screenshotsRoot = resolve(runner.activeProjectPath as string, '.mcp', 'screenshots');
+    if (!isUnderDir(screenshotsRoot, screenshotPath)) {
+      return createErrorResponse(
+        'Bridge returned a screenshot path outside .mcp/screenshots/. Refusing to read.',
+        [
+          'This indicates a tampered or misbehaving McpBridge autoload',
+          'Stop the project, verify the bridge script is the one shipped with this server, and retry',
+        ],
+      );
+    }
+
     if (!existsSync(screenshotPath)) {
       return createErrorResponse(`Screenshot file not found at: ${screenshotPath}`, [
         'The screenshot may have failed to save',
@@ -740,6 +755,15 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
         ]);
       }
       const previewPath = normalizeScreenshotPath(parsed.preview_path);
+      if (!isUnderDir(screenshotsRoot, previewPath)) {
+        return createErrorResponse(
+          'Bridge returned a screenshot preview path outside .mcp/screenshots/. Refusing to read.',
+          [
+            'This indicates a tampered or misbehaving McpBridge autoload',
+            'Stop the project, verify the bridge script is the one shipped with this server, and retry',
+          ],
+        );
+      }
       if (!existsSync(previewPath)) {
         return createErrorResponse(`Screenshot preview file not found at: ${previewPath}`, [
           'The preview may have failed to save',

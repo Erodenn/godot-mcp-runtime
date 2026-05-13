@@ -4,7 +4,7 @@ import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godo
 import {
   normalizeParameters,
   convertCamelToSnakeCase,
-  validatePath,
+  validateSubPath,
   createErrorResponse,
   validateProjectArgs,
   validateSceneArgs,
@@ -274,10 +274,10 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validatePath(args.nodePath as string)) {
+  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', ['Provide the target node path']);
   }
-  if (!args.texturePath || !validatePath(args.texturePath as string)) {
+  if (!args.texturePath || !validateSubPath(v.projectPath, args.texturePath as string)) {
     return createErrorResponse('Valid texturePath is required', [
       'Provide the texture path relative to the project',
     ]);
@@ -304,8 +304,10 @@ export async function handleSaveScene(runner: GodotRunner, args: OperationParams
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (args.newPath && !validatePath(args.newPath as string)) {
-    return createErrorResponse('Invalid newPath', ['Provide a valid path without ".."']);
+  if (args.newPath && !validateSubPath(v.projectPath, args.newPath as string)) {
+    return createErrorResponse('Invalid newPath', [
+      'Provide a valid relative path without ".." that stays inside the project directory',
+    ]);
   }
 
   const params: OperationParams = { scenePath: args.scenePath };
@@ -320,7 +322,7 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.outputPath || !validatePath(args.outputPath as string)) {
+  if (!args.outputPath || !validateSubPath(v.projectPath, args.outputPath as string)) {
     return createErrorResponse('Valid outputPath is required', [
       'Provide the output path for the .res file',
     ]);

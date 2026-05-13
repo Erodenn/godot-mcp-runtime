@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import {
   handleDetachProject,
@@ -833,18 +833,19 @@ describe('handleRunScript', () => {
 
 describe('handleTakeScreenshot bridge response shapes', () => {
   let fake: RuntimeFake;
+  let projectPath: string;
+  let screenshotDir: string;
+
   beforeEach(() => {
+    projectPath = tmp.make('mcp-project-');
+    screenshotDir = join(projectPath, '.mcp', 'screenshots');
+    mkdirSync(screenshotDir, { recursive: true });
     fake = createRuntimeFake();
     fake.setSession({
       mode: 'spawned',
-      projectPath: '/p',
+      projectPath,
       process: makeRunningProcess(),
     });
-  });
-
-  let screenshotDir: string;
-  beforeEach(() => {
-    screenshotDir = tmp.make('mcp-screenshot-');
   });
 
   function writeScreenshot(name: string, content = 'png-data'): string {
@@ -1027,8 +1028,23 @@ describe('handleTakeScreenshot bridge response shapes', () => {
   });
 
   it('returns isError when the resolved path does not exist on disk', async () => {
-    fake.setBridgeResponse(JSON.stringify({ path: '/definitely/does/not/exist/screenshot.png' }));
+    fake.setBridgeResponse(JSON.stringify({ path: join(screenshotDir, 'missing.png') }));
     const result = await handleTakeScreenshot(fake.asRunner, {});
     expectErrorMatching(result, /Screenshot file not found/i);
+  });
+
+  it('refuses to read a bridge path outside .mcp/screenshots/', async () => {
+    fake.setBridgeResponse(JSON.stringify({ path: '/etc/passwd' }));
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+    expectErrorMatching(result, /outside \.mcp\/screenshots\//i);
+  });
+
+  it('refuses to read a bridge preview_path outside .mcp/screenshots/', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png');
+    fake.setBridgeResponse(
+      JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }),
+    );
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
+    expectErrorMatching(result, /preview path outside \.mcp\/screenshots\//i);
   });
 });

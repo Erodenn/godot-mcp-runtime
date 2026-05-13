@@ -143,6 +143,14 @@ describe('validateSceneArgs', () => {
     expect('isError' in result).toBe(true);
   });
 
+  it('returns isError when scenePath is an absolute path that escapes the project', () => {
+    const result = validateSceneArgs({
+      projectPath: fixtureProjectPath,
+      scenePath: '/etc/passwd',
+    });
+    expect('isError' in result).toBe(true);
+  });
+
   it('returns isError when sceneRequired (default) and scene file does not exist', () => {
     const result = validateSceneArgs({
       projectPath: fixtureProjectPath,
