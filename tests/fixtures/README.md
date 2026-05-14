@@ -9,15 +9,13 @@ Contents:
 - `main.tscn` — `Node2D` root with `Label` and `Sprite2D` children
 - `placeholder.gd`, `placeholder.png` — empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 
-Use it from tests by passing the absolute path:
+Use it from tests by importing the path helper:
 
 ```ts
-import { fileURLToPath } from 'url';
-import { join, dirname } from 'path';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const fixturePath = join(here, '..', 'fixtures', 'godot-project');
+import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 ```
+
+`tests/helpers/fixture-paths.ts` exports `fixtureProjectPath`, `fixtureScenePath`, and `fixtureSceneAbsPath` so individual specs don't redo the `fileURLToPath` / `dirname` / `join` boilerplate.
 
 Tests that exercise headless Godot (validate, scene operations) skip themselves when `GODOT_PATH` is not set, so this fixture is also safe to leave in place when Godot is not installed.
 
