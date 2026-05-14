@@ -82,20 +82,17 @@ async function startMockBridge(): Promise<MockBridge> {
 describe('GodotRunner.sendCommand (TCP)', () => {
   let bridge: MockBridge;
   let runner: GodotRunner;
-  let prevPort: string | undefined;
 
   beforeEach(async () => {
     bridge = await startMockBridge();
-    prevPort = process.env.MCP_BRIDGE_PORT;
-    process.env.MCP_BRIDGE_PORT = String(bridge.port);
     runner = new GodotRunner({ godotPath: 'godot' });
+    // Direct assignment — port is now baked, not read from env at sendCommand time.
+    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
   });
 
   afterEach(async () => {
     runner.closeConnection();
     await bridge.shutdown();
-    if (prevPort === undefined) delete process.env.MCP_BRIDGE_PORT;
-    else process.env.MCP_BRIDGE_PORT = prevPort;
   });
 
   it('lazy-connects on first call and round-trips a command', async () => {
@@ -186,9 +183,8 @@ describe('GodotRunner.sendCommand (TCP)', () => {
 
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {
     // Point the runner at a port nobody is listening on.
-    // afterEach restores MCP_BRIDGE_PORT — no inline cleanup needed.
-    process.env.MCP_BRIDGE_PORT = '1';
     const r = new GodotRunner({ godotPath: 'godot' });
+    (r as unknown as { activeBridgePort: number }).activeBridgePort = 1;
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
     r.closeConnection();
   });
@@ -197,20 +193,16 @@ describe('GodotRunner.sendCommand (TCP)', () => {
 describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   let bridge: MockBridge;
   let runner: GodotRunner;
-  let prevPort: string | undefined;
 
   beforeEach(async () => {
     bridge = await startMockBridge();
-    prevPort = process.env.MCP_BRIDGE_PORT;
-    process.env.MCP_BRIDGE_PORT = String(bridge.port);
     runner = new GodotRunner({ godotPath: 'godot' });
+    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
   });
 
   afterEach(async () => {
     runner.closeConnection();
     await bridge.shutdown();
-    if (prevPort === undefined) delete process.env.MCP_BRIDGE_PORT;
-    else process.env.MCP_BRIDGE_PORT = prevPort;
   });
 
   it('retries once on BridgeDisconnectedError during an active session', async () => {

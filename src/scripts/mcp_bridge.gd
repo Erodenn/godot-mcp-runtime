@@ -6,7 +6,11 @@ extends Node
 # Wire format: 4-byte big-endian length prefix + UTF-8 JSON payload.
 # Max frame size 16 MiB; oversize frames close the offending peer.
 
-const DEFAULT_BRIDGE_PORT := 9900
+# Port is baked into this script at inject time by BridgeManager.inject — the
+# integer literal below is rewritten in the project copy. The 9900 here is the
+# source-of-truth default that ships with the script so it remains runnable
+# standalone (e.g. validate, manual debugging).
+const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
 const MAX_FRAME_BYTES := 16 * 1024 * 1024
 const FRAME_HEADER_BYTES := 4
 
@@ -18,32 +22,19 @@ class PeerState:
 	var handling: bool = false   # true while a command is awaiting a response
 
 var tcp_server: TCPServer
-var port: int = DEFAULT_BRIDGE_PORT
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
 var _shutting_down: bool = false  # One-shot: set true in shutdown(); never reset (autoload is recreated on next session)
 
-func _resolve_port() -> int:
-	var raw := OS.get_environment("MCP_BRIDGE_PORT")
-	if raw == "":
-		return DEFAULT_BRIDGE_PORT
-	if not raw.is_valid_int():
-		return DEFAULT_BRIDGE_PORT
-	var parsed := int(raw)
-	if parsed <= 0 or parsed > 65535:
-		return DEFAULT_BRIDGE_PORT
-	return parsed
-
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
-	port = _resolve_port()
 	tcp_server = TCPServer.new()
-	var err = tcp_server.listen(port, "127.0.0.1")
+	var err = tcp_server.listen(PORT, "127.0.0.1")
 	if err != OK:
-		push_error("McpBridge: Failed to listen on port %d (error %d)" % [port, err])
+		push_error("McpBridge: Failed to listen on port %d (error %d)" % [PORT, err])
 	else:
-		print("McpBridge: Listening on TCP port %d" % port)
+		print("McpBridge: Listening on TCP port %d" % PORT)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)

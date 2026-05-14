@@ -28,7 +28,7 @@ Each tool teaches agents how to use it through its description and response mess
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 
-**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (`run_project` auto-selects a free port; `attach_project` defaults to 9900 — override either with the `bridgePort` parameter or `MCP_BRIDGE_PORT` env var) and enables:
+**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
 - **Screenshots:** Capture the viewport — by default returns a 960x540 preview inline plus the full PNG on disk; use `responseMode: 'full'` for pixel-perfect or `'path_only'` to skip the inline image
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, and timed waits
@@ -155,7 +155,7 @@ When `run_project` or `attach_project` is called:
 
 1. `mcp_bridge.gd` is copied into the project directory
 2. It's registered as an autoload in `project.godot`
-3. Godot launches with the bridge listening on `127.0.0.1`. With `run_project`, MCP spawns the process and auto-selects a free port (or uses `bridgePort` if passed). With `attach_project`, you launch it yourself; the port resolves to `bridgePort` > `MCP_BRIDGE_PORT` env > 9900.
+3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. The resolved port is baked into the per-project bridge script at inject time, so the listener and the Node-side socket always agree.
 4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
 5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes the bridge script and autoload entry
 

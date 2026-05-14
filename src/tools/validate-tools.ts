@@ -100,8 +100,13 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
       let filePath: string | undefined;
 
       if (i + 1 < lines.length) {
-        // Try res:// path first (captures file + line)
-        const resAtMatch = lines[i + 1].match(/\s*at:\s*(res:\/\/[^:]+):(\d+)/);
+        // Try res:// path first (captures file + line). Tolerates an optional
+        // "<method> (" prefix before res:// so we catch both
+        //   "   at: res://foo.gd:3"
+        // and
+        //   "   at: GDScript::reload (res://foo.gd:3)"
+        // Real Godot 4.5 stderr uses the parenthesized form.
+        const resAtMatch = lines[i + 1].match(/\s*at:\s*(?:[^()\n]*\()?(res:\/\/[^):"\s]+):(\d+)/);
         if (resAtMatch) {
           filePath = resAtMatch[1];
           lineNum = parseInt(resAtMatch[2], 10);
@@ -117,11 +122,12 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
       }
 
       // Parse-error entries reference synthetic gdscript:// URIs in their `at:` line
-      // rather than a res:// path. Peek forward up to 3 lines for the secondary
+      // rather than a res:// path. Peek forward up to 10 lines for the secondary
       // "Failed to load script/resource: \"res://...\"" message that names the file,
-      // and adopt that path so batch error attribution can find it.
+      // and adopt that path so batch error attribution can find it. The window is
+      // intentionally wide enough to clear a full GDScript backtrace.
       if (!filePath && /Parse Error/i.test(line)) {
-        const lookaheadLimit = Math.min(i + 4, lines.length);
+        const lookaheadLimit = Math.min(i + 11, lines.length);
         for (let j = i + 1; j < lookaheadLimit; j++) {
           const failMatch = lines[j].match(
             /Failed to load (?:script|resource):?\s*"?(res:\/\/[^":\s]+)/,

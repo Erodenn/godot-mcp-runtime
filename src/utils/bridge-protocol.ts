@@ -16,20 +16,6 @@ export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const FRAME_HEADER_BYTES = 4;
 
 /**
- * Resolve the bridge port. Reads `MCP_BRIDGE_PORT` from the environment, falls
- * back to {@link DEFAULT_BRIDGE_PORT}. Invalid values fall back to the default.
- */
-export function getBridgePort(): number {
-  const raw = process.env.MCP_BRIDGE_PORT;
-  if (!raw) return DEFAULT_BRIDGE_PORT;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
-    return DEFAULT_BRIDGE_PORT;
-  }
-  return parsed;
-}
-
-/**
  * Find an available TCP port by binding to port 0 (OS-assigned ephemeral port),
  * reading the assigned port, and closing the listener. The brief TOCTOU window
  * between close and the consumer's listen is acceptable — if a collision occurs,

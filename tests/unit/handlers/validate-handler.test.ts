@@ -208,12 +208,16 @@ describe('handleValidate batch mode', () => {
     expectErrorMatching(result, /Invalid project path/);
   });
 
-  it('reports valid:false for parse-broken targets via secondary "Failed to load script" message', async () => {
-    // Regression: parse-error stderr entries reference `gdscript://-N.gd` synthetic
-    // URIs in their `at:` line, not `res://` paths. The handler must peek forward
-    // for the secondary "Failed to load script: \"res://...\"" message to attribute
-    // the error back to the right target. Without that, batch fell back to the
-    // GDScript-side `resource != null` check, which is `true` for malformed scripts.
+  it('reports valid:false for parse-broken targets from real Godot 4.5 stderr', async () => {
+    // Regression: real Godot 4.5 stderr formats the `at:` line as
+    //   "   at: GDScript::reload (res://path/to/file.gd:LINE)"
+    // — the res:// path appears inside parentheses after a method name, not bare
+    // after `at:`. The tolerant `at:` regex must capture that path. As a
+    // belt-and-suspenders fallback, the secondary "Failed to load script: \"res://...\""
+    // message lands several lines below after a GDScript backtrace, so the
+    // lookahead window must clear it (10 lines covers any realistic trace).
+    // Without either fix, batch error attribution returns an empty Map and
+    // valid falls back to GDScript's unreliable `resource != null` flag.
     const fake = createFakeRunner({
       stdout: JSON.stringify({
         results: [
@@ -222,8 +226,12 @@ describe('handleValidate batch mode', () => {
         ],
       }),
       stderr: [
-        'SCRIPT ERROR: Parse Error: Unexpected token: ":".',
-        '   at: GDScript::reload (gdscript://-1.gd:2)',
+        'SCRIPT ERROR: Parse Error: Expected parameter name.',
+        '   at: GDScript::reload (res://_e2e_test/broken.gd:3)',
+        '   GDScript backtrace (most recent call first):',
+        '       [0] _validate_single (res://.mcp/godot_operations.gd:860)',
+        '       [1] validate_batch (res://.mcp/godot_operations.gd:876)',
+        '       [2] _init (res://.mcp/godot_operations.gd:87)',
         'ERROR: Failed to load script "res://_e2e_test/broken.gd" with error "Parse error".',
         '   at: load (core/io/resource_loader.cpp:283)',
       ].join('\n'),
@@ -242,7 +250,8 @@ describe('handleValidate batch mode', () => {
     const ok = parsed.results.find((r: { target: string }) => r.target === '_e2e_test/ok.gd');
     expect(broken.valid).toBe(false);
     expect(broken.errors.length).toBeGreaterThan(0);
-    expect(broken.errors[0].message).toContain('Unexpected token');
+    expect(broken.errors[0].message).toContain('Expected parameter name');
+    expect(broken.errors[0].line).toBe(3);
     expect(ok.valid).toBe(true);
   });
 });

@@ -144,7 +144,7 @@ function createRuntimeFake(): RuntimeFake {
     async attachProject(projectPath: string, bridgePort?: number) {
       state.activeSessionMode = 'attached';
       state.activeProjectPath = projectPath;
-      fake.activeBridgePort = bridgePort ?? 9900;
+      fake.activeBridgePort = bridgePort ?? 19901;
     },
     async waitForBridge() {
       return { ready: bridgeReady, error: bridgeError };
@@ -154,6 +154,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     getRecentErrors(_n: number): string[] {
       return [];
+    },
+    readBakedBridgePort(_projectPath: string): number | null {
+      return null;
     },
   };
 

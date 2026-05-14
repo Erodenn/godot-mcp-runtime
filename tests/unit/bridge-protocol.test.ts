@@ -1,10 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  DEFAULT_BRIDGE_PORT,
   MAX_FRAME_BYTES,
   encodeFrame,
   findFreePort,
-  getBridgePort,
   parseFrames,
 } from '../../src/utils/bridge-protocol.js';
 
@@ -120,41 +118,4 @@ describe('findFreePort', () => {
     const b = await findFreePort();
     expect(a).not.toBe(b);
   });
-});
-
-describe('getBridgePort', () => {
-  it('returns DEFAULT_BRIDGE_PORT when MCP_BRIDGE_PORT is unset', () => {
-    const prev = process.env.MCP_BRIDGE_PORT;
-    delete process.env.MCP_BRIDGE_PORT;
-    try {
-      expect(getBridgePort()).toBe(DEFAULT_BRIDGE_PORT);
-    } finally {
-      if (prev !== undefined) process.env.MCP_BRIDGE_PORT = prev;
-    }
-  });
-
-  it('honours a valid MCP_BRIDGE_PORT', () => {
-    const prev = process.env.MCP_BRIDGE_PORT;
-    process.env.MCP_BRIDGE_PORT = '12345';
-    try {
-      expect(getBridgePort()).toBe(12345);
-    } finally {
-      if (prev === undefined) delete process.env.MCP_BRIDGE_PORT;
-      else process.env.MCP_BRIDGE_PORT = prev;
-    }
-  });
-
-  it.each(['', 'abc', '0', '-1', '99999'])(
-    'falls back to DEFAULT_BRIDGE_PORT for invalid value %j',
-    (bad) => {
-      const prev = process.env.MCP_BRIDGE_PORT;
-      process.env.MCP_BRIDGE_PORT = bad;
-      try {
-        expect(getBridgePort()).toBe(DEFAULT_BRIDGE_PORT);
-      } finally {
-        if (prev === undefined) delete process.env.MCP_BRIDGE_PORT;
-        else process.env.MCP_BRIDGE_PORT = prev;
-      }
-    },
-  );
 });

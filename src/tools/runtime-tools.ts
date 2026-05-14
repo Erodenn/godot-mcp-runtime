@@ -55,7 +55,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. Preferred entry to runtime tools — required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Returns plain-text status confirming the bridge is ready, including the assigned port (auto-selected when bridgePort is omitted, or the value passed in). Errors if projectPath is not a Godot project or another run is already active.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Returns plain-text status with the assigned bridge port. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -79,7 +79,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
           minimum: 1,
           maximum: 65535,
           description:
-            "TCP port for the MCP bridge. Omit to auto-select a free port. Specify to use a fixed port (e.g. when coordinating with external tools). Threaded into the spawned child's MCP_BRIDGE_PORT env var.",
+            "TCP port for the MCP bridge. Omit to auto-select a free port (recommended). The chosen port is baked into the project's `mcp_bridge.gd` at inject time, so the running Godot listens on exactly this port.",
         },
       },
       required: ['projectPath'],
@@ -88,7 +88,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_project',
     description:
-      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond. If you are launching Godot in parallel, kick the launch off concurrently with this call so the wait absorbs startup. bridge.inject is idempotent, so retrying after a missed window is safe. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured). Returns plain-text status confirming the bridge is ready in attached mode, including the resolved bridge port. Unlike run_project, attach_project does NOT auto-select a free port — pass bridgePort or set MCP_BRIDGE_PORT when the externally launched Godot is on a non-default port; otherwise the default 9900 is used.',
+      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 15s for the bridge to respond. Call BEFORE Godot launches — Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -99,8 +99,10 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
         },
         bridgePort: {
           type: 'number',
+          minimum: 1,
+          maximum: 65535,
           description:
-            'TCP port where the MCP bridge is listening (default: MCP_BRIDGE_PORT env or 9900). Specify when the externally launched Godot uses a non-default port.',
+            "TCP port for the MCP bridge. Omit to auto-select a free port (recommended). The chosen port is baked into the project's `mcp_bridge.gd` at inject time, so the running Godot listens on exactly this port.",
         },
       },
       required: ['projectPath'],
@@ -403,6 +405,16 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
       required: ['script'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        result: {},
+        warning: { type: 'string' },
+        warnings: { type: 'array', items: { type: 'string' } },
+        tip: { type: 'string' },
+      },
+    },
   },
 ];
 
@@ -534,8 +546,14 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
       const recentErrors = runner.getRecentErrors(20);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
+      const expected = runner.activeBridgePort;
+      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
+      const racePrefix = raceDetected
+        ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
+        : '';
       const lines = [
-        `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
+        `${racePrefix}Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
         '- The bridge listener never came up — likely an early _ready error or a stuck process holding the port',
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
@@ -546,11 +564,17 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       // Tear down before returning so hasActiveRuntimeSession() reports false
       // and the next run_project lazy-reconnects cleanly.
       await runner.stopProject();
-      return createErrorResponse(lines.join('\n'), [
+      const solutions = [
         'Check for broken autoloads with list_autoloads',
         'Check that the bridge port (default 9900) is not occupied by another Godot process',
         'Retry run_project',
-      ]);
+      ];
+      if (raceDetected) {
+        solutions.push(
+          'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
+        );
+      }
+      return createErrorResponse(lines.join('\n'), solutions);
     }
 
     const port = runner.activeBridgePort;
@@ -600,7 +624,7 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
         return createErrorResponse(
           `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort)})`,
           [
-            'Omit bridgePort to fall back to MCP_BRIDGE_PORT or the default 9900',
+            'Omit bridgePort to auto-select a free port',
             'Pass a valid TCP port number matching the externally launched Godot',
           ],
         );
@@ -611,17 +635,29 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
     const bridgeResult = await runner.waitForBridgeAttached();
 
     if (!bridgeResult.ready) {
+      const expected = runner.activeBridgePort;
+      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
+      const racePrefix = raceDetected
+        ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
+        : '';
       // Tear down the attached-mode session state so retrying with
       // attach_project (or run_project) works without a manual detach first.
       await runner.stopProject();
+      const solutions = [
+        'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup — do not sequentialize',
+        'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
+        'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
+        'Check that no other Godot project is occupying the bridge port (default 9900)',
+      ];
+      if (raceDetected) {
+        solutions.push(
+          'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
+        );
+      }
       return createErrorResponse(
-        `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
-        [
-          'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup — do not sequentialize',
-          'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
-          'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
-          'Check that no other Godot project is occupying the bridge port (default 9900)',
-        ],
+        `${racePrefix}Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
+        solutions,
       );
     }
 

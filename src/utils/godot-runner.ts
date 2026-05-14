@@ -7,9 +7,9 @@ import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeManager } from './bridge-manager.js';
 import {
+  DEFAULT_BRIDGE_PORT,
   encodeFrame,
   findFreePort,
-  getBridgePort,
   parseFrames,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
@@ -707,6 +707,15 @@ export class GodotRunner {
     return this.godotPath;
   }
 
+  /**
+   * Read the port currently baked into the project's bridge script. Returns
+   * null if the file is missing or malformed. Thin pass-through to
+   * BridgeManager — used by bridge-wait-timeout race detection.
+   */
+  readBakedBridgePort(projectPath: string): number | null {
+    return this.bridge.readBakedPort(projectPath);
+  }
+
   async getVersion(): Promise<string> {
     if (this.cachedVersion !== null) {
       return this.cachedVersion;
@@ -830,7 +839,7 @@ export class GodotRunner {
     this.activeBridgePort = port;
 
     try {
-      this.bridge.inject(projectPath);
+      this.bridge.inject(projectPath, port);
     } catch (err) {
       logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
     }
@@ -851,7 +860,6 @@ export class GodotRunner {
       env: {
         ...process.env,
         MCP_SESSION_TOKEN: sessionToken,
-        MCP_BRIDGE_PORT: String(port),
       },
     };
     if (background) {
@@ -928,13 +936,11 @@ export class GodotRunner {
       this.activeSessionMode = null;
     }
 
-    this.bridge.inject(projectPath);
-    this.activeBridgePort = bridgePort ?? getBridgePort();
-    if (bridgePort === undefined && !process.env.MCP_BRIDGE_PORT) {
-      logDebug(
-        `attach_project: bridgePort and MCP_BRIDGE_PORT both unset; using default port ${this.activeBridgePort}`,
-      );
-    }
+    const port = bridgePort ?? (await findFreePort());
+    this.activeBridgePort = port;
+    this.bridge.inject(projectPath, port);
+    const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
+    logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
@@ -1093,7 +1099,10 @@ export class GodotRunner {
           cb();
           return;
         }
-        const port = this.activeBridgePort ?? getBridgePort();
+        // Fallback to DEFAULT_BRIDGE_PORT is defensive — every entry point
+        // (runProject, attachProject) sets activeBridgePort before sendCommand
+        // can be reached, so this branch is not expected in practice.
+        const port = this.activeBridgePort ?? DEFAULT_BRIDGE_PORT;
         const sock = net.connect(port, '127.0.0.1');
         const onConnect = (): void => {
           sock.setNoDelay(true);

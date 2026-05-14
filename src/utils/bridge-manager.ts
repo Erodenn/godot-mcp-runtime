@@ -1,13 +1,5 @@
 import { join } from 'path';
-import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  copyFileSync,
-  unlinkSync,
-  mkdirSync,
-  statSync,
-} from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { logDebug } from './logger.js';
 import { addAutoloadEntry, parseAutoloads, removeAutoloadEntry } from './autoload-ini.js';
 
@@ -15,20 +7,9 @@ const BRIDGE_AUTOLOAD_NAME = 'McpBridge';
 const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd';
 const MCP_GITIGNORE_ENTRY = '.mcp/';
 
-/**
- * Cheap equality check by size + mtime — sufficient for the bridge artifact
- * since the manager is the only writer. Avoids reading and hashing both files
- * on every inject call.
- */
-function isSameFile(a: string, b: string): boolean {
-  try {
-    const sa = statSync(a);
-    const sb = statSync(b);
-    return sa.size === sb.size && sa.mtimeMs === sb.mtimeMs;
-  } catch {
-    return false;
-  }
-}
+// Matches the baked-port marker line inserted in src/scripts/mcp_bridge.gd —
+// `const PORT := <int>` — so inject() can rewrite the integer per project.
+const BAKED_PORT_REGEX = /const PORT := \d+/;
 
 /**
  * Owns the McpBridge autoload artifact: the script copy in the target project,
@@ -45,19 +26,32 @@ function isSameFile(a: string, b: string): boolean {
 export class BridgeManager {
   private injectedProjects: Set<string> = new Set();
   private repairedProjects: Set<string> = new Set();
+  /**
+   * Last port baked into the on-disk script per project. Used by the
+   * race-detection helper in runtime-tools to spot a concurrent re-inject
+   * after a bridge-wait timeout.
+   */
+  private lastInjectedPort: Map<string, number> = new Map();
 
   constructor(private bridgeScriptPath: string) {}
 
-  inject(projectPath: string): void {
-    // Always refresh the bridge script — a server rebuild updates the source
-    // GDScript, and a same-session re-inject must propagate that to the
-    // project copy or the running game would talk to stale code. Short-circuit
-    // the copy when the destination already matches source size + mtime.
-    const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
-    if (!isSameFile(this.bridgeScriptPath, destScript)) {
-      copyFileSync(this.bridgeScriptPath, destScript);
-      logDebug(`Refreshed bridge autoload at ${destScript}`);
+  inject(projectPath: string, port: number): void {
+    // Always rewrite the destination — the per-project bridge script may
+    // differ from the template by exactly the baked integer, so a size/mtime
+    // shortcut no longer maps to "up-to-date." Bake the resolved port into
+    // the const PORT line so the running game listens on the exact port the
+    // Node side will connect to.
+    const template = readFileSync(this.bridgeScriptPath, 'utf8');
+    if (!BAKED_PORT_REGEX.test(template)) {
+      throw new Error(
+        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const PORT := <int>' marker`,
+      );
     }
+    const baked = template.replace(BAKED_PORT_REGEX, `const PORT := ${port}`);
+    const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
+    writeFileSync(destScript, baked, 'utf8');
+    this.lastInjectedPort.set(projectPath, port);
+    logDebug(`Wrote bridge autoload at ${destScript} (baked port ${port})`);
 
     if (this.injectedProjects.has(projectPath)) {
       logDebug('Bridge already injected for this project; refreshed script only.');
@@ -84,6 +78,28 @@ export class BridgeManager {
     this.removeBridgeArtifacts(projectPath);
     this.injectedProjects.delete(projectPath);
     this.repairedProjects.delete(projectPath);
+    this.lastInjectedPort.delete(projectPath);
+  }
+
+  /**
+   * Read the port currently baked into the project's bridge script. Returns
+   * the integer on success, or null if the file is missing, unreadable, or
+   * lacks the marker. Used to detect concurrent re-inject after a bridge-
+   * wait timeout (another MCP client may have rewritten the port).
+   */
+  readBakedPort(projectPath: string): number | null {
+    const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
+    if (!existsSync(destScript)) return null;
+    try {
+      const content = readFileSync(destScript, 'utf8');
+      const match = content.match(BAKED_PORT_REGEX);
+      if (!match) return null;
+      const parsed = Number.parseInt(match[0].replace(/^const PORT := /, ''), 10);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 
   /**
