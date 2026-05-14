@@ -99,6 +99,56 @@ describe('add_node round-trip', () => {
     },
     40000,
   );
+
+  itGodot(
+    'add_node with non-existent parentNodePath does not produce a success message or mutate the scene',
+    async () => {
+      // Regression: SceneTree.quit(n) in Godot 4 only schedules a quit for
+      // end-of-frame, so control was falling through past the failing
+      // _apply_add_node call into save_scene_to_path + the success print().
+      // Stdout then read as success and the parent-not-found stderr was
+      // discarded. The fix is `return` after every `quit(1)` in
+      // godot_operations.gd; this test pins the contract that failed
+      // headless ops MUST NOT emit a "added successfully" line.
+      const originalTscn = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
+
+      let threw = false;
+      let stdoutSeen = '';
+      let stderrSeen = '';
+      try {
+        const { stdout, stderr } = await runner.executeOperation(
+          'add_node',
+          {
+            scenePath: 'main.tscn',
+            nodeType: 'Sprite2D',
+            nodeName: 'Orphan',
+            parentNodePath: 'root/DoesNotExist',
+          },
+          tmpProject,
+          30000,
+        );
+        stdoutSeen = stdout || '';
+        stderrSeen = stderr || '';
+      } catch (err) {
+        threw = true;
+        stderrSeen = err instanceof Error ? err.message : String(err);
+      }
+
+      // Either the runner rejected, or it returned stdout the handler would
+      // classify as failure (no "added successfully" marker).
+      expect(stdoutSeen).not.toContain('added successfully');
+      expect(threw || !stdoutSeen.includes('added successfully')).toBe(true);
+      // The Godot side should have reported the parent-not-found error to stderr.
+      expect(stderrSeen.toLowerCase()).toContain('parent node not found');
+
+      // The scene must not have been mutated — no phantom Orphan node entry.
+      const tscnAfter = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
+      expect(tscnAfter).not.toMatch(/\[node name="Orphan"/);
+      // Belt-and-suspenders: the file should be byte-identical to the original.
+      expect(tscnAfter).toBe(originalTscn);
+    },
+    60000,
+  );
 });
 
 describe('set_node_properties round-trip', () => {

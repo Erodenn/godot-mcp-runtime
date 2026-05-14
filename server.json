@@ -25,11 +25,6 @@
           "isRequired": false
         },
         {
-          "name": "MCP_BRIDGE_PORT",
-          "description": "TCP port for the runtime bridge (default 9900, localhost only).",
-          "isRequired": false
-        },
-        {
           "name": "DEBUG",
           "description": "Enable verbose logging when set to 'true'.",
           "isRequired": false

@@ -6,7 +6,15 @@ import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();
 
-const BRIDGE_SOURCE_CONTENT = '# fake mcp_bridge.gd source for testing\nextends Node\n';
+const BRIDGE_SOURCE_CONTENT =
+  '# fake mcp_bridge.gd source for testing\nextends Node\nconst PORT := 9900\n';
+
+const TEST_PORT = 9900;
+const ALT_PORT = 23456;
+
+function bakedContent(port: number): string {
+  return BRIDGE_SOURCE_CONTENT.replace(/const PORT := \d+/, `const PORT := ${port}`);
+}
 
 /**
  * Set up a minimal project + a stand-in bridge source script. Returns the
@@ -34,11 +42,11 @@ function setupProject(opts: { projectGodot?: string; gitignore?: string } = {}):
 describe('BridgeManager.inject', () => {
   it('copies the bridge script, registers the autoload, and writes .mcp/.gdignore', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     const bridgeScript = join(projectPath, 'mcp_bridge.gd');
     expect(existsSync(bridgeScript)).toBe(true);
-    expect(readFileSync(bridgeScript, 'utf8')).toBe(BRIDGE_SOURCE_CONTENT);
+    expect(readFileSync(bridgeScript, 'utf8')).toBe(bakedContent(TEST_PORT));
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(projectGodot).toContain('[autoload]');
@@ -49,7 +57,7 @@ describe('BridgeManager.inject', () => {
 
   it('creates a .gitignore with .mcp/ when none exists', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     const gitignore = readFileSync(join(projectPath, '.gitignore'), 'utf8');
     expect(gitignore).toContain('.mcp/');
@@ -57,7 +65,7 @@ describe('BridgeManager.inject', () => {
 
   it('appends .mcp/ to an existing .gitignore that lacks it', () => {
     const { projectPath, manager } = setupProject({ gitignore: 'node_modules/\n' });
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     const gitignore = readFileSync(join(projectPath, '.gitignore'), 'utf8');
     expect(gitignore).toContain('node_modules/');
@@ -66,7 +74,7 @@ describe('BridgeManager.inject', () => {
 
   it('does not duplicate the .mcp/ entry on a second inject call', () => {
     const { projectPath, manager } = setupProject({ gitignore: '.mcp/\n' });
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     const gitignore = readFileSync(join(projectPath, '.gitignore'), 'utf8');
     const matches = gitignore.match(/\.mcp\//g) ?? [];
@@ -75,8 +83,8 @@ describe('BridgeManager.inject', () => {
 
   it('is idempotent within a session — second inject does not duplicate the autoload entry', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
+    manager.inject(projectPath, TEST_PORT);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     const matches = projectGodot.match(/McpBridge="\*res:\/\/mcp_bridge\.gd"/g) ?? [];
@@ -87,7 +95,7 @@ describe('BridgeManager.inject', () => {
     // First manager injects normally.
     const { projectPath, bridgeSourcePath } = setupProject();
     const firstManager = new BridgeManager(bridgeSourcePath);
-    firstManager.inject(projectPath);
+    firstManager.inject(projectPath, TEST_PORT);
 
     // Mutate the in-project bridge script to detect the refresh.
     const destScript = join(projectPath, 'mcp_bridge.gd');
@@ -95,10 +103,10 @@ describe('BridgeManager.inject', () => {
 
     // Fresh manager (no in-memory cache) re-injects against the same project.
     const secondManager = new BridgeManager(bridgeSourcePath);
-    secondManager.inject(projectPath);
+    secondManager.inject(projectPath, TEST_PORT);
 
     // The bridge script is runtime-owned, so a fresh inject refreshes it.
-    expect(readFileSync(destScript, 'utf8')).toBe(BRIDGE_SOURCE_CONTENT);
+    expect(readFileSync(destScript, 'utf8')).toBe(bakedContent(TEST_PORT));
 
     // Autoload entry remains a single, canonical line.
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
@@ -106,11 +114,38 @@ describe('BridgeManager.inject', () => {
     expect(matches.length).toBe(1);
   });
 
+  it('bakes the supplied port into the destination script', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, ALT_PORT);
+
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    expect(readFileSync(destScript, 'utf8')).toContain(`const PORT := ${ALT_PORT}`);
+    expect(readFileSync(destScript, 'utf8')).not.toContain('const PORT := 9900');
+  });
+
+  it('rewrites the baked port when inject is called again with a different port', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+    manager.inject(projectPath, ALT_PORT);
+
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    expect(readFileSync(destScript, 'utf8')).toContain(`const PORT := ${ALT_PORT}`);
+  });
+
+  it('throws if the template lacks the const PORT marker', () => {
+    const projectPath = tmp.makeProject('mcp-bridge-bad-', 'config_version=5\n');
+    const sourceDir = tmp.make('mcp-bridge-bad-src-');
+    const bridgeSourcePath = join(sourceDir, 'mcp_bridge.gd');
+    writeFileSync(bridgeSourcePath, '# no marker\nextends Node\n', 'utf8');
+    const manager = new BridgeManager(bridgeSourcePath);
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/const PORT := <int>/);
+  });
+
   it('inserts McpBridge into an existing empty [autoload] section', () => {
     const { projectPath, manager } = setupProject({
       projectGodot: 'config_version=5\n\n[autoload]\n',
     });
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
@@ -122,7 +157,7 @@ describe('BridgeManager.inject', () => {
 describe('BridgeManager.cleanup', () => {
   it('removes the autoload entry, the bridge script, and the .uid sidecar', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
     // Simulate a .uid sidecar that Godot would create.
     writeFileSync(join(projectPath, 'mcp_bridge.gd.uid'), 'uid://fake', 'utf8');
 
@@ -137,7 +172,7 @@ describe('BridgeManager.cleanup', () => {
 
   it('drops the [autoload] section when the bridge was the only entry', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
     manager.cleanup(projectPath);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
@@ -148,7 +183,7 @@ describe('BridgeManager.cleanup', () => {
     const { projectPath, manager } = setupProject({
       projectGodot: 'config_version=5\n\n[autoload]\nOtherSingleton="*res://other.gd"\n',
     });
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
     manager.cleanup(projectPath);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
@@ -159,10 +194,10 @@ describe('BridgeManager.cleanup', () => {
 
   it('allows a fresh inject after cleanup (clears injected-cache)', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
     manager.cleanup(projectPath);
 
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     expect(existsSync(join(projectPath, 'mcp_bridge.gd'))).toBe(true);
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
@@ -192,7 +227,7 @@ describe('BridgeManager.repairOrphaned', () => {
 
   it('is a no-op when the script file is present (no false-positive cleanup)', () => {
     const { projectPath, manager } = setupProject();
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     manager.repairOrphaned(projectPath);
 
@@ -215,12 +250,37 @@ describe('BridgeManager.repairOrphaned', () => {
   });
 });
 
+describe('BridgeManager.readBakedPort', () => {
+  it('returns the port that was baked into the destination script', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, ALT_PORT);
+    expect(manager.readBakedPort(projectPath)).toBe(ALT_PORT);
+  });
+
+  it('returns null when the script file is missing', () => {
+    const projectPath = tmp.makeProject('mcp-bridge-missing-');
+    const sourceDir = tmp.make('mcp-bridge-missing-src-');
+    const bridgeSourcePath = join(sourceDir, 'mcp_bridge.gd');
+    writeFileSync(bridgeSourcePath, BRIDGE_SOURCE_CONTENT, 'utf8');
+    const manager = new BridgeManager(bridgeSourcePath);
+    expect(manager.readBakedPort(projectPath)).toBeNull();
+  });
+
+  it('returns null when the const PORT line is corrupted', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    writeFileSync(destScript, '# corrupted - no port marker\nextends Node\n', 'utf8');
+    expect(manager.readBakedPort(projectPath)).toBeNull();
+  });
+});
+
 describe('BridgeManager handles project layouts', () => {
   it('creates the .mcp directory if it does not exist', () => {
     const { projectPath, manager } = setupProject();
     expect(existsSync(join(projectPath, '.mcp'))).toBe(false);
 
-    manager.inject(projectPath);
+    manager.inject(projectPath, TEST_PORT);
 
     expect(existsSync(join(projectPath, '.mcp'))).toBe(true);
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
@@ -230,7 +290,7 @@ describe('BridgeManager handles project layouts', () => {
     const { projectPath, manager } = setupProject();
     mkdirSync(join(projectPath, '.mcp'), { recursive: true });
 
-    expect(() => manager.inject(projectPath)).not.toThrow();
+    expect(() => manager.inject(projectPath, TEST_PORT)).not.toThrow();
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
   });
 });

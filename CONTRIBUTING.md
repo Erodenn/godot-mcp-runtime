@@ -110,6 +110,10 @@ The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a
 4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_init()`.
 5. Add a unit test for any pure helper logic; add an integration test if the tool touches scene files.
 
+## Modifying an existing tool
+
+Tool descriptions ship on every handshake — they are the entire UI an agent sees. If you change a tool's behavior, params, or return shape, update the `description`, per-property `description`s, `outputSchema`, and `docs/tools.md` in the same PR. Re-read `docs/tool-authoring.md` for the rules; `npm run verify` runs the description/schema tests.
+
 ## Release process
 
 1. Bump version in `package.json` and `src/index.ts`

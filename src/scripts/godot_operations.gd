@@ -15,6 +15,7 @@ func _init():
 	if script_index == -1:
 		log_error("Could not find --script argument")
 		quit(1)
+		return
 
 	var operation_index = script_index + 2
 	var params_index = script_index + 3
@@ -23,6 +24,7 @@ func _init():
 		log_error("Usage: godot --headless --script godot_operations.gd <operation> <json_params>")
 		log_error("Not enough command-line arguments provided.")
 		quit(1)
+		return
 
 	log_debug("All arguments: " + str(args))
 
@@ -42,10 +44,12 @@ func _init():
 		log_error("Failed to parse JSON parameters: " + params_json)
 		log_error("JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line()))
 		quit(1)
+		return
 
 	if not params:
 		log_error("Failed to parse JSON parameters: " + params_json)
 		quit(1)
+		return
 
 	log_info("Executing operation: " + operation)
 
@@ -90,8 +94,10 @@ func _init():
 		_:
 			log_error("Unknown operation: " + operation)
 			quit(1)
+			return
 
 	quit()
+	return
 
 # Logging functions
 func log_debug(message):
@@ -280,6 +286,7 @@ func create_scene(params):
 	if not scene_root:
 		log_error("Failed to instantiate node of type: " + root_node_type)
 		quit(1)
+		return
 
 	scene_root.name = "root"
 	scene_root.owner = scene_root
@@ -287,12 +294,14 @@ func create_scene(params):
 	if not _ensure_res_dir(full_scene_path):
 		log_error("Failed to create directory for scene: " + full_scene_path)
 		quit(1)
+		return
 
 	if save_scene_to_path(scene_root, full_scene_path):
 		print("Scene created successfully at: " + params.scene_path)
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		quit(1)
+		return
 
 # Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
@@ -351,17 +360,20 @@ func add_node(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var result = _apply_add_node(scene_root, params)
 	if not result.ok:
 		log_error(result.error)
 		quit(1)
+		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Node '" + params.node_name + "' of type '" + params.node_type + "' added successfully")
 	else:
 		log_error("Failed to save scene after adding node")
 		quit(1)
+		return
 
 # Load a sprite into a Sprite2D node
 func load_sprite(params):
@@ -370,17 +382,20 @@ func load_sprite(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var result = _apply_load_sprite(scene_root, params)
 	if not result.ok:
 		log_error(result.error)
 		quit(1)
+		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Sprite loaded successfully with texture: " + params.texture_path)
 	else:
 		log_error("Failed to save scene after loading sprite")
 		quit(1)
+		return
 
 # Export a scene as a MeshLibrary resource
 func export_mesh_library(params):
@@ -389,6 +404,7 @@ func export_mesh_library(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var mesh_library = MeshLibrary.new()
 
@@ -430,6 +446,7 @@ func export_mesh_library(params):
 		if not _ensure_res_dir(full_output_path):
 			log_error("Failed to create directory for MeshLibrary: " + full_output_path)
 			quit(1)
+			return
 
 		var error = ResourceSaver.save(mesh_library, full_output_path)
 		if error == OK:
@@ -437,9 +454,11 @@ func export_mesh_library(params):
 		else:
 			log_error("Failed to save MeshLibrary: " + str(error))
 			quit(1)
+			return
 	else:
 		log_error("No valid meshes found in the scene")
 		quit(1)
+		return
 
 # Save changes to a scene file
 func save_scene(params):
@@ -448,6 +467,7 @@ func save_scene(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var save_path = params.new_path if params.has("new_path") else params.scene_path
 
@@ -456,6 +476,7 @@ func save_scene(params):
 	else:
 		log_error("Failed to save scene")
 		quit(1)
+		return
 
 # ============================================
 # NODE OPERATIONS
@@ -468,6 +489,7 @@ func delete_nodes(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var node_paths: Array = params.node_paths
 	var results: Array = []
@@ -565,6 +587,7 @@ func get_scene_tree(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var tree_root = scene_root
 	if params.has("parent_path") and params.parent_path:
@@ -572,6 +595,7 @@ func get_scene_tree(params):
 		if not tree_root:
 			log_error("Parent node not found: " + str(params.parent_path))
 			quit(1)
+			return
 
 	var max_depth = -1
 	if params.has("max_depth"):
@@ -608,22 +632,26 @@ func attach_script(params):
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
 		quit(1)
+		return
 
 	var node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		quit(1)
+		return
 
 	var full_script_path = normalize_scene_path(params.script_path)
 
 	if not FileAccess.file_exists(full_script_path):
 		log_error("Script file does not exist: " + full_script_path)
 		quit(1)
+		return
 
 	var script = load(full_script_path)
 	if not script:
 		log_error("Failed to load script: " + full_script_path)
 		quit(1)
+		return
 
 	node.set_script(script)
 
@@ -632,6 +660,7 @@ func attach_script(params):
 	else:
 		log_error("Failed to save scene after attaching script")
 		quit(1)
+		return
 
 # ============================================
 # SIGNAL AND DUPLICATE OPERATIONS
@@ -640,15 +669,19 @@ func attach_script(params):
 # Duplicate a node and its children within a scene
 func duplicate_node(params):
 	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root: quit(1)
+	if not scene_root:
+		quit(1)
+		return
 
 	var node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		quit(1)
+		return
 	if node == scene_root:
 		log_error("Cannot duplicate the root node")
 		quit(1)
+		return
 
 	var duplicate = node.duplicate()
 	if params.has("new_name"):
@@ -662,6 +695,7 @@ func duplicate_node(params):
 		if not parent:
 			log_error("Target parent not found: " + params.target_parent_path)
 			quit(1)
+			return
 
 	parent.add_child(duplicate)
 	duplicate.owner = scene_root
@@ -677,16 +711,20 @@ func duplicate_node(params):
 	else:
 		log_error("Failed to save scene after duplicating node")
 		quit(1)
+		return
 
 # List signals defined on a node and their current connections
 func get_node_signals(params):
 	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root: quit(1)
+	if not scene_root:
+		quit(1)
+		return
 
 	var node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		quit(1)
+		return
 
 	var signals = []
 	for sig in node.get_signal_list():
@@ -712,25 +750,31 @@ func get_node_signals(params):
 # Connect a signal from one node to a method on another node
 func connect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root: quit(1)
+	if not scene_root:
+		quit(1)
+		return
 
 	var source = find_node_by_path(scene_root, params.node_path)
 	if not source:
 		log_error("Source node not found: " + params.node_path)
 		quit(1)
+		return
 
 	var target = find_node_by_path(scene_root, params.target_node_path)
 	if not target:
 		log_error("Target node not found: " + params.target_node_path)
 		quit(1)
+		return
 
 	if not source.has_signal(params.signal):
 		log_error("Signal does not exist: " + params.signal + " on " + source.get_class())
 		quit(1)
+		return
 
 	if not target.has_method(params.method):
 		log_error("Method does not exist: " + params.method + " on " + target.get_class())
 		quit(1)
+		return
 
 	# CONNECT_PERSIST is required for the connection to be serialized into the
 	# packed scene; without it the connection is runtime-only and disappears on save.
@@ -738,31 +782,38 @@ func connect_signal(params):
 	if err != OK:
 		log_error("Failed to connect signal: " + str(err))
 		quit(1)
+		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print("Signal '" + params.signal + "' connected from '" + params.node_path + "' to '" + params.target_node_path + "." + params.method + "'")
 	else:
 		log_error("Failed to save scene after connecting signal")
 		quit(1)
+		return
 
 # Disconnect a signal connection between two nodes
 func disconnect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root: quit(1)
+	if not scene_root:
+		quit(1)
+		return
 
 	var source = find_node_by_path(scene_root, params.node_path)
 	if not source:
 		log_error("Source node not found: " + params.node_path)
 		quit(1)
+		return
 
 	var target = find_node_by_path(scene_root, params.target_node_path)
 	if not target:
 		log_error("Target node not found: " + params.target_node_path)
 		quit(1)
+		return
 
 	if not source.is_connected(params.signal, Callable(target, params.method)):
 		log_error("Signal connection does not exist")
 		quit(1)
+		return
 
 	source.disconnect(params.signal, Callable(target, params.method))
 
@@ -771,6 +822,7 @@ func disconnect_signal(params):
 	else:
 		log_error("Failed to save scene after disconnecting signal")
 		quit(1)
+		return
 
 # ============================================
 # VALIDATE OPERATION
@@ -781,6 +833,7 @@ func validate_resource(params):
 	if not (params.has("script_path") or params.has("scene_path")):
 		log_error("validate_resource requires script_path or scene_path")
 		quit(1)
+		return
 	var result = _validate_single(params)
 	print(JSON.stringify({"valid": result.valid, "errors": result.errors}))
 
