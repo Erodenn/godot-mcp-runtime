@@ -5,6 +5,7 @@ import {
   convertCamelToSnakeCase,
   validatePath,
   validateSubPath,
+  validateNodePath,
   isUnderDir,
   extractGdError,
   createErrorResponse,
@@ -175,6 +176,45 @@ describe('validateSubPath', () => {
     // path.resolve('/project', '../project-evil') would equal '/project-evil',
     // which must not pass the startsWith(projectRoot + sep) check.
     expect(validateSubPath(project, '../project-evil/file.gd')).toBe(false);
+  });
+
+  // POSIX-only: on Windows `resolve('/')` returns the current drive root
+  // (e.g. `C:\\`), so `projectRoot === sep` never holds and the new branch
+  // is unreachable. The regression only matters on POSIX-style roots.
+  const itPosix = process.platform === 'win32' ? it.skip : it;
+  itPosix('handles projectRoot === filesystem root without breaking the prefix check', () => {
+    // Without the tail special-case, projectRoot + sep would be '//' and every
+    // absolute path under '/' would be rejected because '/etc/passwd' does not
+    // start with '//'. The tail computation must collapse to sep so paths
+    // beneath the filesystem root resolve correctly.
+    expect(validateSubPath(sep, '/etc/passwd')).toBe(true);
+  });
+});
+
+describe('validateNodePath', () => {
+  it('accepts well-formed relative scene-tree paths', () => {
+    expect(validateNodePath('root/Player')).toBe(true);
+    expect(validateNodePath('root/Player/Sprite2D')).toBe(true);
+  });
+
+  it('accepts absolute scene-tree paths', () => {
+    expect(validateNodePath('/root/Player')).toBe(true);
+  });
+
+  it('rejects empty strings', () => {
+    expect(validateNodePath('')).toBe(false);
+  });
+
+  it('rejects paths containing ".."', () => {
+    expect(validateNodePath('root/..')).toBe(false);
+    expect(validateNodePath('../escape')).toBe(false);
+    expect(validateNodePath('root/Player/../Other')).toBe(false);
+  });
+
+  it('rejects non-string input', () => {
+    expect(validateNodePath(null as unknown as string)).toBe(false);
+    expect(validateNodePath(undefined as unknown as string)).toBe(false);
+    expect(validateNodePath(42 as unknown as string)).toBe(false);
   });
 });
 

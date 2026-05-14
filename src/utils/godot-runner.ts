@@ -332,7 +332,22 @@ export function validateSubPath(projectPath: string, userPath: string): boolean 
   if (!stripped) return false;
   const projectRoot = resolve(projectPath);
   const resolved = resolve(projectRoot, stripped);
-  return resolved === projectRoot || resolved.startsWith(projectRoot + sep);
+  const tail = projectRoot === sep ? sep : projectRoot + sep;
+  return resolved === projectRoot || resolved.startsWith(tail);
+}
+
+/**
+ * Validate a Godot scene-tree path (NodePath). Scene-tree paths are a
+ * separate namespace from filesystem paths — they address nodes inside
+ * a scene, not files on disk, so the project-root containment check
+ * in `validateSubPath` does not apply.
+ *
+ * Rejects empty strings and `..` segments. Accepts both relative
+ * (`root/Player`) and absolute (`/root/Player`) Godot forms; the
+ * codebase convention is the relative form.
+ */
+export function validateNodePath(path: string): boolean {
+  return typeof path === 'string' && path.length > 0 && !path.includes('..');
 }
 
 /**

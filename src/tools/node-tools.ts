@@ -4,6 +4,7 @@ import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godo
 import {
   normalizeParameters,
   validateSubPath,
+  validateNodePath,
   createErrorResponse,
   validateSceneArgs,
 } from '../utils/godot-runner.js';
@@ -319,9 +320,9 @@ export async function handleDeleteNodes(runner: GodotRunner, args: OperationPara
     ]);
   }
   for (const p of args.nodePaths as unknown[]) {
-    if (typeof p !== 'string' || !validateSubPath(v.projectPath, p)) {
+    if (typeof p !== 'string' || !validateNodePath(p)) {
       return createErrorResponse('Invalid nodePath in nodePaths', [
-        'Provide valid paths without ".." (e.g. "root/Player")',
+        'Provide a scene-tree path without ".." (e.g. "root/Player")',
       ]);
     }
   }
@@ -385,14 +386,14 @@ export async function handleAttachScript(runner: GodotRunner, args: OperationPar
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
+  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', [
       'Provide the node path (e.g. "root/Player")',
     ]);
   }
   if (!args.scriptPath || !validateSubPath(v.projectPath, args.scriptPath as string)) {
     return createErrorResponse('Valid scriptPath is required', [
-      'Provide the script path relative to the project',
+      'Provide a relative script path that stays inside the project directory',
     ]);
   }
   const scriptFullPath = join(v.projectPath, args.scriptPath as string);
@@ -417,8 +418,10 @@ export async function handleGetSceneTree(runner: GodotRunner, args: OperationPar
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (args.parentPath && !validateSubPath(v.projectPath, args.parentPath as string)) {
-    return createErrorResponse('Invalid parentPath', ['Provide a valid path without ".."']);
+  if (args.parentPath && !validateNodePath(args.parentPath as string)) {
+    return createErrorResponse('Invalid parentPath', [
+      'Provide a scene-tree path without ".." (e.g. "root/Player")',
+    ]);
   }
 
   const params: OperationParams = { scenePath: args.scenePath };
@@ -439,13 +442,15 @@ export async function handleDuplicateNode(runner: GodotRunner, args: OperationPa
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
+  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', [
       'Provide the node path to duplicate',
     ]);
   }
-  if (args.targetParentPath && !validateSubPath(v.projectPath, args.targetParentPath as string)) {
-    return createErrorResponse('Invalid targetParentPath', ['Provide a valid path without ".."']);
+  if (args.targetParentPath && !validateNodePath(args.targetParentPath as string)) {
+    return createErrorResponse('Invalid targetParentPath', [
+      'Provide a scene-tree path without ".." (e.g. "root/Player")',
+    ]);
   }
 
   const params: OperationParams = { scenePath: args.scenePath, nodePath: args.nodePath };
@@ -466,7 +471,7 @@ export async function handleGetNodeSignals(runner: GodotRunner, args: OperationP
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
+  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', [
       'Provide the node path (e.g. "root/Button")',
     ]);
@@ -498,7 +503,7 @@ function validateSignalArgs(
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
+  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', ['Provide the source node path']);
   }
   if (!args.signal || !args.targetNodePath || !args.method) {
@@ -506,8 +511,10 @@ function validateSignalArgs(
       'Provide all three parameters',
     ]);
   }
-  if (!validateSubPath(v.projectPath, args.targetNodePath as string)) {
-    return createErrorResponse('Invalid targetNodePath', ['Provide a valid path without ".."']);
+  if (!validateNodePath(args.targetNodePath as string)) {
+    return createErrorResponse('Invalid targetNodePath', [
+      'Provide a scene-tree path without ".." (e.g. "root/Player")',
+    ]);
   }
 
   return {

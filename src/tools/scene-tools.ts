@@ -4,6 +4,7 @@ import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godo
 import {
   normalizeParameters,
   validateSubPath,
+  validateNodePath,
   createErrorResponse,
   validateProjectArgs,
   validateSceneArgs,
@@ -290,12 +291,12 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
 
-  if (!args.nodePath || !validateSubPath(v.projectPath, args.nodePath as string)) {
+  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
     return createErrorResponse('Valid nodePath is required', ['Provide the target node path']);
   }
   if (!args.texturePath || !validateSubPath(v.projectPath, args.texturePath as string)) {
     return createErrorResponse('Valid texturePath is required', [
-      'Provide the texture path relative to the project',
+      'Provide a relative texture path that stays inside the project directory',
     ]);
   }
   const textureFullPath = join(v.projectPath, args.texturePath as string);
@@ -340,7 +341,7 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
 
   if (!args.outputPath || !validateSubPath(v.projectPath, args.outputPath as string)) {
     return createErrorResponse('Valid outputPath is required', [
-      'Provide the output path for the .res file',
+      'Provide an output path for the .res file that stays inside the project directory',
     ]);
   }
 
