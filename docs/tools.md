@@ -4,20 +4,20 @@ The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `
 
 ## Project Management
 
-| Tool               | Description                                                                            |
-| ------------------ | -------------------------------------------------------------------------------------- |
-| `launch_editor`    | Open the Godot editor GUI for a project                                                |
-| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window    |
-| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself                             |
-| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone |
-| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)     |
-| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)          |
-| `list_projects`    | Find Godot projects in a directory                                                     |
-| `get_project_info` | Get project metadata and Godot version                                                 |
+| Tool               | Description                                                                                                                                                       |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                           |
+| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; pass `bridgePort` to pin the bridge port (auto-selects a free one otherwise) |
+| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself; pass `bridgePort` (or set `MCP_BRIDGE_PORT`) when Godot uses a non-default bridge port                |
+| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone                                                                            |
+| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)                                                                                |
+| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                     |
+| `list_projects`    | Find Godot projects in a directory                                                                                                                                |
+| `get_project_info` | Get project metadata and Godot version                                                                                                                            |
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
-Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 15 s for the externally launched Godot process to come up. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup — don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent).
+Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 15 s for the externally launched Godot process to come up. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup — don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent). `run_project` auto-selects a free bridge port (override with `bridgePort`); `attach_project` uses `bridgePort`, then `MCP_BRIDGE_PORT`, then the default 9900 — it does not auto-select.
 
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
