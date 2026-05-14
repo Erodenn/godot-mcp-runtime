@@ -55,7 +55,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. Preferred entry to runtime tools — required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Returns plain-text status confirming the bridge is ready. Errors if projectPath is not a Godot project or another run is already active.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. Preferred entry to runtime tools — required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Call stop_project when done. Returns plain-text status confirming the bridge is ready, including the assigned port (auto-selected when bridgePort is omitted, or the value passed in). Errors if projectPath is not a Godot project or another run is already active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -76,8 +76,10 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
         },
         bridgePort: {
           type: 'number',
+          minimum: 1,
+          maximum: 65535,
           description:
-            'TCP port for the MCP bridge. Omit to auto-select a free port. Specify to use a fixed port (e.g. when coordinating with external tools).',
+            "TCP port for the MCP bridge. Omit to auto-select a free port. Specify to use a fixed port (e.g. when coordinating with external tools). Threaded into the spawned child's MCP_BRIDGE_PORT env var.",
         },
       },
       required: ['projectPath'],
@@ -86,7 +88,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
   {
     name: 'attach_project',
     description:
-      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond. If you are launching Godot in parallel, kick the launch off concurrently with this call so the wait absorbs startup. bridge.inject is idempotent, so retrying after a missed window is safe. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured). Returns plain-text status confirming the bridge is ready in attached mode.',
+      'Attach runtime MCP tools to a manually launched Godot process without spawning one. Use only when something other than MCP is running Godot (debugger attached, custom CLI flags, IDE run) — for the standard case, use run_project. Injects the McpBridge autoload, then waits up to 15s for the bridge to respond. If you are launching Godot in parallel, kick the launch off concurrently with this call so the wait absorbs startup. bridge.inject is idempotent, so retrying after a missed window is safe. Use detach_project or stop_project when done. get_debug_output is unavailable in attached mode (stdout/stderr not captured). Returns plain-text status confirming the bridge is ready in attached mode, including the resolved bridge port. Unlike run_project, attach_project does NOT auto-select a free port — pass bridgePort or set MCP_BRIDGE_PORT when the externally launched Godot is on a non-default port; otherwise the default 9900 is used.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -492,12 +494,24 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
 
   try {
     const background = args.background === true;
-    const bridgePort = typeof args.bridgePort === 'number' ? args.bridgePort : undefined;
+    const bridgePort = args.bridgePort;
+    if (bridgePort !== undefined) {
+      if (
+        !Number.isInteger(bridgePort) ||
+        (bridgePort as number) < 1 ||
+        (bridgePort as number) > 65535
+      ) {
+        return createErrorResponse(
+          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort)})`,
+          ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
+        );
+      }
+    }
     await runner.runProject(
       v.projectPath,
       args.scene as string | undefined,
       background,
-      bridgePort,
+      bridgePort as number | undefined,
     );
 
     const bridgeResult = await runner.waitForBridge();
@@ -576,8 +590,23 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
   if ('isError' in v) return v;
 
   try {
-    const attachBridgePort = typeof args.bridgePort === 'number' ? args.bridgePort : undefined;
-    await runner.attachProject(v.projectPath, attachBridgePort);
+    const attachBridgePort = args.bridgePort;
+    if (attachBridgePort !== undefined) {
+      if (
+        !Number.isInteger(attachBridgePort) ||
+        (attachBridgePort as number) < 1 ||
+        (attachBridgePort as number) > 65535
+      ) {
+        return createErrorResponse(
+          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort)})`,
+          [
+            'Omit bridgePort to fall back to MCP_BRIDGE_PORT or the default 9900',
+            'Pass a valid TCP port number matching the externally launched Godot',
+          ],
+        );
+      }
+    }
+    await runner.attachProject(v.projectPath, attachBridgePort as number | undefined);
 
     const bridgeResult = await runner.waitForBridgeAttached();
 

@@ -232,9 +232,10 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
     expect(JSON.parse(result.response)).toEqual({ nodes: [] });
   }, 10000);
 
-  it('does not retry when no session is active', async () => {
-    // No activeSessionMode set — should fail immediately.
-    const pending = runner.sendCommand('ping');
+  it('does not retry retryable commands when no session is active', async () => {
+    // activeSessionMode is null — sendCommandWithReconnect must NOT retry
+    // even for normally-retryable commands like get_ui_elements.
+    const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();
     bridge.closePeer();
     await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);
