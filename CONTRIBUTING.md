@@ -117,8 +117,9 @@ Tool descriptions ship on every handshake — they are the entire UI an agent se
 ## Release process
 
 1. Bump version in `package.json` and `src/index.ts`
-2. Commit and push to `main`
-3. Push a `vX.Y.Z` tag — `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
+2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
+3. Commit and push to `main`
+4. Push a `vX.Y.Z` tag — `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
 Docker CI runs automatically on push and PR to `main`.
 

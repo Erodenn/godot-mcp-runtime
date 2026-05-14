@@ -1,30 +1,46 @@
 # Godot MCP Runtime
 
-<a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server" />
-</a>
+<p align="center">
+  <a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime"><img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server"></a>
+</p>
 
-[![](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
-[![npm version](https://img.shields.io/npm/v/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
-[![npm downloads](https://img.shields.io/npm/dt/godot-mcp-runtime)](https://www.npmjs.com/package/godot-mcp-runtime)
-[![License: MIT](https://badgen.net/github/license/Erodenn/godot-mcp-runtime)](LICENSE)
-[![Node.js](https://img.shields.io/node/v/godot-mcp-runtime)](https://nodejs.org/)
+<p align="center">
+  <a href="https://modelcontextprotocol.io/introduction"><img src="https://badge.mcpx.dev?type=server" alt="MCP Server"></a>
+  <a href="https://www.npmjs.com/package/godot-mcp-runtime"><img src="https://img.shields.io/npm/v/godot-mcp-runtime" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/godot-mcp-runtime"><img src="https://img.shields.io/npm/dt/godot-mcp-runtime" alt="npm downloads"></a>
+  <a href="LICENSE"><img src="https://badgen.net/github/license/Erodenn/godot-mcp-runtime" alt="License: MIT"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/node/v/godot-mcp-runtime" alt="Node.js"></a>
+</p>
 
-A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI assistants direct access to a running [Godot](https://godotengine.org/) 4.x game. Not just file editing, not just scene manipulation. Actual runtime control: input simulation, screenshots, UI discovery, and live GDScript execution while the game is running.
+A lightweight [MCP](https://modelcontextprotocol.io/) server that pairs comprehensive headless editing with full runtime control over a [Godot](https://godotengine.org/) 4.x project. Scene, node, autoload, and validation ops cover everything short of the most niche corners of the engine; the runtime bridge adds screenshots, input simulation, UI discovery, and live GDScript against the running scene tree.
 
-**The distinction matters: the AI doesn't just write your game, it can check its work.**
+<p align="center"><img src="docs/assets/demo.gif" alt="Agent driving a Godot game via MCP runtime tools" width="1000"></p>
 
-When you run a project through this server, it injects a lightweight TCP bridge as an autoload, and suddenly the AI can interact with your game the same way a player would: press keys, click buttons, read what's on screen, and run arbitrary code against the live scene tree.
+<h3 align="center">The AI doesn't just write your game, it can check its work.</h3>
+<br>
 
-**No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon — something you install into your project, commit to version control, and manage as a dependency. All this server needs is Node.js and a Godot executable: no addon installation, no project modifications, no cleanup.
+- **Headless editing** — scenes, nodes, scripts, signals, validation, no editor window
+- **Runtime control** — screenshots, input simulation, UI discovery, and live GDScript against the running game
+- **Zero footprint** — no Godot addon, no project commits, auto-cleanup on shutdown
+
+**No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon, something you install into your project, commit to version control, and manage as a dependency. Use npx and there's no install or setup needed.
 
 Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), but for Godot. This does the same thing for games: run the project, take a screenshot, simulate input, read what's on screen, execute a script against the live scene tree. The agent closes the loop on its own changes rather than handing off to you to verify.
 
-This is not a playtesting replacement. It doesn't catch the subtle feel issues that only a human notices, and it won't tell you if your game is fun. What it does is let an agent confirm that a scene loads, a button responds, a value updated, a script ran without errors. The ability to check work is crucial for AI driven workflows.
+> [!NOTE]
+> This is not a playtesting replacement. It doesn't catch the subtle feel issues that only a human notices, and it won't tell you if your game is fun. What it does is let an agent confirm that a scene loads, a button responds, a value updated, a script ran without errors. The ability to check work is crucial for AI driven workflows.
 
-Each tool teaches agents how to use it through its description and response messages: what to call next, when to wait, and how to recover from errors. Every operation is its own tool with only its relevant parameters, no operation discriminators and no conditional schemas. This server is built for agents.
+## Contents
+
+- [What It Does](#what-it-does)
+- [Quick Start](#quick-start)
+- [Docs](#docs)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
 
 ## What It Does
+
+**Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along.
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 
@@ -37,7 +53,10 @@ Each tool teaches agents how to use it through its description and response mess
 
 **Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen (positioned at `(-9999, -9999)`) with physical input blocked: borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
 
-**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `attach_project` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. The tradeoff: `get_debug_output` is unavailable in attached mode because stdout and stderr only flow through processes MCP started itself. Use `detach_project` when done.
+**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `attach_project` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Use `detach_project` when done.
+
+> [!IMPORTANT]
+> `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Use `run_project` if you need the debug stream.
 
 The bridge cleans itself up automatically when `stop_project` or `detach_project` is called. No leftover autoloads, no modified project files.
 
@@ -112,62 +131,20 @@ npm run build
 }
 ```
 
+> [!TIP]
+> **Prefer pnpm?** All three install paths work with pnpm. Substitute `pnpm dlx godot-mcp-runtime` for `npx -y godot-mcp-runtime`, `pnpm add -g godot-mcp-runtime` for the global install, or `pnpm install && pnpm run build` for the source build. pnpm ships stronger defaults against npm supply-chain attacks; see [pnpm's supply chain security guide](https://pnpm.io/supply-chain-security).
+
 If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it. Set `"DEBUG": "true"` in `env` for verbose logging.
 
 ### Verify
 
 Ask your AI assistant to call `get_project_info`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
-## Tools
+## Docs
 
-See [`docs/tools.md`](docs/tools.md) for the full tool reference, grouped by category. Authoring standards for adding or modifying tools live in [`docs/tool-authoring.md`](docs/tool-authoring.md).
-
-## Architecture
-
-```
-src/
-├── index.ts                # MCP server entry point, server setup
-├── dispatch.ts             # Tool-name → handler dispatch table
-├── tools/
-│   ├── project-tools.ts    # Project introspection (list_projects, get_project_info, files, search, settings, scene_dependencies)
-│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project, attach_project, take_screenshot, etc.)
-│   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
-│   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
-│   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
-│   └── validate-tools.ts   # GDScript and scene validation
-├── scripts/
-│   ├── godot_operations.gd # Headless GDScript operations
-│   └── mcp_bridge.gd       # TCP autoload for runtime communication
-└── utils/
-    ├── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
-    ├── handler-helpers.ts  # executeSceneOp wrapper for headless-op handlers
-    ├── bridge-manager.ts   # McpBridge artifact lifecycle (inject, cleanup, repair)
-    ├── bridge-protocol.ts  # TCP framing (length-prefixed frames, port resolution)
-    ├── autoload-ini.ts     # project.godot [autoload] INI primitives
-    └── logger.ts           # logDebug / logError helpers
-```
-
-Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).
-
-## How the Bridge Works
-
-When `run_project` or `attach_project` is called:
-
-1. `mcp_bridge.gd` is copied into the project directory
-2. It's registered as an autoload in `project.godot`
-3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. The resolved port is baked into the per-project bridge script at inject time, so the listener and the Node-side socket always agree.
-4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
-5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes the bridge script and autoload entry
-
-Files generated during runtime (screenshots, executed scripts) are stored in `.mcp/` inside the project directory. This directory is automatically added to `.gitignore` and has a `.gdignore` so Godot won't import it.
-
-`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
-
-- `responseMode: "full"` — return the full inline PNG when the agent needs to inspect exact pixels, small UI text, or texture detail.
-- `responseMode: "path_only"` — skip the inline image entirely when another tool or human will inspect the saved file.
-- `previewMaxWidth` / `previewMaxHeight` — override the default 960x540 preview bounds (e.g. `{ "responseMode": "preview", "previewMaxWidth": 480, "previewMaxHeight": 270 }`).
-
-The response is a JSON text entry (`{ responseMode, path, size, previewPath?, previewSize?, warnings? }`) plus an inline `image` entry for `full` and `preview`.
+- [`docs/tools.md`](docs/tools.md) — full tool reference, grouped by category
+- [`docs/tool-authoring.md`](docs/tool-authoring.md) — standards for adding or modifying tools
+- [`docs/architecture.md`](docs/architecture.md) — source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
 
 ## Acknowledgments
 
