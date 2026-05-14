@@ -129,7 +129,12 @@ function createRuntimeFake(): RuntimeFake {
       return proc as unknown as GodotProcess['process'];
     },
     activeBridgePort: null as number | null,
-    runProject(projectPath: string, _scene?: string, _background?: boolean, bridgePort?: number) {
+    async runProject(
+      projectPath: string,
+      _scene?: string,
+      _background?: boolean,
+      bridgePort?: number,
+    ) {
       if (runProjectError) throw runProjectError;
       state.activeSessionMode = 'spawned';
       state.activeProjectPath = projectPath;

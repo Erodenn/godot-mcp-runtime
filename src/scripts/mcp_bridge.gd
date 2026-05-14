@@ -21,7 +21,7 @@ var tcp_server: TCPServer
 var port: int = DEFAULT_BRIDGE_PORT
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
-var _shutting_down: bool = false
+var _shutting_down: bool = false  # One-shot: set true in shutdown(); never reset (autoload is recreated on next session)
 
 func _resolve_port() -> int:
 	var raw := OS.get_environment("MCP_BRIDGE_PORT")

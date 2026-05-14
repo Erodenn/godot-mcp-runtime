@@ -48,6 +48,9 @@ export function findFreePort(): Promise<number> {
       const port = addr.port;
       srv.close(() => resolve(port));
     });
+    // One-shot: only fires before listen() succeeds. If listen succeeded,
+    // we proceed to srv.close() in the listening callback — a later error
+    // is not possible from this server, so the listener stays safely dormant.
     srv.on('error', reject);
   });
 }

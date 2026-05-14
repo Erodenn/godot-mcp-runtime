@@ -41,6 +41,7 @@ const BRIDGE_PING_TIMEOUT_MS = 1000;
 const BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS = 500;
 const BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS = 1500;
 const BRIDGE_PROCESS_EXIT_TIMEOUT_MS = 2000;
+const BRIDGE_RECONNECT_DELAY_MS = 1000;
 
 /**
  * Normalize a path for cross-platform comparison.
@@ -842,7 +843,8 @@ export class GodotRunner {
       cmdArgs.push(scene);
     }
 
-    logDebug(`Running Godot project: ${projectPath} (bridge port ${port})`);
+    const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
+    logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     const sessionToken = randomBytes(16).toString('hex');
     const spawnOptions: SpawnOptions = {
       stdio: 'pipe',
@@ -928,6 +930,11 @@ export class GodotRunner {
 
     this.bridge.inject(projectPath);
     this.activeBridgePort = bridgePort ?? getBridgePort();
+    if (bridgePort === undefined && !process.env.MCP_BRIDGE_PORT) {
+      logDebug(
+        `attach_project: bridgePort and MCP_BRIDGE_PORT both unset; using default port ${this.activeBridgePort}`,
+      );
+    }
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
@@ -1253,7 +1260,7 @@ export class GodotRunner {
         GodotRunner.RETRYABLE_BRIDGE_COMMANDS.has(command)
       ) {
         this.closeConnection();
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
         return this.sendCommand(command, params, timeoutMs);
       }
       throw err;
