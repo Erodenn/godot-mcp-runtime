@@ -4,16 +4,16 @@ The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `
 
 ## Project Management
 
-| Tool               | Description                                                                                                                                                       |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                           |
-| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; pass `bridgePort` to pin the bridge port (auto-selects a free one otherwise) |
-| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself; pass `bridgePort` (or set `MCP_BRIDGE_PORT`) when Godot uses a non-default bridge port                |
-| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone                                                                            |
-| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)                                                                                |
-| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                     |
-| `list_projects`    | Find Godot projects in a directory                                                                                                                                |
-| `get_project_info` | Get project metadata and Godot version                                                                                                                            |
+| Tool               | Description                                                                                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                                                 |
+| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; pass `bridgePort` (integer 1–65535) to pin the bridge port — auto-selects a free port when omitted |
+| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself; pass `bridgePort` (integer 1–65535) or set `MCP_BRIDGE_PORT` when Godot uses a non-default bridge port (default: 9900)      |
+| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone                                                                                                  |
+| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)                                                                                                      |
+| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                                           |
+| `list_projects`    | Find Godot projects in a directory                                                                                                                                                      |
+| `get_project_info` | Get project metadata and Godot version                                                                                                                                                  |
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
@@ -22,7 +22,7 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `take_screenshot` | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
-| `simulate_input`  | Send batched input: key, mouse, click_element, action, wait                                                                             |
+| `simulate_input`  | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
 | `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 

@@ -82,7 +82,7 @@ Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/godot-runner.ts`. These reject paths containing `..` and verify that `project.godot` / the scene file exist. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
+All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/godot-runner.ts`. These reject paths containing `..`, reject absolute paths that escape the project root, and verify that `project.godot` / the scene file exist. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
 
 ### Error responses use `createErrorResponse`
 
@@ -116,7 +116,7 @@ The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a
 2. Commit and push to `main`
 3. Push a `vX.Y.Z` tag — `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
-Docker CI runs automatically on push to `main`.
+Docker CI runs automatically on push and PR to `main`.
 
 ## Known limitations
 
