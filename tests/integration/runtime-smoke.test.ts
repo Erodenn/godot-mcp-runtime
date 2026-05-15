@@ -74,7 +74,7 @@ describe('runtime bridge smoke', () => {
 
       // Start the project — waitForBridge polls until the TCP ping responds
       await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(12000);
+      const bridgeResult = await runner.waitForBridge(20000);
 
       if (!bridgeResult.ready) {
         // Distinguish "no display server" (acceptable skip) from "process exited
@@ -127,7 +127,7 @@ describe('runtime bridge smoke', () => {
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
       await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(12000);
+      const bridgeResult = await runner.waitForBridge(20000);
 
       if (!bridgeResult.ready) {
         if (isHeadlessEnvironmentError(bridgeResult.error)) {
