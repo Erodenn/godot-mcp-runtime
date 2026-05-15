@@ -208,6 +208,71 @@ describe('handleValidate batch mode', () => {
     expectErrorMatching(result, /Invalid project path/);
   });
 
+  it('short-circuits and reports per-target failure when batch scriptPath contains ..', async () => {
+    // Regression: validateSubPath ran in single-target mode but the batch
+    // branch built snakeTargets without it. An agent could pass a traversal
+    // path and bypass the documented path-traversal protection.
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: '../escape.gd' }],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(0); // short-circuit — no runner spawn
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].valid).toBe(false);
+    expect(parsed.results[0].target).toBe('../escape.gd');
+    expect(parsed.results[0].errors[0].message).toMatch(/Invalid scriptPath/);
+  });
+
+  it('short-circuits and reports per-target failure when batch scenePath is absolute and escapes root', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: '/etc/passwd' }],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(0);
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].valid).toBe(false);
+    expect(parsed.results[0].target).toBe('/etc/passwd');
+    expect(parsed.results[0].errors[0].message).toMatch(/Invalid scenePath/);
+  });
+
+  it('preserves input order when mixing valid and invalid batch targets', async () => {
+    // Godot only sees the two valid entries; the handler must splice the
+    // pre-validation failure back at index 1 so output order matches input.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          { target: 'ok.gd', valid: true, errors: [] },
+          { target: 'ok.tscn', valid: true, errors: [] },
+        ],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 'ok.gd' }, { scriptPath: '../escape.gd' }, { scenePath: 'ok.tscn' }],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+    const sentTargets = (
+      fake.calls[0].params as { targets: Array<{ script_path?: string; scene_path?: string }> }
+    ).targets;
+    expect(sentTargets).toHaveLength(2); // only the two valid ones reach Godot
+    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    expect(parsed.results).toHaveLength(3);
+    expect(parsed.results[0].valid).toBe(true);
+    expect(parsed.results[0].target).toBe('ok.gd');
+    expect(parsed.results[1].valid).toBe(false);
+    expect(parsed.results[1].target).toBe('../escape.gd');
+    expect(parsed.results[1].errors[0].message).toMatch(/Invalid scriptPath/);
+    expect(parsed.results[2].valid).toBe(true);
+    expect(parsed.results[2].target).toBe('ok.tscn');
+  });
+
   it('reports valid:false for parse-broken targets from real Godot 4.5 stderr', async () => {
     // Regression: real Godot 4.5 stderr formats the `at:` line as
     //   "   at: GDScript::reload (res://path/to/file.gd:LINE)"

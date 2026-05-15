@@ -566,7 +566,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       await runner.stopProject();
       const solutions = [
         'Check for broken autoloads with list_autoloads',
-        'Check that the bridge port (default 9900) is not occupied by another Godot process',
+        `Check that the assigned bridge port (${runner.activeBridgePort}) is not occupied by another Godot process`,
         'Retry run_project',
       ];
       if (raceDetected) {
@@ -648,7 +648,7 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
         'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup — do not sequentialize',
         'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
         'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
-        'Check that no other Godot project is occupying the bridge port (default 9900)',
+        `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
       ];
       if (raceDetected) {
         solutions.push(

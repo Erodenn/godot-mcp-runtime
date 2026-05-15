@@ -82,7 +82,7 @@ Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/godot-runner.ts`. These reject paths containing `..`, reject absolute paths that escape the project root, and verify that `project.godot` / the scene file exist. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
+All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/godot-runner.ts`. `validateProjectArgs` rejects `..` and verifies `project.godot` exists. `validateSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
 
 ### Error responses use `createErrorResponse`
 
