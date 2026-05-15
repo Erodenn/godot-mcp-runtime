@@ -35,6 +35,9 @@ Thumbs.db
 .claude/
 .mcp.json
 
+# Local npm config (publish-time overrides like min-release-age)
+.npmrc
+
 # Local-only Godot test project (ad hoc manual testing).
 # The committed shared fixture lives at tests/fixtures/godot-project/.
 .test-project/
