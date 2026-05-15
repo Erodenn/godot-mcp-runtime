@@ -10,6 +10,9 @@ func _init():
 	# Check for debug flag
 	debug_mode = "--debug-godot" in args
 
+	# SceneTree.quit(n) only schedules a quit for end-of-frame in Godot 4.
+	# Every quit(1) must be followed by `return` to halt the failing path,
+	# otherwise control falls through into success-print + scene save.
 	# Find the script argument and determine the positions of operation and params
 	var script_index = args.find("--script")
 	if script_index == -1:

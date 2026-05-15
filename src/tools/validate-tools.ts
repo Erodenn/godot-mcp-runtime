@@ -210,6 +210,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
     try {
       const snakeTargets: Array<{ script_path?: string; scene_path?: string }> = [];
+      const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
       for (let i = 0; i < targets.length; i++) {
         const t = targets[i];
@@ -222,12 +223,46 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
           tempFiles.push(absPath);
           snakeTargets.push({ script_path: resPath });
         } else if (t.scriptPath) {
-          snakeTargets.push({ script_path: t.scriptPath });
+          if (!validateSubPath(pv.projectPath, t.scriptPath)) {
+            preErrors.set(i, {
+              target: t.scriptPath,
+              errors: [
+                {
+                  message:
+                    'Invalid scriptPath: must be a relative path inside the project root, no ".."',
+                },
+              ],
+            });
+          } else {
+            snakeTargets.push({ script_path: t.scriptPath });
+          }
         } else if (t.scenePath) {
-          snakeTargets.push({ scene_path: t.scenePath });
+          if (!validateSubPath(pv.projectPath, t.scenePath)) {
+            preErrors.set(i, {
+              target: t.scenePath,
+              errors: [
+                {
+                  message:
+                    'Invalid scenePath: must be a relative path inside the project root, no ".."',
+                },
+              ],
+            });
+          } else {
+            snakeTargets.push({ scene_path: t.scenePath });
+          }
         } else {
           snakeTargets.push({});
         }
+      }
+
+      // Short-circuit when every target failed pre-validation — no work for
+      // Godot, and spawning it would just cost ~3s for a no-op.
+      if (snakeTargets.length === 0 && preErrors.size === targets.length) {
+        const results = targets.map((_, i) => {
+          const pre = preErrors.get(i)!;
+          return { target: pre.target, valid: false, errors: pre.errors };
+        });
+        return { content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] };
       }
 
       const { stdout, stderr } = await runner.executeOperation(
@@ -254,7 +289,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
 
       const errorsByPath = parseGodotErrorsByPath(stderr || '');
 
-      const results = parsed.results.map((r) => {
+      const godotResults = parsed.results.map((r) => {
         const key = r.target.startsWith('res://') ? r.target : `res://${r.target}`;
         const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
         const allErrors: ValidationError[] =
@@ -265,6 +300,20 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
           errors: allErrors,
         };
       });
+
+      // Merge pre-validation failures back into their original positions so
+      // output order matches input order. Pre-validation errors are ours, not
+      // Godot's — they bypass the stderr overlay above.
+      const results: Array<{ target: string; valid: boolean; errors: ValidationError[] }> = [];
+      let godotIdx = 0;
+      for (let i = 0; i < targets.length; i++) {
+        if (preErrors.has(i)) {
+          const pre = preErrors.get(i)!;
+          results.push({ target: pre.target, valid: false, errors: pre.errors });
+        } else {
+          results.push(godotResults[godotIdx++]);
+        }
+      }
 
       return { content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] };
     } catch (error: unknown) {
