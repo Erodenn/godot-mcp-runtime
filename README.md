@@ -136,6 +136,17 @@ npm run build
 
 If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it. Set `"DEBUG": "true"` in `env` for verbose logging.
 
+> [!IMPORTANT]
+> **Windows path gotchas.** `GODOT_PATH` must point at the Godot executable itself, not its install folder. Backslashes in JSON must be escaped or replaced with forward slashes:
+>
+> ```json
+> "GODOT_PATH": "D:\\Godot\\Godot_v4.4-stable_win64.exe"
+> // or equivalently
+> "GODOT_PATH": "D:/Godot/Godot_v4.4-stable_win64.exe"
+> ```
+>
+> Setting the variable from a wrapper `.bat` does not propagate to the MCP server — the path must live in the client's `env` block above.
+
 ### Verify
 
 Ask your AI assistant to call `get_project_info`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
