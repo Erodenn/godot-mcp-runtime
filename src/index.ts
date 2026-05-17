@@ -112,13 +112,12 @@ class GodotMcpServer {
       await this.runner.detectGodotPath();
 
       const godotPath = this.runner.getGodotPath();
-      if (!godotPath) {
-        console.error(
-          '[SERVER] Warning: Godot executable not found. Set GODOT_PATH to enable Godot tools.',
-        );
-      } else {
+      if (godotPath) {
         console.error(`[SERVER] Using Godot at: ${godotPath}`);
       }
+      // detectGodotPath() already emits a specific logError on failure (bad
+      // GODOT_PATH, no binary found, etc.). Don't duplicate with a generic
+      // warning here — the runner's message names the actual cause.
 
       const transport = new StdioServerTransport();
       await this.server.connect(transport);

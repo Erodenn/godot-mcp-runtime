@@ -638,12 +638,9 @@ export class GodotRunner {
   }
 
   async detectGodotPath(): Promise<void> {
-    // Explicit paths (constructor config or GODOT_PATH) are authoritative:
-    // if they fail validation we surface the misconfiguration and leave
-    // godotPath null rather than silently substituting an auto-detected
-    // binary. The previous fallback to `C:\Program Files\Godot\Godot.exe`
-    // (and platform equivalents) masked custom-path misconfiguration as
-    // generic "not found" errors against a path the user never chose.
+    // Explicit paths (constructor config or GODOT_PATH) are authoritative — leave
+    // godotPath null on failure rather than fabricating a platform default, so
+    // callers can produce actionable errors.
     if (this.godotPath) {
       if (await this.isValidGodotPath(this.godotPath)) {
         logDebug(`Using existing Godot path: ${this.godotPath}`);
