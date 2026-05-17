@@ -5,6 +5,7 @@ import {
   validateProjectArgs,
   validateSceneArgs,
   checkDisplayAvailable,
+  GodotRunner,
 } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -244,5 +245,62 @@ describe('checkDisplayAvailable', () => {
     delete process.env.DISPLAY;
     delete process.env.WAYLAND_DISPLAY;
     expect(checkDisplayAvailable()).toBe(false);
+  });
+});
+
+// ─── detectGodotPath ────────────────────────────────────────────────────────
+
+describe('detectGodotPath', () => {
+  const originalGodotPath = process.env.GODOT_PATH;
+
+  afterEach(() => {
+    if (originalGodotPath !== undefined) {
+      process.env.GODOT_PATH = originalGodotPath;
+    } else {
+      delete process.env.GODOT_PATH;
+    }
+  });
+
+  // Regression: issue #15 — a misconfigured GODOT_PATH used to be silently
+  // swallowed and the runner fell back to platform defaults (e.g. on Windows
+  // `C:\Program Files\Godot\Godot.exe`). Users who installed Godot elsewhere
+  // got "file not found" errors against a path they never chose. An explicit
+  // GODOT_PATH must now be authoritative — if it doesn't resolve, leave
+  // godotPath null so the caller can produce an actionable error instead.
+  it('leaves godotPath null when GODOT_PATH points to a non-existent file', async () => {
+    process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
+    const runner = new GodotRunner();
+    await runner.detectGodotPath();
+    expect(runner.getGodotPath()).toBeNull();
+  });
+
+  it('leaves godotPath null when GODOT_PATH is set but invalid, even if auto-detect would succeed', async () => {
+    // Even on a developer machine where `godot` is on PATH, an explicit
+    // (broken) GODOT_PATH must not silently fall through to the PATH binary —
+    // doing so masks the user's intent.
+    process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
+    const runner = new GodotRunner();
+    await runner.detectGodotPath();
+    expect(runner.getGodotPath()).toBeNull();
+  });
+
+  it('does not invent a hardcoded platform-default path when auto-detect finds nothing', async () => {
+    // Pre-fix behavior set godotPath to `C:\Program Files\Godot\Godot.exe`
+    // (Windows) / `/usr/bin/godot` (Linux) / `/Applications/Godot.app/...`
+    // (macOS) when nothing was found, then later spawn calls failed against
+    // that fabricated path. The runner must leave godotPath null instead.
+    delete process.env.GODOT_PATH;
+    const runner = new GodotRunner({ godotPath: '/nonexistent/godot-mcp-test-bogus-binary' });
+    // Constructor sync-validation rejects the bogus path, so godotPath starts null.
+    expect(runner.getGodotPath()).toBeNull();
+    await runner.detectGodotPath();
+    // After detection: still null unless this machine actually has Godot
+    // somewhere in the auto-detect search list. In CI (no Godot), null.
+    // Locally with Godot on PATH, this is a real working path — not the
+    // fabricated platform default.
+    const resolved = runner.getGodotPath();
+    if (resolved !== null) {
+      expect(resolved).not.toMatch(/Program Files\\Godot\\Godot\.exe$/);
+    }
   });
 });

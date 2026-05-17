@@ -638,8 +638,22 @@ export class GodotRunner {
   }
 
   async detectGodotPath(): Promise<void> {
-    if (this.godotPath && (await this.isValidGodotPath(this.godotPath))) {
-      logDebug(`Using existing Godot path: ${this.godotPath}`);
+    // Explicit paths (constructor config or GODOT_PATH) are authoritative:
+    // if they fail validation we surface the misconfiguration and leave
+    // godotPath null rather than silently substituting an auto-detected
+    // binary. The previous fallback to `C:\Program Files\Godot\Godot.exe`
+    // (and platform equivalents) masked custom-path misconfiguration as
+    // generic "not found" errors against a path the user never chose.
+    if (this.godotPath) {
+      if (await this.isValidGodotPath(this.godotPath)) {
+        logDebug(`Using existing Godot path: ${this.godotPath}`);
+        return;
+      }
+      logError(
+        `Configured Godot path "${this.godotPath}" is not a working Godot executable. ` +
+          `Pass a valid Godot 4.x binary via the godotPath config option.`,
+      );
+      this.godotPath = null;
       return;
     }
 
@@ -651,6 +665,11 @@ export class GodotRunner {
         logDebug(`Using Godot path from environment: ${this.godotPath}`);
         return;
       }
+      logError(
+        `GODOT_PATH is set to "${normalizedPath}" but no working Godot executable was found there. ` +
+          `Update GODOT_PATH to your Godot 4.x binary or unset it to auto-detect.`,
+      );
+      return;
     }
 
     const osPlatform = process.platform;
@@ -690,17 +709,10 @@ export class GodotRunner {
       return;
     }
 
-    logDebug(`Warning: Could not find Godot in common locations for ${osPlatform}`);
-    logError(`Could not find Godot in common locations for ${osPlatform}`);
-
-    if (osPlatform === 'win32') {
-      this.godotPath = normalize('C:\\Program Files\\Godot\\Godot.exe');
-    } else if (osPlatform === 'darwin') {
-      this.godotPath = normalize('/Applications/Godot.app/Contents/MacOS/Godot');
-    } else {
-      this.godotPath = normalize('/usr/bin/godot');
-    }
-    logDebug(`Using default path: ${this.godotPath}, but this may not work.`);
+    logError(
+      `Could not find Godot in common locations for ${osPlatform}. ` +
+        `Set GODOT_PATH to your Godot 4.x executable.`,
+    );
   }
 
   getGodotPath(): string | null {
@@ -797,7 +809,9 @@ export class GodotRunner {
 
   launchEditor(projectPath: string): ChildProcess {
     if (!this.godotPath) {
-      throw new Error('Godot path not set. Call detectGodotPath first.');
+      throw new Error(
+        'No Godot executable resolved. Set GODOT_PATH to a Godot 4.x binary, or pass godotPath via config.',
+      );
     }
     return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
   }
@@ -809,7 +823,9 @@ export class GodotRunner {
     bridgePort?: number,
   ): Promise<GodotProcess> {
     if (!this.godotPath) {
-      throw new Error('Godot path not set. Call detectGodotPath first.');
+      throw new Error(
+        'No Godot executable resolved. Set GODOT_PATH to a Godot 4.x binary, or pass godotPath via config.',
+      );
     }
 
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {

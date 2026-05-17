@@ -230,6 +230,20 @@ describe('handleRunProject validation', () => {
     expectErrorMatching(result, /not a valid godot project/i);
   });
 
+  // Regression: issue #15 — without an explicit Godot-path precheck, an
+  // unresolved godotPath used to bubble up as a generic "Failed to run
+  // Godot project" error pointing at a hardcoded `C:\Program Files\...`
+  // fallback path the user never configured. The handler must now surface
+  // a clear "set GODOT_PATH" message before attempting to spawn.
+  it('returns a "set GODOT_PATH" error when no Godot executable can be resolved', async () => {
+    const fake = createRuntimeFake();
+    // godotPath stays empty (default), so the precheck must fire.
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /Could not find a valid Godot executable path/);
+    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    expect(solutionsText).toMatch(/GODOT_PATH/);
+  });
+
   it('returns display-unavailable error with attach_project suggestion', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -306,6 +320,7 @@ describe('handleAttachProject bridge port', () => {
 describe('handleRunProject bridge failure paths', () => {
   it('returns "exited before MCP bridge could initialize" error when process exits during wait', async () => {
     const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(false, 'process gone');
     // Replace the default runProject so the post-state has hasExited=true.
     // The handler must take the "process exited" branch (not the timeout
@@ -327,6 +342,7 @@ describe('handleRunProject bridge failure paths', () => {
 
   it('returns "bridge did not respond" error and tears down when bridge times out', async () => {
     const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(false, 'timeout after 5s');
     // The default fake.runProject sets process with hasExited=false, so the
     // handler takes the timeout branch (not the process-exited branch).
