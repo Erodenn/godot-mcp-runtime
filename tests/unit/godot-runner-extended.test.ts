@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   cleanOutput,
   normalizeForCompare,
@@ -277,11 +277,24 @@ describe('detectGodotPath', () => {
   it('leaves godotPath null when GODOT_PATH is set but invalid, even if auto-detect would succeed', async () => {
     // Even on a developer machine where `godot` is on PATH, an explicit
     // (broken) GODOT_PATH must not silently fall through to the PATH binary —
-    // doing so masks the user's intent.
+    // doing so masks the user's intent. We stub isValidGodotPath so auto-detect
+    // would unambiguously succeed for `godot`; the assertion proves the
+    // explicit-invalid branch short-circuits before auto-detect runs.
     process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
     const runner = new GodotRunner();
+    const spy = vi
+      .spyOn(
+        runner as unknown as { isValidGodotPath: (p: string) => Promise<boolean> },
+        'isValidGodotPath',
+      )
+      .mockImplementation(async (p: string) => p === 'godot');
     await runner.detectGodotPath();
     expect(runner.getGodotPath()).toBeNull();
+    // Sanity: the auto-detect candidates were never probed — the explicit
+    // GODOT_PATH branch short-circuited before reaching auto-detect.
+    const probed = spy.mock.calls.map((c) => c[0]);
+    expect(probed).not.toContain('godot');
+    spy.mockRestore();
   });
 
   it('does not invent a hardcoded platform-default path when auto-detect finds nothing', async () => {
