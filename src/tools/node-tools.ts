@@ -9,7 +9,7 @@ import { executeSceneOp } from '../utils/headless-op.js';
 
 // --- Tool definitions ---
 
-export const nodeToolDefinitions: ToolDefinition[] = [
+export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
@@ -302,7 +302,7 @@ export const nodeToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'scenePath', 'nodePath', 'signal', 'targetNodePath', 'method'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
 

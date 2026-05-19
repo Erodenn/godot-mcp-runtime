@@ -12,7 +12,7 @@ import {
   getErrorMessage,
 } from '../utils/error-response.js';
 
-export const validateToolDefinitions: ToolDefinition[] = [
+export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
@@ -63,7 +63,7 @@ export const validateToolDefinitions: ToolDefinition[] = [
       required: ['projectPath'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 interface ValidationError {
   line?: number;

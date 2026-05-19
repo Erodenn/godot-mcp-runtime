@@ -31,7 +31,7 @@ interface ScreenshotBridgeResponse {
 
 // --- Tool definitions ---
 
-export const runtimeToolDefinitions: ToolDefinition[] = [
+export const runtimeToolDefinitions = [
   {
     name: 'launch_editor',
     description:
@@ -411,7 +411,7 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Helpers ---
 

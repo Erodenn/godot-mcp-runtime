@@ -18,7 +18,7 @@ function fileExtension(name: string): string {
 
 // --- Tool definitions ---
 
-export const projectToolDefinitions: ToolDefinition[] = [
+export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
@@ -170,7 +170,7 @@ export const projectToolDefinitions: ToolDefinition[] = [
       required: ['projectPath'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Helpers ---
 

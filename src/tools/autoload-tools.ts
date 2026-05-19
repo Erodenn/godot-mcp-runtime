@@ -16,7 +16,7 @@ import {
 
 // --- Tool definitions ---
 
-export const autoloadToolDefinitions: ToolDefinition[] = [
+export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
@@ -85,7 +85,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'autoloadName'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
 

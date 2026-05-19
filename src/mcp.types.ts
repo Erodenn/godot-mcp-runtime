@@ -1,4 +1,10 @@
 import type { GodotRunner } from './utils/godot-runner.js';
+import type { autoloadToolDefinitions } from './tools/autoload-tools.js';
+import type { nodeToolDefinitions } from './tools/node-tools.js';
+import type { projectToolDefinitions } from './tools/project-tools.js';
+import type { runtimeToolDefinitions } from './tools/runtime-tools.js';
+import type { sceneToolDefinitions } from './tools/scene-tools.js';
+import type { validateToolDefinitions } from './tools/validate-tools.js';
 
 export interface OperationParams {
   [key: string]: unknown;
@@ -13,19 +19,19 @@ interface ToolAnnotations {
 }
 
 export interface ToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: string;
-    properties: Record<string, unknown>;
-    required: string[];
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: {
+    readonly type: string;
+    readonly properties: Readonly<Record<string, unknown>>;
+    readonly required: readonly string[];
   };
-  outputSchema?: {
-    type: string;
-    properties?: Record<string, unknown>;
-    required?: string[];
+  readonly outputSchema?: {
+    readonly type: string;
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: readonly string[];
   };
-  annotations?: ToolAnnotations;
+  readonly annotations?: ToolAnnotations;
 }
 
 export interface ToolResponse {
@@ -38,3 +44,12 @@ export type ToolHandler = (
   runner: GodotRunner,
   args: OperationParams,
 ) => Promise<ToolResponse> | ToolResponse;
+
+export type ToolName = (
+  | typeof autoloadToolDefinitions
+  | typeof nodeToolDefinitions
+  | typeof projectToolDefinitions
+  | typeof runtimeToolDefinitions
+  | typeof sceneToolDefinitions
+  | typeof validateToolDefinitions
+)[number]['name'];

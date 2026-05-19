@@ -11,7 +11,7 @@ import {
 } from '../utils/error-response.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 
-export const sceneToolDefinitions: ToolDefinition[] = [
+export const sceneToolDefinitions = [
   {
     name: 'create_scene',
     description:
@@ -228,7 +228,7 @@ export const sceneToolDefinitions: ToolDefinition[] = [
       },
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
 
