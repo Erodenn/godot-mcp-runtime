@@ -90,7 +90,11 @@ interface InFlightCommand {
  * Caller must ensure total length across chunks is >= n.
  */
 function readBytesFromChunks(chunks: Buffer[], n: number): Buffer {
-  if (chunks[0].length >= n) return chunks[0].subarray(0, n);
+  const first = chunks[0];
+  if (first === undefined) {
+    throw new Error('readBytesFromChunks called with empty chunks array');
+  }
+  if (first.length >= n) return first.subarray(0, n);
   const result = Buffer.allocUnsafe(n);
   let copied = 0;
   for (const c of chunks) {
@@ -727,9 +731,10 @@ export class GodotRunner {
             if (this.rxTotal < FRAME_HEADER_BYTES + firstLen) return;
 
             try {
+              const first = this.rxChunks[0];
               const buffer =
-                this.rxChunks.length === 1
-                  ? this.rxChunks[0]
+                first !== undefined && this.rxChunks.length === 1
+                  ? first
                   : Buffer.concat(this.rxChunks, this.rxTotal);
               const { frames, remainder } = parseFrames(buffer);
               if (remainder.length === 0) {

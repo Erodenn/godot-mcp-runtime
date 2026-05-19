@@ -356,10 +356,10 @@ function searchInFiles(
         }
         const lines = content.split('\n');
         const needle = caseSensitive ? pattern : pattern.toLowerCase();
-        for (let i = 0; i < lines.length; i++) {
-          const haystack = caseSensitive ? lines[i] : lines[i].toLowerCase();
+        for (const [i, line] of lines.entries()) {
+          const haystack = caseSensitive ? line : line.toLowerCase();
           if (haystack.includes(needle)) {
-            matches.push({ file: childRelPath, lineNumber: i + 1, line: lines[i] });
+            matches.push({ file: childRelPath, lineNumber: i + 1, line });
             if (matches.length >= maxResults) {
               truncated = true;
               return;
@@ -408,8 +408,8 @@ function parseProjectSettings(
       const num = Number(rawVal);
       value = isNaN(num) ? rawVal : num;
     }
-    if (!result[currentSection]) result[currentSection] = {};
-    result[currentSection][key] = value;
+    const section = (result[currentSection] ??= {});
+    section[key] = value;
   }
   return result;
 }
@@ -582,17 +582,17 @@ export async function handleGetSceneDependencies(args: OperationParams) {
     const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
     let match;
     while ((match = extResourcePattern.exec(sceneContent)) !== null) {
-      const attrs = match[1];
+      const [, attrs = ''] = match;
       const typeMatch = attrs.match(/\btype="([^"]*)"/);
       const pathMatch = attrs.match(/\bpath="([^"]*)"/);
       const uidMatch = attrs.match(/\buid="([^"]*)"/);
       if (pathMatch) {
-        const depPath = pathMatch[1].replace(/^res:\/\//, '');
+        const depPath = (pathMatch[1] ?? '').replace(/^res:\/\//, '');
         const dep: { path: string; type: string; uid?: string } = {
           path: depPath,
-          type: typeMatch ? typeMatch[1] : 'Unknown',
+          type: typeMatch?.[1] ?? 'Unknown',
         };
-        if (uidMatch) dep.uid = uidMatch[1];
+        if (uidMatch?.[1] !== undefined) dep.uid = uidMatch[1];
         dependencies.push(dep);
       }
     }

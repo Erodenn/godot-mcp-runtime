@@ -61,7 +61,8 @@ export function parseAutoloads(projectFilePath: string, existingContent?: string
     // shapes means a missing quote pair doesn't silently drop the entry.
     const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
     if (match) {
-      autoloads.push({ name: match[1], singleton: match[2] === '*', path: match[3] });
+      const [, name = '', star = '', path = ''] = match;
+      autoloads.push({ name, singleton: star === '*', path });
     }
   }
   return autoloads;
@@ -86,7 +87,7 @@ export function addAutoloadEntry(
   }
 
   let insertIdx = sectionIdx + 1;
-  while (insertIdx < lines.length && !lines[insertIdx].trim().startsWith('[')) {
+  while (insertIdx < lines.length && !(lines[insertIdx] ?? '').trim().startsWith('[')) {
     insertIdx++;
   }
   lines.splice(insertIdx, 0, entry);

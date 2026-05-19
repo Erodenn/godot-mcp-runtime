@@ -88,6 +88,7 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (line === undefined) continue;
 
     // Pattern: "SCRIPT ERROR: Parse Error: MESSAGE" or "ERROR: MESSAGE"
     // followed by "   at: res://...:LINE" or "   at: ...:LINE"
@@ -96,27 +97,30 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
     const match = scriptErrorMatch || errorMatch;
 
     if (match) {
-      const message = match[1].trim();
+      const [, rawMessage = ''] = match;
+      const message = rawMessage.trim();
       let lineNum: number | undefined;
       let filePath: string | undefined;
 
-      if (i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (next !== undefined) {
         // Try res:// path first (captures file + line). Tolerates an optional
         // "<method> (" prefix before res:// so we catch both
         //   "   at: res://foo.gd:3"
         // and
         //   "   at: GDScript::reload (res://foo.gd:3)"
         // Real Godot 4.5 stderr uses the parenthesized form.
-        const resAtMatch = lines[i + 1].match(/\s*at:\s*(?:[^()\n]*\()?(res:\/\/[^):"\s]+):(\d+)/);
+        const resAtMatch = next.match(/\s*at:\s*(?:[^()\n]*\()?(res:\/\/[^):"\s]+):(\d+)/);
         if (resAtMatch) {
-          filePath = resAtMatch[1];
-          lineNum = parseInt(resAtMatch[2], 10);
+          const [, path = '', lineStr = '0'] = resAtMatch;
+          filePath = path;
+          lineNum = parseInt(lineStr, 10);
           i++;
         } else {
           // Fall back to loose match (line only, e.g. native code "at:" lines)
-          const looseAtMatch = lines[i + 1].match(/\s*at:\s*.+:(\d+)/);
+          const looseAtMatch = next.match(/\s*at:\s*.+:(\d+)/);
           if (looseAtMatch) {
-            lineNum = parseInt(looseAtMatch[1], 10);
+            lineNum = parseInt(looseAtMatch[1] ?? '0', 10);
             i++;
           }
         }
@@ -130,7 +134,9 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
       if (!filePath && /Parse Error/i.test(line)) {
         const lookaheadLimit = Math.min(i + 11, lines.length);
         for (let j = i + 1; j < lookaheadLimit; j++) {
-          const failMatch = lines[j].match(
+          const lookLine = lines[j];
+          if (lookLine === undefined) continue;
+          const failMatch = lookLine.match(
             /Failed to load (?:script|resource):?\s*"?(res:\/\/[^":\s]+)/,
           );
           if (failMatch) {
@@ -140,16 +146,20 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
         }
       }
 
-      entries.push({ message, line: lineNum, filePath });
+      const entry: ParsedErrorEntry = { message };
+      if (lineNum !== undefined) entry.line = lineNum;
+      if (filePath !== undefined) entry.filePath = filePath;
+      entries.push(entry);
       continue;
     }
 
     // Pattern: "Parse Error: MESSAGE at line LINE"
     const parseErrorMatch = line.match(/Parse Error:\s*(.+?)\s+at line\s+(\d+)/);
     if (parseErrorMatch) {
+      const [, parseMsg = '', parseLine = '0'] = parseErrorMatch;
       entries.push({
-        line: parseInt(parseErrorMatch[2], 10),
-        message: parseErrorMatch[1].trim(),
+        line: parseInt(parseLine, 10),
+        message: parseMsg.trim(),
       });
     }
   }
@@ -158,7 +168,11 @@ function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
 }
 
 function parseGodotErrors(stderr: string): ValidationError[] {
-  return parseGodotErrorEntries(stderr).map(({ message, line }) => ({ message, line }));
+  return parseGodotErrorEntries(stderr).map(({ message, line }) => {
+    const err: ValidationError = { message };
+    if (line !== undefined) err.line = line;
+    return err;
+  });
 }
 
 /**
@@ -188,7 +202,9 @@ function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> 
   for (const { message, line, filePath } of parseGodotErrorEntries(stderr)) {
     if (filePath) {
       if (!result.has(filePath)) result.set(filePath, []);
-      result.get(filePath)!.push({ line, message });
+      const err: ValidationError = { message };
+      if (line !== undefined) err.line = line;
+      result.get(filePath)!.push(err);
     }
   }
   return result;
@@ -213,8 +229,7 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
       const snakeTargets: Array<{ script_path?: string; scene_path?: string }> = [];
       const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
-      for (let i = 0; i < targets.length; i++) {
-        const t = targets[i];
+      for (const [i, t] of targets.entries()) {
         if (t.source) {
           const { resPath, absPath } = writeTempGdScript(
             pv.projectPath,
@@ -312,7 +327,11 @@ export async function handleValidate(runner: GodotRunner, args: OperationParams)
           const pre = preErrors.get(i)!;
           results.push({ target: pre.target, valid: false, errors: pre.errors });
         } else {
-          results.push(godotResults[godotIdx++]);
+          const r = godotResults[godotIdx++];
+          // Unreachable: godotIdx is incremented once per non-pre-error target,
+          // and godotResults has exactly that many entries.
+          if (r === undefined) continue;
+          results.push(r);
         }
       }
 
