@@ -446,10 +446,7 @@ function parseBridgeJson<T = unknown>(responseStr: string, context: string): Par
  * payload. No-op when there are no runtime errors. Truncates to
  * `MAX_RUNTIME_ERROR_CONTEXT_LINES` to keep payloads bounded.
  */
-function attachRuntimeWarnings(
-  target: Record<string, unknown>,
-  runtimeErrors: string[],
-): void {
+function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: string[]): void {
   if (runtimeErrors.length > 0) {
     target.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
   }
