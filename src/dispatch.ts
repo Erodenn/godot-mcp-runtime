@@ -14,7 +14,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotRunner } from './utils/godot-runner.js';
-import type { OperationParams, ToolHandler, ToolResponse } from './mcp.types.js';
+import type { OperationParams, ToolHandler, ToolName, ToolResponse } from './mcp.types.js';
 
 import {
   handleLaunchEditor,
@@ -68,7 +68,7 @@ import {
 
 import { handleValidate } from './tools/validate-tools.js';
 
-export const toolDispatch: Record<string, ToolHandler> = {
+export const toolDispatch = {
   // Project tools
   launch_editor: handleLaunchEditor,
   run_project: handleRunProject,
@@ -112,14 +112,14 @@ export const toolDispatch: Record<string, ToolHandler> = {
 
   // Validate tools
   validate: handleValidate,
-};
+} as const satisfies Record<ToolName, ToolHandler>;
 
 export async function dispatchToolCall(
   runner: GodotRunner,
   toolName: string,
   args: OperationParams,
 ): Promise<ToolResponse> {
-  const handler = toolDispatch[toolName];
+  const handler = toolDispatch[toolName as ToolName];
   if (!handler) {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }
