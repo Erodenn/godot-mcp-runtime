@@ -1,7 +1,7 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, validateNodePath } from '../utils/path-validation.js';
 import { createErrorResponse, validateSceneArgs } from '../utils/error-response.js';
@@ -306,7 +306,10 @@ export const nodeToolDefinitions: ToolDefinition[] = [
 
 // --- Handlers ---
 
-export async function handleDeleteNodes(runner: GodotRunner, args: OperationParams) {
+export async function handleDeleteNodes(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -330,7 +333,10 @@ export async function handleDeleteNodes(runner: GodotRunner, args: OperationPara
   ]);
 }
 
-export async function handleSetNodeProperties(runner: GodotRunner, args: OperationParams) {
+export async function handleSetNodeProperties(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -356,7 +362,10 @@ export async function handleSetNodeProperties(runner: GodotRunner, args: Operati
   );
 }
 
-export async function handleGetNodeProperties(runner: GodotRunner, args: OperationParams) {
+export async function handleGetNodeProperties(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -378,7 +387,10 @@ export async function handleGetNodeProperties(runner: GodotRunner, args: Operati
   );
 }
 
-export async function handleAttachScript(runner: GodotRunner, args: OperationParams) {
+export async function handleAttachScript(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -410,7 +422,10 @@ export async function handleAttachScript(runner: GodotRunner, args: OperationPar
   ]);
 }
 
-export async function handleGetSceneTree(runner: GodotRunner, args: OperationParams) {
+export async function handleGetSceneTree(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -434,7 +449,10 @@ export async function handleGetSceneTree(runner: GodotRunner, args: OperationPar
   );
 }
 
-export async function handleDuplicateNode(runner: GodotRunner, args: OperationParams) {
+export async function handleDuplicateNode(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -463,7 +481,10 @@ export async function handleDuplicateNode(runner: GodotRunner, args: OperationPa
   );
 }
 
-export async function handleGetNodeSignals(runner: GodotRunner, args: OperationParams) {
+export async function handleGetNodeSignals(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -524,7 +545,10 @@ function validateSignalArgs(
   };
 }
 
-export async function handleConnectSignal(runner: GodotRunner, args: OperationParams) {
+export async function handleConnectSignal(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSignalArgs(args);
   if ('isError' in v) return v;
@@ -546,7 +570,10 @@ export async function handleConnectSignal(runner: GodotRunner, args: OperationPa
   );
 }
 
-export async function handleDisconnectSignal(runner: GodotRunner, args: OperationParams) {
+export async function handleDisconnectSignal(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSignalArgs(args);
   if ('isError' in v) return v;

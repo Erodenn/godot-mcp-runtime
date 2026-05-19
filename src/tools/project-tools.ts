@@ -1,7 +1,7 @@
 import { join, basename } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, validateSubPath, projectGodotPath } from '../utils/path-validation.js';
 import {
@@ -416,7 +416,7 @@ function parseProjectSettings(
 
 // --- Handlers ---
 
-export async function handleListProjects(args: OperationParams) {
+export async function handleListProjects(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   if (!args.directory) {
@@ -452,7 +452,10 @@ export async function handleListProjects(args: OperationParams) {
   }
 }
 
-export async function handleGetProjectInfo(runner: GodotRunner, args: OperationParams) {
+export async function handleGetProjectInfo(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   try {
@@ -504,7 +507,7 @@ export async function handleGetProjectInfo(runner: GodotRunner, args: OperationP
   }
 }
 
-export async function handleGetProjectFiles(args: OperationParams) {
+export async function handleGetProjectFiles(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -523,7 +526,7 @@ export async function handleGetProjectFiles(args: OperationParams) {
   }
 }
 
-export async function handleSearchProject(args: OperationParams) {
+export async function handleSearchProject(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -553,7 +556,7 @@ export async function handleSearchProject(args: OperationParams) {
   }
 }
 
-export async function handleGetSceneDependencies(args: OperationParams) {
+export async function handleGetSceneDependencies(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -606,7 +609,7 @@ export async function handleGetSceneDependencies(args: OperationParams) {
   }
 }
 
-export async function handleGetProjectSettings(args: OperationParams) {
+export async function handleGetProjectSettings(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;

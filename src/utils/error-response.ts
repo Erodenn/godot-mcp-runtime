@@ -1,6 +1,6 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
-import type { OperationParams } from '../mcp.types.js';
+import type { OperationParams, ToolResponse } from '../mcp.types.js';
 import { validatePath, validateSubPath, projectGodotPath } from './path-validation.js';
 import { logError } from './logger.js';
 
@@ -27,10 +27,7 @@ export function extractGdError(stderr: string): string {
 export function createErrorResponse(
   message: string,
   possibleSolutions: string[] = [],
-): {
-  content: Array<{ type: 'text'; text: string }>;
-  isError: boolean;
-} {
+): ToolResponse & { isError: true } {
   logError(`Error response: ${message}`);
   if (possibleSolutions.length > 0) {
     logError(`Possible solutions: ${possibleSolutions.join(', ')}`);
@@ -38,7 +35,7 @@ export function createErrorResponse(
 
   const response: {
     content: Array<{ type: 'text'; text: string }>;
-    isError: boolean;
+    isError: true;
   } = {
     content: [{ type: 'text', text: message }],
     isError: true,
@@ -56,16 +53,20 @@ export function createErrorResponse(
 
 // --- Shared validation helpers ---
 
-interface ValidatedProjectArgs {
+export interface ValidatedProjectArgs {
   projectPath: string;
 }
 
-interface ValidatedSceneArgs {
+export interface ValidatedSceneArgs {
   projectPath: string;
   scenePath: string;
 }
 
-type ValidationErrorResult = ReturnType<typeof createErrorResponse>;
+// Strict subtype of ToolResponse with isError required, so callers can narrow
+// validator returns via `'isError' in v`. ToolResponse itself declares
+// `isError?: boolean` plus a `[k: string]: unknown` index signature, which
+// would collapse `v.projectPath` to `unknown` after narrowing.
+type ValidationErrorResult = ToolResponse & { isError: true };
 
 export function validateProjectArgs(
   args: OperationParams,

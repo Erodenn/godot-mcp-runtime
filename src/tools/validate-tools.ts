@@ -2,7 +2,7 @@ import { join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import {
@@ -210,7 +210,10 @@ function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> 
   return result;
 }
 
-export async function handleValidate(runner: GodotRunner, args: OperationParams) {
+export async function handleValidate(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const pv = validateProjectArgs(args);

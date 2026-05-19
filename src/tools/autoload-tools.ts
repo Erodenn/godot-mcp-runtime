@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
 import {
@@ -89,7 +89,7 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
 
 // --- Handlers ---
 
-export function handleListAutoloads(args: OperationParams) {
+export function handleListAutoloads(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -105,7 +105,7 @@ export function handleListAutoloads(args: OperationParams) {
   }
 }
 
-export function handleAddAutoload(args: OperationParams) {
+export function handleAddAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -154,7 +154,7 @@ export function handleAddAutoload(args: OperationParams) {
   }
 }
 
-export function handleRemoveAutoload(args: OperationParams) {
+export function handleRemoveAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
@@ -183,7 +183,7 @@ export function handleRemoveAutoload(args: OperationParams) {
   }
 }
 
-export function handleUpdateAutoload(args: OperationParams) {
+export function handleUpdateAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;

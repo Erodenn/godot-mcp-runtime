@@ -481,7 +481,10 @@ function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
 
 // --- Handlers ---
 
-export async function handleLaunchEditor(runner: GodotRunner, args: OperationParams) {
+export async function handleLaunchEditor(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const v = validateProjectArgs(args);
@@ -521,7 +524,10 @@ export async function handleLaunchEditor(runner: GodotRunner, args: OperationPar
   }
 }
 
-export async function handleRunProject(runner: GodotRunner, args: OperationParams) {
+export async function handleRunProject(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const v = validateProjectArgs(args);
@@ -650,7 +656,10 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
   }
 }
 
-export async function handleAttachProject(runner: GodotRunner, args: OperationParams) {
+export async function handleAttachProject(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const v = validateProjectArgs(args);
@@ -726,7 +735,7 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
   }
 }
 
-export async function handleDetachProject(runner: GodotRunner) {
+export async function handleDetachProject(runner: GodotRunner): Promise<ToolResponse> {
   if (runner.activeSessionMode !== 'attached') {
     return createErrorResponse('No attached project to detach.', [
       'Use attach_project first for manual-launch workflows',
@@ -749,7 +758,10 @@ export async function handleDetachProject(runner: GodotRunner) {
   };
 }
 
-export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams = {}) {
+export function handleGetDebugOutput(
+  runner: GodotRunner,
+  args: OperationParams = {},
+): ToolResponse {
   args = normalizeParameters(args);
 
   if (!runner.activeSessionMode) {
@@ -813,7 +825,7 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
   };
 }
 
-export async function handleStopProject(runner: GodotRunner) {
+export async function handleStopProject(runner: GodotRunner): Promise<ToolResponse> {
   const result = await runner.stopProject();
 
   if (!result) {
@@ -860,7 +872,10 @@ function normalizeScreenshotPath(path: string): string {
   return sep === '\\' ? path.replace(/\//g, '\\') : path;
 }
 
-export async function handleTakeScreenshot(runner: GodotRunner, args: OperationParams) {
+export async function handleTakeScreenshot(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'take a screenshot');
@@ -1001,7 +1016,10 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
   }
 }
 
-export async function handleSimulateInput(runner: GodotRunner, args: OperationParams) {
+export async function handleSimulateInput(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'simulate input');
@@ -1075,7 +1093,10 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
   }
 }
 
-export async function handleGetUiElements(runner: GodotRunner, args: OperationParams) {
+export async function handleGetUiElements(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'query UI elements');
@@ -1128,7 +1149,10 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
   }
 }
 
-export async function handleRunScript(runner: GodotRunner, args: OperationParams) {
+export async function handleRunScript(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'execute scripts');

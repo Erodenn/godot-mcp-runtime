@@ -1,7 +1,7 @@
 import { join } from 'path';
 import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, validateNodePath } from '../utils/path-validation.js';
 import {
@@ -232,7 +232,10 @@ export const sceneToolDefinitions: ToolDefinition[] = [
 
 // --- Handlers ---
 
-export async function handleCreateScene(runner: GodotRunner, args: OperationParams) {
+export async function handleCreateScene(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args, { sceneRequired: false });
   if ('isError' in v) return v;
@@ -246,7 +249,10 @@ export async function handleCreateScene(runner: GodotRunner, args: OperationPara
   ]);
 }
 
-export async function handleAddNode(runner: GodotRunner, args: OperationParams) {
+export async function handleAddNode(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -286,7 +292,10 @@ export async function handleAddNode(runner: GodotRunner, args: OperationParams) 
   ]);
 }
 
-export async function handleLoadSprite(runner: GodotRunner, args: OperationParams) {
+export async function handleLoadSprite(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -316,7 +325,10 @@ export async function handleLoadSprite(runner: GodotRunner, args: OperationParam
   ]);
 }
 
-export async function handleSaveScene(runner: GodotRunner, args: OperationParams) {
+export async function handleSaveScene(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -334,7 +346,10 @@ export async function handleSaveScene(runner: GodotRunner, args: OperationParams
   ]);
 }
 
-export async function handleExportMeshLibrary(runner: GodotRunner, args: OperationParams) {
+export async function handleExportMeshLibrary(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateSceneArgs(args);
   if ('isError' in v) return v;
@@ -362,7 +377,10 @@ export async function handleExportMeshLibrary(runner: GodotRunner, args: Operati
   );
 }
 
-export async function handleBatchSceneOperations(runner: GodotRunner, args: OperationParams) {
+export async function handleBatchSceneOperations(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<ToolResponse> {
   args = normalizeParameters(args);
   const v = validateProjectArgs(args);
   if ('isError' in v) return v;
