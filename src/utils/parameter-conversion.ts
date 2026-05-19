@@ -3,7 +3,7 @@ import type { OperationParams } from '../mcp.types.js';
 // Parameter mappings between snake_case and camelCase
 // Add new entries whenever a tool surfaces a new compound parameter — the
 // strict converter throws in test env on unmapped keys to catch oversights.
-const parameterMappings: Record<string, string> = {
+const parameterMappings = {
   project_path: 'projectPath',
   scene_path: 'scenePath',
   root_node_type: 'rootNodeType',
@@ -32,13 +32,19 @@ const parameterMappings: Record<string, string> = {
   case_sensitive: 'caseSensitive',
   file_types: 'fileTypes',
   max_results: 'maxResults',
-};
+} as const satisfies Record<string, string>;
+
+type ForwardMap = typeof parameterMappings;
+type ReverseParameterMappings = { [K in keyof ForwardMap as ForwardMap[K]]: K & string };
 
 // Reverse mapping from camelCase to snake_case
-const reverseParameterMappings: Record<string, string> = {};
-for (const [snakeCase, camelCase] of Object.entries(parameterMappings)) {
-  reverseParameterMappings[camelCase] = snakeCase;
-}
+const reverseParameterMappings = ((): ReverseParameterMappings => {
+  const result: Record<string, string> = {};
+  for (const [snakeCase, camelCase] of Object.entries(parameterMappings)) {
+    result[camelCase] = snakeCase;
+  }
+  return result as ReverseParameterMappings;
+})();
 
 export function normalizeParameters(params: OperationParams): OperationParams {
   if (!params || typeof params !== 'object') {
@@ -51,8 +57,8 @@ export function normalizeParameters(params: OperationParams): OperationParams {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
       let normalizedKey = key;
 
-      if (key.includes('_') && parameterMappings[key]) {
-        normalizedKey = parameterMappings[key];
+      if (key.includes('_') && parameterMappings[key as keyof ForwardMap]) {
+        normalizedKey = parameterMappings[key as keyof ForwardMap];
       }
 
       const value = params[key];
@@ -83,7 +89,7 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
 
   for (const key in params) {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
-      const mapped = reverseParameterMappings[key];
+      const mapped = reverseParameterMappings[key as keyof ReverseParameterMappings];
       let snakeKey: string;
       if (mapped) {
         snakeKey = mapped;
