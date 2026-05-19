@@ -13,7 +13,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotServerConfig } from './utils/godot-runner.js';
-import { GodotRunner, getErrorMessage } from './utils/godot-runner.js';
+import { GodotRunner } from './utils/godot-runner.js';
+import { getErrorMessage } from './utils/error-response.js';
 
 import { dispatchToolCall } from './dispatch.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';

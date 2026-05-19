@@ -13,12 +13,8 @@
 
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
-import type {
-  GodotRunner,
-  OperationParams,
-  ToolHandler,
-  ToolResponse,
-} from './utils/godot-runner.js';
+import type { GodotRunner } from './utils/godot-runner.js';
+import type { OperationParams, ToolHandler, ToolResponse } from './mcp.types.js';
 
 import {
   handleLaunchEditor,

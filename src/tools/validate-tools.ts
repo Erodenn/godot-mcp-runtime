@@ -1,15 +1,16 @@
 import { join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
-import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { GodotRunner } from '../utils/godot-runner.js';
+import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath } from '../utils/path-validation.js';
 import {
-  normalizeParameters,
-  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   extractGdError,
   getErrorMessage,
-} from '../utils/godot-runner.js';
+} from '../utils/error-response.js';
 
 export const validateToolDefinitions: ToolDefinition[] = [
   {

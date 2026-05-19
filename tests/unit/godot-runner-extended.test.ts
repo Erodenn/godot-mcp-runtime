@@ -1,12 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import {
-  cleanOutput,
-  normalizeForCompare,
-  validateProjectArgs,
-  validateSceneArgs,
-  checkDisplayAvailable,
-  GodotRunner,
-} from '../../src/utils/godot-runner.js';
+import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
+import { validateProjectArgs, validateSceneArgs } from '../../src/utils/error-response.js';
+import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';

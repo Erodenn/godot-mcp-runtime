@@ -1,13 +1,12 @@
 import { readFileSync } from 'fs';
-import type { OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
 import {
-  normalizeParameters,
-  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   getErrorMessage,
-  projectGodotPath,
-} from '../utils/godot-runner.js';
+} from '../utils/error-response.js';
 import {
   parseAutoloads,
   addAutoloadEntry,

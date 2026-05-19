@@ -1,15 +1,15 @@
 import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { GodotRunner } from '../utils/godot-runner.js';
+import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/godot-runner.js';
+import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
 import {
-  normalizeParameters,
   validateProjectArgs,
-  validateSubPath,
   createErrorResponse,
   getErrorMessage,
-  isUnderDir,
-  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
-} from '../utils/godot-runner.js';
+} from '../utils/error-response.js';
 import {
   attachRuntimeWarnings,
   parseBridgeJson,

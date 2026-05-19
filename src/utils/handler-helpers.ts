@@ -1,5 +1,6 @@
-import type { GodotRunner, OperationParams, ToolResponse } from './godot-runner.js';
-import { createErrorResponse, extractGdError, getErrorMessage } from './godot-runner.js';
+import type { GodotRunner } from './godot-runner.js';
+import type { OperationParams, ToolResponse } from '../mcp.types.js';
+import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 
 export const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
 

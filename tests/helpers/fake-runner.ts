@@ -17,11 +17,8 @@
  * actually invoked the batch operation rather than the single-target one.
  */
 
-import type {
-  GodotRunner,
-  OperationParams,
-  OperationResult,
-} from '../../src/utils/godot-runner.js';
+import type { GodotRunner, OperationResult } from '../../src/utils/godot-runner.js';
+import type { OperationParams } from '../../src/mcp.types.js';
 
 export interface FakeRunnerCall {
   operation: string;

@@ -3,15 +3,15 @@ import { resolve, sep } from 'path';
 import {
   normalizeParameters,
   convertCamelToSnakeCase,
+} from '../../src/utils/parameter-conversion.js';
+import {
   validatePath,
   validateSubPath,
   validateNodePath,
   isUnderDir,
-  extractGdError,
-  createErrorResponse,
-  extractJson,
-  cleanStdout,
-} from '../../src/utils/godot-runner.js';
+} from '../../src/utils/path-validation.js';
+import { extractGdError, createErrorResponse } from '../../src/utils/error-response.js';
+import { extractJson, cleanStdout } from '../../src/utils/output-parsing.js';
 
 describe('normalizeParameters', () => {
   it('converts known snake_case keys to camelCase', () => {

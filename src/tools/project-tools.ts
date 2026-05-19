@@ -1,15 +1,14 @@
 import { join, basename } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
-import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { GodotRunner } from '../utils/godot-runner.js';
+import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validatePath, validateSubPath, projectGodotPath } from '../utils/path-validation.js';
 import {
-  normalizeParameters,
-  validatePath,
-  validateSubPath,
   validateProjectArgs,
   createErrorResponse,
   getErrorMessage,
-  projectGodotPath,
-} from '../utils/godot-runner.js';
+} from '../utils/error-response.js';
 import { logDebug } from '../utils/logger.js';
 
 function fileExtension(name: string): string {

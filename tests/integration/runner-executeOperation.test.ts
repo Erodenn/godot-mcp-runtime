@@ -13,7 +13,8 @@
 import { describe, beforeAll, expect } from 'vitest';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
-import { GodotRunner, extractJson } from '../../src/utils/godot-runner.js';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
 import { handleGetProjectInfo } from '../../src/tools/project-tools.js';
 
