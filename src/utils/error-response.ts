@@ -51,7 +51,14 @@ export function createErrorResponse(
   return response;
 }
 
-// --- Shared validation helpers ---
+// --- Shared validation helpers (legacy shape) ---
+//
+// Kept verbatim in this commit because removing them now would require
+// rewriting every call site in tools/*.ts in the same commit — which is what
+// commit 3 of the Phase 3 plan does. The new `parseProjectArgs` /
+// `parseSceneArgs` in `arg-parsing.ts` live alongside these during the
+// transitional commit. Both implementations are pure functions over the same
+// inputs; keeping the old code path active means no behavior change here.
 
 export interface ValidatedProjectArgs {
   projectPath: string;

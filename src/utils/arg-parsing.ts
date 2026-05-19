@@ -10,9 +10,18 @@
  * single import for argument parsing.
  */
 
+import { existsSync } from 'fs';
+import { join } from 'path';
 import type { OperationParams, ToolResponse } from '../mcp.types.js';
 import { createErrorResponse } from './error-response.js';
 import { ok, err, type Result } from './result.js';
+import type { NodePath, ProjectPath, ScenePath } from './branded.js';
+import {
+  validatePath,
+  validateSubPath,
+  validateNodePath as validateNodePathShape,
+  projectGodotPath,
+} from './path-validation.js';
 
 // --- Generic field helpers ---
 
@@ -181,4 +190,149 @@ export function requireArray(
     );
   }
   return ok(value);
+}
+
+// --- Path-shaped helpers ---
+
+/**
+ * Parse and validate `projectPath` from raw args. The returned brand confirms
+ * the path has been shape-checked AND the `project.godot` manifest exists on
+ * disk — handlers can use the value verbatim without re-validating.
+ */
+export function parseProjectArgs(
+  args: OperationParams,
+): Result<{ projectPath: ProjectPath }, ToolResponse> {
+  const raw = args.projectPath;
+  if (!raw) {
+    return err(
+      createErrorResponse('projectPath is required', [
+        'Provide a valid path to a Godot project directory',
+      ]),
+    );
+  }
+  if (typeof raw !== 'string') {
+    return err(
+      createErrorResponse('projectPath must be a string', [
+        'Provide a valid path to a Godot project directory',
+      ]),
+    );
+  }
+  if (!validatePath(raw)) {
+    return err(
+      createErrorResponse('Invalid project path', [
+        'Provide a valid path without ".." or other potentially unsafe characters',
+      ]),
+    );
+  }
+  if (!existsSync(projectGodotPath(raw))) {
+    return err(
+      createErrorResponse(`Not a valid Godot project: ${raw}`, [
+        'Ensure the path points to a directory containing a project.godot file',
+      ]),
+    );
+  }
+  return ok({ projectPath: raw as ProjectPath });
+}
+
+/**
+ * Parse and validate `projectPath` + `scenePath`. When `sceneRequired` is
+ * true (default), the scene file must exist on disk. When false, an empty
+ * `scenePath` is permitted and `scenePath` is returned as an empty string
+ * branded as `ScenePath` for shape parity (the caller knows the scene-not-
+ * required path means "no scene to load yet" — e.g. `create_scene`).
+ */
+export function parseSceneArgs(
+  args: OperationParams,
+  opts?: { sceneRequired?: boolean },
+): Result<{ projectPath: ProjectPath; scenePath: ScenePath }, ToolResponse> {
+  const project = parseProjectArgs(args);
+  if (!project.ok) return project;
+
+  const sceneRequired = opts?.sceneRequired !== false;
+  const raw = args.scenePath;
+
+  if (!raw) {
+    if (sceneRequired) {
+      return err(
+        createErrorResponse('scenePath is required', [
+          'Provide the scene file path relative to the project',
+        ]),
+      );
+    }
+    return ok({ projectPath: project.value.projectPath, scenePath: '' as ScenePath });
+  }
+  if (typeof raw !== 'string') {
+    return err(
+      createErrorResponse('scenePath must be a string', [
+        'Provide the scene file path relative to the project',
+      ]),
+    );
+  }
+  if (!validateSubPath(project.value.projectPath, raw)) {
+    return err(
+      createErrorResponse('Invalid scene path', [
+        'Provide a valid relative path without ".." that stays inside the project directory',
+      ]),
+    );
+  }
+  if (sceneRequired) {
+    const sceneFullPath = join(project.value.projectPath, raw);
+    if (!existsSync(sceneFullPath)) {
+      return err(
+        createErrorResponse(`Scene file does not exist: ${raw}`, [
+          'Ensure the scene path is correct',
+          'Use create_scene to create a new scene first',
+        ]),
+      );
+    }
+  }
+  return ok({ projectPath: project.value.projectPath, scenePath: raw as ScenePath });
+}
+
+/**
+ * Brand a string as a scene-tree NodePath after validating its shape. Use
+ * for fields that hold a node path (e.g. `nodePath`, `parentNodePath`,
+ * `targetNodePath`) — scene-tree paths live in a separate namespace from
+ * filesystem paths and the project-root containment check does not apply.
+ */
+export function parseNodePath(raw: string): Result<NodePath, ToolResponse> {
+  if (!validateNodePathShape(raw)) {
+    return err(
+      createErrorResponse('Invalid nodePath', [
+        'Provide a scene-tree path without ".." (e.g. "root/Player")',
+      ]),
+    );
+  }
+  return ok(raw as NodePath);
+}
+
+export function parseRequiredNodePath(
+  args: OperationParams,
+  key: string,
+): Result<NodePath, ToolResponse> {
+  const raw = args[key];
+  if (typeof raw !== 'string' || raw === '') {
+    return err(
+      createErrorResponse(`${key} is required`, [
+        `Provide a scene-tree path for ${key} (e.g. "root/Player")`,
+      ]),
+    );
+  }
+  return parseNodePath(raw);
+}
+
+export function parseOptionalNodePath(
+  args: OperationParams,
+  key: string,
+): Result<NodePath | undefined, ToolResponse> {
+  const raw = args[key];
+  if (raw === undefined || raw === null || raw === '') return ok(undefined);
+  if (typeof raw !== 'string') {
+    return err(
+      createErrorResponse(`${key} must be a string when provided`, [
+        `Provide a scene-tree path for ${key} or omit it`,
+      ]),
+    );
+  }
+  return parseNodePath(raw);
 }
