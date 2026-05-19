@@ -9,7 +9,7 @@ import {
   validateProjectArgs,
   validateSceneArgs,
 } from '../utils/error-response.js';
-import { executeSceneOp } from '../utils/handler-helpers.js';
+import { executeSceneOp } from '../utils/headless-op.js';
 
 export const sceneToolDefinitions: ToolDefinition[] = [
   {

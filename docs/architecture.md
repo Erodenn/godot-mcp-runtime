@@ -21,7 +21,7 @@ src/
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
     ├── error-response.ts        # Error helpers + arg validators (createErrorResponse, getErrorMessage, extractGdError, validateProjectArgs, validateSceneArgs)
     ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
-    ├── handler-helpers.ts       # executeSceneOp wrapper for headless-op handlers
+    ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
     ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
     ├── bridge-protocol.ts       # TCP framing (length-prefixed frames, port resolution)
     ├── autoload-ini.ts          # project.godot [autoload] INI primitives

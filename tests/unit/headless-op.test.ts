@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { executeSceneOp } from '../../src/utils/handler-helpers.js';
+import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching } from '../helpers/assertions.js';
 

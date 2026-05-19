@@ -5,7 +5,7 @@ import type { OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, validateNodePath } from '../utils/path-validation.js';
 import { createErrorResponse, validateSceneArgs } from '../utils/error-response.js';
-import { executeSceneOp } from '../utils/handler-helpers.js';
+import { executeSceneOp } from '../utils/headless-op.js';
 
 // --- Tool definitions ---
 

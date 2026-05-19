@@ -1,8 +1,8 @@
 import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition } from '../mcp.types.js';
+import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
+import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
 import {
@@ -10,11 +10,6 @@ import {
   createErrorResponse,
   getErrorMessage,
 } from '../utils/error-response.js';
-import {
-  attachRuntimeWarnings,
-  parseBridgeJson,
-  MAX_RUNTIME_ERROR_CONTEXT_LINES,
-} from '../utils/handler-helpers.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
 
@@ -419,6 +414,46 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
 ];
 
 // --- Helpers ---
+
+const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
+
+type ParseResult<T> = { ok: true; data: T } | { ok: false; response: ToolResponse };
+
+/**
+ * Parse a JSON frame returned by the McpBridge. On failure, returns a
+ * structured error response so handlers can short-circuit with one branch.
+ * `context` should describe which bridge command produced the frame.
+ */
+function parseBridgeJson<T = unknown>(responseStr: string, context: string): ParseResult<T> {
+  try {
+    return { ok: true, data: JSON.parse(responseStr) as T };
+  } catch (error) {
+    return {
+      ok: false,
+      response: createErrorResponse(
+        `Invalid response from bridge (${context}): ${getErrorMessage(error)}`,
+        [
+          'The bridge returned non-JSON data — check Godot stderr via get_debug_output',
+          'Restart the project with stop_project followed by run_project',
+        ],
+      ),
+    };
+  }
+}
+
+/**
+ * Attach captured runtime errors as a `warnings` array on a tool response
+ * payload. No-op when there are no runtime errors. Truncates to
+ * `MAX_RUNTIME_ERROR_CONTEXT_LINES` to keep payloads bounded.
+ */
+function attachRuntimeWarnings(
+  target: Record<string, unknown>,
+  runtimeErrors: string[],
+): void {
+  if (runtimeErrors.length > 0) {
+    target.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+  }
+}
 
 function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
   if (!runner.activeSessionMode || !runner.activeProjectPath) {

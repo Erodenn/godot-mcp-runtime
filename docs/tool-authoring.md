@@ -77,7 +77,7 @@ Use snake_case for tool names and the GDScript boundary; camelCase inside TypeSc
 
 ### Implementation helpers
 
-Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/handler-helpers.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
+Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/headless-op.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
 
 ---
 

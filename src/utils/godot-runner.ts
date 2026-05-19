@@ -13,6 +13,7 @@ import {
   parseFrames,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
+  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
@@ -37,7 +38,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Bridge readiness polling
-export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
 const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
