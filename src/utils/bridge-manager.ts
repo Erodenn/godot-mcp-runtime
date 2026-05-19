@@ -3,9 +3,9 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from '
 import { logDebug } from './logger.js';
 import { addAutoloadEntry, parseAutoloads, removeAutoloadEntry } from './autoload-ini.js';
 
-const BRIDGE_AUTOLOAD_NAME = 'McpBridge';
-const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd';
-const MCP_GITIGNORE_ENTRY = '.mcp/';
+const BRIDGE_AUTOLOAD_NAME = 'McpBridge' as const;
+const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd' as const;
+const MCP_GITIGNORE_ENTRY = '.mcp/' as const;
 
 // Matches the baked-port marker line inserted in src/scripts/mcp_bridge.gd —
 // `const PORT := <int>` — so inject() can rewrite the integer per project.
