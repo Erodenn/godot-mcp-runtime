@@ -16,7 +16,8 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
-import { GodotRunner, extractJson } from '../../src/utils/godot-runner.js';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 
 // --- tmp project helpers ---
 

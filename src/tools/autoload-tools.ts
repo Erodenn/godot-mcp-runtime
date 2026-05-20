@@ -1,13 +1,15 @@
 import { readFileSync } from 'fs';
-import type { OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
-  normalizeParameters,
-  validateSubPath,
-  validateProjectArgs,
-  createErrorResponse,
-  getErrorMessage,
-  projectGodotPath,
-} from '../utils/godot-runner.js';
+  parseProjectArgs,
+  requireString,
+  optionalString,
+  optionalBoolean,
+} from '../utils/arg-parsing.js';
+import { ok, err } from '../utils/result.js';
 import {
   parseAutoloads,
   addAutoloadEntry,
@@ -17,7 +19,7 @@ import {
 
 // --- Tool definitions ---
 
-export const autoloadToolDefinitions: ToolDefinition[] = [
+export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
@@ -86,140 +88,166 @@ export const autoloadToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'autoloadName'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
 
-export function handleListAutoloads(args: OperationParams) {
+export function handleListAutoloads(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const autoloads = parseAutoloads(projectFile);
-    return { content: [{ type: 'text', text: JSON.stringify(autoloads) }] };
+    return ok({ content: [{ type: 'text', text: JSON.stringify(autoloads) }] });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [
-      'Check if project.godot is accessible',
-    ]);
+    return err(
+      createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+      ]),
+    );
   }
 }
 
-export function handleAddAutoload(args: OperationParams) {
+export function handleAddAutoload(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.autoloadName || !args.autoloadPath) {
-    return createErrorResponse('autoloadName and autoloadPath are required', [
-      'Provide the autoload node name and script/scene path',
-    ]);
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName;
+
+  const autoloadPath = requireString(args, 'autoloadPath');
+  if (!autoloadPath.ok) return autoloadPath;
+
+  if (!validateSubPath(parsed.value.projectPath, autoloadPath.value)) {
+    return err(
+      createErrorResponse('Invalid autoload path', [
+        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      ]),
+    );
   }
-  if (!validateSubPath(v.projectPath, args.autoloadPath as string)) {
-    return createErrorResponse('Invalid autoload path', [
-      'Provide a valid relative path or res:// URI that stays inside the project directory',
-    ]);
-  }
+
+  const singleton = optionalBoolean(args, 'singleton');
+  if (!singleton.ok) return singleton;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const projectFileContent = readFileSync(projectFile, 'utf8');
     const existing = parseAutoloads(projectFile, projectFileContent);
-    if (existing.some((a) => a.name === (args.autoloadName as string))) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' already exists`, [
-        'Use update_autoload to modify it',
-        'Use list_autoloads to see current autoloads',
-      ]);
+    if (existing.some((a) => a.name === autoloadName.value)) {
+      return err(
+        createErrorResponse(`Autoload '${autoloadName.value}' already exists`, [
+          'Use update_autoload to modify it',
+          'Use list_autoloads to see current autoloads',
+        ]),
+      );
     }
-    const isSingleton = args.singleton !== false;
+    const isSingleton = singleton.value !== false;
     addAutoloadEntry(
       projectFile,
-      args.autoloadName as string,
-      args.autoloadPath as string,
+      autoloadName.value,
+      autoloadPath.value,
       isSingleton,
       projectFileContent,
     );
-    return {
+    return ok({
       content: [
         {
           type: 'text',
-          text: `Autoload '${args.autoloadName}' registered at '${args.autoloadPath}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.`,
+          text: `Autoload '${autoloadName.value}' registered at '${autoloadPath.value}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.`,
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to add autoload: ${getErrorMessage(error)}`, [
-      'Check if project.godot is accessible',
-    ]);
+    return err(
+      createErrorResponse(`Failed to add autoload: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+      ]),
+    );
   }
 }
 
-export function handleRemoveAutoload(args: OperationParams) {
+export function handleRemoveAutoload(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.autoloadName) {
-    return createErrorResponse('autoloadName is required', [
-      'Provide the name of the autoload to remove',
-    ]);
-  }
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
-    const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
+    const removed = removeAutoloadEntry(projectFile, autoloadName.value);
     if (!removed) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' not found`, [
-        'Use list_autoloads to see existing autoloads',
-      ]);
+      return err(
+        createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
+          'Use list_autoloads to see existing autoloads',
+        ]),
+      );
     }
-    return {
-      content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }],
-    };
+    return ok({
+      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' removed successfully.` }],
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to remove autoload: ${getErrorMessage(error)}`, [
-      'Check if project.godot is accessible',
-    ]);
+    return err(
+      createErrorResponse(`Failed to remove autoload: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+      ]),
+    );
   }
 }
 
-export function handleUpdateAutoload(args: OperationParams) {
+export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.autoloadName) {
-    return createErrorResponse('autoloadName is required', [
-      'Provide the name of the autoload to update',
-    ]);
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName;
+
+  const autoloadPath = optionalString(args, 'autoloadPath');
+  if (!autoloadPath.ok) return autoloadPath;
+
+  if (
+    autoloadPath.value !== undefined &&
+    !validateSubPath(parsed.value.projectPath, autoloadPath.value)
+  ) {
+    return err(
+      createErrorResponse('Invalid autoload path', [
+        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      ]),
+    );
   }
-  if (args.autoloadPath && !validateSubPath(v.projectPath, args.autoloadPath as string)) {
-    return createErrorResponse('Invalid autoload path', [
-      'Provide a valid relative path or res:// URI that stays inside the project directory',
-    ]);
-  }
+
+  const singleton = optionalBoolean(args, 'singleton');
+  if (!singleton.ok) return singleton;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const updated = updateAutoloadEntry(
       projectFile,
-      args.autoloadName as string,
-      args.autoloadPath as string | undefined,
-      args.singleton as boolean | undefined,
+      autoloadName.value,
+      autoloadPath.value,
+      singleton.value,
     );
     if (!updated) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' not found`, [
-        'Use list_autoloads to see existing autoloads',
-        'Use add_autoload to register a new one',
-      ]);
+      return err(
+        createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
+          'Use list_autoloads to see existing autoloads',
+          'Use add_autoload to register a new one',
+        ]),
+      );
     }
-    return {
-      content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }],
-    };
+    return ok({
+      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' updated successfully.` }],
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [
-      'Check if project.godot is accessible',
-    ]);
+    return err(
+      createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+      ]),
+    );
   }
 }

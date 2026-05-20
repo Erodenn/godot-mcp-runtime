@@ -1,20 +1,18 @@
 import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { GodotRunner } from '../utils/godot-runner.js';
+import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
+import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
+import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
-  normalizeParameters,
-  validateProjectArgs,
-  validateSubPath,
-  createErrorResponse,
-  getErrorMessage,
-  isUnderDir,
-  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
-} from '../utils/godot-runner.js';
-import {
-  attachRuntimeWarnings,
-  parseBridgeJson,
-  MAX_RUNTIME_ERROR_CONTEXT_LINES,
-} from '../utils/handler-helpers.js';
+  parseProjectArgs,
+  optionalString,
+  optionalNumber,
+  optionalBoolean,
+} from '../utils/arg-parsing.js';
+import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
 
@@ -36,7 +34,7 @@ interface ScreenshotBridgeResponse {
 
 // --- Tool definitions ---
 
-export const runtimeToolDefinitions: ToolDefinition[] = [
+export const runtimeToolDefinitions = [
   {
     name: 'launch_editor',
     description:
@@ -416,18 +414,59 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       },
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Helpers ---
 
-function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
+const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
+
+/**
+ * Parse a JSON frame returned by the McpBridge. On failure, returns the
+ * canonical `Result<T, ToolResponse>` so handlers can short-circuit with
+ * `return parsed` on the err branch (the inner `error` is already a structured
+ * MCP error response). `context` should describe which bridge command produced
+ * the frame.
+ */
+function parseBridgeJson<T = unknown>(
+  responseStr: string,
+  context: string,
+): Result<T, ToolResponse> {
+  try {
+    return ok(JSON.parse(responseStr) as T);
+  } catch (error) {
+    return err(
+      createErrorResponse(`Invalid response from bridge (${context}): ${getErrorMessage(error)}`, [
+        'The bridge returned non-JSON data — check Godot stderr via get_debug_output',
+        'Restart the project with stop_project followed by run_project',
+      ]),
+    );
+  }
+}
+
+/**
+ * Attach captured runtime errors as a `warnings` array on a tool response
+ * payload. No-op when there are no runtime errors. Truncates to
+ * `MAX_RUNTIME_ERROR_CONTEXT_LINES` to keep payloads bounded.
+ */
+function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: string[]): void {
+  if (runtimeErrors.length > 0) {
+    target.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+  }
+}
+
+function ensureRuntimeSession(
+  runner: GodotRunner,
+  actionDescription: string,
+): HandlerResult | null {
   if (!runner.activeSessionMode || !runner.activeProjectPath) {
-    return createErrorResponse(
-      `No active runtime session. A project must be running or attached to ${actionDescription}.`,
-      [
-        'Use run_project to start a Godot project first',
-        'Or use attach_project before launching Godot manually',
-      ],
+    return err(
+      createErrorResponse(
+        `No active runtime session. A project must be running or attached to ${actionDescription}.`,
+        [
+          'Use run_project to start a Godot project first',
+          'Or use attach_project before launching Godot manually',
+        ],
+      ),
     );
   }
 
@@ -435,12 +474,11 @@ function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
     runner.activeSessionMode === 'spawned' &&
     (!runner.activeProcess || runner.activeProcess.hasExited)
   ) {
-    return createErrorResponse(
-      `The spawned Godot process has exited and cannot ${actionDescription}.`,
-      [
+    return err(
+      createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
         'Use get_debug_output to inspect the last captured logs',
         'Call stop_project to clean up, then run_project again',
-      ],
+      ]),
     );
   }
 
@@ -449,57 +487,73 @@ function ensureRuntimeSession(runner: GodotRunner, actionDescription: string) {
 
 // --- Handlers ---
 
-export async function handleLaunchEditor(runner: GodotRunner, args: OperationParams) {
+export async function handleLaunchEditor(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
 
   try {
     if (!runner.getGodotPath()) {
       await runner.detectGodotPath();
       if (!runner.getGodotPath()) {
-        return createErrorResponse('Could not find a valid Godot executable path', [
-          'Ensure Godot is installed correctly',
-          'Set GODOT_PATH environment variable',
-        ]);
+        return err(
+          createErrorResponse('Could not find a valid Godot executable path', [
+            'Ensure Godot is installed correctly',
+            'Set GODOT_PATH environment variable',
+          ]),
+        );
       }
     }
 
-    logDebug(`Launching Godot editor for project: ${v.projectPath}`);
-    const process = runner.launchEditor(v.projectPath);
+    logDebug(`Launching Godot editor for project: ${parsed.value.projectPath}`);
+    const process = runner.launchEditor(parsed.value.projectPath);
 
-    process.on('error', (err: Error) => {
-      console.error('Failed to start Godot editor:', err);
+    process.on('error', (spawnErr: Error) => {
+      console.error('Failed to start Godot editor:', spawnErr);
     });
 
-    return {
+    return ok({
       content: [
         {
           type: 'text',
-          text: `Godot editor launched successfully for project at ${v.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
+          text: `Godot editor launched successfully for project at ${parsed.value.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to launch Godot editor: ${getErrorMessage(error)}`, [
-      'Ensure Godot is installed correctly',
-      'Check if the GODOT_PATH environment variable is set correctly',
-    ]);
+    return err(
+      createErrorResponse(`Failed to launch Godot editor: ${getErrorMessage(error)}`, [
+        'Ensure Godot is installed correctly',
+        'Check if the GODOT_PATH environment variable is set correctly',
+      ]),
+    );
   }
 }
 
-export async function handleRunProject(runner: GodotRunner, args: OperationParams) {
+export async function handleRunProject(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+  const { projectPath } = parsed.value;
 
-  if (typeof args.scene === 'string') {
-    if (!validateSubPath(v.projectPath, args.scene)) {
-      return createErrorResponse(
-        `Invalid scene path: must be project-relative without ".." (got: ${args.scene})`,
-        ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
+  const scene = optionalString(args, 'scene');
+  if (!scene.ok) return scene;
+
+  if (scene.value !== undefined) {
+    if (!validateSubPath(projectPath, scene.value)) {
+      return err(
+        createErrorResponse(
+          `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
+          ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
+        ),
       );
     }
   }
@@ -507,35 +561,35 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
   if (!runner.getGodotPath()) {
     await runner.detectGodotPath();
     if (!runner.getGodotPath()) {
-      return createErrorResponse('Could not find a valid Godot executable path', [
-        'Set GODOT_PATH in your MCP client config to your Godot 4.x executable',
-        'Ensure the path points at the Godot binary, not its installation folder',
-        'On Windows, escape backslashes in JSON (e.g. "D:\\\\Godot\\\\Godot.exe")',
-      ]);
+      return err(
+        createErrorResponse('Could not find a valid Godot executable path', [
+          'Set GODOT_PATH in your MCP client config to your Godot 4.x executable',
+          'Ensure the path points at the Godot binary, not its installation folder',
+          'On Windows, escape backslashes in JSON (e.g. "D:\\\\Godot\\\\Godot.exe")',
+        ]),
+      );
     }
   }
 
-  try {
-    const background = args.background === true;
-    const bridgePort = args.bridgePort;
-    if (bridgePort !== undefined) {
-      if (
-        !Number.isInteger(bridgePort) ||
-        (bridgePort as number) < 1 ||
-        (bridgePort as number) > 65535
-      ) {
-        return createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort)})`,
+  const bridgePort = optionalNumber(args, 'bridgePort');
+  if (!bridgePort.ok) return bridgePort;
+  if (bridgePort.value !== undefined) {
+    if (!Number.isInteger(bridgePort.value) || bridgePort.value < 1 || bridgePort.value > 65535) {
+      return err(
+        createErrorResponse(
+          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort.value)})`,
           ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
-        );
-      }
+        ),
+      );
     }
-    await runner.runProject(
-      v.projectPath,
-      args.scene as string | undefined,
-      background,
-      bridgePort as number | undefined,
-    );
+  }
+
+  const background = optionalBoolean(args, 'background');
+  if (!background.ok) return background;
+  const isBackground = background.value === true;
+
+  try {
+    await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value);
 
     const bridgeResult = await runner.waitForBridge();
 
@@ -544,21 +598,23 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
         // Tear down the spawned-mode session state so a retry of run_project
         // works without an intervening stop_project.
         await runner.stopProject();
-        return createErrorResponse(
-          `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}`,
-          [
-            'Check get_debug_output for runtime errors',
-            'Verify a display server is available (Wayland/X11)',
-            'Check for broken autoloads with list_autoloads',
-            'Retry run_project once the underlying issue is resolved',
-          ],
+        return err(
+          createErrorResponse(
+            `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}`,
+            [
+              'Check get_debug_output for runtime errors',
+              'Verify a display server is available (Wayland/X11)',
+              'Check for broken autoloads with list_autoloads',
+              'Retry run_project once the underlying issue is resolved',
+            ],
+          ),
         );
       }
 
       const recentErrors = runner.getRecentErrors(20);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
       const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const onDisk = runner.readBakedBridgePort(projectPath);
       const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
       const racePrefix = raceDetected
         ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
@@ -569,7 +625,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
       ];
-      if (background) {
+      if (isBackground) {
         lines.push('- Background mode: window hidden, physical input blocked');
       }
       // Tear down before returning so hasActiveRuntimeSession() reports false
@@ -585,7 +641,7 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
           'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
         );
       }
-      return createErrorResponse(lines.join('\n'), solutions);
+      return err(createErrorResponse(lines.join('\n'), solutions));
     }
 
     const port = runner.activeBridgePort;
@@ -595,59 +651,71 @@ export async function handleRunProject(runner: GodotRunner, args: OperationParam
       '- Use get_debug_output to check runtime output and errors',
       '- Call stop_project when done',
     ];
-    if (background) {
+    if (isBackground) {
       lines.push('- Background mode: window hidden, physical input blocked');
     }
 
-    return {
+    return ok({
       content: [{ type: 'text', text: lines.join('\n') }],
-    };
+    });
   } catch (error: unknown) {
     const errorMessage = getErrorMessage(error);
     if (errorMessage.includes('No display server available')) {
-      return createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
-        'Use attach_project with an externally launched Godot process',
-        'Set DISPLAY or WAYLAND_DISPLAY environment variables',
-        'Run from a graphical shell session',
-      ]);
+      return err(
+        createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+          'Use attach_project with an externally launched Godot process',
+          'Set DISPLAY or WAYLAND_DISPLAY environment variables',
+          'Run from a graphical shell session',
+        ]),
+      );
     }
-    return createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
-      'Ensure Godot is installed correctly',
-      'Check if the GODOT_PATH environment variable is set correctly',
-    ]);
+    return err(
+      createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+        'Ensure Godot is installed correctly',
+        'Check if the GODOT_PATH environment variable is set correctly',
+      ]),
+    );
   }
 }
 
-export async function handleAttachProject(runner: GodotRunner, args: OperationParams) {
+export async function handleAttachProject(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+  const { projectPath } = parsed.value;
 
-  try {
-    const attachBridgePort = args.bridgePort;
-    if (attachBridgePort !== undefined) {
-      if (
-        !Number.isInteger(attachBridgePort) ||
-        (attachBridgePort as number) < 1 ||
-        (attachBridgePort as number) > 65535
-      ) {
-        return createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort)})`,
+  const attachBridgePort = optionalNumber(args, 'bridgePort');
+  if (!attachBridgePort.ok) return attachBridgePort;
+  if (attachBridgePort.value !== undefined) {
+    if (
+      !Number.isInteger(attachBridgePort.value) ||
+      attachBridgePort.value < 1 ||
+      attachBridgePort.value > 65535
+    ) {
+      return err(
+        createErrorResponse(
+          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort.value)})`,
           [
             'Omit bridgePort to auto-select a free port',
             'Pass a valid TCP port number matching the externally launched Godot',
           ],
-        );
-      }
+        ),
+      );
     }
-    await runner.attachProject(v.projectPath, attachBridgePort as number | undefined);
+  }
+
+  try {
+    await runner.attachProject(projectPath, attachBridgePort.value);
 
     const bridgeResult = await runner.waitForBridgeAttached();
 
     if (!bridgeResult.ready) {
       const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const onDisk = runner.readBakedBridgePort(projectPath);
       const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
       const racePrefix = raceDetected
         ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
@@ -666,14 +734,16 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
           'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
         );
       }
-      return createErrorResponse(
-        `${racePrefix}Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
-        solutions,
+      return err(
+        createErrorResponse(
+          `${racePrefix}Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
+          solutions,
+        ),
       );
     }
 
     const attachedPort = runner.activeBridgePort;
-    return {
+    return ok({
       content: [
         {
           type: 'text',
@@ -685,26 +755,30 @@ export async function handleAttachProject(runner: GodotRunner, args: OperationPa
           ].join('\n'),
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, [
-      'Check if project.godot is accessible',
-      'Ensure MCP can write the bridge autoload into the project',
-    ]);
+    return err(
+      createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+        'Ensure MCP can write the bridge autoload into the project',
+      ]),
+    );
   }
 }
 
-export async function handleDetachProject(runner: GodotRunner) {
+export async function handleDetachProject(runner: GodotRunner): Promise<HandlerResult> {
   if (runner.activeSessionMode !== 'attached') {
-    return createErrorResponse('No attached project to detach.', [
-      'Use attach_project first for manual-launch workflows',
-      'If MCP launched the game, use stop_project instead',
-    ]);
+    return err(
+      createErrorResponse('No attached project to detach.', [
+        'Use attach_project first for manual-launch workflows',
+        'If MCP launched the game, use stop_project instead',
+      ]),
+    );
   }
 
   const result = (await runner.stopProject())!;
 
-  return {
+  return ok({
     content: [
       {
         type: 'text',
@@ -714,21 +788,26 @@ export async function handleDetachProject(runner: GodotRunner) {
         }),
       },
     ],
-  };
+  });
 }
 
-export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams = {}) {
+export function handleGetDebugOutput(
+  runner: GodotRunner,
+  args: OperationParams = {},
+): HandlerResult {
   args = normalizeParameters(args);
 
   if (!runner.activeSessionMode) {
-    return createErrorResponse('No active runtime session.', [
-      'Use run_project to start a Godot project first',
-      'Or use attach_project before launching Godot manually',
-    ]);
+    return err(
+      createErrorResponse('No active runtime session.', [
+        'Use run_project to start a Godot project first',
+        'Or use attach_project before launching Godot manually',
+      ]),
+    );
   }
 
   if (runner.activeSessionMode === 'attached') {
-    return {
+    return ok({
       content: [
         {
           type: 'text',
@@ -741,15 +820,17 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
           }),
         },
       ],
-    };
+    });
   }
 
   const proc = runner.activeProcess;
   if (!proc) {
-    return createErrorResponse('No active spawned process is available for debug output.', [
-      'Use run_project to start a Godot project first',
-      'Or use attach_project only when stdout/stderr capture is not needed',
-    ]);
+    return err(
+      createErrorResponse('No active spawned process is available for debug output.', [
+        'Use run_project to start a Godot project first',
+        'Or use attach_project only when stdout/stderr capture is not needed',
+      ]),
+    );
   }
 
   const limit = typeof args.limit === 'number' ? args.limit : 200;
@@ -771,27 +852,29 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
       'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
   }
 
-  return {
+  return ok({
     content: [
       {
         type: 'text',
         text: JSON.stringify(response),
       },
     ],
-  };
+  });
 }
 
-export async function handleStopProject(runner: GodotRunner) {
+export async function handleStopProject(runner: GodotRunner): Promise<HandlerResult> {
   const result = await runner.stopProject();
 
   if (!result) {
-    return createErrorResponse('No active Godot process to stop.', [
-      'Use run_project to start a Godot project first',
-      'The process may have already terminated',
-    ]);
+    return err(
+      createErrorResponse('No active Godot process to stop.', [
+        'Use run_project to start a Godot project first',
+        'The process may have already terminated',
+      ]),
+    );
   }
 
-  return {
+  return ok({
     content: [
       {
         type: 'text',
@@ -807,7 +890,7 @@ export async function handleStopProject(runner: GodotRunner) {
         }),
       },
     ],
-  };
+  });
 }
 
 function parseScreenshotResponseMode(value: unknown): ScreenshotResponseMode | null {
@@ -828,7 +911,10 @@ function normalizeScreenshotPath(path: string): string {
   return sep === '\\' ? path.replace(/\//g, '\\') : path;
 }
 
-export async function handleTakeScreenshot(runner: GodotRunner, args: OperationParams) {
+export async function handleTakeScreenshot(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'take a screenshot');
@@ -839,17 +925,21 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
   const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
   const responseMode = parseScreenshotResponseMode(args.responseMode);
   if (responseMode === null) {
-    return createErrorResponse('Invalid responseMode for take_screenshot', [
-      'Use one of: "full", "preview", or "path_only"',
-    ]);
+    return err(
+      createErrorResponse('Invalid responseMode for take_screenshot', [
+        'Use one of: "full", "preview", or "path_only"',
+      ]),
+    );
   }
 
   const previewMaxWidth = parsePreviewDimension(args.previewMaxWidth, DEFAULT_PREVIEW_MAX_WIDTH);
   const previewMaxHeight = parsePreviewDimension(args.previewMaxHeight, DEFAULT_PREVIEW_MAX_HEIGHT);
   if (previewMaxWidth === null || previewMaxHeight === null) {
-    return createErrorResponse('Invalid preview dimensions for take_screenshot', [
-      'previewMaxWidth and previewMaxHeight must be positive numbers',
-    ]);
+    return err(
+      createErrorResponse('Invalid preview dimensions for take_screenshot', [
+        'previewMaxWidth and previewMaxHeight must be positive numbers',
+      ]),
+    );
   }
 
   const commandParams: Record<string, unknown> = {};
@@ -866,21 +956,25 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
     );
 
     const parsedResult = parseBridgeJson<ScreenshotBridgeResponse>(responseStr, 'screenshot');
-    if (!parsedResult.ok) return parsedResult.response;
-    const parsed = parsedResult.data;
+    if (!parsedResult.ok) return parsedResult;
+    const parsed = parsedResult.value;
 
     if (parsed.error) {
-      return createErrorResponse(`Screenshot server error: ${parsed.error}`, [
-        'Ensure the project has a viewport (a headless project with no display server cannot render)',
-        'Check disk space and permissions on the project directory (.mcp/screenshots/)',
-      ]);
+      return err(
+        createErrorResponse(`Screenshot server error: ${parsed.error}`, [
+          'Ensure the project has a viewport (a headless project with no display server cannot render)',
+          'Check disk space and permissions on the project directory (.mcp/screenshots/)',
+        ]),
+      );
     }
 
     if (!parsed.path) {
-      return createErrorResponse('Screenshot server returned no file path', [
-        'The bridge response is missing the expected `path` field — this is a bridge bug, not a timing issue',
-        'Check get_debug_output for runtime errors during the screenshot save',
-      ]);
+      return err(
+        createErrorResponse('Screenshot server returned no file path', [
+          'The bridge response is missing the expected `path` field — this is a bridge bug, not a timing issue',
+          'Check get_debug_output for runtime errors during the screenshot save',
+        ]),
+      );
     }
 
     // Normalize path for the local filesystem (forward slashes from GDScript)
@@ -889,22 +983,26 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
     // Defense-in-depth: the bridge runs in user-controlled GDScript and could
     // be patched to return any path. Refuse to read anything outside the
     // project's own .mcp/screenshots/ directory.
-    const screenshotsRoot = resolve(runner.activeProjectPath as string, '.mcp', 'screenshots');
+    const screenshotsRoot = resolve(runner.activeProjectPath!, '.mcp', 'screenshots');
     if (!isUnderDir(screenshotsRoot, screenshotPath)) {
-      return createErrorResponse(
-        'Bridge returned a screenshot path outside .mcp/screenshots/. Refusing to read.',
-        [
-          'This indicates a tampered or misbehaving McpBridge autoload',
-          'Stop the project, verify the bridge script is the one shipped with this server, and retry',
-        ],
+      return err(
+        createErrorResponse(
+          'Bridge returned a screenshot path outside .mcp/screenshots/. Refusing to read.',
+          [
+            'This indicates a tampered or misbehaving McpBridge autoload',
+            'Stop the project, verify the bridge script is the one shipped with this server, and retry',
+          ],
+        ),
       );
     }
 
     if (!existsSync(screenshotPath)) {
-      return createErrorResponse(`Screenshot file not found at: ${screenshotPath}`, [
-        'The screenshot may have failed to save',
-        'Check disk space and permissions',
-      ]);
+      return err(
+        createErrorResponse(`Screenshot file not found at: ${screenshotPath}`, [
+          'The screenshot may have failed to save',
+          'Check disk space and permissions',
+        ]),
+      );
     }
 
     const metadata: Record<string, unknown> = {
@@ -924,26 +1022,32 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
       });
     } else if (responseMode === 'preview') {
       if (!parsed.preview_path) {
-        return createErrorResponse('Screenshot server returned no preview path', [
-          'Ensure the running project has the current McpBridge autoload',
-          'Restart the runtime after rebuilding the MCP server',
-        ]);
+        return err(
+          createErrorResponse('Screenshot server returned no preview path', [
+            'Ensure the running project has the current McpBridge autoload',
+            'Restart the runtime after rebuilding the MCP server',
+          ]),
+        );
       }
       const previewPath = normalizeScreenshotPath(parsed.preview_path);
       if (!isUnderDir(screenshotsRoot, previewPath)) {
-        return createErrorResponse(
-          'Bridge returned a screenshot preview path outside .mcp/screenshots/. Refusing to read.',
-          [
-            'This indicates a tampered or misbehaving McpBridge autoload',
-            'Stop the project, verify the bridge script is the one shipped with this server, and retry',
-          ],
+        return err(
+          createErrorResponse(
+            'Bridge returned a screenshot preview path outside .mcp/screenshots/. Refusing to read.',
+            [
+              'This indicates a tampered or misbehaving McpBridge autoload',
+              'Stop the project, verify the bridge script is the one shipped with this server, and retry',
+            ],
+          ),
         );
       }
       if (!existsSync(previewPath)) {
-        return createErrorResponse(`Screenshot preview file not found at: ${previewPath}`, [
-          'The preview may have failed to save',
-          'Try again, or use responseMode "full" to return the original screenshot',
-        ]);
+        return err(
+          createErrorResponse(`Screenshot preview file not found at: ${previewPath}`, [
+            'The preview may have failed to save',
+            'Try again, or use responseMode "full" to return the original screenshot',
+          ]),
+        );
       }
       const previewBuffer = readFileSync(previewPath);
       content.push({
@@ -959,17 +1063,22 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
 
     content.push({ type: 'text', text: JSON.stringify(metadata) });
 
-    return { content };
+    return ok({ content });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
-      'Check get_debug_output for crash backtraces or runtime errors',
-      'If the game has exited, call stop_project, then run_project again',
-      'For slow renders, increase the timeout parameter',
-    ]);
+    return err(
+      createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
+        'Check get_debug_output for crash backtraces or runtime errors',
+        'If the game has exited, call stop_project, then run_project again',
+        'For slow renders, increase the timeout parameter',
+      ]),
+    );
   }
 }
 
-export async function handleSimulateInput(runner: GodotRunner, args: OperationParams) {
+export async function handleSimulateInput(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'simulate input');
@@ -979,9 +1088,11 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
 
   const actions = args.actions;
   if (!Array.isArray(actions) || actions.length === 0) {
-    return createErrorResponse('actions must be a non-empty array of input actions', [
-      'Provide at least one action object with a "type" field',
-    ]);
+    return err(
+      createErrorResponse('actions must be a non-empty array of input actions', [
+        'Provide at least one action object with a "type" field',
+      ]),
+    );
   }
 
   // Calculate timeout: sum of all wait durations + 10s buffer
@@ -1010,14 +1121,16 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
       error?: string;
       actions_processed?: number;
     }>(responseStr, 'simulate_input');
-    if (!parsedResult.ok) return parsedResult.response;
-    const parsed = parsedResult.data;
+    if (!parsedResult.ok) return parsedResult;
+    const parsed = parsedResult.value;
 
     if (parsed.error) {
-      return createErrorResponse(`Input simulation error: ${parsed.error}`, [
-        'Check action types and parameters',
-        'Ensure key names are valid Godot key names',
-      ]);
+      return err(
+        createErrorResponse(`Input simulation error: ${parsed.error}`, [
+          'Check action types and parameters',
+          'Ensure key names are valid Godot key names',
+        ]),
+      );
     }
 
     const payload: Record<string, unknown> = {
@@ -1027,23 +1140,28 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
+    return ok({
       content: [
         {
           type: 'text',
           text: JSON.stringify(payload),
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
-      'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
-      'If the game has exited, call stop_project, then run_project again',
-    ]);
+    return err(
+      createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
+        'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
+        'If the game has exited, call stop_project, then run_project again',
+      ]),
+    );
   }
 }
 
-export async function handleGetUiElements(runner: GodotRunner, args: OperationParams) {
+export async function handleGetUiElements(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'query UI elements');
@@ -1065,13 +1183,15 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
       responseStr,
       'get_ui_elements',
     );
-    if (!parsedResult.ok) return parsedResult.response;
-    const parsed = parsedResult.data;
+    if (!parsedResult.ok) return parsedResult;
+    const parsed = parsedResult.value;
 
     if (parsed.error) {
-      return createErrorResponse(`UI element query error: ${parsed.error}`, [
-        'Ensure the game has a UI with Control nodes',
-      ]);
+      return err(
+        createErrorResponse(`UI element query error: ${parsed.error}`, [
+          'Ensure the game has a UI with Control nodes',
+        ]),
+      );
     }
 
     const payload: Record<string, unknown> = {
@@ -1080,23 +1200,28 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
+    return ok({
       content: [
         {
           type: 'text',
           text: JSON.stringify(payload),
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
-      'Check get_debug_output for crash backtraces or runtime errors',
-      'If the game has exited, call stop_project, then run_project again',
-    ]);
+    return err(
+      createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
+        'Check get_debug_output for crash backtraces or runtime errors',
+        'If the game has exited, call stop_project, then run_project again',
+      ]),
+    );
   }
 }
 
-export async function handleRunScript(runner: GodotRunner, args: OperationParams) {
+export async function handleRunScript(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const sessionError = ensureRuntimeSession(runner, 'execute scripts');
@@ -1106,15 +1231,18 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
 
   const script = args.script;
   if (typeof script !== 'string' || script.trim() === '') {
-    return createErrorResponse('script is required and must be a non-empty string', [
-      'Provide GDScript source code with extends RefCounted and func execute(scene_tree: SceneTree) -> Variant',
-    ]);
+    return err(
+      createErrorResponse('script is required and must be a non-empty string', [
+        'Provide GDScript source code with extends RefCounted and func execute(scene_tree: SceneTree) -> Variant',
+      ]),
+    );
   }
 
   if (!script.includes('func execute')) {
-    return createErrorResponse(
-      'Script must define func execute(scene_tree: SceneTree) -> Variant',
-      ['Add a func execute(scene_tree: SceneTree) -> Variant method to your script'],
+    return err(
+      createErrorResponse('Script must define func execute(scene_tree: SceneTree) -> Variant', [
+        'Add a func execute(scene_tree: SceneTree) -> Variant method to your script',
+      ]),
     );
   }
 
@@ -1147,15 +1275,17 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
       result?: unknown;
       error?: string;
     }>(responseStr, 'run_script');
-    if (!parsedResult.ok) return parsedResult.response;
-    const parsed = parsedResult.data;
+    if (!parsedResult.ok) return parsedResult;
+    const parsed = parsedResult.value;
 
     if (parsed.error) {
-      return createErrorResponse(`Script execution error: ${parsed.error}`, [
-        'Check your GDScript syntax',
-        'Ensure the script extends RefCounted',
-        'Check get_debug_output for details',
-      ]);
+      return err(
+        createErrorResponse(`Script execution error: ${parsed.error}`, [
+          'Check your GDScript syntax',
+          'Ensure the script extends RefCounted',
+          'Check get_debug_output for details',
+        ]),
+      );
     }
 
     // Detect false-positive success: GDScript has no try-catch, so runtime errors
@@ -1163,13 +1293,15 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
     if (parsed.success && parsed.result === null && runner.activeSessionMode === 'spawned') {
       if (runtimeErrors.length > 0) {
         const errorContext = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES).join('\n');
-        return createErrorResponse(`Script runtime error detected:\n${errorContext}`, [
-          'Fix the GDScript error in your script and retry',
-          'Use get_debug_output for full process output',
-        ]);
+        return err(
+          createErrorResponse(`Script runtime error detected:\n${errorContext}`, [
+            'Fix the GDScript error in your script and retry',
+            'Use get_debug_output for full process output',
+          ]),
+        );
       }
 
-      return {
+      return ok({
         content: [
           {
             type: 'text',
@@ -1182,7 +1314,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
             }),
           },
         ],
-      };
+      });
     }
 
     const payload: Record<string, unknown> = {
@@ -1192,19 +1324,21 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
+    return ok({
       content: [
         {
           type: 'text',
           text: JSON.stringify(payload),
         },
       ],
-    };
+    });
   } catch (error: unknown) {
-    return createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [
-      'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
-      'If the game has exited, call stop_project, then run_project again',
-      'For long-running scripts, increase the timeout parameter',
-    ]);
+    return err(
+      createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [
+        'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
+        'If the game has exited, call stop_project, then run_project again',
+        'For long-running scripts, increase the timeout parameter',
+      ]),
+    );
   }
 }

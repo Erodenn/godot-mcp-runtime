@@ -14,6 +14,7 @@ import * as net from 'net';
 export const DEFAULT_BRIDGE_PORT = 9900;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const FRAME_HEADER_BYTES = 4;
+export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
 
 /**
  * Find an available TCP port by binding to port 0 (OS-assigned ephemeral port),

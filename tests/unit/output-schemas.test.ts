@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Ajv from 'ajv';
 import { allToolDefinitions } from '../../src/index.js';
-import type { ToolDefinition } from '../../src/utils/godot-runner.js';
+import type { ToolDefinition } from '../../src/mcp.types.js';
 
 const ajv = new Ajv({ strict: false });
 

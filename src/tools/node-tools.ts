@@ -1,18 +1,29 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
-import type { GodotRunner, OperationParams, ToolDefinition } from '../utils/godot-runner.js';
+import type { GodotRunner } from '../utils/godot-runner.js';
+import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { validateSubPath } from '../utils/path-validation.js';
+import { createErrorResponse } from '../utils/error-response.js';
 import {
-  normalizeParameters,
-  validateSubPath,
-  validateNodePath,
-  createErrorResponse,
-  validateSceneArgs,
-} from '../utils/godot-runner.js';
-import { executeSceneOp } from '../utils/handler-helpers.js';
+  parseSceneArgs,
+  parseRequiredNodePath,
+  parseOptionalNodePath,
+  requireString,
+  optionalString,
+  requireStringArray,
+  requireArray,
+  optionalNumber,
+  optionalBoolean,
+} from '../utils/arg-parsing.js';
+import type { NodePath, ProjectPath, ScenePath } from '../utils/branded.js';
+import type { Result } from '../utils/result.js';
+import { ok, err } from '../utils/result.js';
+import { executeSceneOp } from '../utils/headless-op.js';
 
 // --- Tool definitions ---
 
-export const nodeToolDefinitions: ToolDefinition[] = [
+export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
@@ -305,267 +316,298 @@ export const nodeToolDefinitions: ToolDefinition[] = [
       required: ['projectPath', 'scenePath', 'nodePath', 'signal', 'targetNodePath', 'method'],
     },
   },
-];
+] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
 
-export async function handleDeleteNodes(runner: GodotRunner, args: OperationParams) {
+export async function handleDeleteNodes(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodePaths || !Array.isArray(args.nodePaths) || args.nodePaths.length === 0) {
-    return createErrorResponse('nodePaths array is required', [
-      'Provide a non-empty array of node paths (e.g. ["root/Player"])',
-    ]);
-  }
-  for (const p of args.nodePaths as unknown[]) {
-    if (typeof p !== 'string' || !validateNodePath(p)) {
-      return createErrorResponse('Invalid nodePath in nodePaths', [
-        'Provide a scene-tree path without ".." (e.g. "root/Player")',
-      ]);
+  const nodePaths = requireStringArray(args, 'nodePaths');
+  if (!nodePaths.ok) return nodePaths;
+  for (const p of nodePaths.value) {
+    if (p.includes('..')) {
+      return err(
+        createErrorResponse('Invalid nodePath in nodePaths', [
+          'Provide a scene-tree path without ".." (e.g. "root/Player")',
+        ]),
+      );
     }
   }
 
-  const params = { scenePath: args.scenePath, nodePaths: args.nodePaths };
-  return executeSceneOp(runner, 'delete_nodes', params, v.projectPath, 'Failed to delete nodes', [
-    'Check if the node paths are correct',
-  ]);
+  const params = { scenePath: parsed.value.scenePath, nodePaths: nodePaths.value };
+  return executeSceneOp(
+    runner,
+    'delete_nodes',
+    params,
+    parsed.value.projectPath,
+    'Failed to delete nodes',
+    ['Check if the node paths are correct'],
+  );
 }
 
-export async function handleSetNodeProperties(runner: GodotRunner, args: OperationParams) {
+export async function handleSetNodeProperties(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.updates || !Array.isArray(args.updates)) {
-    return createErrorResponse('updates array is required', [
-      'Provide an array of { nodePath, property, value }',
-    ]);
-  }
+  const updates = requireArray(args, 'updates');
+  if (!updates.ok) return updates;
+
+  const abortOnError = optionalBoolean(args, 'abortOnError');
+  if (!abortOnError.ok) return abortOnError;
 
   const params = {
-    scenePath: args.scenePath,
-    updates: args.updates,
-    abortOnError: args.abortOnError ?? false,
+    scenePath: parsed.value.scenePath,
+    updates: updates.value,
+    abortOnError: abortOnError.value ?? false,
   };
   return executeSceneOp(
     runner,
     'set_node_properties',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to set node properties',
     ['Check node paths and property names'],
   );
 }
 
-export async function handleGetNodeProperties(runner: GodotRunner, args: OperationParams) {
+export async function handleGetNodeProperties(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodes || !Array.isArray(args.nodes)) {
-    return createErrorResponse('nodes array is required', [
-      'Provide an array of { nodePath, changedOnly? }',
-    ]);
-  }
+  const nodes = requireArray(args, 'nodes');
+  if (!nodes.ok) return nodes;
 
-  const params = { scenePath: args.scenePath, nodes: args.nodes };
+  const params = { scenePath: parsed.value.scenePath, nodes: nodes.value };
   return executeSceneOp(
     runner,
     'get_node_properties',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to get node properties',
     ['Check node paths'],
   );
 }
 
-export async function handleAttachScript(runner: GodotRunner, args: OperationParams) {
+export async function handleAttachScript(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
-    return createErrorResponse('Valid nodePath is required', [
-      'Provide the node path (e.g. "root/Player")',
-    ]);
+  const nodePath = parseRequiredNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath;
+
+  const scriptPath = requireString(args, 'scriptPath');
+  if (!scriptPath.ok) return scriptPath;
+  if (!validateSubPath(parsed.value.projectPath, scriptPath.value)) {
+    return err(
+      createErrorResponse('Valid scriptPath is required', [
+        'Provide a relative script path that stays inside the project directory',
+      ]),
+    );
   }
-  if (!args.scriptPath || !validateSubPath(v.projectPath, args.scriptPath as string)) {
-    return createErrorResponse('Valid scriptPath is required', [
-      'Provide a relative script path that stays inside the project directory',
-    ]);
-  }
-  const scriptFullPath = join(v.projectPath, args.scriptPath as string);
+  const scriptFullPath = join(parsed.value.projectPath, scriptPath.value);
   if (!existsSync(scriptFullPath)) {
-    return createErrorResponse(`Script file does not exist: ${args.scriptPath}`, [
-      'Create the script file first',
-    ]);
+    return err(
+      createErrorResponse(`Script file does not exist: ${scriptPath.value}`, [
+        'Create the script file first',
+      ]),
+    );
   }
 
   const params = {
-    scenePath: args.scenePath,
-    nodePath: args.nodePath,
-    scriptPath: args.scriptPath,
+    scenePath: parsed.value.scenePath,
+    nodePath: nodePath.value,
+    scriptPath: scriptPath.value,
   };
-  return executeSceneOp(runner, 'attach_script', params, v.projectPath, 'Failed to attach script', [
-    'Ensure the script is valid for this node type',
-  ]);
+  return executeSceneOp(
+    runner,
+    'attach_script',
+    params,
+    parsed.value.projectPath,
+    'Failed to attach script',
+    ['Ensure the script is valid for this node type'],
+  );
 }
 
-export async function handleGetSceneTree(runner: GodotRunner, args: OperationParams) {
+export async function handleGetSceneTree(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (args.parentPath && !validateNodePath(args.parentPath as string)) {
-    return createErrorResponse('Invalid parentPath', [
-      'Provide a scene-tree path without ".." (e.g. "root/Player")',
-    ]);
-  }
+  const parentPath = parseOptionalNodePath(args, 'parentPath');
+  if (!parentPath.ok) return parentPath;
 
-  const params: OperationParams = { scenePath: args.scenePath };
-  if (args.parentPath) params.parentPath = args.parentPath;
-  if (typeof args.maxDepth === 'number') params.maxDepth = args.maxDepth;
+  const maxDepth = optionalNumber(args, 'maxDepth');
+  if (!maxDepth.ok) return maxDepth;
+
+  const params: OperationParams = { scenePath: parsed.value.scenePath };
+  if (parentPath.value) params.parentPath = parentPath.value;
+  if (maxDepth.value !== undefined) params.maxDepth = maxDepth.value;
   return executeSceneOp(
     runner,
     'get_scene_tree',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to get scene tree',
     ['Ensure the scene is valid'],
   );
 }
 
-export async function handleDuplicateNode(runner: GodotRunner, args: OperationParams) {
+export async function handleDuplicateNode(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
-    return createErrorResponse('Valid nodePath is required', [
-      'Provide the node path to duplicate',
-    ]);
-  }
-  if (args.targetParentPath && !validateNodePath(args.targetParentPath as string)) {
-    return createErrorResponse('Invalid targetParentPath', [
-      'Provide a scene-tree path without ".." (e.g. "root/Player")',
-    ]);
-  }
+  const nodePath = parseRequiredNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath;
 
-  const params: OperationParams = { scenePath: args.scenePath, nodePath: args.nodePath };
-  if (args.newName) params.newName = args.newName;
-  if (args.targetParentPath) params.targetParentPath = args.targetParentPath;
+  const targetParentPath = parseOptionalNodePath(args, 'targetParentPath');
+  if (!targetParentPath.ok) return targetParentPath;
+
+  const newName = optionalString(args, 'newName');
+  if (!newName.ok) return newName;
+
+  const params: OperationParams = {
+    scenePath: parsed.value.scenePath,
+    nodePath: nodePath.value,
+  };
+  if (newName.value) params.newName = newName.value;
+  if (targetParentPath.value) params.targetParentPath = targetParentPath.value;
   return executeSceneOp(
     runner,
     'duplicate_node',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
   );
 }
 
-export async function handleGetNodeSignals(runner: GodotRunner, args: OperationParams) {
+export async function handleGetNodeSignals(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
-    return createErrorResponse('Valid nodePath is required', [
-      'Provide the node path (e.g. "root/Button")',
-    ]);
-  }
+  const nodePath = parseRequiredNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath;
 
-  const params = { scenePath: args.scenePath, nodePath: args.nodePath };
+  const params = { scenePath: parsed.value.scenePath, nodePath: nodePath.value };
   return executeSceneOp(
     runner,
     'get_node_signals',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to get node signals',
     ['Check if the node path is correct'],
   );
 }
 
-interface ValidatedSignalArgs {
-  projectPath: string;
-  scenePath: string;
-  nodePath: string;
+interface ParsedSignalArgs {
+  projectPath: ProjectPath;
+  scenePath: ScenePath;
+  nodePath: NodePath;
   signal: string;
-  targetNodePath: string;
+  targetNodePath: NodePath;
   method: string;
 }
 
-function validateSignalArgs(
-  args: OperationParams,
-): ValidatedSignalArgs | ReturnType<typeof createErrorResponse> {
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+function parseSignalArgs(args: OperationParams): Result<ParsedSignalArgs, ToolResponse> {
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
 
-  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
-    return createErrorResponse('Valid nodePath is required', ['Provide the source node path']);
-  }
-  if (!args.signal || !args.targetNodePath || !args.method) {
-    return createErrorResponse('signal, targetNodePath, and method are required', [
-      'Provide all three parameters',
-    ]);
-  }
-  if (!validateNodePath(args.targetNodePath as string)) {
-    return createErrorResponse('Invalid targetNodePath', [
-      'Provide a scene-tree path without ".." (e.g. "root/Player")',
-    ]);
-  }
+  const nodePath = parseRequiredNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath;
 
-  return {
-    projectPath: v.projectPath,
-    scenePath: v.scenePath,
-    nodePath: args.nodePath as string,
-    signal: args.signal as string,
-    targetNodePath: args.targetNodePath as string,
-    method: args.method as string,
-  };
+  const signal = requireString(args, 'signal');
+  if (!signal.ok) return signal;
+
+  const targetNodePath = parseRequiredNodePath(args, 'targetNodePath');
+  if (!targetNodePath.ok) return targetNodePath;
+
+  const method = requireString(args, 'method');
+  if (!method.ok) return method;
+
+  return ok({
+    projectPath: parsed.value.projectPath,
+    scenePath: parsed.value.scenePath,
+    nodePath: nodePath.value,
+    signal: signal.value,
+    targetNodePath: targetNodePath.value,
+    method: method.value,
+  });
 }
 
-export async function handleConnectSignal(runner: GodotRunner, args: OperationParams) {
+export async function handleConnectSignal(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSignalArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSignalArgs(args);
+  if (!parsed.ok) return parsed;
 
   const params = {
-    scenePath: v.scenePath,
-    nodePath: v.nodePath,
-    signal: v.signal,
-    targetNodePath: v.targetNodePath,
-    method: v.method,
+    scenePath: parsed.value.scenePath,
+    nodePath: parsed.value.nodePath,
+    signal: parsed.value.signal,
+    targetNodePath: parsed.value.targetNodePath,
+    method: parsed.value.method,
   };
   return executeSceneOp(
     runner,
     'connect_signal',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to connect signal',
     ['Ensure the signal exists on the source node and the method exists on the target node'],
   );
 }
 
-export async function handleDisconnectSignal(runner: GodotRunner, args: OperationParams) {
+export async function handleDisconnectSignal(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const v = validateSignalArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSignalArgs(args);
+  if (!parsed.ok) return parsed;
 
   const params = {
-    scenePath: v.scenePath,
-    nodePath: v.nodePath,
-    signal: v.signal,
-    targetNodePath: v.targetNodePath,
-    method: v.method,
+    scenePath: parsed.value.scenePath,
+    nodePath: parsed.value.nodePath,
+    signal: parsed.value.signal,
+    targetNodePath: parsed.value.targetNodePath,
+    method: parsed.value.method,
   };
   return executeSceneOp(
     runner,
     'disconnect_signal',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to disconnect signal',
     ['Ensure the signal connection exists before trying to disconnect it'],
   );

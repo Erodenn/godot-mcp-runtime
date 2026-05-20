@@ -61,6 +61,7 @@ export default [
       ],
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/consistent-type-imports': 'warn',
+      '@typescript-eslint/explicit-module-boundary-types': 'error',
 
       // MCP stdio invariant: stdout is the transport. console.log corrupts the
       // protocol. Use console.error / logError / logDebug for all server output.
@@ -92,6 +93,7 @@ export default [
     files: ['tests/**/*.ts', 'src/**/*.test.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/explicit-module-boundary-types': 'off',
     },
   },
   {

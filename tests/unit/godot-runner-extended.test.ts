@@ -1,12 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import {
-  cleanOutput,
-  normalizeForCompare,
-  validateProjectArgs,
-  validateSceneArgs,
-  checkDisplayAvailable,
-  GodotRunner,
-} from '../../src/utils/godot-runner.js';
+import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
+import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js';
+import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
@@ -88,58 +84,54 @@ describe('normalizeForCompare', () => {
   });
 });
 
-// ─── validateProjectArgs ─────────────────────────────────────────────────────
+// ─── parseProjectArgs ────────────────────────────────────────────────────────
 
-describe('validateProjectArgs', () => {
+describe('parseProjectArgs', () => {
   const tmp = useTmpDirs();
 
-  it('returns isError when projectPath is missing', () => {
-    expectErrorMatching(validateProjectArgs({}), /projectPath is required/);
+  it('returns err when projectPath is missing', () => {
+    expectErrorMatching(parseProjectArgs({}), /projectPath is required/);
   });
 
-  it('returns isError when projectPath contains ..', () => {
-    expectErrorMatching(
-      validateProjectArgs({ projectPath: '/some/../path' }),
-      /Invalid project path/,
-    );
+  it('returns err when projectPath contains ..', () => {
+    expectErrorMatching(parseProjectArgs({ projectPath: '/some/../path' }), /Invalid project path/);
   });
 
-  it('returns isError when directory exists but has no project.godot', () => {
+  it('returns err when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    expectErrorMatching(validateProjectArgs({ projectPath: dir }), /Not a valid Godot project/);
+    expectErrorMatching(parseProjectArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
-  it('returns validated shape with projectPath for a valid Godot project', () => {
-    const result = validateProjectArgs({ projectPath: fixtureProjectPath });
-    expect('isError' in result).toBe(false);
-    expect((result as { projectPath: string }).projectPath).toBe(fixtureProjectPath);
+  it('returns ok with branded projectPath for a valid Godot project', () => {
+    const result = parseProjectArgs({ projectPath: fixtureProjectPath });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.projectPath).toBe(fixtureProjectPath);
+    }
   });
 });
 
-// ─── validateSceneArgs ───────────────────────────────────────────────────────
+// ─── parseSceneArgs ──────────────────────────────────────────────────────────
 
-describe('validateSceneArgs', () => {
+describe('parseSceneArgs', () => {
   const tmp = useTmpDirs();
 
-  it('returns isError when projectPath is missing', () => {
-    expectErrorMatching(validateSceneArgs({}), /projectPath is required/);
+  it('returns err when projectPath is missing', () => {
+    expectErrorMatching(parseSceneArgs({}), /projectPath is required/);
   });
 
-  it('returns isError when projectPath contains ..', () => {
-    expectErrorMatching(
-      validateSceneArgs({ projectPath: '/some/../path' }),
-      /Invalid project path/,
-    );
+  it('returns err when projectPath contains ..', () => {
+    expectErrorMatching(parseSceneArgs({ projectPath: '/some/../path' }), /Invalid project path/);
   });
 
-  it('returns isError when directory exists but has no project.godot', () => {
+  it('returns err when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    expectErrorMatching(validateSceneArgs({ projectPath: dir }), /Not a valid Godot project/);
+    expectErrorMatching(parseSceneArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
-  it('returns isError when scenePath contains ..', () => {
+  it('returns err when scenePath contains ..', () => {
     expectErrorMatching(
-      validateSceneArgs({
+      parseSceneArgs({
         projectPath: fixtureProjectPath,
         scenePath: '../outside.tscn',
       }),
@@ -147,9 +139,9 @@ describe('validateSceneArgs', () => {
     );
   });
 
-  it('returns isError when scenePath is an absolute path that escapes the project', () => {
+  it('returns err when scenePath is an absolute path that escapes the project', () => {
     expectErrorMatching(
-      validateSceneArgs({
+      parseSceneArgs({
         projectPath: fixtureProjectPath,
         scenePath: '/etc/passwd',
       }),
@@ -157,9 +149,9 @@ describe('validateSceneArgs', () => {
     );
   });
 
-  it('returns isError when sceneRequired (default) and scene file does not exist', () => {
+  it('returns err when sceneRequired (default) and scene file does not exist', () => {
     expectErrorMatching(
-      validateSceneArgs({
+      parseSceneArgs({
         projectPath: fixtureProjectPath,
         scenePath: 'nonexistent.tscn',
       }),
@@ -168,33 +160,36 @@ describe('validateSceneArgs', () => {
   });
 
   it('returns { projectPath, scenePath: "" } when sceneRequired:false and scenePath is absent', () => {
-    const result = validateSceneArgs({ projectPath: fixtureProjectPath }, { sceneRequired: false });
-    expect('isError' in result).toBe(false);
-    const typed = result as { projectPath: string; scenePath: string };
-    expect(typed.projectPath).toBe(fixtureProjectPath);
-    expect(typed.scenePath).toBe('');
+    const result = parseSceneArgs({ projectPath: fixtureProjectPath }, { sceneRequired: false });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.projectPath).toBe(fixtureProjectPath);
+      expect(result.value.scenePath).toBe('');
+    }
   });
 
-  it('returns validated shape for a valid project and scene', () => {
-    const result = validateSceneArgs({
+  it('returns ok shape for a valid project and scene', () => {
+    const result = parseSceneArgs({
       projectPath: fixtureProjectPath,
       scenePath: fixtureScenePath,
     });
-    expect('isError' in result).toBe(false);
-    const typed = result as { projectPath: string; scenePath: string };
-    expect(typed.projectPath).toBe(fixtureProjectPath);
-    expect(typed.scenePath).toBe(fixtureScenePath);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.projectPath).toBe(fixtureProjectPath);
+      expect(result.value.scenePath).toBe(fixtureScenePath);
+    }
   });
 
   it('does not check scene existence when sceneRequired:false and scenePath is provided', () => {
-    // The implementation only stat-checks scene files when sceneRequired is true
-    const result = validateSceneArgs(
+    // Only sceneRequired:true stat-checks the scene file
+    const result = parseSceneArgs(
       { projectPath: fixtureProjectPath, scenePath: 'ghost.tscn' },
       { sceneRequired: false },
     );
-    expect('isError' in result).toBe(false);
-    const typed = result as { projectPath: string; scenePath: string };
-    expect(typed.scenePath).toBe('ghost.tscn');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.scenePath).toBe('ghost.tscn');
+    }
   });
 });
 

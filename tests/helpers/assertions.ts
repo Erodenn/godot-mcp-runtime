@@ -1,14 +1,52 @@
 /**
  * Shared assertion helpers for handler tests.
  *
- * Handlers return either a normal MCP response (`{ content: [...] }`) or an
- * error envelope (`{ content: [...], isError: true }`). `hasError` is the
- * canonical predicate — prefer it over inlining the shape check.
+ * After Phase 3 commit 4, handlers return `Result<ToolSuccessPayload, ToolResponse>`
+ * instead of `ToolResponse` directly — the dispatch edge in `src/dispatch.ts`
+ * maps the Result back to the MCP wire envelope. These helpers accept either
+ * shape so tests written before or after the flip stay readable.
+ *
+ * `hasError` is the canonical predicate. `unwrap` returns the underlying
+ * envelope (the success `value` or the error `error`) so test code that needs
+ * to inspect `content[i].text` directly can do so without knowing whether the
+ * handler returned a Result or a raw response.
  */
 
 import { expect } from 'vitest';
 
+interface ContentEntry {
+  type: string;
+  text?: string;
+  [k: string]: unknown;
+}
+
+interface EnvelopeShape {
+  content: ContentEntry[];
+  isError?: boolean;
+  [k: string]: unknown;
+}
+
+function isResult(value: unknown): value is { ok: boolean; value?: unknown; error?: unknown } {
+  return typeof value === 'object' && value !== null && 'ok' in (value as Record<string, unknown>);
+}
+
+/**
+ * Return the wire-shaped envelope from either a Result-wrapped handler return
+ * or a raw `ToolResponse`. Use in tests that need to read `content[i].text`
+ * directly — `unwrap(result).content[0].text` works regardless of which side
+ * of the Phase-3 boundary the handler under test is on.
+ */
+export function unwrap(result: unknown): EnvelopeShape {
+  if (isResult(result)) {
+    return (result.ok ? result.value : result.error) as EnvelopeShape;
+  }
+  return result as EnvelopeShape;
+}
+
 export function hasError(result: unknown): boolean {
+  if (isResult(result)) {
+    return !result.ok;
+  }
   return typeof result === 'object' && result !== null && 'isError' in result;
 }
 
@@ -18,7 +56,8 @@ export function hasError(result: unknown): boolean {
  */
 export function errorText(result: unknown): string | null {
   if (!hasError(result)) return null;
-  const content = (result as { content?: Array<{ text?: string }> }).content;
+  const envelope = unwrap(result);
+  const content = envelope.content;
   if (!Array.isArray(content) || content.length === 0) return null;
   return content[0]?.text ?? null;
 }

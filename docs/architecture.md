@@ -4,6 +4,7 @@
 src/
 ├── index.ts                # MCP server entry point, server setup
 ├── dispatch.ts             # Tool-name → handler dispatch table
+├── mcp.types.ts            # Shared MCP-contract types (OperationParams, ToolDefinition, ToolResponse, ToolHandler)
 ├── tools/
 │   ├── project-tools.ts    # Project introspection (list_projects, get_project_info, files, search, settings, scene_dependencies)
 │   ├── runtime-tools.ts    # Runtime/lifecycle (run_project, attach_project, take_screenshot, etc.)
@@ -15,12 +16,16 @@ src/
 │   ├── godot_operations.gd # Headless GDScript operations
 │   └── mcp_bridge.gd       # TCP autoload for runtime communication
 └── utils/
-    ├── godot-runner.ts     # Process spawning, output parsing, shared validation helpers
-    ├── handler-helpers.ts  # executeSceneOp wrapper for headless-op handlers
-    ├── bridge-manager.ts   # McpBridge artifact lifecycle (inject, cleanup, repair)
-    ├── bridge-protocol.ts  # TCP framing (length-prefixed frames, port resolution)
-    ├── autoload-ini.ts     # project.godot [autoload] INI primitives
-    └── logger.ts           # logDebug / logError helpers
+    ├── godot-runner.ts          # Process spawning, runtime session, bridge TCP client
+    ├── output-parsing.ts        # Godot stdout parsing (extractJson, cleanOutput, cleanStdout, normalizeForCompare)
+    ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
+    ├── error-response.ts        # Error helpers + arg validators (createErrorResponse, getErrorMessage, extractGdError, validateProjectArgs, validateSceneArgs)
+    ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
+    ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
+    ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
+    ├── bridge-protocol.ts       # TCP framing (length-prefixed frames, port resolution)
+    ├── autoload-ini.ts          # project.godot [autoload] INI primitives
+    └── logger.ts                # logDebug / logError helpers
 ```
 
 Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).

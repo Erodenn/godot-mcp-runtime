@@ -10,15 +10,14 @@ import {
   handleListProjects,
 } from '../../../src/tools/project-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 
-interface TextResponse {
-  content: Array<{ text: string }>;
-}
 function parseText<T>(result: unknown): T {
-  return JSON.parse((result as TextResponse).content[0].text);
+  const text = unwrap(result).content[0]?.text;
+  if (text === undefined) throw new Error('Expected a text content entry');
+  return JSON.parse(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +180,7 @@ describe('handleGetSceneDependencies', () => {
       scenePath: '../outside.tscn',
     });
     // handleGetSceneDependencies validates scenePath inline ("Invalid scenePath")
-    // rather than via validateSceneArgs ("Invalid scene path") — match either.
+    // rather than via parseSceneArgs ("Invalid scene path") — match either.
     expectErrorMatching(result, /invalid scene\s?path/i);
   });
 
@@ -370,7 +369,7 @@ describe('handleListProjects', () => {
     const projectName = dir.split(sep).pop()!;
     const result = await handleListProjects({ directory: parentDir });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain(projectName);
   });
 
@@ -390,7 +389,7 @@ describe('handleListProjects', () => {
 
     const result = await handleListProjects({ directory: parent });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('.dot-project');
     expect(text).not.toContain('.git');
   });

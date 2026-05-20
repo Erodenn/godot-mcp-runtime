@@ -73,11 +73,11 @@ When a tool is too complex to cover in the top-level description budget (~500 ch
 
 The `batch_` prefix is **not** a naming convention — it's the symptom of a missed consolidation (see §5). If you're tempted to add `batch_foo`, reconsider whether `foos` should take an array.
 
-Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/godot-runner.ts` bridge them.
+Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/parameter-conversion.ts` bridge them.
 
 ### Implementation helpers
 
-Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/handler-helpers.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
+Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/headless-op.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
 
 ---
 

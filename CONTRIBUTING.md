@@ -82,7 +82,7 @@ Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/godot-runner.ts`. `validateProjectArgs` rejects `..` and verifies `project.godot` exists. `validateSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
+All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/error-response.ts`. `validateProjectArgs` rejects `..` and verifies `project.godot` exists. `validateSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
 
 ### Error responses use `createErrorResponse`
 
@@ -90,7 +90,7 @@ Tool handlers return `createErrorResponse(message, possibleSolutions[])`, not ra
 
 ### TypeScript camelCase, GDScript snake_case
 
-Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/godot-runner.ts`.
+Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/parameter-conversion.ts`.
 
 ### MCP SDK: `Server` vs `McpServer`
 
