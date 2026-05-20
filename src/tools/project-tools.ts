@@ -7,6 +7,7 @@ import {
   validateSubPath,
   validateProjectArgs,
   createErrorResponse,
+  createStructuredResponse,
   getErrorMessage,
   projectGodotPath,
 } from '../utils/godot-runner.js';
@@ -546,7 +547,7 @@ export async function handleSearchProject(args: OperationParams) {
       caseSensitive,
       maxResults,
     );
-    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    return createStructuredResponse(result as unknown as Record<string, unknown>);
   } catch (error: unknown) {
     return createErrorResponse(`Failed to search project: ${getErrorMessage(error)}`, [
       'Check if the project directory is accessible',
@@ -597,9 +598,10 @@ export async function handleGetSceneDependencies(args: OperationParams) {
         dependencies.push(dep);
       }
     }
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }],
-    };
+    return createStructuredResponse({
+      scene: args.scenePath as string,
+      dependencies,
+    });
   } catch (error: unknown) {
     return createErrorResponse(`Failed to get scene dependencies: ${getErrorMessage(error)}`, [
       'Check if the scene file is accessible',

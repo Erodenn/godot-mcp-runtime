@@ -6,6 +6,7 @@ import {
   validateProjectArgs,
   validateSubPath,
   createErrorResponse,
+  createStructuredResponse,
   getErrorMessage,
   isUnderDir,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
@@ -410,7 +411,6 @@ export const runtimeToolDefinitions: ToolDefinition[] = [
       properties: {
         success: { type: 'boolean' },
         result: {},
-        warning: { type: 'string' },
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },
@@ -704,17 +704,10 @@ export async function handleDetachProject(runner: GodotRunner) {
 
   const result = (await runner.stopProject())!;
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          message: 'Detached attached project and cleaned MCP bridge state',
-          externalProcessPreserved: result.externalProcessPreserved === true,
-        }),
-      },
-    ],
-  };
+  return createStructuredResponse({
+    message: 'Detached attached project and cleaned MCP bridge state',
+    externalProcessPreserved: result.externalProcessPreserved === true,
+  });
 }
 
 export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams = {}) {
@@ -728,20 +721,13 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
   }
 
   if (runner.activeSessionMode === 'attached') {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            output: [],
-            errors: [],
-            running: null,
-            attached: true,
-            tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
-          }),
-        },
-      ],
-    };
+    return createStructuredResponse({
+      output: [],
+      errors: [],
+      running: null,
+      attached: true,
+      tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
+    });
   }
 
   const proc = runner.activeProcess;
@@ -771,14 +757,7 @@ export function handleGetDebugOutput(runner: GodotRunner, args: OperationParams 
       'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
   }
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify(response),
-      },
-    ],
-  };
+  return createStructuredResponse(response);
 }
 
 export async function handleStopProject(runner: GodotRunner) {
@@ -791,23 +770,16 @@ export async function handleStopProject(runner: GodotRunner) {
     ]);
   }
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          message:
-            result.mode === 'attached'
-              ? 'Attached project detached and MCP bridge state cleaned up'
-              : 'Godot project stopped',
-          mode: result.mode,
-          externalProcessPreserved: result.externalProcessPreserved === true,
-          finalOutput: result.output.slice(-200),
-          finalErrors: result.errors.slice(-200),
-        }),
-      },
-    ],
-  };
+  return createStructuredResponse({
+    message:
+      result.mode === 'attached'
+        ? 'Attached project detached and MCP bridge state cleaned up'
+        : 'Godot project stopped',
+    mode: result.mode,
+    externalProcessPreserved: result.externalProcessPreserved === true,
+    finalOutput: result.output.slice(-200),
+    finalErrors: result.errors.slice(-200),
+  });
 }
 
 function parseScreenshotResponseMode(value: unknown): ScreenshotResponseMode | null {
@@ -957,9 +929,7 @@ export async function handleTakeScreenshot(runner: GodotRunner, args: OperationP
 
     attachRuntimeWarnings(metadata, runtimeErrors);
 
-    content.push({ type: 'text', text: JSON.stringify(metadata) });
-
-    return { content };
+    return createStructuredResponse(metadata, content);
   } catch (error: unknown) {
     return createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors',
@@ -1027,14 +997,7 @@ export async function handleSimulateInput(runner: GodotRunner, args: OperationPa
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    };
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
@@ -1080,14 +1043,7 @@ export async function handleGetUiElements(runner: GodotRunner, args: OperationPa
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    };
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors',
@@ -1169,20 +1125,14 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
         ]);
       }
 
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              success: true,
-              result: null,
-              warning:
-                'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
-              tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
-            }),
-          },
+      return createStructuredResponse({
+        success: true,
+        result: null,
+        warnings: [
+          'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
         ],
-      };
+        tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+      });
     }
 
     const payload: Record<string, unknown> = {
@@ -1192,14 +1142,7 @@ export async function handleRunScript(runner: GodotRunner, args: OperationParams
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    };
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [
       'Check get_debug_output for crash backtraces or runtime errors raised inside the script',

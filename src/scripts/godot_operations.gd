@@ -300,7 +300,7 @@ func create_scene(params):
 		return
 
 	if save_scene_to_path(scene_root, full_scene_path):
-		print("Scene created successfully at: " + params.scene_path)
+		print(JSON.stringify({"success": true, "scenePath": params.scene_path}))
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		quit(1)
@@ -659,7 +659,11 @@ func attach_script(params):
 	node.set_script(script)
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Script '" + params.script_path + "' attached successfully to node '" + params.node_path + "'")
+		print(JSON.stringify({
+			"success": true,
+			"nodePath": params.node_path,
+			"scriptPath": params.script_path
+		}))
 	else:
 		log_error("Failed to save scene after attaching script")
 		quit(1)
@@ -709,8 +713,27 @@ func duplicate_node(params):
 		current.owner = scene_root
 		queue.append_array(current.get_children())
 
+	# Compute the new node's scene-relative path: parent path + "/" + duplicate.name.
+	# The scene tree isn't attached in headless mode so get_path() is unreliable;
+	# derive parent path from the input node_path (or target_parent_path).
+	var parent_relative_path: String
+	if params.has("target_parent_path"):
+		parent_relative_path = params.target_parent_path
+	else:
+		var last_slash = params.node_path.rfind("/")
+		parent_relative_path = params.node_path.substr(0, last_slash) if last_slash > 0 else ""
+	var new_path: String
+	if parent_relative_path == "":
+		new_path = String(duplicate.name)
+	else:
+		new_path = parent_relative_path + "/" + String(duplicate.name)
+
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Node duplicated successfully as '" + duplicate.name + "'")
+		print(JSON.stringify({
+			"success": true,
+			"originalPath": params.node_path,
+			"newPath": new_path
+		}))
 	else:
 		log_error("Failed to save scene after duplicating node")
 		quit(1)

@@ -75,14 +75,23 @@ describe('handleCreateScene', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({ stdout: 'Scene created successfully at: scenes/x.tscn' });
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ success: true, scenePath: 'scenes/x.tscn' }),
+    });
     const result = await handleCreateScene(fake.asRunner, {
       projectPath: fixtureProjectPath,
       scenePath: 'scenes/x.tscn',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
-    expect(text).toContain('created successfully');
+    const typed = result as {
+      content: Array<{ text: string }>;
+      structuredContent?: { success?: boolean; scenePath?: string };
+    };
+    expect(typed.structuredContent).toEqual({ success: true, scenePath: 'scenes/x.tscn' });
+    expect(JSON.parse(typed.content[0].text)).toEqual({
+      success: true,
+      scenePath: 'scenes/x.tscn',
+    });
   });
 });
 
