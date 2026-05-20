@@ -5,11 +5,13 @@ import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
+import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
-  validateProjectArgs,
-  createErrorResponse,
-  getErrorMessage,
-} from '../utils/error-response.js';
+  parseProjectArgs,
+  optionalString,
+  optionalNumber,
+  optionalBoolean,
+} from '../utils/arg-parsing.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
 
@@ -487,8 +489,8 @@ export async function handleLaunchEditor(
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
   try {
     if (!runner.getGodotPath()) {
@@ -501,8 +503,8 @@ export async function handleLaunchEditor(
       }
     }
 
-    logDebug(`Launching Godot editor for project: ${v.projectPath}`);
-    const process = runner.launchEditor(v.projectPath);
+    logDebug(`Launching Godot editor for project: ${parsed.value.projectPath}`);
+    const process = runner.launchEditor(parsed.value.projectPath);
 
     process.on('error', (err: Error) => {
       console.error('Failed to start Godot editor:', err);
@@ -512,7 +514,7 @@ export async function handleLaunchEditor(
       content: [
         {
           type: 'text',
-          text: `Godot editor launched successfully for project at ${v.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
+          text: `Godot editor launched successfully for project at ${parsed.value.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
         },
       ],
     };
@@ -530,13 +532,17 @@ export async function handleRunProject(
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
+  const { projectPath } = parsed.value;
 
-  if (typeof args.scene === 'string') {
-    if (!validateSubPath(v.projectPath, args.scene)) {
+  const scene = optionalString(args, 'scene');
+  if (!scene.ok) return scene.error;
+
+  if (scene.value !== undefined) {
+    if (!validateSubPath(projectPath, scene.value)) {
       return createErrorResponse(
-        `Invalid scene path: must be project-relative without ".." (got: ${args.scene})`,
+        `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
         ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
       );
     }
@@ -553,27 +559,23 @@ export async function handleRunProject(
     }
   }
 
-  try {
-    const background = args.background === true;
-    const bridgePort = args.bridgePort;
-    if (bridgePort !== undefined) {
-      if (
-        !Number.isInteger(bridgePort) ||
-        (bridgePort as number) < 1 ||
-        (bridgePort as number) > 65535
-      ) {
-        return createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort)})`,
-          ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
-        );
-      }
+  const bridgePort = optionalNumber(args, 'bridgePort');
+  if (!bridgePort.ok) return bridgePort.error;
+  if (bridgePort.value !== undefined) {
+    if (!Number.isInteger(bridgePort.value) || bridgePort.value < 1 || bridgePort.value > 65535) {
+      return createErrorResponse(
+        `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort.value)})`,
+        ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
+      );
     }
-    await runner.runProject(
-      v.projectPath,
-      args.scene as string | undefined,
-      background,
-      bridgePort as number | undefined,
-    );
+  }
+
+  const background = optionalBoolean(args, 'background');
+  if (!background.ok) return background.error;
+  const isBackground = background.value === true;
+
+  try {
+    await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value);
 
     const bridgeResult = await runner.waitForBridge();
 
@@ -596,7 +598,7 @@ export async function handleRunProject(
       const recentErrors = runner.getRecentErrors(20);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
       const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const onDisk = runner.readBakedBridgePort(projectPath);
       const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
       const racePrefix = raceDetected
         ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
@@ -607,7 +609,7 @@ export async function handleRunProject(
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
       ];
-      if (background) {
+      if (isBackground) {
         lines.push('- Background mode: window hidden, physical input blocked');
       }
       // Tear down before returning so hasActiveRuntimeSession() reports false
@@ -633,7 +635,7 @@ export async function handleRunProject(
       '- Use get_debug_output to check runtime output and errors',
       '- Call stop_project when done',
     ];
-    if (background) {
+    if (isBackground) {
       lines.push('- Background mode: window hidden, physical input blocked');
     }
 
@@ -662,33 +664,36 @@ export async function handleAttachProject(
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
+  const { projectPath } = parsed.value;
+
+  const attachBridgePort = optionalNumber(args, 'bridgePort');
+  if (!attachBridgePort.ok) return attachBridgePort.error;
+  if (attachBridgePort.value !== undefined) {
+    if (
+      !Number.isInteger(attachBridgePort.value) ||
+      attachBridgePort.value < 1 ||
+      attachBridgePort.value > 65535
+    ) {
+      return createErrorResponse(
+        `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort.value)})`,
+        [
+          'Omit bridgePort to auto-select a free port',
+          'Pass a valid TCP port number matching the externally launched Godot',
+        ],
+      );
+    }
+  }
 
   try {
-    const attachBridgePort = args.bridgePort;
-    if (attachBridgePort !== undefined) {
-      if (
-        !Number.isInteger(attachBridgePort) ||
-        (attachBridgePort as number) < 1 ||
-        (attachBridgePort as number) > 65535
-      ) {
-        return createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort)})`,
-          [
-            'Omit bridgePort to auto-select a free port',
-            'Pass a valid TCP port number matching the externally launched Godot',
-          ],
-        );
-      }
-    }
-    await runner.attachProject(v.projectPath, attachBridgePort as number | undefined);
+    await runner.attachProject(projectPath, attachBridgePort.value);
 
     const bridgeResult = await runner.waitForBridgeAttached();
 
     if (!bridgeResult.ready) {
       const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(v.projectPath);
+      const onDisk = runner.readBakedBridgePort(projectPath);
       const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
       const racePrefix = raceDetected
         ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
@@ -936,7 +941,7 @@ export async function handleTakeScreenshot(
     // Defense-in-depth: the bridge runs in user-controlled GDScript and could
     // be patched to return any path. Refuse to read anything outside the
     // project's own .mcp/screenshots/ directory.
-    const screenshotsRoot = resolve(runner.activeProjectPath as string, '.mcp', 'screenshots');
+    const screenshotsRoot = resolve(runner.activeProjectPath!, '.mcp', 'screenshots');
     if (!isUnderDir(screenshotsRoot, screenshotPath)) {
       return createErrorResponse(
         'Bridge returned a screenshot path outside .mcp/screenshots/. Refusing to read.',

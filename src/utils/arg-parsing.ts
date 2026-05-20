@@ -67,16 +67,14 @@ export function requireStringArray(
       ]),
     );
   }
-  for (const v of value) {
-    if (typeof v !== 'string') {
-      return err(
-        createErrorResponse(`${key} entries must all be strings`, [
-          `Ensure every entry in ${key} is a string`,
-        ]),
-      );
-    }
+  if (!value.every(isStringElement)) {
+    return err(
+      createErrorResponse(`${key} entries must all be strings`, [
+        `Ensure every entry in ${key} is a string`,
+      ]),
+    );
   }
-  return ok(value as string[]);
+  return ok(value);
 }
 
 export function optionalStringArray(
@@ -92,16 +90,18 @@ export function optionalStringArray(
       ]),
     );
   }
-  for (const v of value) {
-    if (typeof v !== 'string') {
-      return err(
-        createErrorResponse(`${key} entries must all be strings`, [
-          `Ensure every entry in ${key} is a string`,
-        ]),
-      );
-    }
+  if (!value.every(isStringElement)) {
+    return err(
+      createErrorResponse(`${key} entries must all be strings`, [
+        `Ensure every entry in ${key} is a string`,
+      ]),
+    );
   }
-  return ok(value as string[]);
+  return ok(value);
+}
+
+function isStringElement(v: unknown): v is string {
+  return typeof v === 'string';
 }
 
 export function requireNumber(args: OperationParams, key: string): Result<number, ToolResponse> {
@@ -169,6 +169,22 @@ export function requireObject(
     return err(
       createErrorResponse(`${key} is required and must be an object`, [
         `Provide a JSON object for ${key}`,
+      ]),
+    );
+  }
+  return ok(value as Record<string, unknown>);
+}
+
+export function optionalObject(
+  args: OperationParams,
+  key: string,
+): Result<Record<string, unknown> | undefined, ToolResponse> {
+  const value = args[key];
+  if (value === undefined) return ok(undefined);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return err(
+      createErrorResponse(`${key} must be an object when provided`, [
+        `Provide a JSON object for ${key} or omit it`,
       ]),
     );
   }
@@ -295,10 +311,10 @@ export function parseSceneArgs(
  * `targetNodePath`) — scene-tree paths live in a separate namespace from
  * filesystem paths and the project-root containment check does not apply.
  */
-export function parseNodePath(raw: string): Result<NodePath, ToolResponse> {
+export function parseNodePath(raw: string, fieldName = 'nodePath'): Result<NodePath, ToolResponse> {
   if (!validateNodePathShape(raw)) {
     return err(
-      createErrorResponse('Invalid nodePath', [
+      createErrorResponse(`Invalid ${fieldName}`, [
         'Provide a scene-tree path without ".." (e.g. "root/Player")',
       ]),
     );
@@ -318,7 +334,7 @@ export function parseRequiredNodePath(
       ]),
     );
   }
-  return parseNodePath(raw);
+  return parseNodePath(raw, key);
 }
 
 export function parseOptionalNodePath(
@@ -334,5 +350,5 @@ export function parseOptionalNodePath(
       ]),
     );
   }
-  return parseNodePath(raw);
+  return parseNodePath(raw, key);
 }

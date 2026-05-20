@@ -3,12 +3,19 @@ import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, validateNodePath } from '../utils/path-validation.js';
+import { validateSubPath } from '../utils/path-validation.js';
+import { createErrorResponse } from '../utils/error-response.js';
 import {
-  createErrorResponse,
-  validateProjectArgs,
-  validateSceneArgs,
-} from '../utils/error-response.js';
+  parseProjectArgs,
+  parseSceneArgs,
+  parseRequiredNodePath,
+  requireString,
+  optionalString,
+  optionalStringArray,
+  optionalBoolean,
+  requireArray,
+  optionalObject,
+} from '../utils/arg-parsing.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 
 export const sceneToolDefinitions = [
@@ -237,16 +244,23 @@ export async function handleCreateScene(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args, { sceneRequired: false });
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args, { sceneRequired: false });
+  if (!parsed.ok) return parsed.error;
+  const rootNodeType = optionalString(args, 'rootNodeType');
+  if (!rootNodeType.ok) return rootNodeType.error;
 
   const params = {
-    scenePath: args.scenePath,
-    rootNodeType: args.rootNodeType || 'Node2D',
+    scenePath: parsed.value.scenePath,
+    rootNodeType: rootNodeType.value || 'Node2D',
   };
-  return executeSceneOp(runner, 'create_scene', params, v.projectPath, 'Failed to create scene', [
-    'Check if the root node type is valid',
-  ]);
+  return executeSceneOp(
+    runner,
+    'create_scene',
+    params,
+    parsed.value.projectPath,
+    'Failed to create scene',
+    ['Check if the root node type is valid'],
+  );
 }
 
 export async function handleAddNode(
@@ -254,14 +268,16 @@ export async function handleAddNode(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.nodeType || !args.nodeName) {
-    return createErrorResponse('nodeType and nodeName are required', [
-      'Provide both nodeType and nodeName',
-    ]);
-  }
+  const nodeType = requireString(args, 'nodeType');
+  if (!nodeType.ok) return nodeType.error;
+  const nodeName = requireString(args, 'nodeName');
+  if (!nodeName.ok) return nodeName.error;
+
+  const properties = optionalObject(args, 'properties');
+  if (!properties.ok) return properties.error;
 
   // Merge promoted top-level params into properties dict
   const promotedKeys = [
@@ -272,7 +288,7 @@ export async function handleAddNode(
     'visible',
     'modulate',
   ] as const;
-  const mergedProps: OperationParams = (args.properties as OperationParams) || {};
+  const mergedProps: OperationParams = properties.value ?? {};
   for (const key of promotedKeys) {
     if (args[key] !== undefined) {
       mergedProps[key] = args[key];
@@ -280,16 +296,24 @@ export async function handleAddNode(
   }
 
   const params: OperationParams = {
-    scenePath: args.scenePath,
-    nodeType: args.nodeType,
-    nodeName: args.nodeName,
+    scenePath: parsed.value.scenePath,
+    nodeType: nodeType.value,
+    nodeName: nodeName.value,
   };
-  if (args.parentNodePath) params.parentNodePath = args.parentNodePath;
+  if (args.parentNodePath !== undefined) {
+    const parentNodePath = parseRequiredNodePath(args, 'parentNodePath');
+    if (!parentNodePath.ok) return parentNodePath.error;
+    params.parentNodePath = parentNodePath.value;
+  }
   if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
-  return executeSceneOp(runner, 'add_node', params, v.projectPath, 'Failed to add node', [
-    'Check if the node type is valid',
-    'Ensure the parent node path exists',
-  ]);
+  return executeSceneOp(
+    runner,
+    'add_node',
+    params,
+    parsed.value.projectPath,
+    'Failed to add node',
+    ['Check if the node type is valid', 'Ensure the parent node path exists'],
+  );
 }
 
 export async function handleLoadSprite(
@@ -297,32 +321,39 @@ export async function handleLoadSprite(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.nodePath || !validateNodePath(args.nodePath as string)) {
-    return createErrorResponse('Valid nodePath is required', ['Provide the target node path']);
-  }
-  if (!args.texturePath || !validateSubPath(v.projectPath, args.texturePath as string)) {
+  const nodePath = parseRequiredNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath.error;
+
+  const texturePath = requireString(args, 'texturePath');
+  if (!texturePath.ok) return texturePath.error;
+  if (!validateSubPath(parsed.value.projectPath, texturePath.value)) {
     return createErrorResponse('Valid texturePath is required', [
       'Provide a relative texture path that stays inside the project directory',
     ]);
   }
-  const textureFullPath = join(v.projectPath, args.texturePath as string);
+  const textureFullPath = join(parsed.value.projectPath, texturePath.value);
   if (!existsSync(textureFullPath)) {
-    return createErrorResponse(`Texture file does not exist: ${args.texturePath}`, [
+    return createErrorResponse(`Texture file does not exist: ${texturePath.value}`, [
       'Ensure the texture path is correct',
     ]);
   }
 
   const params = {
-    scenePath: args.scenePath,
-    nodePath: args.nodePath,
-    texturePath: args.texturePath,
+    scenePath: parsed.value.scenePath,
+    nodePath: nodePath.value,
+    texturePath: texturePath.value,
   };
-  return executeSceneOp(runner, 'load_sprite', params, v.projectPath, 'Failed to load sprite', [
-    'Check if the node is a Sprite2D, Sprite3D, or TextureRect',
-  ]);
+  return executeSceneOp(
+    runner,
+    'load_sprite',
+    params,
+    parsed.value.projectPath,
+    'Failed to load sprite',
+    ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
+  );
 }
 
 export async function handleSaveScene(
@@ -330,20 +361,27 @@ export async function handleSaveScene(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (args.newPath && !validateSubPath(v.projectPath, args.newPath as string)) {
+  const newPath = optionalString(args, 'newPath');
+  if (!newPath.ok) return newPath.error;
+  if (newPath.value && !validateSubPath(parsed.value.projectPath, newPath.value)) {
     return createErrorResponse('Invalid newPath', [
       'Provide a valid relative path without ".." that stays inside the project directory',
     ]);
   }
 
-  const params: OperationParams = { scenePath: args.scenePath };
-  if (args.newPath) params.newPath = args.newPath;
-  return executeSceneOp(runner, 'save_scene', params, v.projectPath, 'Failed to save scene', [
-    'Check if the scene file is valid',
-  ]);
+  const params: OperationParams = { scenePath: parsed.value.scenePath };
+  if (newPath.value) params.newPath = newPath.value;
+  return executeSceneOp(
+    runner,
+    'save_scene',
+    params,
+    parsed.value.projectPath,
+    'Failed to save scene',
+    ['Check if the scene file is valid'],
+  );
 }
 
 export async function handleExportMeshLibrary(
@@ -351,27 +389,32 @@ export async function handleExportMeshLibrary(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateSceneArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.outputPath || !validateSubPath(v.projectPath, args.outputPath as string)) {
+  const outputPath = requireString(args, 'outputPath');
+  if (!outputPath.ok) return outputPath.error;
+  if (!validateSubPath(parsed.value.projectPath, outputPath.value)) {
     return createErrorResponse('Valid outputPath is required', [
       'Provide an output path for the .res file that stays inside the project directory',
     ]);
   }
 
+  const meshItemNames = optionalStringArray(args, 'meshItemNames');
+  if (!meshItemNames.ok) return meshItemNames.error;
+
   const params: OperationParams = {
-    scenePath: args.scenePath,
-    outputPath: args.outputPath,
+    scenePath: parsed.value.scenePath,
+    outputPath: outputPath.value,
   };
-  if (args.meshItemNames && Array.isArray(args.meshItemNames)) {
-    params.meshItemNames = args.meshItemNames;
+  if (meshItemNames.value) {
+    params.meshItemNames = meshItemNames.value;
   }
   return executeSceneOp(
     runner,
     'export_mesh_library',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
   );
@@ -382,24 +425,24 @@ export async function handleBatchSceneOperations(
   args: OperationParams,
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.operations || !Array.isArray(args.operations)) {
-    return createErrorResponse('operations array is required', [
-      'Provide an operations array with at least one item',
-    ]);
-  }
+  const operations = requireArray(args, 'operations');
+  if (!operations.ok) return operations.error;
+
+  const abortOnError = optionalBoolean(args, 'abortOnError');
+  if (!abortOnError.ok) return abortOnError.error;
 
   const params = {
-    operations: args.operations,
-    abortOnError: args.abortOnError ?? false,
+    operations: operations.value,
+    abortOnError: abortOnError.value ?? false,
   };
   return executeSceneOp(
     runner,
     'batch_scene_operations',
     params,
-    v.projectPath,
+    parsed.value.projectPath,
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
   );

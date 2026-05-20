@@ -4,11 +4,15 @@ import type { GodotRunner } from '../utils/godot-runner.js';
 import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
-  validateProjectArgs,
-  createErrorResponse,
-  getErrorMessage,
-} from '../utils/error-response.js';
+  parseProjectArgs,
+  requireString,
+  optionalString,
+  optionalBoolean,
+  optionalNumber,
+  optionalStringArray,
+} from '../utils/arg-parsing.js';
 import { logDebug } from '../utils/logger.js';
 
 function fileExtension(name: string): string {
@@ -419,27 +423,26 @@ function parseProjectSettings(
 export async function handleListProjects(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
-  if (!args.directory) {
-    return createErrorResponse('Directory is required', [
-      'Provide a valid directory path to search for Godot projects',
-    ]);
-  }
+  const directory = requireString(args, 'directory');
+  if (!directory.ok) return directory.error;
 
-  if (!validatePath(args.directory as string)) {
+  if (!validatePath(directory.value)) {
     return createErrorResponse('Invalid directory path', [
       'Provide a valid path without ".." or other potentially unsafe characters',
     ]);
   }
 
   try {
-    if (!existsSync(args.directory as string)) {
-      return createErrorResponse(`Directory does not exist: ${args.directory}`, [
+    if (!existsSync(directory.value)) {
+      return createErrorResponse(`Directory does not exist: ${directory.value}`, [
         'Provide a valid directory path that exists on the system',
       ]);
     }
 
-    const recursive = args.recursive === true;
-    const projects = findGodotProjects(args.directory as string, recursive);
+    const recursive = optionalBoolean(args, 'recursive');
+    if (!recursive.ok) return recursive.error;
+
+    const projects = findGodotProjects(directory.value, recursive.value === true);
 
     return {
       content: [{ type: 'text', text: JSON.stringify(projects) }],
@@ -468,13 +471,13 @@ export async function handleGetProjectInfo(
       };
     }
 
-    const v = validateProjectArgs(args);
-    if ('isError' in v) return v;
+    const parsed = parseProjectArgs(args);
+    if (!parsed.ok) return parsed.error;
 
-    const projectFile = projectGodotPath(v.projectPath);
-    const projectStructure = getProjectStructure(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
+    const projectStructure = getProjectStructure(parsed.value.projectPath);
 
-    let projectName = basename(v.projectPath);
+    let projectName = basename(parsed.value.projectPath);
     try {
       const projectFileContent = readFileSync(projectFile, 'utf8');
       const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
@@ -492,7 +495,7 @@ export async function handleGetProjectInfo(
           type: 'text',
           text: JSON.stringify({
             name: projectName,
-            path: v.projectPath,
+            path: parsed.value.projectPath,
             godotVersion: version,
             structure: projectStructure,
           }),
@@ -509,15 +512,21 @@ export async function handleGetProjectInfo(
 
 export async function handleGetProjectFiles(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
   try {
-    const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : -1;
-    const extensions = Array.isArray(args.extensions)
-      ? (args.extensions as string[]).map((e) => e.toLowerCase().replace(/^\./, ''))
+    const maxDepthResult = optionalNumber(args, 'maxDepth');
+    if (!maxDepthResult.ok) return maxDepthResult.error;
+    const maxDepth = maxDepthResult.value ?? -1;
+
+    const extensionsResult = optionalStringArray(args, 'extensions');
+    if (!extensionsResult.ok) return extensionsResult.error;
+    const extensions = extensionsResult.value
+      ? extensionsResult.value.map((e) => e.toLowerCase().replace(/^\./, ''))
       : null;
-    const tree = buildFilesystemTree(v.projectPath, '', maxDepth, 0, extensions);
+
+    const tree = buildFilesystemTree(parsed.value.projectPath, '', maxDepth, 0, extensions);
     return { content: [{ type: 'text', text: JSON.stringify(tree) }] };
   } catch (error: unknown) {
     return createErrorResponse(`Failed to get project files: ${getErrorMessage(error)}`, [
@@ -528,22 +537,30 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Tool
 
 export async function handleSearchProject(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.pattern || typeof args.pattern !== 'string') {
-    return createErrorResponse('pattern is required', ['Provide a plain-text search string']);
-  }
+  const pattern = requireString(args, 'pattern');
+  if (!pattern.ok) return pattern.error;
 
   try {
-    const fileTypes = Array.isArray(args.fileTypes)
-      ? (args.fileTypes as string[]).map((e) => e.toLowerCase().replace(/^\./, ''))
+    const fileTypesResult = optionalStringArray(args, 'fileTypes');
+    if (!fileTypesResult.ok) return fileTypesResult.error;
+    const fileTypes = fileTypesResult.value
+      ? fileTypesResult.value.map((e) => e.toLowerCase().replace(/^\./, ''))
       : ['gd', 'tscn', 'cs', 'gdshader'];
-    const caseSensitive = args.caseSensitive === true;
-    const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 100;
+
+    const caseSensitiveResult = optionalBoolean(args, 'caseSensitive');
+    if (!caseSensitiveResult.ok) return caseSensitiveResult.error;
+    const caseSensitive = caseSensitiveResult.value === true;
+
+    const maxResultsResult = optionalNumber(args, 'maxResults');
+    if (!maxResultsResult.ok) return maxResultsResult.error;
+    const maxResults = maxResultsResult.value ?? 100;
+
     const result = searchInFiles(
-      v.projectPath,
-      args.pattern as string,
+      parsed.value.projectPath,
+      pattern.value,
       fileTypes,
       caseSensitive,
       maxResults,
@@ -558,24 +575,22 @@ export async function handleSearchProject(args: OperationParams): Promise<ToolRe
 
 export async function handleGetSceneDependencies(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.scenePath || typeof args.scenePath !== 'string') {
-    return createErrorResponse('scenePath is required', [
-      'Provide a path relative to the project root, e.g. "scenes/main.tscn"',
-    ]);
-  }
-  if (!validateSubPath(v.projectPath, args.scenePath as string)) {
+  const scenePath = requireString(args, 'scenePath');
+  if (!scenePath.ok) return scenePath.error;
+
+  if (!validateSubPath(parsed.value.projectPath, scenePath.value)) {
     return createErrorResponse('Invalid scenePath', [
       'Provide a valid relative path without ".." that stays inside the project directory',
     ]);
   }
 
   try {
-    const sceneFullPath = join(v.projectPath, args.scenePath as string);
+    const sceneFullPath = join(parsed.value.projectPath, scenePath.value);
     if (!existsSync(sceneFullPath)) {
-      return createErrorResponse(`Scene file not found: ${args.scenePath}`, [
+      return createErrorResponse(`Scene file not found: ${scenePath.value}`, [
         'Verify the path is relative to the project root',
         'Use get_project_files to list available .tscn files',
       ]);
@@ -600,7 +615,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
       }
     }
     return {
-      content: [{ type: 'text', text: JSON.stringify({ scene: args.scenePath, dependencies }) }],
+      content: [{ type: 'text', text: JSON.stringify({ scene: scenePath.value, dependencies }) }],
     };
   } catch (error: unknown) {
     return createErrorResponse(`Failed to get scene dependencies: ${getErrorMessage(error)}`, [
@@ -611,14 +626,17 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
 
 export async function handleGetProjectSettings(args: OperationParams): Promise<ToolResponse> {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
+
+  const section = optionalString(args, 'section');
+  if (!section.ok) return section.error;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const allSettings = parseProjectSettings(projectFile);
-    if (args.section && typeof args.section === 'string') {
-      const sectionData = allSettings[args.section as string] ?? {};
+    if (section.value) {
+      const sectionData = allSettings[section.value] ?? {};
       return { content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] };
     }
     return { content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] };

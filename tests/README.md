@@ -19,7 +19,7 @@ tests/
 | File                                          | Covers                                                                                                                   | Notes                                                   |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
 | `unit/godot-runner.test.ts`                   | `normalizeParameters`, `convertCamelToSnakeCase`, `validatePath`, `extractGdError`, `createErrorResponse`, `extractJson` | First batch from dev-bootstrap                          |
-| `unit/godot-runner-extended.test.ts`          | `cleanOutput`, `normalizeForCompare`, `validateProjectArgs`, `validateSceneArgs`                                         |                                                         |
+| `unit/godot-runner-extended.test.ts`          | `cleanOutput`, `normalizeForCompare`, `parseProjectArgs`, `parseSceneArgs`                                               |                                                         |
 | `unit/tool-definitions.test.ts`               | Shape contract for every tool definition; no duplicate names                                                             |                                                         |
 | `unit/handlers/scene-handlers.test.ts`        | Argument validation in `src/tools/scene-tools.ts` handlers                                                               | Uses `tests/helpers/fake-runner.ts`                     |
 | `unit/handlers/node-handlers.test.ts`         | Argument validation in `src/tools/node-tools.ts` handlers                                                                | Uses `tests/helpers/fake-runner.ts`                     |
@@ -99,7 +99,7 @@ CI does not install Godot. Godot-required tests run only when contributors run t
 - For Godot-required tests, use the `itGodot` wrapper from `tests/helpers/godot-skip.ts` so the suite stays green without Godot installed
 - Mock at the I/O boundary only: `child_process`, `net` (bridge transport), destructive `fs` ops. Never mock `godot-runner` from handler tests — pass a fake runner via the handler's runner parameter instead
 - One assertion per behavior; don't bundle three contracts into one test
-- Test names describe behavior: `"rejects scenePath containing .."` not `"validateSceneArgs handles bad input"`
+- Test names describe behavior: `"rejects scenePath containing .."` not `"parseSceneArgs handles bad input"`
 - Don't write coverage targets. Coverage is a side effect of testing the right things, not a goal
 
 ### Anti-patterns specific to this codebase

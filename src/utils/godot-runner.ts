@@ -921,8 +921,8 @@ export class GodotRunner {
         const response = await this.sendCommand('ping', opts.pingPayload, BRIDGE_PING_TIMEOUT_MS);
         const parsed = JSON.parse(response);
         if (opts.validatePong(parsed)) {
-          if (opts.expectedPath && parsed.project_path) {
-            const bridgePath = normalizeForCompare(parsed.project_path as string);
+          if (opts.expectedPath && typeof parsed.project_path === 'string') {
+            const bridgePath = normalizeForCompare(parsed.project_path);
             if (bridgePath !== opts.expectedPath) {
               return {
                 ready: false,

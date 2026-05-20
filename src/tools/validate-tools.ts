@@ -5,12 +5,8 @@ import type { GodotRunner } from '../utils/godot-runner.js';
 import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
-import {
-  validateProjectArgs,
-  createErrorResponse,
-  extractGdError,
-  getErrorMessage,
-} from '../utils/error-response.js';
+import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
+import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 
 export const validateToolDefinitions = [
   {
@@ -216,8 +212,9 @@ export async function handleValidate(
 ): Promise<ToolResponse> {
   args = normalizeParameters(args);
 
-  const pv = validateProjectArgs(args);
-  if ('isError' in pv) return pv;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
+  const { projectPath } = parsed.value;
 
   // Batch mode: targets array
   if (args.targets && Array.isArray(args.targets)) {
@@ -234,15 +231,11 @@ export async function handleValidate(
 
       for (const [i, t] of targets.entries()) {
         if (t.source) {
-          const { resPath, absPath } = writeTempGdScript(
-            pv.projectPath,
-            t.source,
-            'validate_batch',
-          );
+          const { resPath, absPath } = writeTempGdScript(projectPath, t.source, 'validate_batch');
           tempFiles.push(absPath);
           snakeTargets.push({ script_path: resPath });
         } else if (t.scriptPath) {
-          if (!validateSubPath(pv.projectPath, t.scriptPath)) {
+          if (!validateSubPath(projectPath, t.scriptPath)) {
             preErrors.set(i, {
               target: t.scriptPath,
               errors: [
@@ -256,7 +249,7 @@ export async function handleValidate(
             snakeTargets.push({ script_path: t.scriptPath });
           }
         } else if (t.scenePath) {
-          if (!validateSubPath(pv.projectPath, t.scenePath)) {
+          if (!validateSubPath(projectPath, t.scenePath)) {
             preErrors.set(i, {
               target: t.scenePath,
               errors: [
@@ -287,7 +280,7 @@ export async function handleValidate(
       const { stdout, stderr } = await runner.executeOperation(
         'validate_batch',
         { targets: snakeTargets },
-        pv.projectPath,
+        projectPath,
       );
 
       if (!stdout.trim()) {
@@ -297,9 +290,11 @@ export async function handleValidate(
         ]);
       }
 
-      let parsed: { results: Array<{ target: string; valid: boolean; errors: ValidationError[] }> };
+      let batchParsed: {
+        results: Array<{ target: string; valid: boolean; errors: ValidationError[] }>;
+      };
       try {
-        parsed = JSON.parse(stdout.trim());
+        batchParsed = JSON.parse(stdout.trim());
       } catch {
         return createErrorResponse(`Invalid response from validate_batch: ${stdout}`, [
           'Ensure Godot is installed correctly',
@@ -308,7 +303,7 @@ export async function handleValidate(
 
       const errorsByPath = parseGodotErrorsByPath(stderr || '');
 
-      const godotResults = parsed.results.map((r) => {
+      const godotResults = batchParsed.results.map((r) => {
         const key = r.target.startsWith('res://') ? r.target : `res://${r.target}`;
         const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
         const allErrors: ValidationError[] =
@@ -355,8 +350,17 @@ export async function handleValidate(
     }
   }
 
-  // Determine mode — exactly one must be provided
-  const modeCount = [args.scriptPath, args.source, args.scenePath].filter(Boolean).length;
+  // Single mode — parse each optional field then enforce exactly-one rule
+  const scriptPathResult = optionalString(args, 'scriptPath');
+  if (!scriptPathResult.ok) return scriptPathResult.error;
+  const sourceResult = optionalString(args, 'source');
+  if (!sourceResult.ok) return sourceResult.error;
+  const scenePathResult = optionalString(args, 'scenePath');
+  if (!scenePathResult.ok) return scenePathResult.error;
+
+  const modeCount = [scriptPathResult.value, sourceResult.value, scenePathResult.value].filter(
+    Boolean,
+  ).length;
   if (modeCount === 0) {
     return createErrorResponse('One of scriptPath, source, or scenePath is required', [
       'Provide scriptPath to validate an existing .gd file, source to validate inline GDScript, or scenePath to validate a .tscn file',
@@ -374,36 +378,36 @@ export async function handleValidate(
   let resolvedScenePath: string | undefined;
 
   try {
-    if (args.source) {
-      const { resPath } = writeTempGdScript(pv.projectPath, args.source as string, 'validate_temp');
+    if (sourceResult.value) {
+      const { resPath } = writeTempGdScript(projectPath, sourceResult.value, 'validate_temp');
       resolvedScriptPath = resPath;
       tempFile = true;
-    } else if (args.scriptPath) {
-      if (!validateSubPath(pv.projectPath, args.scriptPath as string)) {
+    } else if (scriptPathResult.value) {
+      if (!validateSubPath(projectPath, scriptPathResult.value)) {
         return createErrorResponse('Invalid scriptPath', [
           'Provide a valid relative path without ".." that stays inside the project directory',
         ]);
       }
-      const fullPath = join(pv.projectPath, args.scriptPath as string);
+      const fullPath = join(projectPath, scriptPathResult.value);
       if (!existsSync(fullPath)) {
-        return createErrorResponse(`Script file does not exist: ${args.scriptPath}`, [
+        return createErrorResponse(`Script file does not exist: ${scriptPathResult.value}`, [
           'Ensure the path is correct relative to the project directory',
         ]);
       }
-      resolvedScriptPath = args.scriptPath as string;
-    } else if (args.scenePath) {
-      if (!validateSubPath(pv.projectPath, args.scenePath as string)) {
+      resolvedScriptPath = scriptPathResult.value;
+    } else if (scenePathResult.value) {
+      if (!validateSubPath(projectPath, scenePathResult.value)) {
         return createErrorResponse('Invalid scenePath', [
           'Provide a valid relative path without ".." that stays inside the project directory',
         ]);
       }
-      const fullPath = join(pv.projectPath, args.scenePath as string);
+      const fullPath = join(projectPath, scenePathResult.value);
       if (!existsSync(fullPath)) {
-        return createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
+        return createErrorResponse(`Scene file does not exist: ${scenePathResult.value}`, [
           'Ensure the path is correct relative to the project directory',
         ]);
       }
-      resolvedScenePath = args.scenePath as string;
+      resolvedScenePath = scenePathResult.value;
     }
 
     const params: OperationParams = {};
@@ -413,7 +417,7 @@ export async function handleValidate(
     const { stdout, stderr } = await runner.executeOperation(
       'validate_resource',
       params,
-      pv.projectPath,
+      projectPath,
     );
 
     // Parse stdout for the base valid/invalid signal from GDScript
@@ -453,7 +457,7 @@ export async function handleValidate(
     ]);
   } finally {
     if (tempFile && resolvedScriptPath) {
-      const tempFilePath = join(pv.projectPath, resolvedScriptPath);
+      const tempFilePath = join(projectPath, resolvedScriptPath);
       try {
         unlinkSync(tempFilePath);
       } catch {

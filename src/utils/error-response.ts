@@ -1,7 +1,4 @@
-import { existsSync } from 'fs';
-import { join } from 'path';
-import type { OperationParams, ToolResponse } from '../mcp.types.js';
-import { validatePath, validateSubPath, projectGodotPath } from './path-validation.js';
+import type { ToolResponse } from '../mcp.types.js';
 import { logError } from './logger.js';
 
 /**
@@ -49,90 +46,4 @@ export function createErrorResponse(
   }
 
   return response;
-}
-
-// --- Shared validation helpers (legacy shape) ---
-//
-// Kept verbatim in this commit because removing them now would require
-// rewriting every call site in tools/*.ts in the same commit — which is what
-// commit 3 of the Phase 3 plan does. The new `parseProjectArgs` /
-// `parseSceneArgs` in `arg-parsing.ts` live alongside these during the
-// transitional commit. Both implementations are pure functions over the same
-// inputs; keeping the old code path active means no behavior change here.
-
-export interface ValidatedProjectArgs {
-  projectPath: string;
-}
-
-export interface ValidatedSceneArgs {
-  projectPath: string;
-  scenePath: string;
-}
-
-// Strict subtype of ToolResponse with isError required, so callers can narrow
-// validator returns via `'isError' in v`. ToolResponse itself declares
-// `isError?: boolean` plus a `[k: string]: unknown` index signature, which
-// would collapse `v.projectPath` to `unknown` after narrowing.
-type ValidationErrorResult = ToolResponse & { isError: true };
-
-export function validateProjectArgs(
-  args: OperationParams,
-): ValidatedProjectArgs | ValidationErrorResult {
-  if (!args.projectPath) {
-    return createErrorResponse('projectPath is required', [
-      'Provide a valid path to a Godot project directory',
-    ]);
-  }
-
-  if (!validatePath(args.projectPath as string)) {
-    return createErrorResponse('Invalid project path', [
-      'Provide a valid path without ".." or other potentially unsafe characters',
-    ]);
-  }
-
-  const projectFile = projectGodotPath(args.projectPath as string);
-  if (!existsSync(projectFile)) {
-    return createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
-      'Ensure the path points to a directory containing a project.godot file',
-    ]);
-  }
-
-  return { projectPath: args.projectPath as string };
-}
-
-export function validateSceneArgs(
-  args: OperationParams,
-  opts?: { sceneRequired?: boolean },
-): ValidatedSceneArgs | ValidationErrorResult {
-  const projectResult = validateProjectArgs(args);
-  if ('isError' in projectResult) return projectResult;
-
-  const sceneRequired = opts?.sceneRequired !== false;
-
-  if (!args.scenePath) {
-    if (sceneRequired) {
-      return createErrorResponse('scenePath is required', [
-        'Provide the scene file path relative to the project',
-      ]);
-    }
-    return { projectPath: projectResult.projectPath, scenePath: '' };
-  }
-
-  if (!validateSubPath(projectResult.projectPath, args.scenePath as string)) {
-    return createErrorResponse('Invalid scene path', [
-      'Provide a valid relative path without ".." that stays inside the project directory',
-    ]);
-  }
-
-  if (sceneRequired) {
-    const sceneFullPath = join(projectResult.projectPath, args.scenePath as string);
-    if (!existsSync(sceneFullPath)) {
-      return createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
-        'Ensure the scene path is correct',
-        'Use create_scene to create a new scene first',
-      ]);
-    }
-  }
-
-  return { projectPath: projectResult.projectPath, scenePath: args.scenePath as string };
 }

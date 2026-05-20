@@ -2,11 +2,13 @@ import { readFileSync } from 'fs';
 import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
-  validateProjectArgs,
-  createErrorResponse,
-  getErrorMessage,
-} from '../utils/error-response.js';
+  parseProjectArgs,
+  requireString,
+  optionalString,
+  optionalBoolean,
+} from '../utils/arg-parsing.js';
 import {
   parseAutoloads,
   addAutoloadEntry,
@@ -91,11 +93,11 @@ export const autoloadToolDefinitions = [
 
 export function handleListAutoloads(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const autoloads = parseAutoloads(projectFile);
     return { content: [{ type: 'text', text: JSON.stringify(autoloads) }] };
   } catch (error: unknown) {
@@ -107,35 +109,39 @@ export function handleListAutoloads(args: OperationParams): ToolResponse {
 
 export function handleAddAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.autoloadName || !args.autoloadPath) {
-    return createErrorResponse('autoloadName and autoloadPath are required', [
-      'Provide the autoload node name and script/scene path',
-    ]);
-  }
-  if (!validateSubPath(v.projectPath, args.autoloadPath as string)) {
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName.error;
+
+  const autoloadPath = requireString(args, 'autoloadPath');
+  if (!autoloadPath.ok) return autoloadPath.error;
+
+  if (!validateSubPath(parsed.value.projectPath, autoloadPath.value)) {
     return createErrorResponse('Invalid autoload path', [
       'Provide a valid relative path or res:// URI that stays inside the project directory',
     ]);
   }
 
+  const singleton = optionalBoolean(args, 'singleton');
+  if (!singleton.ok) return singleton.error;
+
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const projectFileContent = readFileSync(projectFile, 'utf8');
     const existing = parseAutoloads(projectFile, projectFileContent);
-    if (existing.some((a) => a.name === (args.autoloadName as string))) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' already exists`, [
+    if (existing.some((a) => a.name === autoloadName.value)) {
+      return createErrorResponse(`Autoload '${autoloadName.value}' already exists`, [
         'Use update_autoload to modify it',
         'Use list_autoloads to see current autoloads',
       ]);
     }
-    const isSingleton = args.singleton !== false;
+    const isSingleton = singleton.value !== false;
     addAutoloadEntry(
       projectFile,
-      args.autoloadName as string,
-      args.autoloadPath as string,
+      autoloadName.value,
+      autoloadPath.value,
       isSingleton,
       projectFileContent,
     );
@@ -143,7 +149,7 @@ export function handleAddAutoload(args: OperationParams): ToolResponse {
       content: [
         {
           type: 'text',
-          text: `Autoload '${args.autoloadName}' registered at '${args.autoloadPath}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.`,
+          text: `Autoload '${autoloadName.value}' registered at '${autoloadPath.value}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.`,
         },
       ],
     };
@@ -156,25 +162,22 @@ export function handleAddAutoload(args: OperationParams): ToolResponse {
 
 export function handleRemoveAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.autoloadName) {
-    return createErrorResponse('autoloadName is required', [
-      'Provide the name of the autoload to remove',
-    ]);
-  }
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName.error;
 
   try {
-    const projectFile = projectGodotPath(v.projectPath);
-    const removed = removeAutoloadEntry(projectFile, args.autoloadName as string);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
+    const removed = removeAutoloadEntry(projectFile, autoloadName.value);
     if (!removed) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' not found`, [
+      return createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
         'Use list_autoloads to see existing autoloads',
       ]);
     }
     return {
-      content: [{ type: 'text', text: `Autoload '${args.autoloadName}' removed successfully.` }],
+      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' removed successfully.` }],
     };
   } catch (error: unknown) {
     return createErrorResponse(`Failed to remove autoload: ${getErrorMessage(error)}`, [
@@ -185,36 +188,43 @@ export function handleRemoveAutoload(args: OperationParams): ToolResponse {
 
 export function handleUpdateAutoload(args: OperationParams): ToolResponse {
   args = normalizeParameters(args);
-  const v = validateProjectArgs(args);
-  if ('isError' in v) return v;
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed.error;
 
-  if (!args.autoloadName) {
-    return createErrorResponse('autoloadName is required', [
-      'Provide the name of the autoload to update',
-    ]);
-  }
-  if (args.autoloadPath && !validateSubPath(v.projectPath, args.autoloadPath as string)) {
+  const autoloadName = requireString(args, 'autoloadName');
+  if (!autoloadName.ok) return autoloadName.error;
+
+  const autoloadPath = optionalString(args, 'autoloadPath');
+  if (!autoloadPath.ok) return autoloadPath.error;
+
+  if (
+    autoloadPath.value !== undefined &&
+    !validateSubPath(parsed.value.projectPath, autoloadPath.value)
+  ) {
     return createErrorResponse('Invalid autoload path', [
       'Provide a valid relative path or res:// URI that stays inside the project directory',
     ]);
   }
 
+  const singleton = optionalBoolean(args, 'singleton');
+  if (!singleton.ok) return singleton.error;
+
   try {
-    const projectFile = projectGodotPath(v.projectPath);
+    const projectFile = projectGodotPath(parsed.value.projectPath);
     const updated = updateAutoloadEntry(
       projectFile,
-      args.autoloadName as string,
-      args.autoloadPath as string | undefined,
-      args.singleton as boolean | undefined,
+      autoloadName.value,
+      autoloadPath.value,
+      singleton.value,
     );
     if (!updated) {
-      return createErrorResponse(`Autoload '${args.autoloadName}' not found`, [
+      return createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
         'Use list_autoloads to see existing autoloads',
         'Use add_autoload to register a new one',
       ]);
     }
     return {
-      content: [{ type: 'text', text: `Autoload '${args.autoloadName}' updated successfully.` }],
+      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' updated successfully.` }],
     };
   } catch (error: unknown) {
     return createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [

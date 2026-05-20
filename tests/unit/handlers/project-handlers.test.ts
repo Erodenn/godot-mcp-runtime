@@ -181,7 +181,7 @@ describe('handleGetSceneDependencies', () => {
       scenePath: '../outside.tscn',
     });
     // handleGetSceneDependencies validates scenePath inline ("Invalid scenePath")
-    // rather than via validateSceneArgs ("Invalid scene path") — match either.
+    // rather than via parseSceneArgs ("Invalid scene path") — match either.
     expectErrorMatching(result, /invalid scene\s?path/i);
   });
 
