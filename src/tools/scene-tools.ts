@@ -1,7 +1,7 @@
 import { join } from 'path';
 import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
@@ -16,6 +16,7 @@ import {
   requireArray,
   optionalObject,
 } from '../utils/arg-parsing.js';
+import { err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 
 export const sceneToolDefinitions = [
@@ -242,12 +243,12 @@ export const sceneToolDefinitions = [
 export async function handleCreateScene(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args, { sceneRequired: false });
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
   const rootNodeType = optionalString(args, 'rootNodeType');
-  if (!rootNodeType.ok) return rootNodeType.error;
+  if (!rootNodeType.ok) return rootNodeType;
 
   const params = {
     scenePath: parsed.value.scenePath,
@@ -266,18 +267,18 @@ export async function handleCreateScene(
 export async function handleAddNode(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodeType = requireString(args, 'nodeType');
-  if (!nodeType.ok) return nodeType.error;
+  if (!nodeType.ok) return nodeType;
   const nodeName = requireString(args, 'nodeName');
-  if (!nodeName.ok) return nodeName.error;
+  if (!nodeName.ok) return nodeName;
 
   const properties = optionalObject(args, 'properties');
-  if (!properties.ok) return properties.error;
+  if (!properties.ok) return properties;
 
   // Merge promoted top-level params into properties dict
   const promotedKeys = [
@@ -302,7 +303,7 @@ export async function handleAddNode(
   };
   if (args.parentNodePath !== undefined) {
     const parentNodePath = parseRequiredNodePath(args, 'parentNodePath');
-    if (!parentNodePath.ok) return parentNodePath.error;
+    if (!parentNodePath.ok) return parentNodePath;
     params.parentNodePath = parentNodePath.value;
   }
   if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
@@ -319,26 +320,30 @@ export async function handleAddNode(
 export async function handleLoadSprite(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
-  if (!nodePath.ok) return nodePath.error;
+  if (!nodePath.ok) return nodePath;
 
   const texturePath = requireString(args, 'texturePath');
-  if (!texturePath.ok) return texturePath.error;
+  if (!texturePath.ok) return texturePath;
   if (!validateSubPath(parsed.value.projectPath, texturePath.value)) {
-    return createErrorResponse('Valid texturePath is required', [
-      'Provide a relative texture path that stays inside the project directory',
-    ]);
+    return err(
+      createErrorResponse('Valid texturePath is required', [
+        'Provide a relative texture path that stays inside the project directory',
+      ]),
+    );
   }
   const textureFullPath = join(parsed.value.projectPath, texturePath.value);
   if (!existsSync(textureFullPath)) {
-    return createErrorResponse(`Texture file does not exist: ${texturePath.value}`, [
-      'Ensure the texture path is correct',
-    ]);
+    return err(
+      createErrorResponse(`Texture file does not exist: ${texturePath.value}`, [
+        'Ensure the texture path is correct',
+      ]),
+    );
   }
 
   const params = {
@@ -359,17 +364,19 @@ export async function handleLoadSprite(
 export async function handleSaveScene(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const newPath = optionalString(args, 'newPath');
-  if (!newPath.ok) return newPath.error;
+  if (!newPath.ok) return newPath;
   if (newPath.value && !validateSubPath(parsed.value.projectPath, newPath.value)) {
-    return createErrorResponse('Invalid newPath', [
-      'Provide a valid relative path without ".." that stays inside the project directory',
-    ]);
+    return err(
+      createErrorResponse('Invalid newPath', [
+        'Provide a valid relative path without ".." that stays inside the project directory',
+      ]),
+    );
   }
 
   const params: OperationParams = { scenePath: parsed.value.scenePath };
@@ -387,21 +394,23 @@ export async function handleSaveScene(
 export async function handleExportMeshLibrary(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const outputPath = requireString(args, 'outputPath');
-  if (!outputPath.ok) return outputPath.error;
+  if (!outputPath.ok) return outputPath;
   if (!validateSubPath(parsed.value.projectPath, outputPath.value)) {
-    return createErrorResponse('Valid outputPath is required', [
-      'Provide an output path for the .res file that stays inside the project directory',
-    ]);
+    return err(
+      createErrorResponse('Valid outputPath is required', [
+        'Provide an output path for the .res file that stays inside the project directory',
+      ]),
+    );
   }
 
   const meshItemNames = optionalStringArray(args, 'meshItemNames');
-  if (!meshItemNames.ok) return meshItemNames.error;
+  if (!meshItemNames.ok) return meshItemNames;
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
@@ -423,16 +432,16 @@ export async function handleExportMeshLibrary(
 export async function handleBatchSceneOperations(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseProjectArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const operations = requireArray(args, 'operations');
-  if (!operations.ok) return operations.error;
+  if (!operations.ok) return operations;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
-  if (!abortOnError.ok) return abortOnError.error;
+  if (!abortOnError.ok) return abortOnError;
 
   const params = {
     operations: operations.value,

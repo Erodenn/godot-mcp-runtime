@@ -6,17 +6,6 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
-import type { Result } from '../../src/utils/result.js';
-import type { ToolResponse } from '../../src/mcp.types.js';
-
-// Adapt a Result-shaped parser return to the legacy `T | ToolResponse` shape so
-// existing `expectErrorMatching` assertions and `result.ok` narrowing both work
-// against the same value. The parsers under test now return `Result<T, ToolResponse>`;
-// `flatten` unwraps the error branch into a plain ToolResponse, which is what
-// the assertion helpers expect.
-function flatten<T>(r: Result<T, ToolResponse>): T | ToolResponse {
-  return r.ok ? r.value : r.error;
-}
 
 // ─── cleanOutput ─────────────────────────────────────────────────────────────
 
@@ -101,22 +90,16 @@ describe('parseProjectArgs', () => {
   const tmp = useTmpDirs();
 
   it('returns err when projectPath is missing', () => {
-    expectErrorMatching(flatten(parseProjectArgs({})), /projectPath is required/);
+    expectErrorMatching(parseProjectArgs({}), /projectPath is required/);
   });
 
   it('returns err when projectPath contains ..', () => {
-    expectErrorMatching(
-      flatten(parseProjectArgs({ projectPath: '/some/../path' })),
-      /Invalid project path/,
-    );
+    expectErrorMatching(parseProjectArgs({ projectPath: '/some/../path' }), /Invalid project path/);
   });
 
   it('returns err when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    expectErrorMatching(
-      flatten(parseProjectArgs({ projectPath: dir })),
-      /Not a valid Godot project/,
-    );
+    expectErrorMatching(parseProjectArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
   it('returns ok with branded projectPath for a valid Godot project', () => {
@@ -134,53 +117,44 @@ describe('parseSceneArgs', () => {
   const tmp = useTmpDirs();
 
   it('returns err when projectPath is missing', () => {
-    expectErrorMatching(flatten(parseSceneArgs({})), /projectPath is required/);
+    expectErrorMatching(parseSceneArgs({}), /projectPath is required/);
   });
 
   it('returns err when projectPath contains ..', () => {
-    expectErrorMatching(
-      flatten(parseSceneArgs({ projectPath: '/some/../path' })),
-      /Invalid project path/,
-    );
+    expectErrorMatching(parseSceneArgs({ projectPath: '/some/../path' }), /Invalid project path/);
   });
 
   it('returns err when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    expectErrorMatching(flatten(parseSceneArgs({ projectPath: dir })), /Not a valid Godot project/);
+    expectErrorMatching(parseSceneArgs({ projectPath: dir }), /Not a valid Godot project/);
   });
 
   it('returns err when scenePath contains ..', () => {
     expectErrorMatching(
-      flatten(
-        parseSceneArgs({
-          projectPath: fixtureProjectPath,
-          scenePath: '../outside.tscn',
-        }),
-      ),
+      parseSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: '../outside.tscn',
+      }),
       /Invalid scene path/,
     );
   });
 
   it('returns err when scenePath is an absolute path that escapes the project', () => {
     expectErrorMatching(
-      flatten(
-        parseSceneArgs({
-          projectPath: fixtureProjectPath,
-          scenePath: '/etc/passwd',
-        }),
-      ),
+      parseSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: '/etc/passwd',
+      }),
       /Invalid scene path/,
     );
   });
 
   it('returns err when sceneRequired (default) and scene file does not exist', () => {
     expectErrorMatching(
-      flatten(
-        parseSceneArgs({
-          projectPath: fixtureProjectPath,
-          scenePath: 'nonexistent.tscn',
-        }),
-      ),
+      parseSceneArgs({
+        projectPath: fixtureProjectPath,
+        scenePath: 'nonexistent.tscn',
+      }),
       /Scene file does not exist/,
     );
   });

@@ -11,7 +11,7 @@ import {
   handleGetNodeSignals,
 } from '../../../src/tools/node-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ describe('handleDeleteNodes', () => {
       nodePaths: ['root/Sprite2D'],
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
   });
@@ -180,7 +180,7 @@ describe('handleSetNodeProperties', () => {
       updates: validUpdates,
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
   });
@@ -198,7 +198,7 @@ describe('handleSetNodeProperties', () => {
       ],
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results).toHaveLength(2);
   });
@@ -273,7 +273,7 @@ describe('handleGetNodeProperties', () => {
       nodes: validNodes,
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results[0].nodePath).toBe('root');
     expect(parsed.results[0].nodeType).toBe('Node2D');
@@ -375,7 +375,7 @@ describe('handleAttachScript', () => {
       scriptPath: 'placeholder.gd',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('attached successfully');
   });
 });
@@ -436,7 +436,7 @@ describe('handleGetSceneTree', () => {
     });
     const result = await handleGetSceneTree(fake.asRunner, validBase);
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.name).toBe('root');
     expect(parsed.type).toBe('Node2D');
@@ -520,7 +520,7 @@ describe('handleDuplicateNode', () => {
       nodePath: 'root/Sprite2D',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('duplicated successfully');
   });
 });
@@ -638,7 +638,7 @@ describe('handleConnectSignal', () => {
       method: '_on_pressed',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('connected');
   });
 });
@@ -756,7 +756,7 @@ describe('handleDisconnectSignal', () => {
       method: '_on_pressed',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('disconnected');
   });
 });
@@ -838,7 +838,7 @@ describe('handleGetNodeSignals', () => {
       nodePath: 'root/Button',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.nodePath).toBe('root/Button');
     expect(parsed.signals[0].name).toBe('pressed');

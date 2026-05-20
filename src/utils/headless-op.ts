@@ -1,6 +1,7 @@
 import type { GodotRunner } from './godot-runner.js';
-import type { OperationParams, ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
+import { ok, err } from './result.js';
 
 /**
  * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
@@ -9,9 +10,8 @@ import { createErrorResponse, extractGdError, getErrorMessage } from './error-re
  *
  * Handlers retain control of: parameter normalization, project/scene validation,
  * field validation, and constructing the `params` object — those run before the
- * call. Success-shape construction (the JSON wrapping the GDScript stdout) is
- * also unchanged: this helper just returns `{ content: [{ type: 'text', text: stdout }] }`,
- * which is the exact shape every handler produced previously.
+ * call. Returns the canonical `Result<ToolSuccessPayload, ToolResponse>` shape;
+ * the dispatch edge maps it back to the MCP wire envelope.
  */
 export async function executeSceneOp(
   runner: GodotRunner,
@@ -21,17 +21,18 @@ export async function executeSceneOp(
   failurePrefix: string,
   emptyStdoutSolutions: string[],
   exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
     if (!stdout.trim()) {
-      return createErrorResponse(
-        `${failurePrefix}: ${extractGdError(stderr)}`,
-        emptyStdoutSolutions,
+      return err(
+        createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
       );
     }
-    return { content: [{ type: 'text', text: stdout }] };
+    return ok({ content: [{ type: 'text', text: stdout }] });
   } catch (error: unknown) {
-    return createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions);
+    return err(
+      createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions),
+    );
   }
 }

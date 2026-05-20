@@ -34,7 +34,7 @@ import type {
   RuntimeSessionMode,
   RuntimeStopResult,
 } from '../../../src/utils/godot-runner.js';
-import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ describe('handleRunProject validation', () => {
     // godotPath stays empty (default), so the precheck must fire.
     const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
     expectErrorMatching(result, /Could not find a valid Godot executable path/);
-    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/GODOT_PATH/);
   });
 
@@ -255,7 +255,7 @@ describe('handleRunProject validation', () => {
     );
     const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
     expectErrorMatching(result, /No display server available/);
-    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/attach_project/);
   });
 
@@ -298,7 +298,7 @@ describe('handleRunProject bridge port', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toMatch(/port \d+/);
   });
 });
@@ -312,7 +312,7 @@ describe('handleAttachProject bridge port', () => {
       bridgePort: 12345,
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toMatch(/port 12345/);
   });
 });
@@ -468,7 +468,7 @@ describe('handleGetDebugOutput', () => {
     fake.setSession({ mode: 'attached', projectPath: '/p' });
     const result = handleGetDebugOutput(fake.asRunner, {});
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed).toEqual({
       output: [],
@@ -497,7 +497,7 @@ describe('handleGetDebugOutput', () => {
     });
 
     const result = handleGetDebugOutput(fake.asRunner, { limit: 3 });
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toEqual(['out7', 'out8', 'out9']);
     expect(parsed.errors).toEqual(['err7', 'err8', 'err9']);
     expect(parsed.running).toBe(true);
@@ -514,7 +514,7 @@ describe('handleGetDebugOutput', () => {
       process: makeRunningProcess({ output }),
     });
     const result = handleGetDebugOutput(fake.asRunner, {});
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toHaveLength(200);
     expect(parsed.output[0]).toBe('o50');
     expect(parsed.output[199]).toBe('o249');
@@ -528,7 +528,7 @@ describe('handleGetDebugOutput', () => {
       process: makeRunningProcess({ hasExited: true, exitCode: 137, output: ['x'] }),
     });
     const result = handleGetDebugOutput(fake.asRunner, {});
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.running).toBe(false);
     expect(parsed.exitCode).toBe(137);
     expect(parsed.tip).toMatch(/Process has exited/i);
@@ -546,7 +546,7 @@ describe('handleStopProject', () => {
     fake.setStopResult({ mode: 'spawned', output: ['o1'], errors: ['e1'] });
     const result = await handleStopProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Godot project stopped');
     expect(parsed.mode).toBe('spawned');
     expect(parsed.externalProcessPreserved).toBe(false);
@@ -561,7 +561,7 @@ describe('handleStopProject', () => {
       externalProcessPreserved: true,
     });
     const result = await handleStopProject(fake.asRunner);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Attached project detached and MCP bridge state cleaned up');
     expect(parsed.mode).toBe('attached');
     expect(parsed.externalProcessPreserved).toBe(true);
@@ -593,7 +593,7 @@ describe('handleDetachProject', () => {
     const result = await handleDetachProject(fake.asRunner);
     expectErrorMatching(result, /No attached project to detach/i);
     // Solutions block points at stop_project for the spawned case.
-    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/stop_project/);
   });
 
@@ -608,7 +608,7 @@ describe('handleDetachProject', () => {
     });
     const result = await handleDetachProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.externalProcessPreserved).toBe(true);
     expect(parsed.message).toMatch(/Detached attached project/i);
   });
@@ -691,7 +691,7 @@ describe('handleSimulateInput', () => {
       actions: [{ type: 'key', key: 'A', pressed: true }],
     });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings).toEqual(['SCRIPT ERROR: in _process']);
   });
 });
@@ -797,7 +797,7 @@ describe('handleRunScript', () => {
     fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), []);
     const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.success).toBe(true);
     expect(parsed.result).toBeNull();
     expect(parsed.warning).toMatch(/GDScript does not propagate exceptions/);
@@ -825,7 +825,7 @@ describe('handleRunScript', () => {
     ]);
     const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.result).toBe(42);
     expect(parsed.warnings).toEqual(['SCRIPT ERROR: stale ref']);
   });
@@ -878,8 +878,8 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     return path;
   }
 
-  function parseMetadata(result: { content?: Array<{ type: string; text?: string }> }) {
-    const textContent = result.content?.filter((entry) => entry.type === 'text') ?? [];
+  function parseMetadata(result: unknown) {
+    const textContent = unwrap(result).content.filter((entry) => entry.type === 'text');
     const metadataEntry = textContent.find((entry) => entry.text?.startsWith('{'));
     expect(metadataEntry?.text).toBeDefined();
     return JSON.parse(metadataEntry!.text!);
@@ -906,7 +906,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       command: 'screenshot',
       params: { preview_max_width: 960, preview_max_height: 540 },
     });
-    expect(result.content?.[0]).toMatchObject({
+    expect(unwrap(result).content[0]).toMatchObject({
       type: 'image',
       data: Buffer.from('preview-image').toString('base64'),
       mimeType: 'image/png',
@@ -931,7 +931,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       command: 'screenshot',
       params: {},
     });
-    expect(result.content?.[0]).toMatchObject({
+    expect(unwrap(result).content[0]).toMatchObject({
       type: 'image',
       data: Buffer.from('full-image').toString('base64'),
       mimeType: 'image/png',
@@ -964,7 +964,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       command: 'screenshot',
       params: { preview_max_width: 960, preview_max_height: 540 },
     });
-    expect(result.content?.[0]).toMatchObject({
+    expect(unwrap(result).content[0]).toMatchObject({
       type: 'image',
       data: Buffer.from('preview-image').toString('base64'),
       mimeType: 'image/png',
@@ -1004,7 +1004,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
 
     expect(hasError(result)).toBe(false);
-    expect(result.content?.some((entry) => entry.type === 'image')).toBe(false);
+    expect(unwrap(result).content.some((entry) => entry.type === 'image')).toBe(false);
     expect(parseMetadata(result)).toMatchObject({
       responseMode: 'path_only',
       path: screenshotPath,

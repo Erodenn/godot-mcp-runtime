@@ -8,7 +8,7 @@ import {
   handleBatchSceneOperations,
 } from '../../../src/tools/scene-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ describe('handleCreateScene', () => {
       projectPath: fixtureProjectPath,
       scenePath: 'new.tscn',
     });
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('disk full');
   });
 
@@ -81,7 +81,7 @@ describe('handleCreateScene', () => {
       scenePath: 'scenes/x.tscn',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('created successfully');
   });
 });
@@ -171,7 +171,7 @@ describe('handleAddNode', () => {
       nodeName: 'Foo',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('added successfully');
   });
 });
@@ -252,7 +252,7 @@ describe('handleLoadSprite', () => {
       texturePath: 'placeholder.png',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('loaded successfully');
   });
 });
@@ -311,7 +311,7 @@ describe('handleSaveScene', () => {
     const fake = createFakeRunner({ stdout: 'Scene saved successfully to: main.tscn' });
     const result = await handleSaveScene(fake.asRunner, validBase);
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('saved successfully');
   });
 });
@@ -392,7 +392,7 @@ describe('handleExportMeshLibrary', () => {
       outputPath: 'lib.res',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('MeshLibrary exported');
   });
 });
@@ -465,7 +465,7 @@ describe('handleBatchSceneOperations', () => {
       operations: validOps,
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
     expect(parsed.results[0].operation).toBe('add_node');

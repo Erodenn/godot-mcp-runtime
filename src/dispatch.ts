@@ -15,6 +15,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotRunner } from './utils/godot-runner.js';
 import type { OperationParams, ToolHandler, ToolName, ToolResponse } from './mcp.types.js';
+import { isOk } from './utils/result.js';
 
 import {
   handleLaunchEditor,
@@ -123,5 +124,10 @@ export async function dispatchToolCall(
   if (!handler) {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }
-  return await handler(runner, args);
+  const result = await handler(runner, args);
+  // Map Result → MCP wire shape. The error branch already carries
+  // `isError: true` from createErrorResponse; the success branch flows
+  // through verbatim. This is the only edge where the wire envelope is
+  // emitted — handlers and helpers stay Result-shaped end to end.
+  return isOk(result) ? result.value : result.error;
 }

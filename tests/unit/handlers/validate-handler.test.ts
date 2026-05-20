@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
-import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ describe('handleValidate', () => {
       projectPath: fixtureProjectPath,
       source: 'extends Node',
     });
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    const text = unwrap(result).content[0].text;
     expect(text).toContain('disk full');
   });
 
@@ -112,7 +112,7 @@ describe('handleValidate', () => {
       source: 'extends Node',
     });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.valid).toBe(false);
   });
 
@@ -131,7 +131,7 @@ describe('handleValidate', () => {
       source: 'func bad( :',
     });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.valid).toBe(false);
     expect(parsed.errors.length).toBeGreaterThan(0);
     expect(parsed.errors[0].message).toContain('Unexpected token');
@@ -219,7 +219,7 @@ describe('handleValidate batch mode', () => {
     });
     expect(hasError(result)).toBe(false);
     expect(fake.calls).toHaveLength(0); // short-circuit — no runner spawn
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(1);
     expect(parsed.results[0].valid).toBe(false);
     expect(parsed.results[0].target).toBe('../escape.gd');
@@ -234,7 +234,7 @@ describe('handleValidate batch mode', () => {
     });
     expect(hasError(result)).toBe(false);
     expect(fake.calls).toHaveLength(0);
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(1);
     expect(parsed.results[0].valid).toBe(false);
     expect(parsed.results[0].target).toBe('/etc/passwd');
@@ -262,7 +262,7 @@ describe('handleValidate batch mode', () => {
       fake.calls[0].params as { targets: Array<{ script_path?: string; scene_path?: string }> }
     ).targets;
     expect(sentTargets).toHaveLength(2); // only the two valid ones reach Godot
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(3);
     expect(parsed.results[0].valid).toBe(true);
     expect(parsed.results[0].target).toBe('ok.gd');
@@ -308,7 +308,7 @@ describe('handleValidate batch mode', () => {
     });
     expect(hasError(result)).toBe(false);
 
-    const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
     const broken = parsed.results.find(
       (r: { target: string }) => r.target === '_e2e_test/broken.gd',
     );

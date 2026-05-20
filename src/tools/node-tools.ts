@@ -1,7 +1,7 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
@@ -18,7 +18,7 @@ import {
 } from '../utils/arg-parsing.js';
 import type { NodePath, ProjectPath, ScenePath } from '../utils/branded.js';
 import type { Result } from '../utils/result.js';
-import { ok } from '../utils/result.js';
+import { ok, err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 
 // --- Tool definitions ---
@@ -323,18 +323,20 @@ export const nodeToolDefinitions = [
 export async function handleDeleteNodes(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodePaths = requireStringArray(args, 'nodePaths');
-  if (!nodePaths.ok) return nodePaths.error;
+  if (!nodePaths.ok) return nodePaths;
   for (const p of nodePaths.value) {
     if (p.includes('..')) {
-      return createErrorResponse('Invalid nodePath in nodePaths', [
-        'Provide a scene-tree path without ".." (e.g. "root/Player")',
-      ]);
+      return err(
+        createErrorResponse('Invalid nodePath in nodePaths', [
+          'Provide a scene-tree path without ".." (e.g. "root/Player")',
+        ]),
+      );
     }
   }
 
@@ -352,16 +354,16 @@ export async function handleDeleteNodes(
 export async function handleSetNodeProperties(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const updates = requireArray(args, 'updates');
-  if (!updates.ok) return updates.error;
+  if (!updates.ok) return updates;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
-  if (!abortOnError.ok) return abortOnError.error;
+  if (!abortOnError.ok) return abortOnError;
 
   const params = {
     scenePath: parsed.value.scenePath,
@@ -381,13 +383,13 @@ export async function handleSetNodeProperties(
 export async function handleGetNodeProperties(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodes = requireArray(args, 'nodes');
-  if (!nodes.ok) return nodes.error;
+  if (!nodes.ok) return nodes;
 
   const params = { scenePath: parsed.value.scenePath, nodes: nodes.value };
   return executeSceneOp(
@@ -403,26 +405,30 @@ export async function handleGetNodeProperties(
 export async function handleAttachScript(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
-  if (!nodePath.ok) return nodePath.error;
+  if (!nodePath.ok) return nodePath;
 
   const scriptPath = requireString(args, 'scriptPath');
-  if (!scriptPath.ok) return scriptPath.error;
+  if (!scriptPath.ok) return scriptPath;
   if (!validateSubPath(parsed.value.projectPath, scriptPath.value)) {
-    return createErrorResponse('Valid scriptPath is required', [
-      'Provide a relative script path that stays inside the project directory',
-    ]);
+    return err(
+      createErrorResponse('Valid scriptPath is required', [
+        'Provide a relative script path that stays inside the project directory',
+      ]),
+    );
   }
   const scriptFullPath = join(parsed.value.projectPath, scriptPath.value);
   if (!existsSync(scriptFullPath)) {
-    return createErrorResponse(`Script file does not exist: ${scriptPath.value}`, [
-      'Create the script file first',
-    ]);
+    return err(
+      createErrorResponse(`Script file does not exist: ${scriptPath.value}`, [
+        'Create the script file first',
+      ]),
+    );
   }
 
   const params = {
@@ -443,16 +449,16 @@ export async function handleAttachScript(
 export async function handleGetSceneTree(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const parentPath = parseOptionalNodePath(args, 'parentPath');
-  if (!parentPath.ok) return parentPath.error;
+  if (!parentPath.ok) return parentPath;
 
   const maxDepth = optionalNumber(args, 'maxDepth');
-  if (!maxDepth.ok) return maxDepth.error;
+  if (!maxDepth.ok) return maxDepth;
 
   const params: OperationParams = { scenePath: parsed.value.scenePath };
   if (parentPath.value) params.parentPath = parentPath.value;
@@ -470,19 +476,19 @@ export async function handleGetSceneTree(
 export async function handleDuplicateNode(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
-  if (!nodePath.ok) return nodePath.error;
+  if (!nodePath.ok) return nodePath;
 
   const targetParentPath = parseOptionalNodePath(args, 'targetParentPath');
-  if (!targetParentPath.ok) return targetParentPath.error;
+  if (!targetParentPath.ok) return targetParentPath;
 
   const newName = optionalString(args, 'newName');
-  if (!newName.ok) return newName.error;
+  if (!newName.ok) return newName;
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
@@ -503,13 +509,13 @@ export async function handleDuplicateNode(
 export async function handleGetNodeSignals(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSceneArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
-  if (!nodePath.ok) return nodePath.error;
+  if (!nodePath.ok) return nodePath;
 
   const params = { scenePath: parsed.value.scenePath, nodePath: nodePath.value };
   return executeSceneOp(
@@ -560,10 +566,10 @@ function parseSignalArgs(args: OperationParams): Result<ParsedSignalArgs, ToolRe
 export async function handleConnectSignal(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSignalArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const params = {
     scenePath: parsed.value.scenePath,
@@ -585,10 +591,10 @@ export async function handleConnectSignal(
 export async function handleDisconnectSignal(
   runner: GodotRunner,
   args: OperationParams,
-): Promise<ToolResponse> {
+): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseSignalArgs(args);
-  if (!parsed.ok) return parsed.error;
+  if (!parsed.ok) return parsed;
 
   const params = {
     scenePath: parsed.value.scenePath,

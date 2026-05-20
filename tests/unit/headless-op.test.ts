@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
-import { hasError, expectErrorMatching } from '../helpers/assertions.js';
+import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
@@ -29,7 +29,7 @@ describe('executeSceneOp', () => {
       EXCEPTION_SOLUTIONS,
     );
     expect(hasError(result)).toBe(false);
-    expect(result.content).toEqual([{ type: 'text', text: '{"node":"ok"}' }]);
+    expect(unwrap(result).content).toEqual([{ type: 'text', text: '{"node":"ok"}' }]);
   });
 
   it('forwards (operation, params, projectPath) to the runner unchanged', async () => {
@@ -68,7 +68,7 @@ describe('executeSceneOp', () => {
     expectErrorMatching(result, /Failed to op/);
     expectErrorMatching(result, /node not found at root\/Missing/);
     // Empty-stdout-specific solutions surface in the secondary text block.
-    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toContain('empty: a');
     expect(solutionsText).not.toContain('exc: a');
   });
@@ -99,7 +99,7 @@ describe('executeSceneOp', () => {
       EXCEPTION_SOLUTIONS,
     );
     expectErrorMatching(result, /Failed to op: spawn ENOENT/);
-    const solutionsText = (result as { content: Array<{ text: string }> }).content[1]?.text ?? '';
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toContain('exc: a');
     expect(solutionsText).not.toContain('empty: a');
   });

@@ -13,6 +13,7 @@
 import { describe, beforeAll, expect } from 'vitest';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
+import { unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
@@ -59,8 +60,7 @@ describe('GodotRunner.executeOperation', () => {
         });
 
         expect(result).not.toHaveProperty('isError', true);
-        const text = (result as { content: Array<{ type: string; text: string }> }).content[0]
-          ?.text;
+        const text = unwrap(result).content[0]?.text;
         expect(text).toBeDefined();
         const parsed = JSON.parse(text);
         // The errors array must contain at least one entry describing the parse problem
@@ -81,8 +81,7 @@ describe('GodotRunner.executeOperation', () => {
         const result = await handleGetProjectInfo(runner, { projectPath: fixtureProjectPath });
 
         expect(result).not.toHaveProperty('isError');
-        const text = (result as { content: Array<{ type: string; text: string }> }).content[0]
-          ?.text;
+        const text = unwrap(result).content[0]?.text;
         expect(text).toBeDefined();
         const info = JSON.parse(text);
         // The fixture's project.godot has: config/name="godot-mcp-runtime test fixture"
