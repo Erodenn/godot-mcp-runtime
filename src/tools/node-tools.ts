@@ -328,9 +328,16 @@ export async function handleDeleteNodes(runner: GodotRunner, args: OperationPara
   }
 
   const params = { scenePath: args.scenePath, nodePaths: args.nodePaths };
-  return executeSceneOp(runner, 'delete_nodes', params, v.projectPath, 'Failed to delete nodes', [
-    'Check if the node paths are correct',
-  ]);
+  return executeSceneOp(
+    runner,
+    'delete_nodes',
+    params,
+    v.projectPath,
+    'Failed to delete nodes',
+    ['Check if the node paths are correct'],
+    undefined,
+    { parseStdoutAsJson: true },
+  );
 }
 
 export async function handleSetNodeProperties(runner: GodotRunner, args: OperationParams) {
@@ -356,6 +363,8 @@ export async function handleSetNodeProperties(runner: GodotRunner, args: Operati
     v.projectPath,
     'Failed to set node properties',
     ['Check node paths and property names'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -408,9 +417,16 @@ export async function handleAttachScript(runner: GodotRunner, args: OperationPar
     nodePath: args.nodePath,
     scriptPath: args.scriptPath,
   };
-  return executeSceneOp(runner, 'attach_script', params, v.projectPath, 'Failed to attach script', [
-    'Ensure the script is valid for this node type',
-  ]);
+  return executeSceneOp(
+    runner,
+    'attach_script',
+    params,
+    v.projectPath,
+    'Failed to attach script',
+    ['Ensure the script is valid for this node type'],
+    undefined,
+    { parseStdoutAsJson: true },
+  );
 }
 
 export async function handleGetSceneTree(runner: GodotRunner, args: OperationParams) {
@@ -463,6 +479,8 @@ export async function handleDuplicateNode(runner: GodotRunner, args: OperationPa
     v.projectPath,
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -485,6 +503,8 @@ export async function handleGetNodeSignals(runner: GodotRunner, args: OperationP
     v.projectPath,
     'Failed to get node signals',
     ['Check if the node path is correct'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 

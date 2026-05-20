@@ -56,6 +56,10 @@ When both are present, they must be consistent — same field names, same semant
 
 When `outputSchema` is impractical (oneOf variants, bare-array, recursive trees, opaque values), the `Returns:` sentence is the only return-shape signal and carries the full load.
 
+### `structuredContent` is mandatory when `outputSchema` is declared
+
+MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/godot-runner.ts` — it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON, pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
+
 ### Harness visibility — what the agent actually sees
 
 Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` — including every per-property `description` — into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.

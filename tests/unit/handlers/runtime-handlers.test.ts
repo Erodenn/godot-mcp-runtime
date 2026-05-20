@@ -800,7 +800,8 @@ describe('handleRunScript', () => {
     const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
     expect(parsed.success).toBe(true);
     expect(parsed.result).toBeNull();
-    expect(parsed.warning).toMatch(/GDScript does not propagate exceptions/);
+    expect(Array.isArray(parsed.warnings)).toBe(true);
+    expect(parsed.warnings[0]).toMatch(/GDScript does not propagate exceptions/);
   });
 
   it('returns success without escalation when attached + result:null (stderr not captured)', async () => {

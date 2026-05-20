@@ -241,9 +241,16 @@ export async function handleCreateScene(runner: GodotRunner, args: OperationPara
     scenePath: args.scenePath,
     rootNodeType: args.rootNodeType || 'Node2D',
   };
-  return executeSceneOp(runner, 'create_scene', params, v.projectPath, 'Failed to create scene', [
-    'Check if the root node type is valid',
-  ]);
+  return executeSceneOp(
+    runner,
+    'create_scene',
+    params,
+    v.projectPath,
+    'Failed to create scene',
+    ['Check if the root node type is valid'],
+    undefined,
+    { parseStdoutAsJson: true },
+  );
 }
 
 export async function handleAddNode(runner: GodotRunner, args: OperationParams) {
@@ -384,5 +391,7 @@ export async function handleBatchSceneOperations(runner: GodotRunner, args: Oper
     v.projectPath,
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }

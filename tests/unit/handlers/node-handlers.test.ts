@@ -367,7 +367,11 @@ describe('handleAttachScript', () => {
 
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
-      stdout: "Script 'res://placeholder.gd' attached successfully to node 'root/Sprite2D'",
+      stdout: JSON.stringify({
+        success: true,
+        nodePath: 'root/Sprite2D',
+        scriptPath: 'placeholder.gd',
+      }),
     });
     const result = await handleAttachScript(fake.asRunner, {
       ...validBase,
@@ -375,8 +379,16 @@ describe('handleAttachScript', () => {
       scriptPath: 'placeholder.gd',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
-    expect(text).toContain('attached successfully');
+    const typed = result as {
+      content: Array<{ text: string }>;
+      structuredContent?: { success?: boolean; nodePath?: string; scriptPath?: string };
+    };
+    expect(typed.structuredContent).toEqual({
+      success: true,
+      nodePath: 'root/Sprite2D',
+      scriptPath: 'placeholder.gd',
+    });
+    expect(JSON.parse(typed.content[0].text)).toEqual(typed.structuredContent);
   });
 });
 
@@ -513,15 +525,27 @@ describe('handleDuplicateNode', () => {
 
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
-      stdout: "Node duplicated successfully as 'Sprite2D2'",
+      stdout: JSON.stringify({
+        success: true,
+        originalPath: 'root/Sprite2D',
+        newPath: 'root/Sprite2D2',
+      }),
     });
     const result = await handleDuplicateNode(fake.asRunner, {
       ...validBase,
       nodePath: 'root/Sprite2D',
     });
     expect(hasError(result)).toBe(false);
-    const text = (result as { content: Array<{ text: string }> }).content[0].text;
-    expect(text).toContain('duplicated successfully');
+    const typed = result as {
+      content: Array<{ text: string }>;
+      structuredContent?: { success?: boolean; originalPath?: string; newPath?: string };
+    };
+    expect(typed.structuredContent).toEqual({
+      success: true,
+      originalPath: 'root/Sprite2D',
+      newPath: 'root/Sprite2D2',
+    });
+    expect(JSON.parse(typed.content[0].text)).toEqual(typed.structuredContent);
   });
 });
 
