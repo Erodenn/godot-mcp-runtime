@@ -181,7 +181,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 # --- Screenshot ---
 
 func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
-	await RenderingServer.frame_post_draw
+	await _ensure_frame_rendered()
 
 	var viewport := get_viewport()
 	if viewport == null:
@@ -234,6 +234,37 @@ func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
 		response["preview_height"] = preview_height
 
 	_send_response(peer, response)
+
+# Waits until a freshly rendered frame is available for capture.
+#
+# Normal path: the engine's render loop is presenting every frame, so the
+# next frame_post_draw is imminent. Occluded path (macOS-only today): a
+# background-mode window parked off-screen fails NSWindowOcclusionState
+# visibility, DisplayServer.window_can_draw() goes false, and the engine
+# main loop stops calling RenderingServer.draw() entirely, so
+# frame_post_draw never fires and the await would deadlock the peer.
+# Recover by driving one render manually: force_draw(false) renders every
+# viewport into its render target but skips the swapchain blit that hangs
+# while occluded. See issue #24.
+func _ensure_frame_rendered() -> void:
+	if DisplayServer.window_can_draw():
+		await RenderingServer.frame_post_draw
+		return
+	# GDScript lambdas capture locals by value; use an Array so the
+	# mutation inside the lambda is visible out here.
+	var draw_state := [false]
+	var on_draw := func() -> void: draw_state[0] = true
+	# Connect BEFORE force_draw(): with single-threaded rendering (the
+	# default), frame_post_draw fires synchronously inside force_draw(),
+	# before an await here could start listening.
+	RenderingServer.frame_post_draw.connect(on_draw, CONNECT_ONE_SHOT)
+	RenderingServer.force_draw(false, 0.0)
+	if not draw_state[0]:
+		# Threaded rendering: the signal is emitted deferred on the main
+		# thread; resume when it lands.
+		await RenderingServer.frame_post_draw
+	elif RenderingServer.frame_post_draw.is_connected(on_draw):
+		RenderingServer.frame_post_draw.disconnect(on_draw)
 
 # --- Input Simulation ---
 
