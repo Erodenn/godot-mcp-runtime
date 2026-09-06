@@ -7,6 +7,7 @@ import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
+import { parseScriptDiagnostics, type StderrDiagnostic } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
 
 export const validateToolDefinitions = [
@@ -67,103 +68,15 @@ interface ValidationError {
   message: string;
 }
 
-interface ParsedErrorEntry {
-  message: string;
-  line?: number;
-  filePath?: string;
-}
-
 /**
  * Core Godot stderr parser. Returns a flat list of error entries, each with an
  * optional line number and optional res:// file path (from the "at:" line).
  */
+type ParsedErrorEntry = StderrDiagnostic;
+
 function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
-  const entries: ParsedErrorEntry[] = [];
-  if (!stderr) return entries;
-
-  const lines = stderr.split('\n');
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line === undefined) continue;
-
-    // Pattern: "SCRIPT ERROR: Parse Error: MESSAGE" or "ERROR: MESSAGE"
-    // followed by "   at: res://...:LINE" or "   at: ...:LINE"
-    const scriptErrorMatch = line.match(/SCRIPT ERROR:\s*(?:Parse Error:\s*)?(.+)/);
-    const errorMatch = !scriptErrorMatch ? line.match(/^ERROR:\s*(.+)/) : null;
-    const match = scriptErrorMatch || errorMatch;
-
-    if (match) {
-      const [, rawMessage = ''] = match;
-      const message = rawMessage.trim();
-      let lineNum: number | undefined;
-      let filePath: string | undefined;
-
-      const next = lines[i + 1];
-      if (next !== undefined) {
-        // Try res:// path first (captures file + line). Tolerates an optional
-        // "<method> (" prefix before res:// so we catch both
-        //   "   at: res://foo.gd:3"
-        // and
-        //   "   at: GDScript::reload (res://foo.gd:3)"
-        // Real Godot 4.5 stderr uses the parenthesized form.
-        const resAtMatch = next.match(/\s*at:\s*(?:[^()\n]*\()?(res:\/\/[^):"\s]+):(\d+)/);
-        if (resAtMatch) {
-          const [, path = '', lineStr = '0'] = resAtMatch;
-          filePath = path;
-          lineNum = parseInt(lineStr, 10);
-          i++;
-        } else {
-          // Fall back to loose match (line only, e.g. native code "at:" lines)
-          const looseAtMatch = next.match(/\s*at:\s*.+:(\d+)/);
-          if (looseAtMatch) {
-            lineNum = parseInt(looseAtMatch[1] ?? '0', 10);
-            i++;
-          }
-        }
-      }
-
-      // Parse-error entries reference synthetic gdscript:// URIs in their `at:` line
-      // rather than a res:// path. Peek forward up to 10 lines for the secondary
-      // "Failed to load script/resource: \"res://...\"" message that names the file,
-      // and adopt that path so batch error attribution can find it. The window is
-      // intentionally wide enough to clear a full GDScript backtrace.
-      if (!filePath && /Parse Error/i.test(line)) {
-        const lookaheadLimit = Math.min(i + 11, lines.length);
-        for (let j = i + 1; j < lookaheadLimit; j++) {
-          const lookLine = lines[j];
-          if (lookLine === undefined) continue;
-          const failMatch = lookLine.match(
-            /Failed to load (?:script|resource):?\s*"?(res:\/\/[^":\s]+)/,
-          );
-          if (failMatch) {
-            filePath = failMatch[1];
-            break;
-          }
-        }
-      }
-
-      const entry: ParsedErrorEntry = { message };
-      if (lineNum !== undefined) entry.line = lineNum;
-      if (filePath !== undefined) entry.filePath = filePath;
-      entries.push(entry);
-      continue;
-    }
-
-    // Pattern: "Parse Error: MESSAGE at line LINE"
-    const parseErrorMatch = line.match(/Parse Error:\s*(.+?)\s+at line\s+(\d+)/);
-    if (parseErrorMatch) {
-      const [, parseMsg = '', parseLine = '0'] = parseErrorMatch;
-      entries.push({
-        line: parseInt(parseLine, 10),
-        message: parseMsg.trim(),
-      });
-    }
-  }
-
-  return entries;
+  return parseScriptDiagnostics(stderr);
 }
-
 function parseGodotErrors(stderr: string): ValidationError[] {
   return parseGodotErrorEntries(stderr).map(({ message, line }) => {
     const err: ValidationError = { message };

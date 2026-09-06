@@ -22,6 +22,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
+import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { randomUUID } from 'crypto';
 import {
   createNullContext,
@@ -1633,11 +1634,11 @@ export async function handleRunScript(
   const timeout = timeoutResult.value ?? 30000;
 
   try {
-    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
-      'run_script',
-      { source: script },
-      timeout,
-    );
+    const {
+      response: responseStr,
+      runtimeErrors,
+      stderrWindow,
+    } = await runner.sendCommandWithErrors('run_script', { source: script }, timeout);
 
     const parsedResult = parseBridgeJson<{
       success?: boolean;
@@ -1648,9 +1649,29 @@ export async function handleRunScript(
     const parsed = parsedResult.value;
 
     if (parsed.error) {
+      // Compilation failures (error 43 class): the bridge returns a bare
+      // "Script compilation failed (error N). Check syntax." with no location,
+      // while the actual parser diagnostic (message + line) is on the engine
+      // process stderr — captured by sendCommandWithErrors in stderrWindow
+      // (unfiltered, so the "at: <path>:<line>" lines survive).
+      // Surface it directly instead of sending the agent hunting through
+      // get_debug_output for it.
+      let compileDetail = '';
+      if (/Script compilation failed/.test(parsed.error)) {
+        const diagnostics = parseScriptDiagnostics(stderrWindow.join('\n'));
+        if (diagnostics.length > 0) {
+          const parts = diagnostics.map(
+            (d) =>
+              `${d.filePath ?? 'submitted script'}${d.line !== undefined ? `:${d.line}` : ''}: ${d.message}`,
+          );
+          compileDetail = `\nCompiler diagnostics:\n${parts.join('\n')}`;
+        }
+      }
       return err(
-        createErrorResponse(`Script execution error: ${parsed.error}`, [
-          'Check your GDScript syntax',
+        createErrorResponse(`Script execution error: ${parsed.error}${compileDetail}`, [
+          ...(compileDetail
+            ? ['Fix the reported line in the submitted script source']
+            : ['Check your GDScript syntax']),
           'Ensure the script extends RefCounted',
           'Check get_debug_output for details',
         ]),
