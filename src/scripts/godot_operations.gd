@@ -941,38 +941,48 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_PACKED_VECTOR4_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR4_ARRAY],
 }
 
+# Helper: enforce a property's PROPERTY_HINT_RESOURCE_TYPE class filter
+# against a Resource about to be assigned. Shared by the res:// load path and
+# the inline-construction path so both reject a wrong-class resource
+# identically. `origin` names how the resource was obtained ("Loaded" /
+# "Constructed") and only shapes the error message. A property with no
+# resource-type hint always passes. Returns {"ok": bool, "error": String}.
+func _check_resource_hint_class(descriptor, res, property: String, origin: String) -> Dictionary:
+	if descriptor == null or descriptor.get("hint") != PROPERTY_HINT_RESOURCE_TYPE or descriptor.get("hint_string", "") == "":
+		return {"ok": true, "error": ""}
+	for allowed_class in descriptor.hint_string.split(","):
+		if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
+			return {"ok": true, "error": ""}
+	return {"ok": false, "error": "%s resource is a %s, but property '%s' expects %s" % [origin, res.get_class(), property, descriptor.hint_string]}
+
 # Construct a Resource inline from a typed-dict spec like
 # {"type": "RectangleShape2D", "size": {"x": 80, "y": 16}}. Inner properties
 # are assigned through the same validated _prepare_property_value machinery
 # (type-compat matrix, nested Resources, res:// loads), so the v3.2.4 error
-# contract applies at every level. Returns
-# {"ok": bool, "value": Resource|null, "error": String}. Constructed
-# Resources are RefCounted: on failure the instance is simply dropped (no
-# explicit free() — freeing a RefCounted from GDScript errors).
+# contract applies at every level, and the property-hint class check is the
+# same one the res:// path uses.
+#
+# Class eligibility is settled entirely against ClassDB before instantiate()
+# runs, so a rejected spec allocates nothing. That ordering is load-bearing:
+# a constructed Resource is RefCounted and cannot be free()d from GDScript,
+# while a non-Resource class (Node and friends) is manually managed and would
+# leak for the life of the process -- neither is safe to drop after the fact.
+# Returns {"ok": bool, "value": Resource|null, "error": String}.
 func _construct_inline_resource(node: Object, property: String, spec: Dictionary) -> Dictionary:
 	var class_name_str = spec.type
 	if not ClassDB.class_exists(class_name_str):
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': unknown class '%s'" % [property, class_name_str]}
+	if not ClassDB.is_parent_class(class_name_str, "Resource"):
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' is not a Resource (only Resource subclasses can be constructed inline)" % [property, class_name_str]}
 	if not ClassDB.can_instantiate(class_name_str):
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' cannot be instantiated (abstract or native-only)" % [property, class_name_str]}
 	var instance = ClassDB.instantiate(class_name_str)
 	if instance == null:
 		return {"ok": false, "value": null, "error": "Failed to instantiate class '%s' for property '%s'" % [class_name_str, property]}
-	if not (instance is Resource):
-		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' is not a Resource (only Resource subclasses can be constructed inline)" % [property, class_name_str]}
 
-	# Enforce the same property-hint class check the res:// load path uses,
-	# so a correctly-typed-but-wrong-class construction errors identically.
-	var descriptor = _find_property_descriptor(node, property)
-	if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
-		var allowed_classes = descriptor.hint_string.split(",")
-		var matches_one = false
-		for allowed_class in allowed_classes:
-			if ClassDB.is_parent_class(instance.get_class(), allowed_class) or instance.is_class(allowed_class):
-				matches_one = true
-				break
-		if not matches_one:
-			return {"ok": false, "value": null, "error": "Constructed resource is a %s, but property '%s' expects %s" % [instance.get_class(), property, descriptor.hint_string]}
+	var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), instance, property, "Constructed")
+	if not hint_check.ok:
+		return {"ok": false, "value": null, "error": hint_check.error}
 
 	# Recursively assign inner properties with full validation.
 	for inner_prop in spec.keys():
@@ -999,10 +1009,13 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 # type against the property's declared type (via get_property_list()) before
 # node.set() ever runs.
 #
-# Two branches get special handling instead of the generic type check:
+# Three branches get special handling instead of the generic type check:
 #   - Object-typed properties (Resource or Node): a plain value is rejected
 #     outright, except a res:// string, which is auto-loaded (mirroring
 #     _apply_load_sprite).
+#   - Object-typed properties given a dict carrying a String "type" key: the
+#     Resource is constructed inline via _construct_inline_resource, whose
+#     inner assignments recurse back through this function.
 #   - Dictionary-typed properties: coercion is skipped so a dict with an x/y
 #     or r/g/b key can still be stored as a plain Dictionary instead of being
 #     turned into a Vector2/Vector3/Color.
@@ -1026,16 +1039,9 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
 			if res.resource_path == "":
 				return {"ok": false, "value": null, "error": "Resource has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
-			var descriptor = _find_property_descriptor(node, property)
-			if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
-				var allowed_classes = descriptor.hint_string.split(",")
-				var matches_one = false
-				for allowed_class in allowed_classes:
-					if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
-						matches_one = true
-						break
-				if not matches_one:
-					return {"ok": false, "value": null, "error": "Loaded resource is a %s, but property '%s' expects %s" % [res.get_class(), property, descriptor.hint_string]}
+			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
+			if not hint_check.ok:
+				return {"ok": false, "value": null, "error": hint_check.error}
 			return {"ok": true, "value": res, "error": ""}
 
 		if typeof(coerced) == TYPE_DICTIONARY and coerced.has("type") and typeof(coerced.type) == TYPE_STRING:

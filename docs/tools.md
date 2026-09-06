@@ -57,6 +57,50 @@ All mutation operations save automatically. Property and delete tools take alway
 | `connect_signal`      | Connect a signal to a method on another node                              |
 | `disconnect_signal`   | Disconnect a signal connection                                            |
 
+## Property Values (`add_node`, `set_node_properties`)
+
+Both tools take JSON property values and assign them through the same validated path. `node.set()` casts through the property's typed setter with no validity return, so an incompatible value would silently store the declared type's zero value (a string on an int stores `0`, a dict on a Resource clears it). Every value is therefore checked against the property's declared type first, and a mismatch errors instead of reporting a write that did not land.
+
+### Automatic conversions
+
+| Input                        | Becomes                     |
+| ---------------------------- | --------------------------- |
+| `{x, y}`                     | `Vector2`                   |
+| `{x, y, z}`                  | `Vector3`                   |
+| `{r, g, b}` / `{r, g, b, a}` | `Color` (`a` defaults to 1) |
+
+A property whose declared type is `Dictionary` skips this coercion, so a dict with `x`/`y` or `r`/`g`/`b` keys is stored as a plain `Dictionary`.
+
+### Accepted widening conversions
+
+Godot performs these on store, so they are allowed: float to int, string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
+
+### Object-typed properties
+
+Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.shape`, `Sprite2D.texture`) reject plain values. They accept one of three forms:
+
+| Form                                | Behavior                                                                                        |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `"res://path/to/file.tres"`         | Loads the saved resource. Errors if the path does not exist or the asset has not been imported. |
+| `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.     |
+| `null`                              | Clears the property.                                                                            |
+
+Inline construction example:
+
+```json
+{ "shape": { "type": "RectangleShape2D", "size": { "x": 80, "y": 16 } } }
+```
+
+Inner properties are assigned through the same validation described above, so nested typed dicts and nested `res://` paths both work at any depth. The scene is persisted with `PackedScene.pack()`, so a constructed Resource is written out as a normal `[sub_resource]` block.
+
+Construction errors are explicit and nothing is persisted when one fires:
+
+- `type` names an unknown class
+- `type` names a class that is not a `Resource` subclass
+- `type` names an abstract or native-only class that cannot be instantiated
+- the constructed class does not satisfy the property's declared resource hint (for example a `RectangleShape2D` assigned to `Sprite2D.texture`)
+- an inner property does not exist on the constructed class, or its value fails the type check (the error names the inner property)
+
 ## Project Config (no Godot process required)
 
 These tools edit `project.godot` directly or read the filesystem. Safe to use even when autoloads are broken.
