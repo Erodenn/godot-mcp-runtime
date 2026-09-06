@@ -136,6 +136,57 @@ describe('handleValidate', () => {
     expect(parsed.errors.length).toBeGreaterThan(0);
     expect(parsed.errors[0].message).toContain('Unexpected token');
   });
+
+  // --- Phase 1 regressions: autoload-aware validation + diagnostic quality ---
+
+  it('reports autoload-reference compile errors with file and line (error-43 class)', async () => {
+    // Real-world failure class: scripts referencing autoload singletons produce a
+    // "Compile Error: Identifier not found" on stderr that the handler must
+    // overlay (message + line) instead of reporting a bare invalid.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stderr: [
+        'SCRIPT ERROR: Compile Error: Identifier not found: GameState',
+        '          at: GDScript::reload (res://scripts/uses_autoload.gd:3)',
+        'ERROR: Failed to load script "res://scripts/uses_autoload.gd" with error "Compilation failed".',
+        '   at: load (modules/gdscript/gdscript_resource_format.cpp:46)',
+      ].join('\n'),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      source: 'func probe() -> int:\n\treturn GameState.score\n',
+    });
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.valid).toBe(false);
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.errors[0].message).toContain('GameState');
+    expect(parsed.errors[0].line).toBe(3);
+  });
+
+  it('does not surface engine-source line numbers from "Failed to load" echoes', async () => {
+    // The engine echo "ERROR: Failed to load script ..." carries an at: line
+    // pointing into Godot's C++ source (e.g. gdscript_resource_format.cpp:46).
+    // Before the shared-parser dedup, that surfaced as a bogus error entry
+    // with a line number belonging to nobody's script.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stderr: [
+        'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
+        '          at: GDScript::reload (res://scripts/a.gd:7)',
+        'ERROR: Failed to load script "res://scripts/a.gd" with error "Parse error".',
+        '   at: load (modules/gdscript/gdscript_resource_format.cpp:46)',
+      ].join('\n'),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      source: 'var x',
+    });
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.valid).toBe(false);
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.errors[0].line).toBe(7);
+  });
 });
 
 // ---------------------------------------------------------------------------

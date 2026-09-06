@@ -905,13 +905,17 @@ export class GodotRunner {
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
-  ): Promise<{ response: string; runtimeErrors: string[] }> {
+  ): Promise<{ response: string; runtimeErrors: string[]; stderrWindow: string[] }> {
     const marker = this.getErrorCount();
     const response = await this.sendCommandWithReconnect(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
     const runtimeErrors =
       this.activeSessionMode === 'spawned' ? this.extractRuntimeErrors(newErrors) : [];
-    return { response, runtimeErrors };
+    // Unfiltered stderr window (newErrors) for callers that need the full
+    // engine output around a failure — e.g. run_script compile diagnostics,
+    // where the SCRIPT ERROR line is followed by an "at: <path>:<line>" line
+    // that extractRuntimeErrors' per-line filter drops.
+    return { response, runtimeErrors, stderrWindow: newErrors };
   }
 
   /**
