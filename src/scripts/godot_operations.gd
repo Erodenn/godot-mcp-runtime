@@ -941,6 +941,52 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_PACKED_VECTOR4_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR4_ARRAY],
 }
 
+# Construct a Resource inline from a typed-dict spec like
+# {"type": "RectangleShape2D", "size": {"x": 80, "y": 16}}. Inner properties
+# are assigned through the same validated _prepare_property_value machinery
+# (type-compat matrix, nested Resources, res:// loads), so the v3.2.4 error
+# contract applies at every level. Returns
+# {"ok": bool, "value": Resource|null, "error": String}. Constructed
+# Resources are RefCounted: on failure the instance is simply dropped (no
+# explicit free() — freeing a RefCounted from GDScript errors).
+func _construct_inline_resource(node: Object, property: String, spec: Dictionary) -> Dictionary:
+	var class_name_str = spec.type
+	if not ClassDB.class_exists(class_name_str):
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': unknown class '%s'" % [property, class_name_str]}
+	if not ClassDB.can_instantiate(class_name_str):
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' cannot be instantiated (abstract or native-only)" % [property, class_name_str]}
+	var instance = ClassDB.instantiate(class_name_str)
+	if instance == null:
+		return {"ok": false, "value": null, "error": "Failed to instantiate class '%s' for property '%s'" % [class_name_str, property]}
+	if not (instance is Resource):
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' is not a Resource (only Resource subclasses can be constructed inline)" % [property, class_name_str]}
+
+	# Enforce the same property-hint class check the res:// load path uses,
+	# so a correctly-typed-but-wrong-class construction errors identically.
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
+		var allowed_classes = descriptor.hint_string.split(",")
+		var matches_one = false
+		for allowed_class in allowed_classes:
+			if ClassDB.is_parent_class(instance.get_class(), allowed_class) or instance.is_class(allowed_class):
+				matches_one = true
+				break
+		if not matches_one:
+			return {"ok": false, "value": null, "error": "Constructed resource is a %s, but property '%s' expects %s" % [instance.get_class(), property, descriptor.hint_string]}
+
+	# Recursively assign inner properties with full validation.
+	for inner_prop in spec.keys():
+		if inner_prop == "type":
+			continue
+		if not (inner_prop in instance):
+			return {"ok": false, "value": null, "error": "Property '%s' does not exist on resource of type '%s' (constructed for property '%s')" % [inner_prop, class_name_str, property]}
+		var prepared = _prepare_property_value(instance, inner_prop, spec[inner_prop])
+		if not prepared.ok:
+			return {"ok": false, "value": null, "error": "Cannot set inner property '%s' on %s constructed for property '%s': %s" % [inner_prop, class_name_str, property, prepared.error]}
+		instance.set(inner_prop, prepared.value)
+
+	return {"ok": true, "value": instance, "error": ""}
+
 # Helper: coerce and validate a raw JSON value against a node's declared
 # property type before it is assigned via node.set(). Returns
 # {"ok": bool, "value": Variant, "error": String}.
@@ -992,10 +1038,16 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 					return {"ok": false, "value": null, "error": "Loaded resource is a %s, but property '%s' expects %s" % [res.get_class(), property, descriptor.hint_string]}
 			return {"ok": true, "value": res, "error": ""}
 
+		if typeof(coerced) == TYPE_DICTIONARY and coerced.has("type") and typeof(coerced.type) == TYPE_STRING:
+			var constructed = _construct_inline_resource(node, property, coerced)
+			if not constructed.ok:
+				return {"ok": false, "value": null, "error": constructed.error}
+			return {"ok": true, "value": constructed.value, "error": ""}
+
 		return {
 			"ok": false,
 			"value": null,
-			"error": "Cannot set property '%s' on node of type '%s': it is Object-typed (Resource or Node) and cannot be assigned a plain value. Pass a res:// path to load a saved resource, or use run_script to construct and assign one." % [property, node.get_class()],
+			"error": "Cannot set property '%s' on node of type '%s': it is Object-typed (Resource or Node) and cannot be assigned a plain value. Pass a res:// path to load a saved resource, a {\"type\": \"ClassName\", ...} dict to construct one inline, or use run_script." % [property, node.get_class()],
 		}
 
 	if declared != TYPE_NIL:
