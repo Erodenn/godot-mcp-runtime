@@ -115,4 +115,41 @@ describe('parseScriptDiagnostics', () => {
     ].join('\n');
     expect(parseScriptDiagnostics(stderr)).toEqual([]);
   });
+
+  it('captures bare ERROR scene-parse lines with their [Resource file] location', () => {
+    // Observed on Godot 4.7.2 validating a broken .tscn - no SCRIPT ERROR
+    // prefix; the user-file location rides inline in brackets.
+    const stderr = [
+      'ERROR: Parse Error: Parse error. [Resource file res://main.tscn:4]',
+      '   at: _parse_node_tag (scene/resources/resource_format_text.cpp:293)',
+      'ERROR: Failed loading resource: res://main.tscn.',
+      '   at: _load (core/io/resource_loader.cpp:317)',
+    ].join('\n');
+    expect(parseScriptDiagnostics(stderr)).toEqual([
+      {
+        message: 'Parse Error: Parse error.',
+        line: 4,
+        filePath: 'res://main.tscn',
+      },
+    ]);
+  });
+
+  it('captures other bare ERROR lines without inventing a location', () => {
+    const stderr = 'ERROR: Unable to open file: res://missing.png';
+    expect(parseScriptDiagnostics(stderr)).toEqual([
+      { message: 'Unable to open file: res://missing.png' },
+    ]);
+  });
+
+  it('suppresses the bare-ERROR "Failed to load script" echo variant', () => {
+    const stderr = [
+      'SCRIPT ERROR: Parse Error: Unterminated string.',
+      '   at: GDScript::reload (res://scripts/a.gd:7)',
+      'ERROR: Failed to load script "res://scripts/a.gd" with error "Parse error".',
+      '   at: load (modules/gdscript/gdscript.cpp:285)',
+    ].join('\n');
+    expect(parseScriptDiagnostics(stderr)).toEqual([
+      { message: 'Unterminated string.', line: 7, filePath: 'res://scripts/a.gd' },
+    ]);
+  });
 });
