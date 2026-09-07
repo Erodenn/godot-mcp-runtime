@@ -154,11 +154,29 @@ func get_script_by_name(name_of_class):
 	printerr("Could not find script for class: " + name_of_class)
 	return null
 
-# Instantiate a class by name
+# Instantiate a class by name, or instance a PackedScene when the name is a
+# scene path (e.g. "scenes/enemy.tscn", "res://scenes/enemy.tscn"). Instanced
+# children pack back as `instance=ExtResource(...)` on save, so scenes can be
+# composed without hand-editing .tscn files.
 func instantiate_class(name_of_class):
 	if name_of_class.is_empty():
 		printerr("Cannot instantiate class: name is empty")
 		return null
+
+	if name_of_class.ends_with(".tscn"):
+		var scene_full_path = normalize_scene_path(name_of_class)
+		if not FileAccess.file_exists(scene_full_path):
+			printerr("Scene file does not exist: " + scene_full_path)
+			return null
+		var packed = load(scene_full_path)
+		if packed == null or not (packed is PackedScene):
+			printerr("Failed to load scene: " + scene_full_path)
+			return null
+		var instanced = packed.instantiate()
+		if instanced == null:
+			printerr("Failed to instantiate scene: " + scene_full_path)
+			return null
+		return instanced
 
 	var result = null
 	if debug_mode:

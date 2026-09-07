@@ -57,7 +57,7 @@ export const sceneToolDefinitions = [
         nodeType: {
           type: 'string',
           description:
-            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label")',
+            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label"), or a scene path (e.g. "scenes/enemy.tscn") to instance an existing scene as a child — instanced children serialize as `instance=ExtResource(...)` on save',
         },
         nodeName: {
           type: 'string',
@@ -332,7 +332,11 @@ export async function handleAddNode(
     params,
     parsed.value.projectPath,
     'Failed to add node',
-    ['Check if the node type is valid', 'Ensure the parent node path exists'],
+    [
+      'Check if the node type is valid',
+      'Ensure the parent node path exists',
+      'If nodeType is a scene path, verify the file exists and loads (it must be a .tscn)',
+    ],
   );
 }
 
