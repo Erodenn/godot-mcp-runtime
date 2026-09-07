@@ -192,15 +192,32 @@ func instantiate_class(name_of_class):
 
 	return result
 
-# Helper to normalize scene path
+# Normalize a project-relative or res:// path to its res:// form, rejecting any
+# path that escapes the project root. Godot resolves "res://../x" outward to a
+# real file on disk, so containment is enforced here rather than trusted from
+# the caller: this is the single choke point every path-taking operation
+# funnels through, batch included -- batch forwards operations to these
+# functions without passing through the Node-side path validators.
+#
+# Returns "" for a rejected path. Callers must treat "" as a rejection.
 func normalize_scene_path(scene_path: String) -> String:
-	if not scene_path.begins_with("res://"):
-		return "res://" + scene_path
-	return scene_path
+	var full_path = scene_path
+	if not full_path.begins_with("res://"):
+		full_path = "res://" + full_path
+	var relative = full_path.substr("res://".length()).simplify_path()
+	# A leading ".." escapes the project root. A surviving "://" means a second
+	# scheme rode in (e.g. "res://res://../x"), which simplify_path leaves
+	# intact -- reject rather than depend on how the engine rewrites it later.
+	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
+		return ""
+	return "res://" + relative
 
 # Helper to load and instantiate a scene
 func load_scene_instance(scene_path: String):
 	var full_path = normalize_scene_path(scene_path)
+	if full_path.is_empty():
+		log_error("Path escapes the project root: " + scene_path)
+		return null
 	log_debug("Loading scene from: " + full_path)
 
 	if not FileAccess.file_exists(full_path):
@@ -244,6 +261,9 @@ func find_node_by_path(scene_root: Node, node_path: String) -> Node:
 # Helper to save a scene
 func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 	var full_path = normalize_scene_path(save_path)
+	if full_path.is_empty():
+		log_error("Path escapes the project root: " + save_path)
+		return false
 
 	var packed_scene = PackedScene.new()
 	var result = packed_scene.pack(scene_root)
@@ -278,6 +298,10 @@ func create_scene(params):
 	printerr("Creating scene: " + params.scene_path)
 
 	var full_scene_path = normalize_scene_path(params.scene_path)
+	if full_scene_path.is_empty():
+		log_error("Path escapes the project root: " + params.scene_path)
+		quit(1)
+		return
 	log_debug("Scene path: " + full_scene_path)
 
 	var root_node_type = "Node2D"
@@ -322,21 +346,6 @@ func _is_scene_path(type_or_path: String) -> bool:
 			return true
 	return false
 
-# Resolve a scene path to its res:// form, rejecting anything that escapes the
-# project root. Godot resolves "res://../x.tscn" outward to a real file on
-# disk, so containment has to be checked here rather than trusted from the
-# caller -- batch operations reach this code without passing through the
-# Node-side path validators.
-func _resolve_project_scene_path(scene_path: String) -> String:
-	var full_path = normalize_scene_path(scene_path)
-	var relative = full_path.substr("res://".length()).simplify_path()
-	# A leading ".." escapes the project root. A surviving "://" means a second
-	# scheme rode in (e.g. "res://res://../x.tscn"), which simplify_path leaves
-	# intact -- reject rather than depend on how the engine rewrites it later.
-	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
-		return ""
-	return "res://" + relative
-
 # Instantiate a node for add_node: a registered Godot class, or an instance of
 # an existing scene when node_type names a scene file. Instanced children pack
 # back as `instance=ExtResource(...)` on save, so scenes can be composed
@@ -348,7 +357,7 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 			return {"ok": false, "error": "Failed to instantiate node of type: " + type_or_path}
 		return {"ok": true, "node": node}
 
-	var scene_full_path = _resolve_project_scene_path(type_or_path)
+	var scene_full_path = normalize_scene_path(type_or_path)
 	if scene_full_path.is_empty():
 		return {"ok": false, "error": "Scene path escapes the project root: " + type_or_path}
 	if not FileAccess.file_exists(scene_full_path):
@@ -417,6 +426,8 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
 		return {"ok": false, "error": "Node is not a sprite-compatible type: " + sprite_node.get_class()}
 	var full_texture_path = normalize_scene_path(op.texture_path)
+	if full_texture_path.is_empty():
+		return {"ok": false, "error": "Path escapes the project root: " + op.texture_path}
 	var texture = load(full_texture_path)
 	if not texture:
 		return {"ok": false, "error": "Failed to load texture: " + full_texture_path}
@@ -517,6 +528,10 @@ func export_mesh_library(params):
 
 	if item_id > 0:
 		var full_output_path = normalize_scene_path(params.output_path)
+		if full_output_path.is_empty():
+			log_error("Path escapes the project root: " + params.output_path)
+			quit(1)
+			return
 
 		if not _ensure_res_dir(full_output_path):
 			log_error("Failed to create directory for MeshLibrary: " + full_output_path)
@@ -720,6 +735,10 @@ func attach_script(params):
 		return
 
 	var full_script_path = normalize_scene_path(params.script_path)
+	if full_script_path.is_empty():
+		log_error("Path escapes the project root: " + params.script_path)
+		quit(1)
+		return
 
 	if not FileAccess.file_exists(full_script_path):
 		log_error("Script file does not exist: " + full_script_path)
@@ -1185,6 +1204,8 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 func _validate_single(target: Dictionary) -> Dictionary:
 	if target.has("script_path") and target.script_path != "":
 		var path = normalize_scene_path(target.script_path)
+		if path.is_empty():
+			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.script_path}], "target": target.script_path}
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.script_path}
 		var resource = load(path)
@@ -1192,6 +1213,8 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		return {"valid": resource != null, "errors": [], "target": target.script_path}
 	elif target.has("scene_path") and target.scene_path != "":
 		var path = normalize_scene_path(target.scene_path)
+		if path.is_empty():
+			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.scene_path}], "target": target.scene_path}
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.scene_path}
 		var scene = load(path)
