@@ -112,11 +112,12 @@ export interface StderrDiagnostic {
  *   the `<method> (path:line)` and bare `path:line` forms. `gdscript://`
  *   URIs (runtime-compiled sources with no res:// identity) yield no
  *   filePath — the line number still applies to the submitted source.
- * - Suppresses the redundant follow-on `ERROR: Failed to load script
- *   "res://..." with error "..."` echo: it restates a SCRIPT ERROR already
- *   captured, and its own `at:` line points into Godot's engine source
- *   (e.g. gdscript_resource_format.cpp:46), which would surface as a bogus
- *   line number for the user's script.
+ * - Captures bare `ERROR:` lines (non-script failures — notably scene file
+ *   parse errors carrying an inline `[Resource file res://x:N]` location),
+ *   while suppressing the redundant `Failed to load/load` echo lines whose
+ *   `at:` lines point into Godot's engine source (e.g.
+ *   gdscript_resource_format.cpp:46) and would surface as bogus line
+ *   numbers for the user's file.
  */
 export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
   const entries: StderrDiagnostic[] = [];
@@ -178,11 +179,49 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       if (reportedFailures.has(key)) continue;
       reportedFailures.add(key);
       entries.push({ line: parseInt(parseLine, 10), message });
+      continue;
     }
 
-    // Suppressed: "ERROR: Failed to load script ..." echoes (restating an
-    // already-captured SCRIPT ERROR, with an engine-source at: line that
-    // would masquerade as a line number in the user's script).
+    // Pattern: bare "ERROR: ..." lines — non-script failures, most importantly
+    // scene/resource file parse errors emitted during scene validation:
+    //   ERROR: Parse Error: Parse error. [Resource file res://main.tscn:4]
+    // These carry no SCRIPT ERROR prefix, so the blocks above miss them.
+    // Guard rails:
+    // - "Failed to load script/resource" echoes merely restate an error
+    //   already captured (with an engine-source at: line that would
+    //   masquerade as a line number in the user's file).
+    // - "Failed loading resource:" is the same echo class for scene loads.
+    // - The at: line below a bare ERROR points into Godot's C++ engine
+    //   source (e.g. resource_format_text.cpp:293), never into the user's
+    //   file, so line/location info is taken only from the inline
+    //   [Resource file res://x:N] suffix when present.
+    const bareErrorMatch = line.match(/^ERROR:\s*(.+)/);
+    if (bareErrorMatch) {
+      const [, rawMessage = ''] = bareErrorMatch;
+      let message = rawMessage.trim();
+      if (
+        /^Failed to load (script|resource)/i.test(message) ||
+        /^Failed loading resource/i.test(message)
+      ) {
+        continue;
+      }
+      let lineNum: number | undefined;
+      let filePath: string | undefined;
+      const resFileMatch = message.match(/\[Resource file (res:\/\/[^:\]]+):(\d+)\]/);
+      if (resFileMatch) {
+        filePath = resFileMatch[1];
+        lineNum = parseInt(resFileMatch[2] ?? '0', 10);
+        message = message.replace(/\s*\[Resource file res:\/\/[^:\]]+:\d+\]/, '').trim();
+      }
+      const key = `bare:${filePath ?? ''}:${lineNum ?? 0}:${message}`;
+      if (reportedFailures.has(key)) continue;
+      reportedFailures.add(key);
+      const entry: StderrDiagnostic = { message };
+      if (lineNum !== undefined) entry.line = lineNum;
+      if (filePath !== undefined) entry.filePath = filePath;
+      entries.push(entry);
+      continue;
+    }
   }
 
   return entries;
