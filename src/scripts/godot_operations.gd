@@ -306,6 +306,11 @@ func create_scene(params):
 		quit(1)
 		return
 
+# Spatial properties add_node accepts as top-level params instead of under
+# `properties`. Mirrored by PROMOTED_SPATIAL_PARAMS in src/tools/scene-tools.ts,
+# which merges them on the standalone path -- KEEP IN SYNC.
+const _PROMOTED_SPATIAL_PARAMS: Array = ["position", "rotation", "scale", "visible", "modulate"]
+
 # Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
@@ -325,14 +330,13 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	if not new_node:
 		return {"ok": false, "error": "Failed to instantiate node of type: " + op.node_type}
 	new_node.name = op.node_name
-	# Promoted spatial params (position, position3d, rotation, scale, visible,
-	# modulate) may arrive top-level instead of under `properties` — the batch
-	# path forwards operations raw, so fold them in before applying properties.
-	# `properties` wins on key conflicts (matching handleAddNode's precedence).
+	# Promoted spatial params may arrive top-level instead of under `properties`
+	# — the batch path forwards operations raw, so fold them in before applying
+	# properties. `properties` wins on key conflicts (matching handleAddNode).
 	var props = {}
 	if op.has("properties"):
 		props = op.properties.duplicate()
-	for promoted in ["position", "position3d", "rotation", "scale", "visible", "modulate"]:
+	for promoted in _PROMOTED_SPATIAL_PARAMS:
 		if op.has(promoted) and not props.has(promoted):
 			props[promoted] = op[promoted]
 	for property in props:

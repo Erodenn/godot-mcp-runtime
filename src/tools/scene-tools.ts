@@ -48,7 +48,7 @@ export const sceneToolDefinitions = [
   {
     name: 'add_node',
     description:
-      "Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) are top-level params; anything else goes under properties. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null. Full value rules: the Property Values section of docs/tools.md. parentNodePath defaults to the scene root. Returns a plain-text confirmation naming the new node and type. Errors, and adds nothing, if nodeType is not a registered Godot class, parentNodePath does not exist, or a property name or value is invalid.",
+      "Add a node to a Godot scene. Saves automatically. Common spatial properties (position, rotation, scale, visible, modulate) are top-level params; anything else goes under properties. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null. Full value rules: the Property Values section of docs/tools.md. parentNodePath defaults to the scene root. Returns a plain-text confirmation naming the new node and type. Errors, and adds nothing, if nodeType is not a registered Godot class, parentNodePath does not exist, or a property name or value is invalid.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,12 +70,8 @@ export const sceneToolDefinitions = [
         },
         position: {
           type: 'object',
-          description: 'Vector2 position (e.g. {"x": 100, "y": 200})',
-          properties: { x: { type: 'number' }, y: { type: 'number' } },
-        },
-        position3d: {
-          type: 'object',
-          description: 'Vector3 position for 3D nodes (e.g. {"x": 0, "y": 1, "z": 0})',
+          description:
+            'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node',
           properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
         rotation: { type: 'number', description: 'Rotation in radians' },
@@ -172,7 +168,7 @@ export const sceneToolDefinitions = [
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -201,12 +197,7 @@ export const sceneToolDefinitions = [
               position: {
                 type: 'object',
                 description:
-                  '[add_node] Vector2 position (e.g. {"x": 100, "y": 200}) — shorthand for properties.position',
-              },
-              position3d: {
-                type: 'object',
-                description:
-                  '[add_node] Vector3 position for 3D nodes — shorthand for properties.position3d',
+                  '[add_node] Position — {"x","y"} for 2D nodes, {"x","y","z"} for 3D. Shorthand for properties.position',
               },
               rotation: {
                 type: 'number',
@@ -292,6 +283,14 @@ export async function handleCreateScene(
   );
 }
 
+/**
+ * Spatial properties `add_node` accepts as top-level params instead of under
+ * `properties`. Mirrored by `_PROMOTED_SPATIAL_PARAMS` in
+ * `src/scripts/godot_operations.gd`, which applies them on the batch path --
+ * KEEP IN SYNC.
+ */
+const PROMOTED_SPATIAL_PARAMS = ['position', 'rotation', 'scale', 'visible', 'modulate'] as const;
+
 export async function handleAddNode(
   runner: GodotRunner,
   args: OperationParams,
@@ -309,16 +308,8 @@ export async function handleAddNode(
   if (!properties.ok) return properties;
 
   // Merge promoted top-level params into properties dict
-  const promotedKeys = [
-    'position',
-    'position3d',
-    'rotation',
-    'scale',
-    'visible',
-    'modulate',
-  ] as const;
   const mergedProps: OperationParams = { ...(properties.value ?? {}) };
-  for (const key of promotedKeys) {
+  for (const key of PROMOTED_SPATIAL_PARAMS) {
     if (args[key] !== undefined) {
       mergedProps[key] = args[key];
     }
