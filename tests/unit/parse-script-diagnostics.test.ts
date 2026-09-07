@@ -2,7 +2,7 @@
  * Unit tests for parseScriptDiagnostics — the shared Godot stderr compiler-
  * diagnostic parser.
  *
- * Context (Phase 1 + Phase 7 of the diagnostics roadmap): GDScript compile
+ * Context: GDScript compile
  * failures don't travel through the API call that triggers them — `load()`
  * returns a placeholder resource, `GDScript.reload()` returns a bare error
  * code (43) — the message and line live on stderr. Two consumers depend on
@@ -81,6 +81,52 @@ describe('parseScriptDiagnostics', () => {
         message: 'Identifier "some_missing_thing" not declared in the current scope.',
         line: 4,
       },
+    ]);
+  });
+
+  it('recovers filePath from the "Failed to load script" echo when at: names no res:// path', () => {
+    // The at: line points into Godot's C++ source, so the entry would carry no
+    // res:// identity -- and parseGodotErrorsByPath drops filePath-less entries,
+    // silently reporting the file valid in batch validate.
+    const stderr = [
+      'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
+      '   at: GDScript::reload (modules/gdscript/gdscript.cpp:2907)',
+      '   GDScript backtrace (most recent call first):',
+      '       [0] _validate_single (res://.mcp/ops.gd:1126)',
+      'ERROR: Failed to load script "res://scripts/late.gd" with error "Parse error".',
+    ].join('\n');
+    expect(parseScriptDiagnostics(stderr)).toEqual([
+      {
+        message: 'Identifier "x" not declared in the current scope.',
+        filePath: 'res://scripts/late.gd',
+      },
+    ]);
+  });
+
+  it('never adopts a line number from the "Failed to load script" echo', () => {
+    const stderr = [
+      'SCRIPT ERROR: Compile Error: Identifier not found: GameState',
+      '   at: GDScript::reload (modules/gdscript/gdscript.cpp:2907)',
+      'ERROR: Failed to load script "res://scripts/a.gd" with error "Compilation failed".',
+      '   at: load (modules/gdscript/gdscript_resource_format.cpp:46)',
+    ].join('\n');
+    const result = parseScriptDiagnostics(stderr);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.filePath).toBe('res://scripts/a.gd');
+    expect(result[0]?.line).toBeUndefined();
+  });
+
+  it('does not relabel a gdscript:// source with an unrelated nearby res:// path', () => {
+    // The at: line already gives the entry a definite identity (the submitted
+    // source), so the load-failure echo below must not overwrite it -- that
+    // would pair a real file path with the submitted source's line number.
+    const stderr = [
+      'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
+      '   at: GDScript::reload (gdscript://-9223372010447436344.gd:4)',
+      'ERROR: Failed to load script "res://scripts/unrelated.gd" with error "Parse error".',
+    ].join('\n');
+    expect(parseScriptDiagnostics(stderr)).toEqual([
+      { message: 'Identifier "x" not declared in the current scope.', line: 4 },
     ]);
   });
 

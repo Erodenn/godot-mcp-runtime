@@ -7,7 +7,7 @@ import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
-import { parseScriptDiagnostics, type StderrDiagnostic } from '../utils/output-parsing.js';
+import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
 
 export const validateToolDefinitions = [
@@ -68,17 +68,8 @@ interface ValidationError {
   message: string;
 }
 
-/**
- * Core Godot stderr parser. Returns a flat list of error entries, each with an
- * optional line number and optional res:// file path (from the "at:" line).
- */
-type ParsedErrorEntry = StderrDiagnostic;
-
-function parseGodotErrorEntries(stderr: string): ParsedErrorEntry[] {
-  return parseScriptDiagnostics(stderr);
-}
 function parseGodotErrors(stderr: string): ValidationError[] {
-  return parseGodotErrorEntries(stderr).map(({ message, line }) => {
+  return parseScriptDiagnostics(stderr).map(({ message, line }) => {
     const err: ValidationError = { message };
     if (line !== undefined) err.line = line;
     return err;
@@ -109,7 +100,7 @@ function writeTempGdScript(
  */
 function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> {
   const result = new Map<string, ValidationError[]>();
-  for (const { message, line, filePath } of parseGodotErrorEntries(stderr)) {
+  for (const { message, line, filePath } of parseScriptDiagnostics(stderr)) {
     if (filePath) {
       if (!result.has(filePath)) result.set(filePath, []);
       const err: ValidationError = { message };

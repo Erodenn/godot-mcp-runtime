@@ -1,5 +1,5 @@
 /**
- * Integration test: run_script compile-error diagnostics (Phase 7).
+ * Integration test: run_script compile-error diagnostics.
  *
  * End-to-end regression for a real-world failure class: run_script compile
  * failures returned only "Script compilation failed (error 43). Check
@@ -15,7 +15,7 @@
  * Requires GODOT_PATH. Skipped in CI without it.
  */
 
-import { describe, beforeAll, beforeEach, afterEach, expect } from 'vitest';
+import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
 import { cpSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -59,6 +59,16 @@ beforeEach(() => {
 
 afterEach(async () => {
   await runner.stopProject().catch(() => undefined);
+});
+
+afterAll(() => {
+  for (const dir of tmpDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
 });
 
 describe('run_script compile-error diagnostics (live bridge)', () => {
@@ -124,14 +134,4 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
     },
     60000,
   );
-});
-
-process.on('exit', () => {
-  for (const dir of tmpDirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
 });
