@@ -198,6 +198,32 @@ export const sceneToolDefinitions = [
                 description: '[add_node] Parent node path (defaults to root)',
               },
               properties: { type: 'object', description: '[add_node] Initial property values' },
+              position: {
+                type: 'object',
+                description:
+                  '[add_node] Vector2 position (e.g. {"x": 100, "y": 200}) — shorthand for properties.position',
+              },
+              position3d: {
+                type: 'object',
+                description:
+                  '[add_node] Vector3 position for 3D nodes — shorthand for properties.position3d',
+              },
+              rotation: {
+                type: 'number',
+                description: '[add_node] Rotation in radians — shorthand for properties.rotation',
+              },
+              scale: {
+                type: 'object',
+                description: '[add_node] Vector2 scale — shorthand for properties.scale',
+              },
+              visible: {
+                type: 'boolean',
+                description: '[add_node] Visibility — shorthand for properties.visible',
+              },
+              modulate: {
+                type: 'object',
+                description: '[add_node] Color modulation — shorthand for properties.modulate',
+              },
               nodePath: { type: 'string', description: '[load_sprite] Target node path' },
               texturePath: {
                 type: 'string',
