@@ -90,6 +90,13 @@ export interface StderrDiagnostic {
 }
 
 /**
+ * How far past a parse/compile error to scan for the `Failed to load script`
+ * echo that names the offending file. Wide enough to clear a full GDScript
+ * backtrace between the two lines.
+ */
+const LOAD_FAILURE_LOOKAHEAD_LINES = 10;
+
+/**
  * Parse Godot script-compiler diagnostics from a raw stderr stream.
  *
  * Both the headless `validate` path and the live-bridge `run_script` path hit
@@ -102,8 +109,7 @@ export interface StderrDiagnostic {
  *   SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.
  *             at: GDScript::reload (res://scripts/foo.gd:3)
  *
- * This is the single shared parser for that format (Phase 1 + Phase 7 of the
- * diagnostics roadmap). Behavior:
+ * This is the single shared parser for that format. Behavior:
  *
  * - Recognizes `SCRIPT ERROR:` / `USER SCRIPT ERROR:` prefixes (the same
  *   marker set GodotRunner.SCRIPT_ERROR_PATTERNS gates on) plus bare
@@ -112,6 +118,11 @@ export interface StderrDiagnostic {
  *   the `<method> (path:line)` and bare `path:line` forms. `gdscript://`
  *   URIs (runtime-compiled sources with no res:// identity) yield no
  *   filePath — the line number still applies to the submitted source.
+ * - When a parse/compile error's `at:` line names no path at all, adopts the
+ *   path (never the line) from a nearby `Failed to load script "res://..."`
+ *   echo, so batch attribution in `validate` can still place the error. A
+ *   `gdscript://` URI counts as a path, so a runtime-compiled source is never
+ *   relabelled with an unrelated file from surrounding stderr.
  * - Captures bare `ERROR:` lines (non-script failures — notably scene file
  *   parse errors carrying an inline `[Resource file res://x:N]` location),
  *   while suppressing the redundant `Failed to load/load` echo lines whose
@@ -139,6 +150,9 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       const message = rawMessage.trim();
       let lineNum: number | undefined;
       let filePath: string | undefined;
+      // Whether the `at:` line named a path of any scheme. A `gdscript://`
+      // URI counts: it has no res:// identity but it is still a definite one.
+      let atNamedAPath = false;
 
       // "Failed to load script" echoes are suppressed only for the rest of
       // this block — the primary SCRIPT ERROR above them is the diagnostic.
@@ -146,13 +160,37 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       if (next !== undefined) {
         // "<method> (res://path:line)" and bare "res://path:line"
         const atMatch = next.match(
-          /\s*at:\s*(?:[^()\n]*\()?\(?((?:res:|gdscript:|file:)?\/\/[^):"\s]+|[a-z]:[^):"\s]+):(\d+)\)?/,
+          /\s*at:\s*(?:[^()\n]*\()?\(?((?:res:|gdscript:|file:)?\/\/[^):"\s]+):(\d+)\)?/,
         );
         if (atMatch) {
           const [, path = '', lineStr = '0'] = atMatch;
           filePath = path.startsWith('res://') ? path : undefined;
           lineNum = parseInt(lineStr, 10);
+          atNamedAPath = true;
           i++;
+        }
+      }
+
+      // The `at:` line of a parse/compile error names a synthetic
+      // `gdscript://` URI (runtime-compiled source) or points into Godot's
+      // own C++ source, leaving the entry with no res:// identity. Batch
+      // attribution in `validate` drops filePath-less entries, so recover the
+      // path from the `Failed to load script "res://..."` echo that follows
+      // within a full GDScript backtrace. Only the path is adopted -- the
+      // echo's own `at:` line points at engine source and would surface as a
+      // bogus line number in the user's file.
+      if (!filePath && !atNamedAPath && /Parse Error|Compile Error/i.test(line)) {
+        const lookaheadLimit = Math.min(i + LOAD_FAILURE_LOOKAHEAD_LINES + 1, lines.length);
+        for (let j = i + 1; j < lookaheadLimit; j++) {
+          const lookLine = lines[j];
+          if (lookLine === undefined) continue;
+          const failMatch = lookLine.match(
+            /Failed to load (?:script|resource):?\s*"?(res:\/\/[^":\s]+)/,
+          );
+          if (failMatch) {
+            filePath = failMatch[1];
+            break;
+          }
         }
       }
 

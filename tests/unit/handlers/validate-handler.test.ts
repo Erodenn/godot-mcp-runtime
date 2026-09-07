@@ -137,7 +137,7 @@ describe('handleValidate', () => {
     expect(parsed.errors[0].message).toContain('Unexpected token');
   });
 
-  // --- Phase 1 regressions: autoload-aware validation + diagnostic quality ---
+  // --- Autoload-aware validation + diagnostic quality regressions ---
 
   it('reports autoload-reference compile errors with file and line (error-43 class)', async () => {
     // Real-world failure class: scripts referencing autoload singletons produce a

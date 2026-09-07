@@ -1,5 +1,5 @@
 /**
- * Regression tests: run_script compile-error diagnostics enrichment (Phase 7).
+ * Regression tests: run_script compile-error diagnostics enrichment.
  *
  * Observed in production agent workflows: run_script compile failures each
  * returned only "Script compilation failed (error 43). Check syntax." — no
