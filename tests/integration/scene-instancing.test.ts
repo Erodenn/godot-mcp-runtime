@@ -12,14 +12,17 @@
  * Rules:
  * - a nonexistent scene path produces an explicit error, adding nothing
  * - a path that exists but is not a scene (wrong suffix) is never treated as one
+ * - a path escaping the project root is rejected on both the standalone and
+ *   batch paths (Godot resolves `res://../x.tscn` to a real file on disk)
  * - the saved parent scene references the child via instance= ExtResource
  * - ordinary class names keep working unchanged
+ * - `create_scene`'s rootNodeType still means a Godot class, not a scene
  *
  * Requires GODOT_PATH. Skipped in CI without it.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { cpSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -168,6 +171,149 @@ describe('scene instancing via add_node', () => {
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="PlainNode" type="Node2D"/);
       expect(saved).not.toMatch(/instance=ExtResource/);
+    },
+    60000,
+  );
+  itGodot(
+    'rejects a scene path that escapes the project root',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const outside = join(tmpProject, '..', `outside-${randomBytes(4).toString('hex')}.tscn`);
+      writeFileSync(outside, '[gd_scene format=3]\n[node name="Outside" type="Node2D"]\n');
+      const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+
+      try {
+        await runner.executeOperation(
+          'add_node',
+          {
+            scenePath: 'main.tscn',
+            nodeType: `../${outside.split(/[\/]/).pop()}`,
+            nodeName: 'Escaped',
+          },
+          tmpProject,
+          30000,
+        );
+      } catch {
+        // acceptable: the operation exits nonzero on rejection
+      } finally {
+        rmSync(outside, { force: true });
+      }
+
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
+    },
+    60000,
+  );
+
+  itGodot(
+    'rejects an escaping scene path through batch_scene_operations too',
+    async () => {
+      // The batch path forwards operations to GDScript without passing through
+      // the Node-side path validators, so containment must hold engine-side.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout } = await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'add_node',
+              scenePath: 'main.tscn',
+              nodeType: '../outside.tscn',
+              nodeName: 'BatchEscaped',
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain('escapes the project root');
+      // The batch re-saves surviving scenes, so assert on the node rather than
+      // byte-equality: nothing was instanced and no ext_resource was added.
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(saved).not.toContain('BatchEscaped');
+      expect(saved).not.toContain('outside.tscn');
+    },
+    60000,
+  );
+
+  itGodot(
+    'rejects a second scheme smuggled into the scene path',
+    async () => {
+      // simplify_path() leaves an embedded "res://" intact, so containment
+      // would otherwise rest on how the engine rewrites the path later.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout } = await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'add_node',
+              scenePath: 'main.tscn',
+              nodeType: 'res://res://../outside.tscn',
+              nodeName: 'SchemeEscaped',
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain('escapes the project root');
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(saved).not.toContain('SchemeEscaped');
+      expect(saved).not.toContain('outside.tscn');
+    },
+    60000,
+  );
+
+  itGodot(
+    'matches the scene suffix case-insensitively',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeChildScene(tmpProject);
+      writeFileSync(
+        join(tmpProject, 'Upper.TSCN'),
+        readFileSync(join(tmpProject, 'child.tscn'), 'utf-8'),
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'Upper.TSCN', nodeName: 'UpperKid' },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain('added successfully');
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toMatch(
+        /instance=ExtResource\(/,
+      );
+    },
+    60000,
+  );
+
+  itGodot(
+    'create_scene rootNodeType still means a Godot class, not a scene path',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeChildScene(tmpProject);
+
+      let stdout = '';
+      try {
+        const result = await runner.executeOperation(
+          'create_scene',
+          { scenePath: 'made.tscn', rootNodeType: 'child.tscn' },
+          tmpProject,
+          30000,
+        );
+        stdout = result.stdout;
+      } catch {
+        // acceptable: the operation exits nonzero
+      }
+
+      expect(stdout).not.toContain('created successfully');
+      expect(existsSync(join(tmpProject, 'made.tscn'))).toBe(false);
     },
     60000,
   );

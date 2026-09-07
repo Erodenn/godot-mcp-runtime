@@ -154,29 +154,11 @@ func get_script_by_name(name_of_class):
 	printerr("Could not find script for class: " + name_of_class)
 	return null
 
-# Instantiate a class by name, or instance a PackedScene when the name is a
-# scene path (e.g. "scenes/enemy.tscn", "res://scenes/enemy.tscn"). Instanced
-# children pack back as `instance=ExtResource(...)` on save, so scenes can be
-# composed without hand-editing .tscn files.
+# Instantiate a class by name
 func instantiate_class(name_of_class):
 	if name_of_class.is_empty():
 		printerr("Cannot instantiate class: name is empty")
 		return null
-
-	if name_of_class.ends_with(".tscn"):
-		var scene_full_path = normalize_scene_path(name_of_class)
-		if not FileAccess.file_exists(scene_full_path):
-			printerr("Scene file does not exist: " + scene_full_path)
-			return null
-		var packed = load(scene_full_path)
-		if packed == null or not (packed is PackedScene):
-			printerr("Failed to load scene: " + scene_full_path)
-			return null
-		var instanced = packed.instantiate()
-		if instanced == null:
-			printerr("Failed to instantiate scene: " + scene_full_path)
-			return null
-		return instanced
 
 	var result = null
 	if debug_mode:
@@ -329,6 +311,56 @@ func create_scene(params):
 # which merges them on the standalone path -- KEEP IN SYNC.
 const _PROMOTED_SPATIAL_PARAMS: Array = ["position", "rotation", "scale", "visible", "modulate"]
 
+# Scene-file suffixes accepted where a node type may name a scene to instance.
+const _SCENE_SUFFIXES: Array = [".tscn", ".scn"]
+
+# True when the value names a scene file rather than a Godot class.
+func _is_scene_path(type_or_path: String) -> bool:
+	var lowered = type_or_path.to_lower()
+	for suffix in _SCENE_SUFFIXES:
+		if lowered.ends_with(suffix):
+			return true
+	return false
+
+# Resolve a scene path to its res:// form, rejecting anything that escapes the
+# project root. Godot resolves "res://../x.tscn" outward to a real file on
+# disk, so containment has to be checked here rather than trusted from the
+# caller -- batch operations reach this code without passing through the
+# Node-side path validators.
+func _resolve_project_scene_path(scene_path: String) -> String:
+	var full_path = normalize_scene_path(scene_path)
+	var relative = full_path.substr("res://".length()).simplify_path()
+	# A leading ".." escapes the project root. A surviving "://" means a second
+	# scheme rode in (e.g. "res://res://../x.tscn"), which simplify_path leaves
+	# intact -- reject rather than depend on how the engine rewrites it later.
+	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
+		return ""
+	return "res://" + relative
+
+# Instantiate a node for add_node: a registered Godot class, or an instance of
+# an existing scene when node_type names a scene file. Instanced children pack
+# back as `instance=ExtResource(...)` on save, so scenes can be composed
+# without hand-editing .tscn files.
+func _instantiate_node_type(type_or_path: String) -> Dictionary:
+	if not _is_scene_path(type_or_path):
+		var node = instantiate_class(type_or_path)
+		if not node:
+			return {"ok": false, "error": "Failed to instantiate node of type: " + type_or_path}
+		return {"ok": true, "node": node}
+
+	var scene_full_path = _resolve_project_scene_path(type_or_path)
+	if scene_full_path.is_empty():
+		return {"ok": false, "error": "Scene path escapes the project root: " + type_or_path}
+	if not FileAccess.file_exists(scene_full_path):
+		return {"ok": false, "error": "Scene file does not exist: " + scene_full_path}
+	var packed = load(scene_full_path)
+	if packed == null or not (packed is PackedScene):
+		return {"ok": false, "error": "Failed to load scene: " + scene_full_path}
+	var instanced = packed.instantiate()
+	if instanced == null:
+		return {"ok": false, "error": "Failed to instantiate scene: " + scene_full_path}
+	return {"ok": true, "node": instanced}
+
 # Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
@@ -344,9 +376,10 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "node_type is required for add_node"}
 	if not op.has("node_name") or op.node_name == "":
 		return {"ok": false, "error": "node_name is required for add_node"}
-	var new_node = instantiate_class(op.node_type)
-	if not new_node:
-		return {"ok": false, "error": "Failed to instantiate node of type: " + op.node_type}
+	var instantiated = _instantiate_node_type(op.node_type)
+	if not instantiated.ok:
+		return {"ok": false, "error": instantiated.error}
+	var new_node = instantiated.node
 	new_node.name = op.node_name
 	# Promoted spatial params may arrive top-level instead of under `properties`
 	# — the batch path forwards operations raw, so fold them in before applying

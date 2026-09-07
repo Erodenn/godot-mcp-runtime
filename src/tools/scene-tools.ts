@@ -57,7 +57,7 @@ export const sceneToolDefinitions = [
         nodeType: {
           type: 'string',
           description:
-            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label"), or a scene path (e.g. "scenes/enemy.tscn") to instance an existing scene as a child — instanced children serialize as `instance=ExtResource(...)` on save',
+            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label"), or a project-relative scene path (.tscn or .scn, e.g. "scenes/enemy.tscn") to instance an existing scene as a child — instanced children serialize as `instance=ExtResource(...)` on save',
         },
         nodeName: {
           type: 'string',
@@ -291,6 +291,18 @@ export async function handleCreateScene(
  */
 const PROMOTED_SPATIAL_PARAMS = ['position', 'rotation', 'scale', 'visible', 'modulate'] as const;
 
+/**
+ * Scene-file suffixes `add_node` accepts in place of a Godot class name.
+ * Mirrored by `_SCENE_SUFFIXES` in `src/scripts/godot_operations.gd` --
+ * KEEP IN SYNC.
+ */
+const SCENE_PATH_SUFFIXES = ['.tscn', '.scn'];
+
+function isScenePath(nodeType: string): boolean {
+  const lowered = nodeType.toLowerCase();
+  return SCENE_PATH_SUFFIXES.some((suffix) => lowered.endsWith(suffix));
+}
+
 export async function handleAddNode(
   runner: GodotRunner,
   args: OperationParams,
@@ -301,6 +313,17 @@ export async function handleAddNode(
 
   const nodeType = requireString(args, 'nodeType');
   if (!nodeType.ok) return nodeType;
+  // A scene-path nodeType is a filesystem path, so it gets the same
+  // project-root containment check every other path input does -- Godot
+  // resolves `res://../x.tscn` to a real file outside the project.
+  if (isScenePath(nodeType.value) && !validateSubPath(parsed.value.projectPath, nodeType.value)) {
+    return err(
+      createErrorResponse(`Scene path escapes the project root: ${nodeType.value}`, [
+        'Use a path relative to the project root (e.g. "scenes/enemy.tscn")',
+        'Remove any ".." segments from the path',
+      ]),
+    );
+  }
   const nodeName = requireString(args, 'nodeName');
   if (!nodeName.ok) return nodeName;
 
@@ -335,7 +358,7 @@ export async function handleAddNode(
     [
       'Check if the node type is valid',
       'Ensure the parent node path exists',
-      'If nodeType is a scene path, verify the file exists and loads (it must be a .tscn)',
+      'If nodeType is a scene path, verify the file exists and loads (.tscn or .scn)',
     ],
   );
 }
