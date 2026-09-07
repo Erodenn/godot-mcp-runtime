@@ -2,18 +2,18 @@
  * Integration test: promoted spatial params in batch_scene_operations.
  *
  * Regression: batch add_node silently dropped top-level `position` (and the
- * other promoted spatial params — rotation, scale, visible, modulate,
- * position3d). The standalone add_node handler merges those keys into
- * `properties` (handleAddNode), but the batch path forwards operations raw
- * to the GDScript layer, whose _apply_add_node only read `properties` — so
+ * other promoted spatial params — rotation, scale, visible, modulate).
+ * The standalone add_node handler merges those keys into `properties`
+ * (handleAddNode), but the batch path forwards operations raw to the
+ * GDScript layer, whose _apply_add_node only read `properties` — so
  * a batch like:
  *
  *   { operation: 'add_node', nodeType: 'StaticBody2D',
  *     nodeName: 'WallTop', position: { x: 480, y: -10 } }
  *
- * reported success while persisting the node at (0,0). Observed in a live
- * agent session building a game (wall positions vanished silently; a later
- * task discovered and repaired them).
+ * reported success while persisting the node at (0,0): a scene assembled
+ * through batch ops came out with every positioned node at the origin, with
+ * nothing in the response hinting at it.
  *
  * The fix folds promoted params into the properties map inside
  * _apply_add_node, with `properties` winning on key conflicts (matching
@@ -38,18 +38,7 @@ function makeTmpProject(): string {
   return dst;
 }
 
-function cleanup(dirs: string[]) {
-  for (const dir of dirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-  dirs.length = 0;
-}
-
-const tmpDirsSafe: string[] = [];
+const tmpDirs: string[] = [];
 
 let runner: GodotRunner;
 
@@ -58,15 +47,21 @@ beforeAll(async () => {
   await runner.detectGodotPath();
 });
 
+beforeEach(() => {
+  tmpDirs.push(makeTmpProject());
+});
+
+afterAll(() => {
+  for (const dir of tmpDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+});
+
 describe('batch_scene_operations promoted spatial params', () => {
-  const tmpDirs: string[] = tmpDirsSafe;
-
-  beforeEach(() => {
-    tmpDirs.push(makeTmpProject());
-  });
-
-  afterAll(() => cleanup(tmpDirs));
-
   itGodot(
     'batch add_node persists a top-level position param',
     async () => {
@@ -166,6 +161,33 @@ describe('batch_scene_operations promoted spatial params', () => {
       );
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toMatch(/position\s*=\s*Vector2\(-10,\s*270\)/);
+    },
+    60000,
+  );
+  itGodot(
+    'promoted position on a 3D node lands as a Vector3 transform',
+    async () => {
+      // There is no separate `position3d` param: `position` carries {x,y,z}
+      // for 3D nodes, which Godot stores on the node's transform.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'add_node',
+              scenePath: 'main.tscn',
+              nodeType: 'Node3D',
+              nodeName: 'Spatial',
+              position: { x: 1, y: 2, z: 3 },
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/transform = Transform3D\([^)]*1, 2, 3\)/);
     },
     60000,
   );
