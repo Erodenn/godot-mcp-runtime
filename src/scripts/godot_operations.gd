@@ -325,17 +325,26 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	if not new_node:
 		return {"ok": false, "error": "Failed to instantiate node of type: " + op.node_type}
 	new_node.name = op.node_name
+	# Promoted spatial params (position, position3d, rotation, scale, visible,
+	# modulate) may arrive top-level instead of under `properties` — the batch
+	# path forwards operations raw, so fold them in before applying properties.
+	# `properties` wins on key conflicts (matching handleAddNode's precedence).
+	var props = {}
 	if op.has("properties"):
-		for property in op.properties:
-			if not (property in new_node):
-				var error_message = "Property '%s' does not exist on node of type '%s'" % [property, new_node.get_class()]
-				new_node.free()
-				return {"ok": false, "error": error_message}
-			var prepared = _prepare_property_value(new_node, property, op.properties[property])
-			if not prepared.ok:
-				new_node.free()
-				return {"ok": false, "error": prepared.error}
-			new_node.set(property, prepared.value)
+		props = op.properties.duplicate()
+	for promoted in ["position", "position3d", "rotation", "scale", "visible", "modulate"]:
+		if op.has(promoted) and not props.has(promoted):
+			props[promoted] = op[promoted]
+	for property in props:
+		if not (property in new_node):
+			var error_message = "Property '%s' does not exist on node of type '%s'" % [property, new_node.get_class()]
+			new_node.free()
+			return {"ok": false, "error": error_message}
+		var prepared = _prepare_property_value(new_node, property, props[property])
+		if not prepared.ok:
+			new_node.free()
+			return {"ok": false, "error": prepared.error}
+		new_node.set(property, prepared.value)
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	return {"ok": true, "error": ""}
