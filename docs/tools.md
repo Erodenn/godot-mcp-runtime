@@ -35,11 +35,17 @@ All mutation operations save automatically. Use `save_scene` only for save-as (`
 | Tool                     | Description                                                          |
 | ------------------------ | -------------------------------------------------------------------- |
 | `create_scene`           | Create a new scene file                                              |
-| `add_node`               | Add a node to an existing scene (supports promoted spatial params)   |
+| `add_node`               | Add a node, or instance an existing scene, into a scene              |
 | `load_sprite`            | Set a texture on a Sprite2D, Sprite3D, or TextureRect                |
 | `save_scene`             | Re-pack and save the scene, or save-as with `newPath`                |
 | `export_mesh_library`    | Export scenes as a MeshLibrary for GridMap                           |
 | `batch_scene_operations` | Run multiple add_node/load_sprite/save ops in a single Godot process |
+
+`add_node` takes either a Godot class name or a project-relative scene path (`.tscn` or `.scn`, matched case-insensitively) as `nodeType`. A scene path is loaded and instanced, and serializes as `instance=ExtResource(...)` on save, so scenes can be composed without hand-editing `.tscn` files.
+
+Spatial properties (`position`, `rotation`, `scale`, `visible`, `modulate`) may be passed as top-level params instead of under `properties`, on the standalone tool and on `add_node` items inside `batch_scene_operations` alike. `properties` wins on a key conflict. `position` takes `{x, y}` on a 2D node and `{x, y, z}` on a 3D node.
+
+Every path argument is confined to the project root. A path that resolves outside it (for example `../enemy.tscn`) is rejected rather than followed, on both the standalone and batch paths.
 
 ## Node Editing (headless)
 
