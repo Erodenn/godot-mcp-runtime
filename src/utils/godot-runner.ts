@@ -432,6 +432,38 @@ export class GodotRunner {
     return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
   }
 
+  /**
+   * Run `godot --headless --import --path <projectPath>` to (re)import assets
+   * into `.godot/imported`. On a fresh project no imported artifacts exist and
+   * resource-touching operations (load_sprite on a new texture, runtime
+   * resource loads) fail with `resource not found` even though the file is on
+   * disk — the import step has never run. Exposed as the `import_assets` tool.
+   */
+  async importAssets(projectPath: string, timeoutMs: number = 120000): Promise<void> {
+    if (!this.godotPath) {
+      await this.detectGodotPath();
+      if (!this.godotPath) {
+        throw new Error('Could not find a valid Godot executable path');
+      }
+    }
+    logDebug(`Importing assets for project: ${projectPath}`);
+    try {
+      await this.spawnAsync(
+        this.godotPath,
+        ['--headless', '--import', '--path', projectPath],
+        timeoutMs,
+      );
+    } catch (error: unknown) {
+      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
+        const execError = error as Error & { stdout: string; stderr: string; code?: number | null };
+        throw new Error(
+          `Asset import failed (exit ${execError.code ?? 'unknown'}).\nStderr:\n${execError.stderr.trim()}`,
+        );
+      }
+      throw error;
+    }
+  }
+
   async runProject(
     projectPath: string,
     scene?: string,

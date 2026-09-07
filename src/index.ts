@@ -41,7 +41,7 @@ export const allToolDefinitions = [
 export const serverInstructions = `Godot MCP Server - AI-driven Godot 4.x project manipulation.
 
 Tool categories:
-- Project management: launch_editor, run_project, attach_project, detach_project, stop_project, get_debug_output, list_projects, get_project_info
+- Project management: launch_editor, run_project, attach_project, detach_project, stop_project, get_debug_output, list_projects, get_project_info, import_assets
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
 - Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
 - Runtime (requires run_project or attach_project): take_screenshot, simulate_input, get_ui_elements, run_script
