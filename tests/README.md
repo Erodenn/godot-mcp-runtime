@@ -10,7 +10,8 @@ tests/
 ├── integration/      Tests that touch fixtures or run real Godot.
 │                     Godot-required tests skip when GODOT_PATH is unset.
 ├── fixtures/         Committed test inputs.
-│   └── godot-project/  Minimal Godot 4 project (Node2D + Label + Sprite2D)
+│   ├── godot-project/  Minimal Godot 4 project (Node2D + Label + Sprite2D)
+│   └── godot-profiling-project/  Same, with a hot _process loop for the profiler tests
 └── README.md         This file.
 ```
 
@@ -31,6 +32,10 @@ tests/
 | `integration/runner-executeOperation.test.ts` | `executeOperation` for `validate_resource` (scene + broken GDScript); `handleGetProjectInfo`                             | Requires `GODOT_PATH`                                   |
 | `integration/scene-roundtrip.test.ts`         | `add_node` / `set_node_properties` / `delete_nodes` round-trip + auto-save invariant (all 3 operations)                  | Requires `GODOT_PATH`; tmp fixture copy                 |
 | `integration/runtime-smoke.test.ts`           | `run_project` → `take_screenshot` smoke test; skips gracefully if no display server                                      | Requires `GODOT_PATH`; may skip headless                |
+| `unit/godot-variant.test.ts`                  | Variant encode/decode round-trip and malformed-packet rejection                                                          |                                                         |
+| `unit/profiler.test.ts`                       | `DebuggerProfiler` against a fake Godot debugger peer: frame aggregation, auto-stop, break-continue, error codes         |                                                         |
+| `unit/handlers/profiler-handlers.test.ts`     | Argument defaults, sort enum, and ProfilerError mapping in `src/tools/profiler-tools.ts`                                 |                                                         |
+| `integration/profiler-smoke.test.ts`          | `run_project({ profiling: true })` → `profile_project` / `start_profiler` + `stop_profiler` against a real engine        | Requires `GODOT_PATH`; needs a display server           |
 | `integration/fixture.test.ts`                 | Smoke check that `tests/fixtures/godot-project/` is well-formed                                                          | No Godot required                                       |
 
 (Add new rows here as additional test files land.)

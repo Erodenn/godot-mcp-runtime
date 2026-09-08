@@ -68,6 +68,12 @@ import {
   handleDisconnectSignal,
 } from './tools/node-tools.js';
 
+import {
+  handleProfileProject,
+  handleStartProfiler,
+  handleStopProfiler,
+} from './tools/profiler-tools.js';
+
 import { handleValidate } from './tools/validate-tools.js';
 
 export const toolDispatch = {
@@ -111,6 +117,11 @@ export const toolDispatch = {
   get_node_signals: handleGetNodeSignals,
   connect_signal: handleConnectSignal,
   disconnect_signal: handleDisconnectSignal,
+
+  // Profiler tools
+  profile_project: handleProfileProject,
+  start_profiler: handleStartProfiler,
+  stop_profiler: handleStopProfiler,
 
   // Validate tools
   validate: handleValidate,

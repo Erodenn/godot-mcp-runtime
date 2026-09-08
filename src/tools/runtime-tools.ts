@@ -103,6 +103,11 @@ export const runtimeToolDefinitions = [
           description:
             "TCP port for the MCP bridge. Omit to auto-select a free port (recommended). The chosen port is baked into the project's `mcp_bridge.gd` at inject time, so the running Godot listens on exactly this port.",
         },
+        profiling: {
+          type: 'boolean',
+          description:
+            "Attach Godot's own remote debugger so profile_project, start_profiler and stop_profiler can measure this session. Must be set at launch — a session already running cannot be profiled — and costs a little runtime overhead.",
+        },
       },
       required: ['projectPath'],
     },
@@ -913,8 +918,12 @@ export async function handleRunProject(
   if (!background.ok) return background;
   const isBackground = background.value === true;
 
+  const profiling = optionalBoolean(args, 'profiling');
+  if (!profiling.ok) return profiling;
+  const isProfiling = profiling.value === true;
+
   try {
-    await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value);
+    await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value, isProfiling);
 
     const bridgeResult = await runner.waitForBridge();
 
@@ -981,6 +990,9 @@ export async function handleRunProject(
     ];
     if (isBackground) {
       lines.push('- Background mode: window hidden, physical input blocked');
+    }
+    if (isProfiling) {
+      lines.push('- Profiling enabled: use profile_project or start_profiler');
     }
     const allWarnings = [
       ...scanFindings.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match)),

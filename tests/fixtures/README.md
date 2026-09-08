@@ -9,6 +9,12 @@ Contents:
 - `main.tscn` — `Node2D` root with `Label` and `Sprite2D` children
 - `placeholder.gd`, `placeholder.png` — empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 
+## `godot-profiling-project/`
+
+The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).
+`integration/profiler-smoke.test.ts` launches it with `profiling: true` and expects that
+function to come back at the top of the capture. Import it as `profilingFixtureProjectPath`.
+
 Use it from tests by importing the path helper:
 
 ```ts

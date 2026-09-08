@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeManager } from './bridge-manager.js';
+import { DebuggerProfiler } from './profiler.js';
 import {
   DEFAULT_BRIDGE_PORT,
   encodeFrame,
@@ -116,6 +117,10 @@ export class GodotRunner {
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
   public activeBridgePort: number | null = null;
+  // Debugger receiver for `run_project({ profiling: true })`. Bound before the
+  // spawn so `--remote-debug` has a port to dial, and torn down with the
+  // session. Null in attached mode — the channel is set at launch or never.
+  public activeProfiler: DebuggerProfiler | null = null;
   // Per-session bridge auth token. Spawned sessions deliver this via the
   // MCP_SESSION_TOKEN env var; attached sessions bake it into the injected
   // script (see BridgeManager.inject). Attached to every outgoing frame in
@@ -408,6 +413,7 @@ export class GodotRunner {
     scene?: string,
     background: boolean = false,
     bridgePort?: number,
+    profiling: boolean = false,
   ): Promise<GodotProcess> {
     if (!this.godotPath) {
       throw new Error(
@@ -420,6 +426,7 @@ export class GodotRunner {
     // expectedPath makes pollBridge's path guard fail immediately and mask
     // the real reason as a generic bridge timeout.
     projectPath = resolve(projectPath);
+    this.closeProfiler();
 
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       logDebug('Killing existing Godot process before starting a new one');
@@ -456,6 +463,11 @@ export class GodotRunner {
     this.activeSessionMode = 'spawned';
 
     const cmdArgs = ['--path', projectPath];
+    if (profiling) {
+      this.activeProfiler = await DebuggerProfiler.create();
+      cmdArgs.push('--remote-debug', `tcp://127.0.0.1:${this.activeProfiler.port}`);
+      logDebug(`Profiling enabled (debugger port ${this.activeProfiler.port})`);
+    }
     if (scene && validateSubPath(projectPath, scene)) {
       logDebug(`Adding scene parameter: ${scene}`);
       cmdArgs.push(scene);
@@ -529,6 +541,7 @@ export class GodotRunner {
     // Resolve relative paths for the same reason as runProject — pollBridge
     // compares against the absolute path the bridge reports.
     projectPath = resolve(projectPath);
+    this.closeProfiler();
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       await this.stopProject();
     } else if (
@@ -579,6 +592,7 @@ export class GodotRunner {
         logDebug(`Attached shutdown timed out or failed (continuing cleanup): ${err}`);
       }
       this.closeConnection();
+      this.closeProfiler();
       const projectPath = this.activeProjectPath;
       if (projectPath) {
         this.bridge.cleanup(projectPath);
@@ -608,6 +622,7 @@ export class GodotRunner {
       // Bridge may already be unreachable — proceed to kill.
     }
     this.closeConnection();
+    this.closeProfiler();
 
     logDebug('Stopping active Godot process');
     const proc = this.activeProcess.process;
@@ -647,6 +662,11 @@ export class GodotRunner {
     this.activeSessionToken = null;
 
     return result;
+  }
+
+  private closeProfiler(): void {
+    this.activeProfiler?.close();
+    this.activeProfiler = null;
   }
 
   hasActiveRuntimeSession(): boolean {

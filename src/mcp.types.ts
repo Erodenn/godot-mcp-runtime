@@ -3,6 +3,7 @@ import type { McpContext } from './utils/mcp-context.js';
 import type { Result } from './utils/result.js';
 import type { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import type { nodeToolDefinitions } from './tools/node-tools.js';
+import type { profilerToolDefinitions } from './tools/profiler-tools.js';
 import type { projectToolDefinitions } from './tools/project-tools.js';
 import type { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import type { sceneToolDefinitions } from './tools/scene-tools.js';
@@ -71,6 +72,7 @@ export type ToolHandler = (
 export type ToolName = (
   | typeof autoloadToolDefinitions
   | typeof nodeToolDefinitions
+  | typeof profilerToolDefinitions
   | typeof projectToolDefinitions
   | typeof runtimeToolDefinitions
   | typeof sceneToolDefinitions

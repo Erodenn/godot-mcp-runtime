@@ -50,10 +50,13 @@ describe('outputSchema — expected coverage', () => {
     'get_node_signals',
     'get_scene_dependencies',
     'get_ui_elements',
+    'profile_project',
     'run_script',
     'search_project',
+    'start_profiler',
     'set_node_properties',
     'simulate_input',
+    'stop_profiler',
     'stop_project',
     'take_screenshot',
   ];
