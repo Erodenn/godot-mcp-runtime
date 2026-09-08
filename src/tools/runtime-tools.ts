@@ -77,7 +77,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. For a Godot process you launched yourself, use attach_project instead. Verifies MCP bridge readiness before returning success. Returns plain-text status with the assigned bridge port. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. Set profiling: true at launch to enable the profiler tools. Use attach_project for one you launched yourself. Verifies MCP bridge readiness before returning success. Returns status with the assigned bridge port. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

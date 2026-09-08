@@ -21,7 +21,9 @@ export type ProfilerErrorCode =
   | 'profile_busy'
   | 'profile_not_started'
   | 'profile_timeout'
-  | 'profile_disconnected';
+  | 'profile_disconnected'
+  | 'profile_no_frames'
+  | 'profile_bad_frame';
 
 export class ProfilerError extends Error {
   constructor(
@@ -45,6 +47,9 @@ export const PROFILE_TOP_MAX = 100;
 const WORST_FRAME_ROWS = 30;
 /** Every engine row is `[signature id, calls, self, total, internal]`. */
 const ROW_STRIDE = 5;
+/** Milliseconds are reported to this many decimals; below it is float noise. */
+const MS_DECIMALS = 4;
+const MS_ROUNDING = 10 ** MS_DECIMALS;
 
 const WAIT_CONNECT_MS = 5000;
 const WAIT_FIRST_FRAME_MS = 5000;
@@ -110,6 +115,11 @@ export interface ProfileResult {
   firstFrame: number | null;
   lastFrame: number | null;
   frameGaps: number;
+  /**
+   * Debugger packets dropped because the codec could not represent them. A
+   * non-zero value means the capture may be missing frames it was sent.
+   */
+  undecodablePackets: number;
   captureLimit: number;
   limitReached: boolean;
   sort: ProfileSort;
@@ -137,12 +147,16 @@ interface FrameRow {
 
 interface Capture {
   limit: number;
+  /** Window the caller asked for; the auto-stop is armed off the first frame. */
+  maxSeconds: number;
   startedAt: number;
   elapsedMs: number;
   /** Frames folded into the totals (excludes the discarded boundary frame). */
   frames: number;
   framesReceived: number;
   frameGaps: number;
+  /** Packets the codec could not represent while this capture was open. */
+  undecodablePackets: number;
   firstFrame: number | null;
   lastFrame: number | null;
   capped: boolean;
@@ -165,14 +179,35 @@ interface Waiter {
   timer: NodeJS.Timeout;
 }
 
+function badFrame(what: string): ProfilerError {
+  return new ProfilerError(
+    'profile_bad_frame',
+    `Unrecognized profiler frame layout (${what}) — this Godot version may not be supported`,
+  );
+}
+
 function asNumber(value: Variant | undefined): number {
-  if (typeof value !== 'number') throw new Error('Expected a number in a profiler frame');
+  if (typeof value !== 'number') throw badFrame('expected a number');
   return value;
+}
+
+/**
+ * Loop bounds and element counts must be real non-negative integers. Plain
+ * `asNumber` would accept a float — and a layout shift that lands a timing
+ * value where a count belongs makes `for (i < 0.016)` run once instead of
+ * throwing, walking `offset` off silently. Fail loudly on version drift.
+ */
+function asCount(value: Variant | undefined, limit: number): number {
+  const count = asNumber(value);
+  if (!Number.isSafeInteger(count) || count < 0 || count > limit) {
+    throw badFrame(`expected a count in [0, ${limit}], got ${count}`);
+  }
+  return count;
 }
 
 /** Trim float noise from the summary — these are milliseconds, not physics. */
 function roundNumbers<T>(value: T): T {
-  if (typeof value === 'number') return (Math.round(value * 1e4) / 1e4) as T;
+  if (typeof value === 'number') return (Math.round(value * MS_ROUNDING) / MS_ROUNDING) as T;
   if (Array.isArray(value)) return value.map(roundNumbers) as T;
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
@@ -196,12 +231,20 @@ interface FrameSample {
   timings: FrameTimings;
   servers: Array<{ name: string; functions: Array<{ name: string; ms: number }> }>;
   rows: FrameRow[];
+  /**
+   * Rows the engine actually sent, before zero-call rows are dropped. The
+   * engine's `captureLimit` applies to this count, so the truncation check
+   * has to use it rather than the filtered `rows.length`.
+   */
+  rawRowCount: number;
 }
 
 /**
- * Split the engine's per-frame array. Layout: six timing fields, a server
- * count, that many `name, entryCount, ...name/time pairs` blocks, then the
- * flattened function rows preceded by their own length.
+ * Split the engine's per-frame array. Layout: the frame number, five timing
+ * fields, a server count, that many `name, entryCount, ...name/time pairs`
+ * blocks, then the flattened function rows preceded by their own length.
+ * Verified against `ServersProfilerFrame::serialize()`; `internal_time` at
+ * `i + 4` is deliberately skipped (the editor's "internal functions" toggle).
  */
 function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSample {
   const timings: FrameTimings = {
@@ -213,9 +256,11 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
   };
   const servers: FrameSample['servers'] = [];
   let offset = 7;
-  for (let i = 0; i < asNumber(data[6]); i++) {
+  const serverCount = asCount(data[6], data.length);
+  for (let i = 0; i < serverCount; i++) {
     const name = data[offset];
-    const entries = asNumber(data[offset + 1]);
+    const entries = asCount(data[offset + 1], data.length - offset);
+    if (entries % 2 !== 0) throw badFrame('server block holds an odd entry count');
     const functions: Array<{ name: string; ms: number }> = [];
     for (let j = offset + 2; j < offset + 2 + entries; j += 2) {
       functions.push({ name: String(data[j]), ms: asNumber(data[j + 1]) * 1000 });
@@ -223,10 +268,10 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
     servers.push({ name: String(name), functions });
     offset += 2 + entries;
   }
-  const length = asNumber(data[offset]);
+  const length = asCount(data[offset], data.length - offset);
   offset += 1;
-  if (length < 0 || length % ROW_STRIDE !== 0 || offset + length !== data.length) {
-    throw new Error('Invalid profiler frame length');
+  if (length % ROW_STRIDE !== 0 || offset + length !== data.length) {
+    throw badFrame('row block does not fill the packet');
   }
   const rows: FrameRow[] = [];
   for (let i = offset; i < offset + length; i += ROW_STRIDE) {
@@ -247,12 +292,20 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
       totalMs: asNumber(data[i + 3]) * 1000,
     });
   }
-  return { frame: asNumber(data[0]), timings, servers, rows };
+  return {
+    frame: asNumber(data[0]),
+    timings,
+    servers,
+    rows,
+    rawRowCount: length / ROW_STRIDE,
+  };
 }
 
 export class DebuggerProfiler {
   private socket: net.Socket | null = null;
-  private rxBuffer: Buffer = Buffer.alloc(0);
+  /** Pending bytes, joined only once a whole frame has arrived (see `receive`). */
+  private rxChunks: Buffer[] = [];
+  private rxLength = 0;
   private threadId: Variant = null;
   private processId: number | null = null;
   private state: ProfilerState = 'idle';
@@ -260,6 +313,7 @@ export class DebuggerProfiler {
   private closed = false;
   private lastMessage: string | null = null;
   private lastDecodeError: string | null = null;
+  private undecodable = 0;
   private signatures: Map<number, string> = new Map();
   private capture: Capture | null = null;
   private autoStopTimer: NodeJS.Timeout | null = null;
@@ -291,9 +345,13 @@ export class DebuggerProfiler {
     });
   }
 
-  /** PID reported by the connected engine, or null before it connects. */
-  get pid(): number | null {
-    return this.processId;
+  /**
+   * A finished capture is readable even once the engine is gone — `stop` only
+   * re-ranks data already folded, and the capture worth reading is often the
+   * one taken right before a crash.
+   */
+  get hasResult(): boolean {
+    return this.capture?.result !== null && this.capture !== null;
   }
 
   get connected(): boolean {
@@ -332,11 +390,13 @@ export class DebuggerProfiler {
     this.signatures = new Map();
     this.capture = {
       limit: captureLimit,
+      maxSeconds: seconds,
       startedAt: Date.now(),
       elapsedMs: 0,
       frames: 0,
       framesReceived: 0,
       frameGaps: 0,
+      undecodablePackets: 0,
       firstFrame: null,
       lastFrame: null,
       capped: false,
@@ -350,11 +410,13 @@ export class DebuggerProfiler {
     };
     this.state = 'starting';
     this.send(true, captureLimit);
-    this.autoStopTimer = setTimeout(() => this.autoStop(), seconds * 1000);
 
     try {
+      // `result` satisfies this too: if the engine closes the capture before a
+      // frame is folded, that is an answer, not a reason to sit out the wait
+      // and then report a timeout for a capture the engine actually finished.
       await this.wait(
-        () => (this.capture?.frames ?? 0) > 0,
+        () => (this.capture?.frames ?? 0) > 0 || (this.capture?.result ?? null) !== null,
         WAIT_FIRST_FRAME_MS,
         'Godot sent no profiler frames',
       );
@@ -386,14 +448,42 @@ export class DebuggerProfiler {
       throw new ProfilerError('profile_not_started', 'Start a capture first');
     }
     this.autoStop();
-    const capture = this.capture;
-    await this.wait(() => capture.result !== null, WAIT_TOTAL_MS, 'Godot sent no profiler totals');
+    return this.finish(this.capture, top, sort);
+  }
+
+  /**
+   * Wait out a known capture's close and rank it. Takes the capture rather than
+   * re-reading `this.capture` so a caller that snapshotted one cannot be handed
+   * a different capture's numbers.
+   */
+  private async finish(capture: Capture, top: number, sort: ProfileSort): Promise<ProfileResult> {
+    try {
+      await this.wait(
+        () => capture.result !== null,
+        WAIT_TOTAL_MS,
+        'Godot sent no profiler totals',
+      );
+    } catch (err) {
+      // Close the capture out either way, so it never sits in `stopping` and
+      // stays re-readable. But only a timeout is recoverable here: the engine
+      // went quiet while the connection held, and what we folded is still
+      // good. A disconnect means the process died mid-capture, which the
+      // caller needs told — a later stop_profiler re-reads the partial data.
+      this.finalize(capture);
+      const recoverable = err instanceof ProfilerError && err.code === 'profile_timeout';
+      if (!recoverable || capture.frames === 0) throw err;
+    }
     return this.summarize(capture, top, sort);
   }
 
   /** `start` + wait out the window + `stop`, for a one-shot capture. */
-  async captureWindow(seconds: number, top: number, sort: ProfileSort): Promise<ProfileResult> {
-    await this.start(seconds, CAPTURE_LIMIT_MAX);
+  async captureWindow(
+    seconds: number,
+    top: number,
+    sort: ProfileSort,
+    captureLimit: number = CAPTURE_LIMIT_MAX,
+  ): Promise<ProfileResult> {
+    await this.start(seconds, captureLimit);
     const capture = this.capture;
     if (capture === null) throw new ProfilerError('profile_not_started', 'Capture was discarded');
     await this.wait(
@@ -401,7 +491,7 @@ export class DebuggerProfiler {
       seconds * 1000 + WAIT_TOTAL_MS,
       'Godot sent no profiler totals',
     );
-    return this.stop(top, sort);
+    return this.finish(capture, top, sort);
   }
 
   close(): void {
@@ -427,32 +517,69 @@ export class DebuggerProfiler {
     this.socket = socket;
     socket.on('data', (chunk: Buffer) => this.receive(chunk));
     socket.on('error', (err) => this.fail(err.message));
-    socket.on('close', () => this.fail('Debugger disconnected'));
+    socket.on('close', () => {
+      // Release the slot even when `fail` short-circuits on an earlier error,
+      // so `connected` stops claiming a peer that is gone.
+      if (this.socket === socket) this.socket = null;
+      this.fail('Debugger disconnected');
+    });
+  }
+
+  /** Read one pending byte without joining the chunk list. */
+  private byteAt(index: number): number {
+    let remaining = index;
+    for (const chunk of this.rxChunks) {
+      if (remaining < chunk.length) return chunk[remaining] as number;
+      remaining -= chunk.length;
+    }
+    throw new Error('Debugger read past the pending buffer');
   }
 
   private receive(chunk: Buffer): void {
-    this.rxBuffer = Buffer.concat([this.rxBuffer, chunk]);
-    while (this.rxBuffer.length >= 4) {
-      const size = this.rxBuffer.readUInt32LE(0);
-      if (size === 0 || size > MAX_PACKET_BYTES) {
-        this.fail('Debugger packet exceeds limit');
+    this.rxChunks.push(chunk);
+    this.rxLength += chunk.length;
+    while (this.rxLength >= 4) {
+      // Read the length prefix in place. Joining on every socket chunk would
+      // make assembling one large packet quadratic in its size.
+      const size =
+        this.byteAt(0) +
+        this.byteAt(1) * 0x100 +
+        this.byteAt(2) * 0x10000 +
+        this.byteAt(3) * 0x1000000;
+      if (size === 0) {
+        this.fail('Debugger sent a zero-length packet (framing desync)');
         return;
       }
-      if (this.rxBuffer.length < 4 + size) return;
-      const payload = this.rxBuffer.subarray(4, 4 + size);
-      this.rxBuffer = this.rxBuffer.subarray(4 + size);
+      if (size > MAX_PACKET_BYTES) {
+        this.fail(`Debugger packet of ${size} bytes exceeds the ${MAX_PACKET_BYTES}-byte limit`);
+        return;
+      }
+      if (this.rxLength < 4 + size) return;
+      const joined =
+        this.rxChunks.length === 1
+          ? (this.rxChunks[0] as Buffer)
+          : Buffer.concat(this.rxChunks, this.rxLength);
+      const payload = joined.subarray(4, 4 + size);
+      const rest = joined.subarray(4 + size);
+      this.rxChunks = rest.length > 0 ? [rest] : [];
+      this.rxLength = rest.length;
       let message: Variant;
       try {
         message = decodeVariant(payload);
       } catch (err) {
         // Unrelated debugger packets carry objects and vectors we don't decode.
         this.lastDecodeError = err instanceof Error ? err.message : String(err);
+        this.undecodable += 1;
+        if (this.capture !== null) this.capture.undecodablePackets += 1;
         continue;
       }
       try {
         this.handle(message);
       } catch (err) {
-        this.fail(err instanceof Error ? err.message : String(err));
+        // A frame we cannot parse is a stream we cannot trust, but it is not a
+        // dropped connection — report it as what it is.
+        const code = err instanceof ProfilerError ? err.code : 'profile_disconnected';
+        this.fail(err instanceof Error ? err.message : String(err), code);
         return;
       }
       this.notify();
@@ -491,23 +618,38 @@ export class DebuggerProfiler {
     const capture = this.capture;
     const sample = parseFrame(data, this.signatures);
     const rows = sample.rows;
-    capture.capped = capture.capped || rows.length >= capture.limit;
 
     if (name === 'servers:profile_total') {
-      capture.result = [...capture.totals.values()];
-      capture.elapsedMs = Date.now() - capture.startedAt;
-      this.state = 'finished';
-      this.clearAutoStop();
+      // The engine's own accumulated rows are capped by `captureLimit` exactly
+      // as the frame packets are, and carry nothing the frames did not already
+      // deliver — while top-N membership rotates between frames, so summing
+      // them covers strictly more functions. Verified against Godot: at a limit
+      // of 16 the frames saw 37 distinct functions and this packet only 16, and
+      // its call counts match our sums exactly. So this is a completion
+      // sentinel, not the source of the totals.
+      this.finalize(capture);
       return;
     }
     if (this.state === 'starting') this.state = 'capturing';
     capture.framesReceived += 1;
     // Enabling the profiler inside a running VM call gives that first sample a
-    // zero start timestamp, so its elapsed time is fiction. Drop it.
+    // zero start timestamp, so its elapsed time is fiction. Drop it — and with
+    // it any truncation it reported, which describes numbers we discarded.
     if (capture.framesReceived === 1) return;
+
+    // The engine fills each frame packet up to `captureLimit` rows, chosen by
+    // inclusive time, before we drop the zero-call ones — so the raw count is
+    // what says whether this frame was truncated.
+    capture.capped = capture.capped || sample.rawRowCount >= capture.limit;
 
     const frame = sample.frame;
     capture.frames += 1;
+    if (capture.frames === 1) {
+      // Measure the window from real data, not from the enable round trip: the
+      // handshake and first-frame latency are not time the game was profiled.
+      capture.startedAt = Date.now();
+      this.armAutoStop();
+    }
     if (capture.firstFrame === null) capture.firstFrame = frame;
     if (capture.lastFrame !== null) {
       capture.frameGaps += Math.max(0, frame - capture.lastFrame - 1);
@@ -558,7 +700,17 @@ export class DebuggerProfiler {
   }
 
   private summarize(capture: Capture, top: number, sort: ProfileSort): ProfileResult {
-    const frames = Math.max(1, capture.frames);
+    if (capture.frames === 0) {
+      // Dividing by a synthetic 1 here would return a well-formed payload of
+      // zeroes and an empty `rows`, which reads exactly like "nothing in this
+      // game is slow" rather than "nothing was measured".
+      throw new ProfilerError(
+        'profile_no_frames',
+        `The capture folded no usable frames (received ${capture.framesReceived}; the first is ` +
+          `always discarded), so there is nothing to rank`,
+      );
+    }
+    const frames = capture.frames;
     const frame = {} as Record<keyof FrameTimings, ProfileStat>;
     for (const key of Object.keys(capture.timingSums) as Array<keyof FrameTimings>) {
       frame[key] = { avg: capture.timingSums[key] / frames, max: capture.timingMax[key] };
@@ -598,6 +750,7 @@ export class DebuggerProfiler {
       firstFrame: capture.firstFrame,
       lastFrame: capture.lastFrame,
       frameGaps: capture.frameGaps,
+      undecodablePackets: capture.undecodablePackets,
       captureLimit: capture.limit,
       limitReached: capture.capped,
       sort,
@@ -640,17 +793,46 @@ export class DebuggerProfiler {
     this.notify();
   }
 
+  private armAutoStop(): void {
+    this.clearAutoStop();
+    const seconds = this.capture?.maxSeconds ?? PROFILE_MAX_SECONDS;
+    this.autoStopTimer = setTimeout(() => this.autoStop(), seconds * 1000);
+  }
+
   private clearAutoStop(): void {
     if (this.autoStopTimer === null) return;
     clearTimeout(this.autoStopTimer);
     this.autoStopTimer = null;
   }
 
-  private fail(reason: string): void {
-    if (this.error !== null) return;
+  /**
+   * Close a capture out. Called on the engine's `profile_total`, and again if
+   * that packet never arrives — a capture left in `stopping` would reject every
+   * later `start` as busy while `stop` kept timing out, and the advice on that
+   * error points straight back at `stop`.
+   */
+  private finalize(capture: Capture): void {
+    if (capture.result === null) {
+      capture.result = [...capture.totals.values()];
+      capture.elapsedMs = Date.now() - capture.startedAt;
+    }
+    this.state = 'finished';
+    this.clearAutoStop();
+  }
+
+  private fail(reason: string, code: ProfilerErrorCode = 'profile_disconnected'): void {
+    // A clean teardown destroys the socket, which fires `close` — that is not a
+    // disconnect worth reporting or logging.
+    if (this.error !== null || this.closed) return;
     this.error = reason;
     logDebug(`[Profiler] ${reason}`);
-    this.rejectWaiters(new ProfilerError('profile_disconnected', reason));
+    // Stop reading: leaving the socket subscribed after a framing error means
+    // the bad header stays at offset 0 and the pending buffer never drains.
+    this.socket?.destroy();
+    this.socket = null;
+    this.rxChunks = [];
+    this.rxLength = 0;
+    this.rejectWaiters(new ProfilerError(code, reason));
   }
 
   // --- waiting ---

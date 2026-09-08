@@ -4,9 +4,10 @@
  * which commands we send, which frames we fold into the totals, and what a
  * dropped or silent debugger turns into — none of which needs a real engine.
  *
- * The frame layout mirrors what Godot 4.6/4.7 actually sends: six timing
- * fields, a server count with that many `name, entryCount, ...entries`
- * blocks, then the flattened five-wide function rows behind their length.
+ * The frame layout mirrors what Godot 4.6/4.7 actually sends: a frame number,
+ * five timing fields, a server count with that many `name, entryCount,
+ * ...entries` blocks, then the flattened five-wide function rows behind their
+ * length.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -358,5 +359,141 @@ describe('DebuggerProfiler error contract', () => {
     const stopped = p.stop(10, 'selfMs');
     fake.close();
     await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+  });
+});
+
+describe('DebuggerProfiler capture quality signals', () => {
+  it('reports truncation from the rows the engine sent, not the rows we kept', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 16);
+    // 16 raw rows is the cap the engine was given, but half report no calls and
+    // get filtered — the truncation is real even though `rows` comes back short.
+    const rows: Row[] = [];
+    for (let i = 0; i < 16; i++) rows.push([i, i % 2 === 0 ? 0 : 3, 0.001, 0.002]);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, rows),
+    ]);
+
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const result = await p.stop(10, 'selfMs');
+    expect(result.limitReached).toBe(true);
+  });
+
+  it('does not report truncation from the discarded boundary frame', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 16);
+    // The boundary frame is at the cap, but its numbers are thrown away, so the
+    // truncation it reports describes data no result ever contains.
+    const atCap: Row[] = [];
+    for (let i = 0; i < 16; i++) atCap.push([i, 5, 0.001, 0.002]);
+    await feedStart(fake, running, [
+      frame(1, 0.016, atCap),
+      frame(2, 0.016, [[0, 5, 0.001, 0.002]]),
+    ]);
+
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const result = await p.stop(10, 'selfMs');
+    expect(result.limitReached).toBe(false);
+  });
+
+  it('does not report truncation from the totals packet', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 16);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [[0, 5, 0.001, 0.002]]),
+    ]);
+
+    // The engine's totals list every function it saw all session. That row
+    // count hitting the limit says nothing about any one frame being cut.
+    const allSession: Row[] = [];
+    for (let i = 0; i < 16; i++) allSession.push([i, 5, 0.001, 0.002]);
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, allSession)]);
+    const result = await p.stop(10, 'selfMs');
+    expect(result.limitReached).toBe(false);
+  });
+
+  it('refuses to summarize a capture that folded no frames', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    // Only the boundary frame arrives, so nothing survives the discard. An
+    // all-zero payload here would read as "nothing in this game is slow".
+    fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [[0, 1, 0.001, 0.002]])]);
+    fake.send(['servers:profile_total', THREAD, frame(2, 0.016, [])]);
+    await running;
+
+    await expect(p.stop(10, 'selfMs')).rejects.toMatchObject({ code: 'profile_no_frames' });
+  });
+
+  it('rejects a frame whose counts are not whole numbers', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    // A layout shift lands a timing value where the server count belongs.
+    const malformed = frame(1, 0.016, [[0, 1, 0.001, 0.002]]);
+    malformed[6] = 0.016;
+    fake.send(['servers:profile_frame', THREAD, malformed]);
+
+    await expect(running).rejects.toMatchObject({ code: 'profile_bad_frame' });
+  });
+});
+
+describe('DebuggerProfiler readability after the engine goes away', () => {
+  it('keeps a finished capture readable and re-rankable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [
+        [0, 3, 0.009, 0.012],
+        [1, 9, 0.001, 0.004],
+      ]),
+    ]);
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    await p.stop(10, 'selfMs');
+
+    expect(p.hasResult).toBe(true);
+    // The peer dropping is exactly the post-crash case worth reading back.
+    fake.close();
+    await waitUntil(() => !p.connected, 'peer disconnect');
+    const reread = await p.stop(1, 'calls');
+    expect(p.hasResult).toBe(true);
+    expect(reread.rows[0]?.function).toBe('_other');
+  });
+
+  it('ignores a second totals packet instead of corrupting the result', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [[0, 4, 0.008, 0.01]]),
+    ]);
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const first = await p.stop(10, 'selfMs');
+
+    fake.send(['servers:profile_total', THREAD, frame(4, 0.016, [[0, 999, 9, 9]])]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = await p.stop(10, 'selfMs');
+    expect(second.rows[0]?.calls).toBe(first.rows[0]?.calls);
+  });
+
+  it('answers a mid-capture debug_enter without disturbing the capture', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
+    fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [[0, 1, 0.001, 0.002]])]);
+    // A script error mid-capture must resume the game, not strand the capture.
+    fake.send(['debug_enter', THREAD, [true, 'Breakpoint']]);
+    fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 6, 0.006, 0.009]])]);
+    await running;
+
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const result = await p.stop(10, 'selfMs');
+    await waitUntil(() => fake.commandsNamed('continue').length === 1, 'continue reply');
+    expect(result.frames).toBe(1);
+    expect(result.rows[0]?.calls).toBe(6);
   });
 });

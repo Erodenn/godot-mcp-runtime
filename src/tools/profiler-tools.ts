@@ -8,6 +8,7 @@ import { ok, err, type Result } from '../utils/result.js';
 import {
   CAPTURE_LIMIT_MAX,
   PROFILE_SORTS,
+  PROFILE_TOP_MAX,
   ProfilerError,
   type DebuggerProfiler,
   type ProfileSort,
@@ -27,9 +28,59 @@ const sortProperty = {
     'Rank by own time ("selfMs", default), inclusive time ("totalMs"), or invocation count ("calls").',
 } as const;
 
+const captureLimitProperty = {
+  type: 'number',
+  description:
+    'Rows the engine puts in each frame packet, 16..512 (default: 512). Godot selects them by inclusive time, so a lower limit hides cheap functions and sets limitReached.',
+} as const;
+
 const topProperty = {
   type: 'number',
   description: 'How many functions to return, 1..100 (default: 20).',
+} as const;
+
+const statSchema = {
+  type: 'object',
+  properties: { avg: { type: 'number' }, max: { type: 'number' } },
+} as const;
+
+const frameTimingsSchema = {
+  type: 'object',
+  properties: {
+    frameMs: statSchema,
+    processMs: statSchema,
+    physicsMs: statSchema,
+    physicsFrameMs: statSchema,
+    scriptMs: statSchema,
+  },
+} as const;
+
+const rowSchema = {
+  type: 'object',
+  properties: {
+    signature: { type: 'string' },
+    function: { type: 'string' },
+    file: { type: 'string' },
+    line: { type: 'number' },
+    sourceResolved: { type: 'boolean' },
+    calls: { type: 'number' },
+    selfMs: { type: 'number' },
+    totalMs: { type: 'number' },
+    callsPerFrame: { type: 'number' },
+    selfMsPerFrame: { type: 'number' },
+    totalMsPerFrame: { type: 'number' },
+    msPerCall: { type: 'number' },
+    percentOfFrame: { type: 'number' },
+    peak: {
+      type: ['object', 'null'],
+      properties: {
+        frame: { type: 'number' },
+        calls: { type: 'number' },
+        selfMs: { type: 'number' },
+        totalMs: { type: 'number' },
+      },
+    },
+  },
 } as const;
 
 const captureResultSchema = {
@@ -41,14 +92,31 @@ const captureResultSchema = {
     firstFrame: { type: ['number', 'null'] },
     lastFrame: { type: ['number', 'null'] },
     frameGaps: { type: 'number' },
+    undecodablePackets: { type: 'number' },
     captureLimit: { type: 'number' },
     limitReached: { type: 'boolean' },
-    sort: { type: 'string' },
+    sort: { type: 'string', enum: [...PROFILE_SORTS] },
     functionsReceived: { type: 'number' },
     unresolvedFunctions: { type: 'number' },
-    frame: { type: 'object' },
-    servers: { type: 'array', items: { type: 'object' } },
-    rows: { type: 'array', items: { type: 'object' } },
+    frame: frameTimingsSchema,
+    servers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          msPerFrame: { type: 'number' },
+          functions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { name: { type: 'string' }, msPerFrame: { type: 'number' } },
+            },
+          },
+        },
+      },
+    },
+    rows: { type: 'array', items: rowSchema },
     worstFrame: { type: ['object', 'null'] },
   },
 } as const;
@@ -57,8 +125,8 @@ export const profilerToolDefinitions = [
   {
     name: 'profile_project',
     description:
-      "Capture a window of Godot's function profiler — the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap — never sum totalMs. Returns: rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget (frameMs/processMs/physicsMs/scriptMs, avg+max), servers, worstFrame, frames, frameGaps, limitReached. Errors if profiling was not enabled at launch.",
-    annotations: { readOnlyHint: true },
+      "Capture a window of Godot's function profiler — the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap — never sum totalMs. Returns: rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -68,6 +136,7 @@ export const profilerToolDefinitions = [
         },
         top: topProperty,
         sort: sortProperty,
+        captureLimit: captureLimitProperty,
       },
       required: [],
     },
@@ -77,7 +146,7 @@ export const profilerToolDefinitions = [
     name: 'start_profiler',
     description:
       'Start a profiler capture and return immediately, so simulate_input, run_script and screenshots can drive the game while it records. Requires run_project with profiling: true. Stops itself after `seconds` (default 30, max 60); call stop_profiler for the results. Returns: active, firstFrame, captureLimit, maxSeconds. Use profile_project instead for an unattended window. Errors if a capture is already running or profiling was not enabled at launch.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,11 +155,7 @@ export const profilerToolDefinitions = [
           description:
             'Maximum capture duration before the automatic stop, greater than 0 and at most 60 (default: 30).',
         },
-        captureLimit: {
-          type: 'number',
-          description:
-            'Rows the engine puts in each frame packet, 16..512 (default: 512). Godot selects them by inclusive time, so a lower limit hides cheap functions.',
-        },
+        captureLimit: captureLimitProperty,
       },
       required: [],
     },
@@ -108,7 +173,7 @@ export const profilerToolDefinitions = [
     name: 'stop_profiler',
     description:
       'Stop the capture started by start_profiler and rank the recorded functions; a capture that already hit its time limit is read back as-is, and can be re-read with a different sort. Times are elapsed, not CPU; inclusive rows overlap — never sum totalMs. Returns: the same payload as profile_project — rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames, frameGaps, limitReached. Errors if no capture was started.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,6 +195,16 @@ export const profilerToolDefinitions = [
  */
 function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResponse> {
   if (runner.activeProfiler === null) {
+    // "Nothing is running" and "running without profiling" have different
+    // fixes, and every sibling runtime tool already draws this line.
+    if (!runner.activeSessionMode || !runner.activeProjectPath) {
+      return err(
+        createErrorResponse('No active runtime session. A project must be running to profile it.', [
+          'Use run_project with profiling: true to start a Godot project first',
+          'Profiling cannot be added to a session that is already running',
+        ]),
+      );
+    }
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
         'Call run_project with profiling: true — the debugger channel is set at launch and cannot be added later',
@@ -137,7 +212,10 @@ function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResp
       ]),
     );
   }
-  if (runner.activeProcess?.hasExited === true) {
+  const profiler = runner.activeProfiler;
+  // A finished capture outlives the engine: re-ranking folded data needs no
+  // process, and the capture taken just before a crash is the one worth having.
+  if (runner.activeProcess?.hasExited === true && !profiler.hasResult) {
     return err(
       createErrorResponse('The spawned Godot process has exited and cannot be profiled.', [
         'Use get_debug_output to inspect the last captured logs',
@@ -145,7 +223,27 @@ function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResp
       ]),
     );
   }
-  return ok(runner.activeProfiler);
+  return ok(profiler);
+}
+
+/**
+ * Range-check `top` here rather than leaving it to `stop()`. A capture window
+ * runs for seconds before that check is reached, so a bad value would cost the
+ * whole window before erroring.
+ */
+function parseTop(args: OperationParams): Result<number, ToolResponse> {
+  const raw = optionalNumber(args, 'top');
+  if (!raw.ok) return raw;
+  if (raw.value === undefined) return ok(DEFAULT_TOP);
+  if (!Number.isInteger(raw.value) || raw.value < 1 || raw.value > PROFILE_TOP_MAX) {
+    return err(
+      createErrorResponse(
+        `Invalid top: must be an integer in [1, ${PROFILE_TOP_MAX}] (got: ${raw.value})`,
+        [`Omit top to return the default of ${DEFAULT_TOP} rows`],
+      ),
+    );
+  }
+  return ok(raw.value);
 }
 
 function parseSort(args: OperationParams): Result<ProfileSort, ToolResponse> {
@@ -182,6 +280,14 @@ function profilerFailure(error: unknown): ToolResponse {
       'The Godot process ended or dropped the debugger connection',
       'Call stop_project, then run_project with profiling: true again',
     ],
+    profile_no_frames: [
+      'Capture for longer — a window shorter than two rendered frames has nothing to average',
+      'Godot only emits profiler frames while it renders; make sure the window is not minimized or paused',
+    ],
+    profile_bad_frame: [
+      'This Godot version may lay out profiler frames differently than the server expects',
+      'Report the Godot version — get_project_info returns it',
+    ],
   };
   return createErrorResponse(message, solutions[error.code]);
 }
@@ -196,7 +302,9 @@ export async function handleProfileProject(
 
   const seconds = optionalNumber(args, 'seconds');
   if (!seconds.ok) return seconds;
-  const top = optionalNumber(args, 'top');
+  const captureLimit = optionalNumber(args, 'captureLimit');
+  if (!captureLimit.ok) return captureLimit;
+  const top = parseTop(args);
   if (!top.ok) return top;
   const sort = parseSort(args);
   if (!sort.ok) return sort;
@@ -207,8 +315,9 @@ export async function handleProfileProject(
   try {
     const result = await profiler.value.captureWindow(
       seconds.value ?? DEFAULT_WINDOW_SECONDS,
-      top.value ?? DEFAULT_TOP,
+      top.value,
       sort.value,
+      captureLimit.value ?? CAPTURE_LIMIT_MAX,
     );
     return createStructuredResponse({ ...result });
   } catch (error: unknown) {
@@ -247,7 +356,7 @@ export async function handleStopProfiler(
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const top = optionalNumber(args, 'top');
+  const top = parseTop(args);
   if (!top.ok) return top;
   const sort = parseSort(args);
   if (!sort.ok) return sort;
@@ -256,7 +365,7 @@ export async function handleStopProfiler(
   if (!profiler.ok) return profiler;
 
   try {
-    const result = await profiler.value.stop(top.value ?? DEFAULT_TOP, sort.value);
+    const result = await profiler.value.stop(top.value, sort.value);
     return createStructuredResponse({ ...result });
   } catch (error: unknown) {
     return err(profilerFailure(error));
