@@ -64,6 +64,7 @@ describe('serverInstructions category coverage', () => {
     ['Scene editing', 'create_scene'],
     ['Node editing', 'delete_nodes'],
     ['Runtime', 'take_screenshot'],
+    ['Profiling', 'profile_project'],
     ['Project config', 'list_autoloads'],
     ['Validation', 'validate'],
   ];

@@ -24,6 +24,7 @@ import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
 import { sceneToolDefinitions } from './tools/scene-tools.js';
 import { nodeToolDefinitions } from './tools/node-tools.js';
+import { profilerToolDefinitions } from './tools/profiler-tools.js';
 import { validateToolDefinitions } from './tools/validate-tools.js';
 
 export const allToolDefinitions = [
@@ -32,6 +33,7 @@ export const allToolDefinitions = [
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
   ...nodeToolDefinitions,
+  ...profilerToolDefinitions,
   ...validateToolDefinitions,
 ];
 
@@ -42,6 +44,7 @@ Tool categories:
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
 - Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
 - Runtime (requires run_project or attach_project): take_screenshot, simulate_input, get_ui_elements, run_script
+- Profiling (requires run_project with profiling: true): profile_project, start_profiler, stop_profiler
 - Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings
 - Validation: validate
 
@@ -52,7 +55,8 @@ Key behaviors:
 - attach_project is the fallback path for a manually launched Godot process. It injects the bridge and marks the project active, but it does not spawn Godot or capture stdout/stderr.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
-- run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.`;
+- run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.
+- profiling: true attaches Godot's own remote debugger for the profiling tools. Errors and \`breakpoint\` still do not pause the game — the server answers every debugger break with continue.`;
 
 /**
  * Build the request-scoped context backed by a live MCP `Server`. Lives here

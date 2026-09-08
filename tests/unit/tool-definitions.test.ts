@@ -4,6 +4,7 @@ import { autoloadToolDefinitions } from '../../src/tools/autoload-tools.js';
 import { projectToolDefinitions } from '../../src/tools/project-tools.js';
 import { sceneToolDefinitions } from '../../src/tools/scene-tools.js';
 import { nodeToolDefinitions } from '../../src/tools/node-tools.js';
+import { profilerToolDefinitions } from '../../src/tools/profiler-tools.js';
 import { validateToolDefinitions } from '../../src/tools/validate-tools.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
 
@@ -13,6 +14,7 @@ const allDefinitions: ToolDefinition[] = [
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
   ...nodeToolDefinitions,
+  ...profilerToolDefinitions,
   ...validateToolDefinitions,
 ];
 

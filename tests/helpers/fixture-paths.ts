@@ -13,6 +13,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Absolute path to tests/fixtures/godot-project. */
 export const fixtureProjectPath = join(here, '..', 'fixtures', 'godot-project');
 
+/** Absolute path to tests/fixtures/godot-profiling-project (hot _process loop). */
+export const profilingFixtureProjectPath = join(here, '..', 'fixtures', 'godot-profiling-project');
+
 /** Scene path *relative to the project root* — matches the MCP tool contract. */
 export const fixtureScenePath = 'main.tscn';
 
