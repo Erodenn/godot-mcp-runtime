@@ -37,7 +37,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          highlights=".github/release-notes/${tag}.md"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$tag" --jq .body > generated-notes.md
+          if [ -f "$highlights" ]; then
+            { cat "$highlights"; printf '\n'; cat generated-notes.md; } > release-notes.md
+          else
+            cp generated-notes.md release-notes.md
+          fi
           gh release create "$tag" \
             --title "$tag" \
-            --generate-notes \
+            --notes-file release-notes.md \
             --verify-tag
