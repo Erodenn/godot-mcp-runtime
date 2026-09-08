@@ -155,6 +155,22 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 ---
 
+## The profiler debug channel
+
+`run_project({ profiling: true })` opens a **second** local TCP channel, and it is not the bridge. Before spawning Godot the server binds a listener on `127.0.0.1:0` and passes `--remote-debug tcp://127.0.0.1:<port>` on the command line, so the engine dials back into it and speaks Godot's own remote-debugger protocol. The measurements are the stock editor ones — nothing is injected into the project — but the channel's properties differ from the bridge's in one way that matters.
+
+**This channel has no token.** The bridge authenticates every frame because both ends are ours. Godot defines the debugger protocol, there is no field to carry a secret, and the engine would not check one. The listener therefore accepts the first connection that arrives and destroys every later one. That is the same trust assumption the bridge token already concedes it cannot exceed: a process able to scan the local TCP table and win the race between bind and the engine's dial-back can equally read `MCP_SESSION_TOKEN` out of the spawned engine's environment and drive the _authenticated_ bridge, which is strictly more powerful. The missing token here does not open a door that a same-user process did not already have.
+
+**What a hostile peer could do, and where it stops.** It is confined to the profiler. The receiver acts on five message names — `set_pid`, `debug_enter`, `servers:function_signature`, `servers:profile_frame` and `servers:profile_total` — and drops everything else. None of them reaches script execution, the filesystem, process control, or any other tool's behaviour; the profiler's state is read only by the three profiling tools. The realistic ceiling is fabricated profiling numbers and denial of profiling for the rest of the session. A peer that connects but never speaks the protocol surfaces as a `profile_timeout` within five seconds, and the engine's own "unable to connect" lands in `get_debug_output`. A peer that _does_ speak it can return plausible-looking measurements with no signal. Treat profiler output as measurement data, not as a trusted assertion about your project.
+
+**Errors still do not pause the game.** A connected debugger normally halts the engine on a script error or `breakpoint`. Every `debug_enter` is answered immediately with `continue`, so profiling mode preserves the behaviour documented under "Runtime errors and `breakpoint`" — the engine runs past errors, `SCRIPT ERROR` output keeps reaching stderr, and `breakpoint` remains a no-op. Verified empirically against a project with a deliberate runtime error: stderr was byte-identical with and without `--remote-debug`, and the game ran on past the fault.
+
+**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch — it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
+
+**Not covered by strict mode.** `GODOT_MCP_STRICT` and `GODOT_MCP_DISABLE_ELICITATION` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate, but strict mode does not separately refuse to open the debugger port.
+
+---
+
 ## Strict mode
 
 `GODOT_MCP_STRICT=true` is read once at process start. When enabled:
@@ -249,6 +265,8 @@ Audit failure (disk full, permission denied) is logged via `logDebug` and never 
 This section exists because the doctrine at the top of this document demands it: a best-effort filter that hides its own holes is worse than one that documents them.
 
 - **No runtime sandbox.** The gate is static-analysis only. Bridge authentication is a per-session token, not process isolation.
+- **The profiler debug channel is unauthenticated.** Godot defines the remote-debugger protocol and it has no place for a token, so the listener accepts the first connection that reaches it. A same-user process that wins that race can feed the server fabricated profiling data. See "The profiler debug channel" — it cannot reach anything beyond the profiler, and it is a strictly weaker position than reading the bridge token from the engine's environment.
+- **Loopback is not a boundary in every host configuration.** Both listeners bind `127.0.0.1` and are unreachable from the network, but a Linux process under WSL2 in mirrored networking mode shares the Windows host's loopback. The bridge is token-protected there; the profiler channel is not.
 - **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.
 - **Identifier aliasing / dataflow is invisible.** `var f = FileAccess; f.open(...)` — or any indirection through a local variable — defeats every chain-based rule, because the scanner is token-level, not a dataflow analysis. This is a structural limit of tokenizer-level matching, not something the next rule addition can close.
 - **Inline scene scripts and instance overrides are not scanned by `run_project`'s pre-flight.** `[sub_resource type="GDScript"]` embeds GDScript source directly inside a `.tscn`; `[instance]` property overrides can also carry code-bearing values. Neither is chased. (Subscene _ext_resource_ recursion — scripts attached to a referenced PackedScene — IS scanned as of this release; see "`run_project` pre-flight".)

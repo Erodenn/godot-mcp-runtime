@@ -487,7 +487,14 @@ export class GodotRunner {
     if (background) {
       spawnOptions.env = { ...spawnOptions.env, MCP_BACKGROUND: '1' };
     }
-    const proc = spawn(this.godotPath, cmdArgs, spawnOptions);
+    let proc;
+    try {
+      proc = spawn(this.godotPath, cmdArgs, spawnOptions);
+    } catch (err) {
+      // Nothing will dial the debugger listener now; don't strand the port.
+      this.closeProfiler();
+      throw err;
+    }
     const output: string[] = [];
     const errors: string[] = [];
 
@@ -531,6 +538,9 @@ export class GodotRunner {
       console.error('Failed to start Godot process:', err);
       errors.push(`Process error: ${err.message}`);
       godotProcess.hasExited = true;
+      // The engine will never dial back, so nothing can arrive on the debugger
+      // listener. Holding the port open until the next run_project is pointless.
+      this.closeProfiler();
     });
 
     this.activeProcess = godotProcess;
@@ -578,7 +588,11 @@ export class GodotRunner {
   }
 
   async stopProject(): Promise<RuntimeStopResult | null> {
+    // Release the debugger listener before any early return. A spawn that
+    // failed after the profiler bound leaves `activeProcess` null, and
+    // stop_project is exactly where the user goes to clean that up.
     if (!this.activeSessionMode) {
+      this.closeProfiler();
       return null;
     }
 
@@ -611,6 +625,9 @@ export class GodotRunner {
     }
 
     if (!this.activeProcess) {
+      this.closeProfiler();
+      this.activeSessionMode = null;
+      this.activeProjectPath = null;
       return null;
     }
 

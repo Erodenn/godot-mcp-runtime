@@ -34,6 +34,7 @@ const captureResult = {
   firstFrame: 10,
   lastFrame: 309,
   frameGaps: 0,
+  undecodablePackets: 0,
   captureLimit: 512,
   limitReached: false,
   sort: 'selfMs',
@@ -44,7 +45,7 @@ const captureResult = {
 };
 
 function createProfilerFake(
-  options: { profiler?: boolean; exited?: boolean; throws?: Error } = {},
+  options: { profiler?: boolean; exited?: boolean; throws?: Error; session?: boolean } = {},
 ): ProfilerFake {
   const calls: ProfilerCall[] = [];
   const record = (method: ProfilerCall['method'], args: unknown[], result: unknown): unknown => {
@@ -71,6 +72,8 @@ function createProfilerFake(
   const runner = {
     activeProfiler: options.profiler === false ? null : (profiler as unknown as DebuggerProfiler),
     activeProcess: { hasExited: options.exited === true } as GodotProcess,
+    activeSessionMode: options.session === false ? null : 'spawned',
+    activeProjectPath: options.session === false ? null : 'D:/proj',
   };
   return { asRunner: runner as unknown as GodotRunner, calls };
 }
@@ -89,6 +92,15 @@ describe('profiler handlers — session requirements', () => {
     ['profile_project', handleProfileProject],
     ['start_profiler', handleStartProfiler],
     ['stop_profiler', handleStopProfiler],
+  ])('%s distinguishes no session at all from no profiling', async (_name, handler) => {
+    const fake = createProfilerFake({ profiler: false, session: false });
+    expectErrorMatching(await handler(fake.asRunner, {}), /No active runtime session/);
+  });
+
+  it.each([
+    ['profile_project', handleProfileProject],
+    ['start_profiler', handleStartProfiler],
+    ['stop_profiler', handleStopProfiler],
   ])('%s rejects a Godot process that already exited', async (_name, handler) => {
     const fake = createProfilerFake({ exited: true });
     expectErrorMatching(await handler(fake.asRunner, {}), /has exited/);
@@ -101,7 +113,7 @@ describe('handleProfileProject', () => {
     const result = await handleProfileProject(fake.asRunner, {});
 
     expect(hasError(result)).toBe(false);
-    expect(fake.calls[0]).toEqual({ method: 'captureWindow', args: [5, 20, 'selfMs'] });
+    expect(fake.calls[0]).toEqual({ method: 'captureWindow', args: [5, 20, 'selfMs', 512] });
     expect(unwrap(result).structuredContent).toMatchObject({ frames: 300, sort: 'selfMs' });
   });
 
@@ -109,7 +121,7 @@ describe('handleProfileProject', () => {
     const fake = createProfilerFake();
     await handleProfileProject(fake.asRunner, { seconds: 12, top: 5, sort: 'totalMs' });
 
-    expect(fake.calls[0]).toEqual({ method: 'captureWindow', args: [12, 5, 'totalMs'] });
+    expect(fake.calls[0]).toEqual({ method: 'captureWindow', args: [12, 5, 'totalMs', 512] });
   });
 
   it('rejects a sort key outside the enum', async () => {
