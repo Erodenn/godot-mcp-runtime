@@ -4,16 +4,16 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 
 ## Project Management
 
-| Tool               | Description                                                                                                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                                                 |
-| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; pass `bridgePort` (integer 1–65535) to pin the bridge port — auto-selects a free port when omitted |
-| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself. Pass `bridgePort` (integer 1–65535) to pin a specific port — auto-selects a free port when omitted                          |
-| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone                                                                                                  |
-| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)                                                                                                      |
-| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                                           |
-| `list_projects`    | Find Godot projects in a directory                                                                                                                                                      |
-| `get_project_info` | Get project metadata and Godot version                                                                                                                                                  |
+| Tool               | Description                                                                                                                                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                                                                                                  |
+| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; `profiling: true` to enable the profiling tools; pass `bridgePort` (integer 1–65535) to pin the bridge port — auto-selects a free port when omitted |
+| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself. Pass `bridgePort` (integer 1–65535) to pin a specific port — auto-selects a free port when omitted                                                                           |
+| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone                                                                                                                                                   |
+| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state)                                                                                                                                                       |
+| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                                                                                            |
+| `list_projects`    | Find Godot projects in a directory                                                                                                                                                                                                       |
+| `get_project_info` | Get project metadata and Godot version                                                                                                                                                                                                   |
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
@@ -27,6 +27,38 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 | `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 
 `take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
+
+## Profiling (requires `run_project` with `profiling: true`)
+
+`profiling: true` adds `--remote-debug` to the launch, so the numbers are Godot's own editor profiler measurements. The channel is set at launch: an already-running session, and every `attach_project` session, returns "Profiling is not enabled for this session."
+
+| Tool              | Description                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `profile_project` | Capture a window (default 5 s, max 60) and return the most expensive GDScript functions   |
+| `start_profiler`  | Start a capture and return immediately, so runtime tools can drive the game while it runs |
+| `stop_profiler`   | Stop (or re-read) that capture and rank its functions                                     |
+
+A capture returns the same three things the editor's Profiler tab shows:
+
+| Field        | Editor equivalent                                                                                                                                                                                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rows[]`     | The **Script Functions** list. `function`, `file`, `line` (the tooltip's `res://…gd:371`), summed `calls`, own `selfMs` and inclusive `totalMs`, per-frame averages, `msPerCall` (the editor's "Average Time"), `percentOfFrame` ("Frame %"), and `peak` frame |
+| `frame`      | The **Frame Time** category: `frameMs`, `processMs`, `physicsMs`, `physicsFrameMs`, `scriptMs`, each as `{ avg, max }` over the capture                                                                                                                        |
+| `servers[]`  | One entry per server category (`audio_thread`, `physics_2d`, …) with its functions, in milliseconds per frame                                                                                                                                                  |
+| `worstFrame` | The slowest single frame: its timings plus its top 30 functions by inclusive time — the spike you would click in the editor's graph                                                                                                                            |
+
+`sort` ranks rows by `selfMs` (default), `totalMs`, or `calls`. Milliseconds are rounded to four decimals.
+
+Reading the numbers:
+
+- Times are elapsed wall clock, including waits — not CPU utilization. Inclusive rows overlap, so summing `totalMs` is meaningless.
+- Totals sum the received frames after the first, which is discarded: enabling the profiler inside a running VM call gives that sample a zero start timestamp.
+- Godot picks the rows it sends by inclusive time and caps them at `captureLimit`. `limitReached` and `frameGaps` say when rows or whole frames are missing; a function that is absent is not a function that is free.
+- The injected `mcp_bridge.gd` polls its socket every frame, so it shows up in the rows like any other script. That is real observer overhead (well under 0.05 ms/frame in practice), not a measurement artifact.
+- Native engine calls are not profiled as separate rows (the editor's "Display internal functions" toggle), so `selfMs` matches the editor's Self column in its default configuration.
+- A capture stops itself at its time limit, and `stop_project` ends it along with the session.
+
+While the debugger is attached, a script error or a `breakpoint` would normally pause the game; the server answers every break with `continue`, so the game keeps running and the error still shows up in `get_debug_output`.
 
 ## Scene Editing (headless)
 

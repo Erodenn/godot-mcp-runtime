@@ -20,7 +20,7 @@ A lightweight [MCP](https://modelcontextprotocol.io/) server that pairs comprehe
 <br>
 
 - **Headless editing** — scenes, nodes, scripts, signals, validation, no editor window
-- **Runtime control** — screenshots, input simulation, UI discovery, and live GDScript against the running game
+- **Runtime control** — screenshots, input simulation, UI discovery, live GDScript, and function profiling against the running game
 - **Zero footprint** — no Godot addon, no project commits, auto-cleanup on shutdown
 
 **No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon, something you install into your project, commit to version control, and manage as a dependency. Use npx and there's no install or setup needed.
@@ -51,6 +51,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, and timed waits
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
+- **Function profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages
 
 **Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen (positioned at `(-9999, -9999)`) with physical input blocked: borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
 

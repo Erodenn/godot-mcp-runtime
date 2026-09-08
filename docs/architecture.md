@@ -11,6 +11,7 @@ src/
 │   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
+│   ├── profiler-tools.ts   # Function profiling (profile_project, start_profiler, stop_profiler)
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
@@ -27,6 +28,8 @@ src/
     ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
     ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
     ├── bridge-protocol.ts       # TCP framing (length-prefixed frames, port resolution)
+    ├── profiler.ts              # Godot remote-debugger receiver behind the profiling tools
+    ├── godot-variant.ts         # Variant subset the remote debugger speaks on the wire
     ├── autoload-ini.ts          # project.godot [autoload] INI primitives
     ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
     ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
