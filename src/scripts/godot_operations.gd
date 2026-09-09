@@ -607,22 +607,24 @@ func delete_nodes(params):
 
 	print(JSON.stringify({"results": results}))
 
-# Make `target` (a node inside an instanced child) survive
-# PackedScene.pack(). Nodes inside an instanced scene are not owned by the
-# scene root, so pack() silently drops any property overrides set on them —
-# the operation reports success while the change is lost (data loss).
-# Claiming ownership for the target (and enabling editable-instance on
-# instanced ancestors) makes the override serialize alongside the instance.
+# Make a property override on `target` (a node inside an instanced child)
+# survive PackedScene.pack(). Nodes inside an instanced scene are not owned
+# by the scene root, so pack() silently drops overrides set on them — the
+# operation reports success while the change is lost (data loss).
+# The fix is the same "editable children" mechanism the Godot editor uses:
+# mark each instanced ancestor editable FROM THE SCENE ROOT —
+# scene_root.set_editable_instance(instanced_child, true). Note the receiver
+# is the ancestor (the scene root) and the argument is the instanced child.
+# The target's owner must NOT be reassigned to scene_root: pack() would then
+# serialize a second, shadowing node ([node name="Inner" type=... parent="A"])
+# instead of an override, duplicating the node on reload and losing the
+# override entirely on a second write.
 func _claim_for_serialization(scene_root: Node, target: Node) -> void:
 	var cur := target.get_parent()
 	while cur != null and cur != scene_root:
 		if cur.get_scene_file_path() != "":
-			cur.set_editable_instance(scene_root, true)
+			scene_root.set_editable_instance(cur, true)
 		cur = cur.get_parent()
-	if cur == null:
-		return
-	if target.owner != scene_root:
-		target.owner = scene_root
 
 # Update one or more node properties in a single headless process (saves once)
 # Apply one property-update list to a loaded scene without saving. Shared by
