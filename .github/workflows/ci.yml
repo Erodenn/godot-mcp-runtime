@@ -77,7 +77,18 @@ jobs:
           chmod +x ~/godot-bin/"$BIN_NAME"
 
       - name: Install xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        # The runner image ships third-party apt repos (Google Chrome, Microsoft)
+        # that this job never installs from. A transient index failure in any one
+        # of them makes `apt-get update` exit non-zero, which previously took down
+        # the only job that exercises Godot: on 2026-09-09 a hash-sum mismatch on
+        # dl.google.com/linux/chrome-stable failed both matrix legs before Godot
+        # ever launched. apt still writes every index it fetched successfully, so
+        # let update report errors and gate on the install instead. If the Ubuntu
+        # archive is genuinely unreachable, xvfb does not install and this step
+        # still fails - the gate moves to the package we actually need.
+        run: |
+          sudo apt-get update || echo "apt-get update reported errors; continuing to install"
+          sudo apt-get install -y xvfb
 
       - name: Run tests against Godot ${{ matrix.godot-version }}
         env:
