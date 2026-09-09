@@ -359,6 +359,14 @@ function writeScriptFile(projectDir: string, name: string): void {
   writeFileSync(join(projectDir, name), 'extends Node2D\n');
 }
 
+// Position written onto the node inside the instanced child. Deliberately
+// distinct from every position already present in the fixture scene (its
+// Sprite2D sits at Vector2(50, 50)): a value that collides with one makes the
+// serialized-text assertion below unfalsifiable, because the string is found
+// whether or not the override actually persisted.
+const OVERRIDE_POSITION = { x: 123, y: 456 };
+const OVERRIDE_POSITION_TSCN = 'position = Vector2(123, 456)';
+
 /**
  * Structural assertion for the editable-children override form.
  *
@@ -377,7 +385,7 @@ async function assertInstancedOverrideRoundTrips(
 ): Promise<void> {
   const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
   expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
-  expect(saved).toContain('position = Vector2(50, 50)');
+  expect(saved).toContain(OVERRIDE_POSITION_TSCN);
   // Override form: name + parent, no type, serialized alongside the instance.
   expect(saved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
   // Forbidden: a second shadowing node for Inner.
@@ -402,7 +410,7 @@ async function assertInstancedOverrideRoundTrips(
   await reapplyUpdate();
   const resaved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
   expect(resaved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
-  expect(resaved).toContain('position = Vector2(50, 50)');
+  expect(resaved).toContain(OVERRIDE_POSITION_TSCN);
   const { stdout: stdout2 } = await runner.executeOperation(
     'get_scene_tree',
     { scenePath: 'main.tscn' },
@@ -434,7 +442,7 @@ describe('set_node_properties on nodes inside instanced children', () => {
           'set_node_properties',
           {
             scenePath: 'main.tscn',
-            updates: [{ nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } }],
+            updates: [{ nodePath: 'root/A/Inner', property: 'position', value: OVERRIDE_POSITION }],
           },
           tmpProject,
           30000,
@@ -469,7 +477,7 @@ describe('set_node_properties on nodes inside instanced children', () => {
               operation: 'set_node_properties',
               scenePath: 'main.tscn',
               updates: [
-                { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
+                { nodePath: 'root/A/Inner', property: 'position', value: OVERRIDE_POSITION },
               ],
             },
             { operation: 'save', scenePath: 'main.tscn' },
@@ -488,7 +496,7 @@ describe('set_node_properties on nodes inside instanced children', () => {
                 operation: 'set_node_properties',
                 scenePath: 'main.tscn',
                 updates: [
-                  { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
+                  { nodePath: 'root/A/Inner', property: 'position', value: OVERRIDE_POSITION },
                 ],
               },
               { operation: 'save', scenePath: 'main.tscn' },
