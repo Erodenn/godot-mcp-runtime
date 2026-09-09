@@ -29,6 +29,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -358,6 +359,152 @@ function writeScriptFile(projectDir: string, name: string): void {
   writeFileSync(join(projectDir, name), 'extends Node2D\n');
 }
 
+/**
+ * Structural assertion for the editable-children override form.
+ *
+ * A corrupt save (owner reassigned to the root instead of editable-instance
+ * flags) serializes a second, shadowing node:
+ *   [node name="Inner" type="Node2D" parent="A"]
+ * A correct override serializes without a type, next to the instance= link:
+ *   [node name="Inner" parent="A" index="0"]
+ * The corrupted output would leave the loaded scene with TWO Inner children
+ * under root/A, so file-text greps alone cannot distinguish them — hence the
+ * get_scene_tree check and the idempotency probe below.
+ */
+async function assertInstancedOverrideRoundTrips(
+  tmpProject: string,
+  reapplyUpdate: () => Promise<void>,
+): Promise<void> {
+  const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+  expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
+  expect(saved).toContain('position = Vector2(50, 50)');
+  // Override form: name + parent, no type, serialized alongside the instance.
+  expect(saved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
+  // Forbidden: a second shadowing node for Inner.
+  expect(saved).not.toMatch(/\[node name="Inner" parent="A" type="/);
+
+  // Reload the saved scene: A must have exactly one Inner, at the override position.
+  const { stdout } = await runner.executeOperation(
+    'get_scene_tree',
+    { scenePath: 'main.tscn' },
+    tmpProject,
+    30000,
+  );
+  const tree = JSON.parse(extractJson(stdout));
+  // get_scene_tree's JSON root IS the scene root node (e.g. "Main").
+  const a = (tree.children ?? []).find((n: { name: string }) => n.name === 'A');
+  expect(a).toBeDefined();
+  const inners = (a!.children ?? []).filter((n: { name: string }) => n.name === 'Inner');
+  expect(inners).toHaveLength(1);
+
+  // Idempotency: a repeat write to the same path must not destroy the
+  // override (the corrupted form degrades to two nodes here, then loses it).
+  await reapplyUpdate();
+  const resaved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+  expect(resaved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
+  expect(resaved).toContain('position = Vector2(50, 50)');
+  const { stdout: stdout2 } = await runner.executeOperation(
+    'get_scene_tree',
+    { scenePath: 'main.tscn' },
+    tmpProject,
+    30000,
+  );
+  const tree2 = JSON.parse(extractJson(stdout2));
+  const a2 = (tree2.children ?? []).find((n: { name: string }) => n.name === 'A');
+  const inners2 = (a2!.children ?? []).filter((n: { name: string }) => n.name === 'Inner');
+  expect(inners2).toHaveLength(1);
+}
+
+describe('set_node_properties on nodes inside instanced children', () => {
+  itGodot(
+    'set_node_properties persists overrides on instanced-child nodes as editable-children, idempotently',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
+        tmpProject,
+        30000,
+      );
+      // Target a node that lives INSIDE the instanced child scene.
+      const reapply = () =>
+        runner.executeOperation(
+          'set_node_properties',
+          {
+            scenePath: 'main.tscn',
+            updates: [{ nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } }],
+          },
+          tmpProject,
+          30000,
+        );
+      const { stdout } = await reapply();
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].error).toBeUndefined();
+      await assertInstancedOverrideRoundTrips(tmpProject, reapply);
+    },
+    180000,
+  );
+
+  itGodot(
+    'batch_scene_operations set_node_properties persists overrides on instanced-child nodes, idempotently',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      // Seed: add the instanced child, apply the override, save — one batch.
+      await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'add_node',
+              scenePath: 'main.tscn',
+              nodeType: 'child_a.tscn',
+              nodeName: 'A',
+            },
+            {
+              operation: 'set_node_properties',
+              scenePath: 'main.tscn',
+              updates: [
+                { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
+              ],
+            },
+            { operation: 'save', scenePath: 'main.tscn' },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const reapply = () =>
+        runner.executeOperation(
+          'batch_scene_operations',
+          {
+            operations: [
+              {
+                operation: 'set_node_properties',
+                scenePath: 'main.tscn',
+                updates: [
+                  { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
+                ],
+              },
+              { operation: 'save', scenePath: 'main.tscn' },
+            ],
+          },
+          tmpProject,
+          30000,
+        );
+      await reapply();
+
+      await assertInstancedOverrideRoundTrips(tmpProject, reapply);
+    },
+    180000,
+  );
+});
+
 describe('ext_resource stability across repeated MCP round-trips', () => {
   itGodot(
     'ids stay unique per resource after many interleaved operations',
@@ -450,80 +597,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
       expect(resLine).toBeDefined();
       expect(resLine!).toContain('type="PackedScene"');
       expect(resLine!).toContain('path="res://child_a.tscn"');
-    },
-    120000,
-  );
-
-  itGodot(
-    'set_node_properties on a node inside an instanced child either persists or errors — never silently drops',
-    async () => {
-      const tmpProject = tmpDirs[tmpDirs.length - 1];
-      writeEntitiesScenes(tmpProject);
-
-      await runner.executeOperation(
-        'add_node',
-        { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
-        tmpProject,
-        30000,
-      );
-      // Target a node that lives INSIDE the instanced child scene.
-      const { stdout } = await runner.executeOperation(
-        'set_node_properties',
-        {
-          scenePath: 'main.tscn',
-          updates: [{ nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } }],
-        },
-        tmpProject,
-        30000,
-      );
-
-      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
-      // The override must round-trip (editable-instance ownership claimed
-      // automatically) — silent success with data loss is the forbidden
-      // outcome this pins.
-      const parsed = JSON.parse(stdout);
-      expect(parsed.results[0].error).toBeUndefined();
-      expect(saved).toContain('position = Vector2(50, 50)');
-      // Inherited children must survive regardless.
-      expect(saved).toContain('Inner');
-    },
-    120000,
-  );
-
-  itGodot(
-    'batch_scene_operations set_node_properties persists overrides on nodes inside instanced children',
-    async () => {
-      const tmpProject = tmpDirs[tmpDirs.length - 1];
-      writeEntitiesScenes(tmpProject);
-
-      await runner.executeOperation(
-        'batch_scene_operations',
-        {
-          operations: [
-            {
-              operation: 'add_node',
-              scenePath: 'main.tscn',
-              nodeType: 'child_a.tscn',
-              nodeName: 'A',
-            },
-            {
-              operation: 'set_node_properties',
-              scenePath: 'main.tscn',
-              updates: [
-                { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
-              ],
-            },
-            { operation: 'save', scenePath: 'main.tscn' },
-          ],
-        },
-        tmpProject,
-        30000,
-      );
-
-      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
-      expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
-      expect(saved).toContain('position = Vector2(50, 50)');
-      expect(saved).toContain('Inner');
     },
     120000,
   );
