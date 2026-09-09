@@ -5,6 +5,18 @@ import { createStructuredResponse } from './structured-response.js';
 import { ok, err } from './result.js';
 
 /**
+ * Heuristic: does this non-JSON stdout look like the operation quit(1) before
+ * emitting its payload? Canonical shape: a script compile error makes the
+ * headless operation exit early, so stdout contains ONLY engine exit noise —
+ * RID-leak warnings are the usual content — with no `{` or `[` anywhere. In
+ * that case the "invalid JSON" blame is wrong (nothing was ever emitted to
+ * parse); the offending stdout and stderr diagnostics are the real diagnosis.
+ */
+function stdoutLooksLikeEarlyQuitNoise(stdout: string): boolean {
+  return !stdout.includes('{') && !stdout.includes('[');
+}
+
+/**
  * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
  * operation. Used by the 15 scene/node mutation handlers in tools/scene-tools.ts
  * and tools/node-tools.ts to eliminate identical error-handling duplication.
@@ -32,10 +44,46 @@ export async function executeSceneOp(
       );
     }
     if (options.parseStdoutAsJson) {
+      let jsonCandidate = stdout.trim();
+      if (jsonCandidate.startsWith('ERROR:') || jsonCandidate.startsWith('WARNING:')) {
+        // Leading engine noise before the payload — strip to the first JSON
+        // opener and retry, so noise-masking doesn't fake an early-quit read.
+        const braceIdx = stdout.indexOf('{');
+        const bracketIdx = stdout.indexOf('[');
+        const first =
+          braceIdx === -1
+            ? bracketIdx
+            : bracketIdx === -1
+              ? braceIdx
+              : Math.min(braceIdx, bracketIdx);
+        if (first !== -1) jsonCandidate = stdout.substring(first).trim();
+      }
       try {
-        const payload = JSON.parse(stdout.trim()) as Record<string, unknown>;
+        const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
         return createStructuredResponse(payload);
       } catch (parseErr) {
+        if (stdoutLooksLikeEarlyQuitNoise(stdout)) {
+          // The operation exited before emitting its JSON payload (early
+          // quit on error): stdout contains only engine exit noise. Surface
+          // the offending output instead of blaming the operation script's
+          // JSON emission. stderr carries the actual failure (compile
+          // errors print to stderr in Godot's canonical format).
+          const parts = [
+            `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
+          ];
+          const errLines = stderr
+            .split('\n')
+            .filter((l) => /^(ERROR|SCRIPT ERROR|USER SCRIPT ERROR):/.test(l.trim()));
+          if (errLines.length > 0) parts.push(`stderr: ${errLines.slice(0, 5).join('\n')}`);
+          const cleanedStdout = stdout.trim().split('\n').slice(-10).join('\n');
+          if (cleanedStdout) parts.push(`stdout (last lines): ${cleanedStdout}`);
+          return err(
+            createErrorResponse(parts.join('\n'), [
+              'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
+              'Check get_debug_output for the raw output',
+            ]),
+          );
+        }
         return err(
           createErrorResponse(
             `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
