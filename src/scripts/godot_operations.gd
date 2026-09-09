@@ -607,18 +607,33 @@ func delete_nodes(params):
 
 	print(JSON.stringify({"results": results}))
 
-# Update one or more node properties in a single headless process (saves once)
-func set_node_properties(params: Dictionary) -> void:
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+# Make `target` (a node inside an instanced child) survive
+# PackedScene.pack(). Nodes inside an instanced scene are not owned by the
+# scene root, so pack() silently drops any property overrides set on them —
+# the operation reports success while the change is lost (data loss).
+# Claiming ownership for the target (and enabling editable-instance on
+# instanced ancestors) makes the override serialize alongside the instance.
+func _claim_for_serialization(scene_root: Node, target: Node) -> void:
+	var cur := target.get_parent()
+	while cur != null and cur != scene_root:
+		if cur.get_scene_file_path() != "":
+			cur.set_editable_instance(scene_root, true)
+		cur = cur.get_parent()
+	if cur == null:
 		return
+	if target.owner != scene_root:
+		target.owner = scene_root
 
-	var abort_on_error = params.get("abort_on_error", false)
+# Update one or more node properties in a single headless process (saves once)
+# Apply one property-update list to a loaded scene without saving. Shared by
+# standalone set_node_properties and batch_scene_operations so both paths
+# validate identically (including instanced-child serialization claiming).
+# Returns {"ok": bool, "any_set": bool, "error": String, "results": Array}.
+func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> Dictionary:
 	var results: Array = []
 	var any_set := false
 
-	for update in params.updates:
+	for update in updates:
 		var result = {"nodePath": update.node_path, "property": update.property}
 		var node = find_node_by_path(scene_root, update.node_path)
 		if node == null:
@@ -630,6 +645,7 @@ func set_node_properties(params: Dictionary) -> void:
 			if not prepared.ok:
 				result["error"] = prepared.error
 			else:
+				_claim_for_serialization(scene_root, node)
 				node.set(update.property, prepared.value)
 				result["success"] = true
 				any_set = true
@@ -637,12 +653,21 @@ func set_node_properties(params: Dictionary) -> void:
 		if abort_on_error and result.has("error"):
 			break
 
-	if any_set:
+	return {"ok": true, "any_set": any_set, "error": "", "results": results}
+
+func set_node_properties(params: Dictionary) -> void:
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root:
+		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		return
+
+	var applied = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
+	if applied.any_set:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after updates", "results": results}))
+			print(JSON.stringify({"error": "Failed to save scene after updates", "results": applied.results}))
 			return
 
-	print(JSON.stringify({"results": results}))
+	print(JSON.stringify({"results": applied.results}))
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:
@@ -1273,6 +1298,19 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
+			"set_node_properties":
+				if scene_root == null:
+					result["error"] = "scene_path required for set_node_properties"
+				elif not op.has("updates") or (op.updates is Array and op.updates.is_empty()):
+					result["error"] = "non-empty updates array required for set_node_properties"
+				else:
+					var apply_result = _apply_updates(scene_root, op.updates, op.get("abort_on_error", false))
+					if apply_result.any_set:
+						result["success"] = true
+					else:
+						result["error"] = "no properties were set"
+					if apply_result.results.size() > 0:
+						result["updates"] = apply_result.results
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"

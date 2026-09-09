@@ -318,3 +318,213 @@ describe('scene instancing via add_node', () => {
     60000,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Reproduction: instanced children lose their scene provenance when a script
+// is attached to them through attach_script.
+//
+// attach_script (godot_operations.gd) loads the scene, calls node.set_script()
+// on the instanced child, then packs+saves via PackedScene.pack(). A plain
+// Node.set_script() on an instanced scene child is legal in the Godot editor
+// (it serializes as a script override next to instance=ExtResource), but the
+// pack path used here drops the instance provenance entirely: the child node
+// is re-serialized as a bare class node WITHOUT its inherited children and
+// WITHOUT the instance=ExtResource attribute. Consumers of the scene see a
+// structurally different tree (missing sub-nodes, missing collision shapes)
+// after what appears to be a successful operation.
+//
+// Invariants pinned below:
+// 1. ext_resource ids remain unique per resource across save round-trips
+// 2. an instanced child survives attach_script + further save cycles with
+//    its instance= link intact AND pointing at the correct PackedScene
+// ---------------------------------------------------------------------------
+
+function writeEntitiesScenes(projectDir: string): void {
+  writeFileSync(
+    join(projectDir, 'child_a.tscn'),
+    '[gd_scene format=3]\n\n' +
+      '[node name="ChildA" type="Node2D"]\n\n' +
+      '[node name="Inner" type="Node2D" parent="."]\n',
+  );
+  writeFileSync(
+    join(projectDir, 'child_b.tscn'),
+    '[gd_scene format=3]\n\n' +
+      '[node name="ChildB" type="Node2D"]\n\n' +
+      '[node name="Inner" type="Node2D" parent="."]\n',
+  );
+}
+
+function writeScriptFile(projectDir: string, name: string): void {
+  writeFileSync(join(projectDir, name), 'extends Node2D\n');
+}
+
+describe('ext_resource stability across repeated MCP round-trips', () => {
+  itGodot(
+    'ids stay unique per resource after many interleaved operations',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      // Two instanced children plus script attachment — the observed trigger mix.
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
+        tmpProject,
+        30000,
+      );
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'child_b.tscn', nodeName: 'B' },
+        tmpProject,
+        30000,
+      );
+      writeScriptFile(tmpProject, 'new_script.gd');
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/A', scriptPath: 'new_script.gd' },
+        tmpProject,
+        30000,
+      );
+
+      // Re-save via a benign mutation to force another pack/save cycle.
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Benign' },
+        tmpProject,
+        30000,
+      );
+
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      const ids = [...saved.matchAll(/\[ext_resource[^\]]*\bid="([^"]+)"/g)].map((m) => m[1]);
+      const uniqueIds = new Set(ids);
+      expect(uniqueIds.size).toBe(ids.length); // no two ext_resources share an id
+    },
+    120000,
+  );
+
+  itGodot(
+    'instanced children keep their instance= link after attach_script + further saves',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
+        tmpProject,
+        30000,
+      );
+      // Overriding the script on an instanced child is legal in the editor;
+      // the survival of instance= + inherited children is the invariant.
+      writeScriptFile(tmpProject, 'override.gd');
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/A', scriptPath: 'override.gd' },
+        tmpProject,
+        30000,
+      );
+
+      // Further save cycles (delete another node, then re-add) must not strip it.
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Temp' },
+        tmpProject,
+        30000,
+      );
+      await runner.executeOperation(
+        'delete_nodes',
+        { scenePath: 'main.tscn', nodePaths: ['root/Temp'] },
+        tmpProject,
+        30000,
+      );
+
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
+      // The ext_resource the instance points at must be the right PackedScene.
+      const instanceMatch = saved.match(/\[node name="A"[^\]]*instance=ExtResource\("([^"]+)"\)/);
+      expect(instanceMatch).not.toBeNull();
+      const id = instanceMatch![1];
+      const resLine = saved
+        .split('\n')
+        .find((l) => l.includes(`id="${id}"`) && l.includes('ext_resource'));
+      expect(resLine).toBeDefined();
+      expect(resLine!).toContain('type="PackedScene"');
+      expect(resLine!).toContain('path="res://child_a.tscn"');
+    },
+    120000,
+  );
+
+  itGodot(
+    'set_node_properties on a node inside an instanced child either persists or errors — never silently drops',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
+        tmpProject,
+        30000,
+      );
+      // Target a node that lives INSIDE the instanced child scene.
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      // The override must round-trip (editable-instance ownership claimed
+      // automatically) — silent success with data loss is the forbidden
+      // outcome this pins.
+      const parsed = JSON.parse(stdout);
+      expect(parsed.results[0].error).toBeUndefined();
+      expect(saved).toContain('position = Vector2(50, 50)');
+      // Inherited children must survive regardless.
+      expect(saved).toContain('Inner');
+    },
+    120000,
+  );
+
+  itGodot(
+    'batch_scene_operations set_node_properties persists overrides on nodes inside instanced children',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      writeEntitiesScenes(tmpProject);
+
+      await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'add_node',
+              scenePath: 'main.tscn',
+              nodeType: 'child_a.tscn',
+              nodeName: 'A',
+            },
+            {
+              operation: 'set_node_properties',
+              scenePath: 'main.tscn',
+              updates: [
+                { nodePath: 'root/A/Inner', property: 'position', value: { x: 50, y: 50 } },
+              ],
+            },
+            { operation: 'save', scenePath: 'main.tscn' },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
+      expect(saved).toContain('position = Vector2(50, 50)');
+      expect(saved).toContain('Inner');
+    },
+    120000,
+  );
+});

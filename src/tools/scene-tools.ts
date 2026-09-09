@@ -168,7 +168,7 @@ export const sceneToolDefinitions = [
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its sub-operation (add_node, load_sprite, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -183,7 +183,7 @@ export const sceneToolDefinitions = [
             properties: {
               operation: {
                 type: 'string',
-                enum: ['add_node', 'load_sprite', 'save'],
+                enum: ['add_node', 'load_sprite', 'set_node_properties', 'save'],
                 description: 'The sub-operation to perform',
               },
               scenePath: { type: 'string', description: 'Scene file path for this operation' },
@@ -194,6 +194,26 @@ export const sceneToolDefinitions = [
                 description: '[add_node] Parent node path (defaults to root)',
               },
               properties: { type: 'object', description: '[add_node] Initial property values' },
+              updates: {
+                type: 'array',
+                description: '[set_node_properties] Property updates to apply in this operation',
+                items: {
+                  type: 'object',
+                  properties: {
+                    nodePath: { type: 'string', description: 'Node path from scene root' },
+                    property: { type: 'string', description: 'Property name in snake_case' },
+                    value: {
+                      description:
+                        'New value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through',
+                    },
+                  },
+                  required: ['nodePath', 'property', 'value'],
+                },
+              },
+              abortOnError: {
+                type: 'boolean',
+                description: '[set_node_properties] Stop processing on first error',
+              },
               position: {
                 type: 'object',
                 description:
