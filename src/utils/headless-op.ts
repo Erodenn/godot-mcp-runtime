@@ -110,6 +110,15 @@ export async function executeSceneOp(
   exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
   options: { parseStdoutAsJson?: boolean } = {},
 ): Promise<HandlerResult> {
+  // Live-session guard: a running (spawned or attached) engine process keeps
+  // the project's scenes in memory in the same process's game state, while a
+  // headless mutation writes to the scene files on disk. The two views of the
+  // scene race — the engine's save actions and the headless write land in
+  // either order, and the file contents diverge from whichever view the
+  // engine last applied. Reject up front with the remedy instead of letting
+  // an edit report success and then race the running session.
+  const guard = rejectIfLiveSessionOnProject(runner, projectPath);
+  if (guard) return guard;
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
     if (!stdout.trim()) {
@@ -165,4 +174,24 @@ export async function executeSceneOp(
       createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions),
     );
   }
+}
+
+function rejectIfLiveSessionOnProject(
+  runner: GodotRunner,
+  projectPath: string,
+): HandlerResult | null {
+  const mode = runner.activeSessionMode;
+  const activeProject = runner.activeProjectPath;
+  if (!mode || !activeProject || !isSameProjectPath(activeProject, projectPath)) return null;
+  return err(
+    createErrorResponse(
+      "A live runtime session is active on this project; scene files and the running process's in-memory scene state race when both change. Stop the session before editing scene files.",
+      ['Call stop_project (or detach_project for attached sessions), then retry the scene edit'],
+    ),
+  );
+}
+
+function isSameProjectPath(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
 }
