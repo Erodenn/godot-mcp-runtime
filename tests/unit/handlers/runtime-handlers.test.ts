@@ -631,6 +631,41 @@ describe('handleStopProject', () => {
     const result = await handleStopProject(fake.asRunner);
     expectErrorMatching(result, /No active Godot process/i);
   });
+
+  it('condenses finalOutput/finalErrors to diagnostic lines on success', async () => {
+    const fake = createRuntimeFake();
+    const banner = [
+      'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org',
+      '',
+      'Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro',
+      '',
+      'Autoload TestPlayer registered (singleton: true).',
+    ];
+    fake.setStopResult({
+      mode: 'spawned',
+      output: [...banner, 'PASS: scenario complete', ''],
+      errors: [...banner, 'SCRIPT ERROR: something real'],
+    });
+    const result = await handleStopProject(fake.asRunner);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    // Banner lines are dropped from the success payload; the tail + any
+    // error lines survive so diagnostics stay reachable.
+    expect(parsed.finalOutput).toEqual(['PASS: scenario complete']);
+    expect(parsed.finalErrors).toEqual(['SCRIPT ERROR: something real']);
+  });
+
+  it('keeps the last output line as fallback when no error/tail-marker lines exist', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      output: ['Godot Engine v4.7.2', '', 'Metal 4.0 - Forward+'],
+      errors: [],
+    });
+    const result = await handleStopProject(fake.asRunner);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+']);
+    expect(parsed.finalErrors).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
