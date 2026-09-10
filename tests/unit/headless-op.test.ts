@@ -12,10 +12,25 @@ import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 import { cleanStdout } from '../../src/utils/output-parsing.js';
+import type { GodotRunner } from '../../src/utils/godot-runner.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
 const EXCEPTION_SOLUTIONS = ['exc: a', 'exc: b'];
+
+/** Fake runner with live runtime-session state for the guard tests. */
+function runnerWithLiveSession(
+  session: { mode: 'spawned' | 'attached'; projectPath: string } | null,
+): GodotRunner {
+  const fake = createFakeRunner({ stdout: '{"ok":true}' });
+  const runner = fake.asRunner as GodotRunner & {
+    activeSessionMode: string | null;
+    activeProjectPath: string | null;
+  };
+  runner.activeSessionMode = session?.mode ?? null;
+  runner.activeProjectPath = session?.projectPath ?? null;
+  return fake.asRunner;
+}
 
 describe('executeSceneOp', () => {
   it('returns the runner stdout verbatim when non-empty (no isError)', async () => {
@@ -103,6 +118,83 @@ describe('executeSceneOp', () => {
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toContain('exc: a');
     expect(solutionsText).not.toContain('empty: a');
+  });
+
+  describe('live-session scene guard', () => {
+    it('errors when mutating a scene while a spawned session is active on the same project', async () => {
+      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        runner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+      );
+      expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(runner.calls.length).toBe(0); // rejected before spawning headless Godot
+    });
+
+    it('errors when mutating a scene while an attached session is active on the same project', async () => {
+      const runner = runnerWithLiveSession({ mode: 'attached', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        runner,
+        'attach_script',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+      );
+      expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(runner.calls.length).toBe(0);
+    });
+
+    it('allows scene mutations when no runtime session is active', async () => {
+      const runner = runnerWithLiveSession(null);
+      const result = await executeSceneOp(
+        runner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+      );
+      expect(hasError(result)).toBe(false);
+      expect((runner as ReturnType<typeof createFakeRunner>).calls.length).toBe(1);
+    });
+
+    it('allows scene mutations when the live session is on a different project', async () => {
+      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/other' });
+      const result = await executeSceneOp(
+        runner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+      );
+      expect(hasError(result)).toBe(false);
+      expect((runner as ReturnType<typeof createFakeRunner>).calls.length).toBe(1);
+    });
+
+    it('points the caller at stop_project as the remedy', async () => {
+      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        runner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+      );
+      const solutionsText = JSON.stringify(unwrap(result).content);
+      expect(solutionsText).toMatch(/stop_project/i);
+    });
   });
 });
 
