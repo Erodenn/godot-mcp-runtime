@@ -50,7 +50,7 @@ sequenceDiagram
     participant Game as Godot Game
 
     Agent->>Node: run_project
-    Node->>Bridge: inject mcp_bridge.gd + register autoload
+    Node->>Bridge: inject .mcp/godot-runtime/bridge/mcp_bridge.gd + register autoload
     Node->>Game: spawn Godot (--headless? no, with window)
     Game->>Bridge: _ready() opens TCP listener on 127.0.0.1
     Node->>Bridge: connect (lazy, on first runtime call)
@@ -67,16 +67,17 @@ sequenceDiagram
     Agent->>Node: stop_project
     Node->>Bridge: shutdown command
     Bridge->>Game: release port, exit
-    Node->>Node: remove mcp_bridge.gd + autoload entry
+    Node->>Node: remove bridge script + autoload entry
 ```
 
 When `run_project` or `attach_project` is called:
 
-1. `mcp_bridge.gd` is copied into the project directory
-2. It's registered as an autoload in `project.godot`
+1. `mcp_bridge.gd` is copied to `.mcp/godot-runtime/bridge/` inside the project
+2. It's registered as an autoload in `project.godot` as `res://.mcp/godot-runtime/bridge/mcp_bridge.gd`
 3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. The resolved port is baked into the per-project bridge script at inject time, so the listener and the Node-side socket always agree.
 4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
 5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes the bridge script and autoload entry
+6. The same removal runs without a tool call when the session ends on its own: a spawned process that exits, an attached bridge that disconnects, or the server itself shutting down (signal, stdin close, or process exit). `stop_project` remains worth calling — it frees the retained process slot and returns the captured logs — but forgetting it does not strand artifacts in the project
 
 ## Runtime Artifacts
 
