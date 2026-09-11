@@ -14,7 +14,7 @@ import { join } from 'path';
 import { cpSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot } from '../helpers/godot-skip.js';
+import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
 import { profilingFixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import {
@@ -37,12 +37,6 @@ interface CaptureShape {
     selfMs: number;
     percentOfFrame: number;
   }>;
-}
-
-function isHeadlessEnvironmentError(err: string | undefined): boolean {
-  if (!err) return false;
-  const lower = err.toLowerCase();
-  return lower.includes('display') || lower.includes('wayland') || lower.includes('x server');
 }
 
 describe('profiler smoke', () => {
