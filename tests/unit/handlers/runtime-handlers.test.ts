@@ -639,7 +639,6 @@ describe('handleStopProject', () => {
       '',
       'Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro',
       '',
-      'Autoload TestPlayer registered (singleton: true).',
     ];
     fake.setStopResult({
       mode: 'spawned',
@@ -654,16 +653,19 @@ describe('handleStopProject', () => {
     expect(parsed.finalErrors).toEqual(['SCRIPT ERROR: something real']);
   });
 
-  it('keeps the last output line as fallback when no error/tail-marker lines exist', async () => {
+  it('falls back to the last non-empty line when every line is filtered', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({
       mode: 'spawned',
-      output: ['Godot Engine v4.7.2', '', 'Metal 4.0 - Forward+'],
+      output: ['Godot Engine v4.7.2', '', 'Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro'],
       errors: [],
     });
     const result = await handleStopProject(fake.asRunner);
     const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+']);
+    // Every line is filtered, so this exercises the fallback rather than the
+    // ordinary keep path -- a bare 'Metal 4.0 - Forward+' would survive the
+    // banner pattern and never reach it.
+    expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro']);
     expect(parsed.finalErrors).toEqual([]);
   });
 });

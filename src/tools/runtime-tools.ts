@@ -22,7 +22,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
-import { parseScriptDiagnostics } from '../utils/output-parsing.js';
+import { parseScriptDiagnostics, condenseProcessTail } from '../utils/output-parsing.js';
 import { randomUUID } from 'crypto';
 import {
   createNullContext,
@@ -183,7 +183,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing — even after a crash — to free the single process slot so run_project can be called again. For attached sessions, this detaches without killing the externally launched process. Returns: message, mode ("spawned"/"attached"), externalProcessPreserved (true only for attached), and condensed finalOutput/finalErrors — blank lines and startup-banner lines are dropped; use get_debug_output for the full unfiltered log. Errors if no session is active.',
+      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing, even after a crash, to free the process slot for run_project. Attached sessions detach without killing the external process. Returns: message, mode ("spawned"/"attached"), externalProcessPreserved (true only for attached), and condensed finalOutput/finalErrors (blank and startup-banner lines dropped, capped at 200 lines); get_debug_output has the full log. Errors if no session is active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -1215,28 +1215,17 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
         : 'Godot project stopped',
     mode: result.mode,
     externalProcessPreserved: result.externalProcessPreserved === true,
-    finalOutput: condenseStoppedOutput(result.output),
-    finalErrors: condenseStoppedOutput(result.errors),
+    finalOutput: condenseProcessTail(result.output, STOP_OUTPUT_MAX_LINES),
+    finalErrors: condenseProcessTail(result.errors, STOP_OUTPUT_MAX_LINES),
   });
 }
 
-// Lines that carry no diagnostic value on a stopped process: the startup
-// banner (engine version/renderer/device/URL), blanks, and recurring
-// engine-noise fragments. stop_project is routine housekeeping whose
-// success result used to re-dump ~200 lines of this per call into the
-// caller's context; get_debug_output remains the full-log path.
-const STOP_OUTPUT_NOISE =
-  /^(Godot Engine v|Metal |Vulkan |OpenGL |Using Device #|https:\/\/godotengine\.org|Autoload .* registered|Warning:)/i;
-
-function condenseStoppedOutput(lines: string[]): string[] {
-  const kept = lines.filter((l) => l.trim() !== '' && !STOP_OUTPUT_NOISE.test(l.trim()));
-  if (kept.length > 0) return kept;
-  // Nothing diagnostic survived filtering: keep the last line so the
-  // caller still sees SOMETHING of the process tail rather than an
-  // unexplained empty array.
-  const lastNonEmpty = [...lines].reverse().find((l) => l.trim() !== '');
-  return lastNonEmpty !== undefined ? [lastNonEmpty] : [];
-}
+// stop_project is routine housekeeping whose success result previously
+// re-dumped up to this many raw lines into the caller's context on every
+// call; get_debug_output remains the full-log path. Preserves the size
+// bound of the prior `.slice(-200)` behavior after condensing to
+// diagnostic lines.
+const STOP_OUTPUT_MAX_LINES = 200;
 
 function parseScreenshotResponseMode(value: unknown): ScreenshotResponseMode | null {
   if (value === undefined) return 'preview';
