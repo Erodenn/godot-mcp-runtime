@@ -520,6 +520,24 @@ describe('BridgeManager.repairOrphaned stranded artifacts', () => {
     );
   });
 
+  // Accepted gap (see the `removeBridgeArtifacts` docstring): with no
+  // `McpBridge=` entry at all, repairOrphaned has nothing to test ownership
+  // against, so a project-root file named exactly `mcp_bridge.gd` is removed
+  // on the assumption it is ours - even when it is actually a user's own
+  // script that happens to share the legacy filename. This pins that exact
+  // behavior so a future change that alters it fails loudly instead of
+  // silently, rather than asserting it should be safe.
+  it('accepted gap: deletes a project-root mcp_bridge.gd with no autoload entry to test ownership against', () => {
+    const { projectPath, manager } = setupProject();
+    const rootScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
+    writeFileSync(rootScript, "# user's own script, unrelated to this server\n", 'utf8');
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+
+    manager.repairOrphaned(projectPath);
+
+    expect(existsSync(rootScript)).toBe(false);
+  });
+
   it('leaves a user-owned McpBridge entry alone', () => {
     const { projectPath, manager } = setupProject({
       projectGodot: 'config_version=5\n\n[autoload]\nMcpBridge="*res://game/my_own_bridge.gd"\n',

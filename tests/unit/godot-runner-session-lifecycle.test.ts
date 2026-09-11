@@ -90,6 +90,7 @@ describe('spawned-process exit auto-clear', () => {
   let proc: FakeChildProcess;
   let projectPath: string;
   let savedDisplay: string | undefined;
+  let scripted: ScriptedBridge | null = null;
 
   beforeEach(() => {
     // checkDisplayAvailable gates runProject on Linux. Nothing real is spawned
@@ -104,9 +105,12 @@ describe('spawned-process exit auto-clear', () => {
     projectPath = tmp.makeProject('godot-mcp-lifecycle-');
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (savedDisplay === undefined) delete process.env.DISPLAY;
     else process.env.DISPLAY = savedDisplay;
+    runner.closeConnection();
+    if (scripted) await scripted.shutdown();
+    scripted = null;
   });
 
   async function start(): Promise<void> {
@@ -226,17 +230,35 @@ describe('spawned-process exit auto-clear', () => {
     expect(await runner.stopProject()).toBeNull();
   });
 
-  it('still classifies stderr as runtime errors after the auto-clear', async () => {
+  it('sendCommandWithErrors still classifies post-exit stderr as runtime errors, keyed on activeProcess', async () => {
+    // Exercise sendCommandWithErrors itself rather than calling
+    // extractRuntimeErrors directly: that call is unconditional, so a
+    // regression reverting the classification's key from `activeProcess` back
+    // to `activeSessionMode === 'spawned'` would leave a direct-call test
+    // green while the real behavior broke.
+    scripted = await startScriptedBridge(() => ({ kind: 'reply', payload: OK }));
     await start();
-    proc.emit('exit', 1);
-    proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: post-exit line\n'));
 
-    const errors = runner.extractRuntimeErrors(runner.getErrorsSince(0));
-    expect(errors.some((l) => l.includes('SCRIPT ERROR: post-exit line'))).toBe(true);
-    // The mode is null now; sendCommandWithErrors keys its classification on
-    // activeProcess, which is still here.
+    proc.emit('exit', 1);
     expect(runner.activeSessionMode).toBeNull();
     expect(runner.activeProcess).not.toBeNull();
+
+    // The auto-clear nulls activeBridgePort/activeSessionToken along with the
+    // rest of the session state, so point them at the scripted bridge only
+    // after the exit - mirroring how a caller would still be able to reach a
+    // bridge command after the session cleared (activeProcess survives).
+    (runner as unknown as { activeBridgePort: number }).activeBridgePort = scripted.port;
+    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'test-token';
+
+    // Marker capture inside sendCommandWithErrors happens synchronously before
+    // it awaits the round-trip, so emitting the stderr line right after the
+    // call (and before awaiting it) lands after the marker - exactly the
+    // "post-exit" ordering under test.
+    const pending = runner.sendCommandWithErrors('get_ui_elements', {});
+    proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: post-exit line\n'));
+    const { runtimeErrors } = await pending;
+
+    expect(runtimeErrors.some((l) => l.includes('SCRIPT ERROR: post-exit line'))).toBe(true);
   });
 });
 
