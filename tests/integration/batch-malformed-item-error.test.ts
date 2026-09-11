@@ -31,6 +31,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -73,7 +74,7 @@ async function runBatch(operations: object[]): Promise<BatchResult[]> {
     30000,
   )) as { stdout: string };
   // The GDScript layer prints {"results": [...]} to stdout.
-  const parsed = JSON.parse(stdout.slice(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1)) as {
+  const parsed = JSON.parse(extractJson(stdout)) as {
     results: BatchResult[];
   };
   return parsed.results;
@@ -100,6 +101,30 @@ describe('batch_scene_operations malformed-item error context', () => {
       expect(err).toContain("'operation' key");
       // Precise: the inference hint, not the enumeration list text
       // ("one of: add_node, ...") which both contain the op name.
+      expect(err).toContain("did you mean operation 'add_node'?");
+    },
+    60000,
+  );
+
+  itGodot(
+    'explicit null operation reports the item index and an add_node hint, without crashing the batch',
+    async () => {
+      const results = await runBatch([
+        // Item 0: valid — proves later malformed items don't kill the run.
+        { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Fine' },
+        // Item 1: nodeName/nodeType present but `operation` is explicitly null.
+        {
+          operation: null,
+          scenePath: 'main.tscn',
+          nodeName: 'Background',
+          nodeType: 'ColorRect',
+          parentNodePath: 'root',
+        },
+      ]);
+      expect(results[0].success).toBe(true);
+      const err = results[1].error ?? '';
+      expect(err).toContain('operations[1]');
+      expect(err).toContain("is missing the required 'operation' key");
       expect(err).toContain("did you mean operation 'add_node'?");
     },
     60000,

@@ -1343,18 +1343,18 @@ func batch_scene_operations(params: Dictionary) -> void:
 				# name the offending item index so the caller can fix it,
 				# and hint at inference when the shape identifies the op.
 				var hint = ""
-				if op_name == "":
-					hint = " — operations[%d] is missing the required 'operation' key (one of: add_node, load_sprite, set_node_properties, save)." % results.size()
+				if op_name == null or op_name == "":
+					hint = " - operations[%d] is missing the required 'operation' key (one of: add_node, load_sprite, set_node_properties, save)." % results.size()
 					# The TS layer's convertCamelToSnakeCase converts operations[]
 					# items recursively (verified: nodeName → node_name), so keys
 					# always arrive snake_cased here.
-					if (op.has("node_name") and op.has("node_type")) or (op.has("node_name") != op.has("node_type")):
+					if op.has("node_name") or op.has("node_type"):
 						hint += " (node_name/node_type present: did you mean operation 'add_node'?)"
 					elif op.has("updates"):
 						hint += " (updates present: did you mean operation 'set_node_properties'?)"
 					elif op.has("texture_path"):
 						hint += " (texture_path present: did you mean operation 'load_sprite'?)"
-				result["error"] = "Unknown batch operation: " + op_name + hint
+				result["error"] = "Unknown batch operation: " + str(op_name) + hint
 
 		results.append(result)
 		if abort_on_error and result.has("error"):
