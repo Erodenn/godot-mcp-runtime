@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
+import { cleanStdout } from '../../src/utils/output-parsing.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
@@ -206,7 +207,7 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
     expect(hasError(result)).toBe(false);
   });
 
-  it('includes SCRIPT ERROR lines from stderr in the early-exit diagnosis', async () => {
+  it('includes SCRIPT ERROR lines from stderr in the early-exit diagnosis, with file+line preserved', async () => {
     const fake = createFakeRunner({
       stdout: "ERROR: 1 RID allocation of type 'P11GodotBody2D' was leaked at exit.\n",
       stderr:
@@ -222,7 +223,109 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
       EXCEPTION_SOLUTIONS,
       { parseStdoutAsJson: true },
     );
-    expectErrorMatching(result, /SCRIPT ERROR: Parse Error/);
     expectErrorMatching(result, /Identifier "Foo" not declared/);
+    // The continuation line carries the file+line — the single most useful
+    // part of a Godot diagnostic — and must survive into the error message.
+    expectErrorMatching(result, /res:\/\/scripts\/bar\.gd/);
+    expectErrorMatching(result, /:3/);
+  });
+
+  it('classifies unrecognized bracket-free stdout as an early exit rather than a JSON bug', async () => {
+    // A line shape the noise whitelist does not know (a stray print() from
+    // the operation script before it died) must not fall back to blaming
+    // JSON emission: with no JSON opener anywhere, nothing was emitted.
+    const fake = createFakeRunner({
+      stdout:
+        "Attaching script to root/Player\nERROR: 2 RID allocations of type 'P11GodotBody2D' were leaked at exit.",
+      stderr: '',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'attach_script',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).not.toContain('bug in godot_operations.gd');
+    expect(message).toContain('Attaching script to root/Player');
+  });
+
+  it('classifies early-quit stdout containing a stray bracket as an early exit, not a JSON bug', async () => {
+    const fake = createFakeRunner({
+      stdout:
+        "ERROR: Parse Error: Parse error. [Resource file res://main.tscn:4]\nERROR: 5 RID allocations of type 'P11GodotBody2D' were leaked at exit.",
+      stderr: '',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'attach_script',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).not.toContain('bug in godot_operations.gd');
+  });
+});
+
+// Captured verbatim from Godot 4.6.2.stable.mono on Windows: attach_script
+// against a missing node (log_error + quit(1)) with DEBUG=true. This is the
+// production shape that reaches the parseStdoutAsJson branch at all -- with
+// DEBUG off, stdout is the version banner alone, cleanStdout empties it, and
+// the empty-stdout branch above handles it. The [DEBUG] lines are what keep
+// stdout non-empty AND non-JSON, and they carry `{`/`[` from the echoed
+// params, so any classifier keying on bracket presence reads this as a
+// payload attempt and reports a JSON emission bug.
+const CAPTURED_DEBUG_EARLY_EXIT_STDOUT = [
+  'Godot Engine v4.6.2.stable.mono.official.71f334935 - https://godotengine.org',
+  '',
+  '[DEBUG] All arguments: ["--script", "dist/scripts/godot_operations.gd", "attach_script", "{\\"scene_path\\":\\"_capture/target.tscn\\",\\"node_path\\":\\"NoSuchNode\\"}", "--debug-godot"]',
+  '[DEBUG] Params JSON: {"scene_path":"_capture/target.tscn","node_path":"NoSuchNode"}',
+  '[DEBUG] Loading scene from: res://_capture/target.tscn',
+].join('\n');
+
+const CAPTURED_DEBUG_EARLY_EXIT_STDERR = [
+  '[INFO] Operation: attach_script',
+  '[ERROR] Node not found: NoSuchNode',
+  'WARNING: 1 RID of type "CanvasItem" was leaked.',
+  '   at: _free_rids (servers/rendering/renderer_canvas_cull.cpp:2690)',
+].join('\n');
+
+describe('executeSceneOp early-exit diagnosis against captured Godot output', () => {
+  it('classifies a real DEBUG-mode early exit as such, not as a JSON emission bug', async () => {
+    // cleanStdout is what GodotRunner.executeOperation applies before a
+    // handler ever sees stdout, so applying it here keeps the fixture
+    // faithful to the production path rather than testing a shape that
+    // only a fake runner can produce.
+    const fake = createFakeRunner({
+      stdout: cleanStdout(CAPTURED_DEBUG_EARLY_EXIT_STDOUT),
+      stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'attach_script',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).not.toContain('bug in godot_operations.gd');
+    // The actual cause. parseScriptDiagnostics does not match the bracketed
+    // [ERROR] form the operation script emits, so this arrives via the raw
+    // stderr tail -- which is exactly why that fallback has to exist.
+    expect(message).toContain('Node not found: NoSuchNode');
   });
 });

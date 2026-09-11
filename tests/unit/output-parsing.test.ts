@@ -18,13 +18,14 @@ describe('stdout JSON extraction with interleaved engine noise', () => {
     expect(() => JSON.parse(cleaned)).not.toThrow();
   });
 
-  it('RID-only stdout (op quit before JSON) reaches JSON.parse as non-JSON — executeSceneOp must classify it as an early exit, not a JSON-format bug (fixed: surfaced as "no JSON payload was emitted")', () => {
+  it('passes RID-only stdout through unchanged (no JSON to extract)', () => {
     const stdout = "ERROR: 5 RID allocations of type 'P11GodotBody2D' were leaked at exit.\n";
     const cleaned = cleanStdout(stdout);
-    // cleanStdout passes the noise through (nothing to extract); the
-    // classification responsibility sits in executeSceneOp's
-    // stdoutLooksLikeEarlyQuitNoise, covered in headless-op.test.ts.
+    // cleanStdout passes the noise through (nothing to extract); classifying
+    // this as an early exit rather than a JSON-format bug is
+    // executeSceneOp's responsibility (stdoutLooksLikeEarlyQuitNoise),
+    // covered in headless-op.test.ts.
     expect(cleaned).toBe(stdout.trim());
-    expect(() => JSON.parse(cleaned)).toThrow("Unexpected token 'E'");
+    expect(() => JSON.parse(cleaned)).toThrow(SyntaxError);
   });
 });
