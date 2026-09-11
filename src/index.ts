@@ -18,7 +18,7 @@ import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
 
 import { dispatchToolCall } from './dispatch.js';
-import type { Elicitor, McpContext } from './utils/mcp-context.js';
+import { resolveDisableSecurity, type Elicitor, type McpContext } from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
@@ -80,10 +80,18 @@ function createContextFromServer(server: Server): McpContext {
   // disable-elicitation opt-out: when both are set, strict wins and disableElicitation
   // resolves to false (the startup log surfaces the override).
   const disableElicitation = process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && !strictMode;
+  // Disable-security is the opposite precedence from disableElicitation above:
+  // it overrides strict mode rather than deferring to it (see
+  // McpContext.disableSecurity / resolveDisableSecurity).
+  const { disableSecurity } = resolveDisableSecurity(
+    process.env.GODOT_MCP_DISABLE_SECURITY,
+    strictMode,
+  );
   return {
     elicitor,
     strictMode,
     disableElicitation,
+    disableSecurity,
     sessionState: { runProjectConfirmed: new Set<string>() },
   };
 }
@@ -110,7 +118,16 @@ class GodotMcpServer {
     );
 
     this.ctx = createContextFromServer(this.server);
-    if (this.ctx.strictMode) {
+    if (this.ctx.disableSecurity) {
+      console.error(
+        '[SERVER] Security gate disabled (GODOT_MCP_DISABLE_SECURITY=true); run_script and run_project execute without scanning, blocking, or confirmation (Tier 1 included)',
+      );
+      if (this.ctx.strictMode) {
+        console.error(
+          '[SERVER] Strict mode ignored: GODOT_MCP_DISABLE_SECURITY overrides GODOT_MCP_STRICT',
+        );
+      }
+    } else if (this.ctx.strictMode) {
       console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
     }
     if (process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && this.ctx.strictMode) {

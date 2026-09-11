@@ -747,85 +747,90 @@ export async function handleRunProject(
   // recursion — see collectSceneScriptsRecursive). Result is a list of
   // findings + a list of scan warnings (file-not-found, read errors,
   // "no launchable scene"); both flow into the response warnings array.
-  // Strict mode + any Tier 1 finding → hard reject before launch.
+  // Strict mode + any Tier 1 finding → hard reject before launch. Skipped
+  // entirely when GODOT_MCP_DISABLE_SECURITY is set (complete no-op, Tier 1
+  // included — see McpContext.disableSecurity).
   const scanWarnings: string[] = [];
   const scanFindings: Array<{ sourcePath: string; match: PolicyMatch }> = [];
   const absProjectPath = resolve(projectPath);
-  try {
-    const projectGodot = projectGodotPath(absProjectPath);
-    if (existsSync(projectGodot)) {
-      const autoloads = parseAutoloads(projectGodot);
-      for (const entry of autoloads) {
-        const stripped = stripResPrefix(entry.path);
-        if (!stripped.endsWith('.gd')) continue;
-        if (!validateSubPath(absProjectPath, stripped)) {
-          scanWarnings.push(
-            `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
-          );
-          continue;
-        }
-        const filePath = join(absProjectPath, stripped);
-        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-        if (warning) scanWarnings.push(warning);
-        for (const m of findings) {
-          scanFindings.push({ sourcePath: filePath, match: m });
-        }
-      }
-    }
-    const launchScene = resolveLaunchScene(absProjectPath, scene.value);
-    if (launchScene === null) {
-      scanWarnings.push(
-        'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
-      );
-    } else if (!existsSync(launchScene)) {
-      scanWarnings.push(
-        `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
-      );
-    } else {
-      const scripts = collectSceneScriptsRecursive(launchScene, absProjectPath);
-      for (const filePath of scripts) {
-        if (!isUnderDir(absProjectPath, filePath)) {
-          scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
-          continue;
-        }
-        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-        if (warning) scanWarnings.push(warning);
-        for (const m of findings) {
-          scanFindings.push({ sourcePath: filePath, match: m });
+  if (!ctx.disableSecurity) {
+    try {
+      const projectGodot = projectGodotPath(absProjectPath);
+      if (existsSync(projectGodot)) {
+        const autoloads = parseAutoloads(projectGodot);
+        for (const entry of autoloads) {
+          const stripped = stripResPrefix(entry.path);
+          if (!stripped.endsWith('.gd')) continue;
+          if (!validateSubPath(absProjectPath, stripped)) {
+            scanWarnings.push(
+              `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
+            );
+            continue;
+          }
+          const filePath = join(absProjectPath, stripped);
+          const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+          if (warning) scanWarnings.push(warning);
+          for (const m of findings) {
+            scanFindings.push({ sourcePath: filePath, match: m });
+          }
         }
       }
+      const launchScene = resolveLaunchScene(absProjectPath, scene.value);
+      if (launchScene === null) {
+        scanWarnings.push(
+          'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
+        );
+      } else if (!existsSync(launchScene)) {
+        scanWarnings.push(
+          `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
+        );
+      } else {
+        const scripts = collectSceneScriptsRecursive(launchScene, absProjectPath);
+        for (const filePath of scripts) {
+          if (!isUnderDir(absProjectPath, filePath)) {
+            scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
+            continue;
+          }
+          const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+          if (warning) scanWarnings.push(warning);
+          for (const m of findings) {
+            scanFindings.push({ sourcePath: filePath, match: m });
+          }
+        }
+      }
+    } catch (error) {
+      scanWarnings.push(`run_project pre-flight scan failed: ${getErrorMessage(error)}`);
     }
-  } catch (error) {
-    scanWarnings.push(`run_project pre-flight scan failed: ${getErrorMessage(error)}`);
-  }
 
-  const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
-  if (ctx.strictMode && hasTier1) {
-    const top = scanFindings
-      .filter((f) => f.match.tier === 1)
-      .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
-    const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
-    const more =
-      scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
-    return err(
-      createErrorResponse(
-        [
-          `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
-          ...summary.map((s) => `- ${s}`),
-        ].join('\n'),
-        [
-          'Remove or refactor the flagged primitives',
-          'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
-        ],
-      ),
-    );
+    const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
+    if (ctx.strictMode && hasTier1) {
+      const top = scanFindings
+        .filter((f) => f.match.tier === 1)
+        .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
+      const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
+      const more =
+        scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
+      return err(
+        createErrorResponse(
+          [
+            `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
+            ...summary.map((s) => `- ${s}`),
+          ].join('\n'),
+          [
+            'Remove or refactor the flagged primitives',
+            'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
+          ],
+        ),
+      );
+    }
   }
 
   // Session-confirmation gate: one elicitation per absolute projectPath per
   // server session. Skipped when an active runtime session already targets
-  // the same project (the user just attached/ran).
+  // the same project (the user just attached/ran), or entirely when
+  // GODOT_MCP_DISABLE_SECURITY is set (R6 — the no-op covers this gate too).
   const projectKey = normalizeProjectKey(absProjectPath);
-  if (!ctx.sessionState.runProjectConfirmed.has(projectKey)) {
+  if (!ctx.disableSecurity && !ctx.sessionState.runProjectConfirmed.has(projectKey)) {
     if (ctx.disableElicitation) {
       // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION). Skip the
       // blanket confirmation gate and launch with a recorded warning. The
@@ -1561,91 +1566,96 @@ export async function handleRunScript(
     );
   }
 
-  // Static-analysis gate. Decision drives audit + dispatch.
-  const policy = evaluateScript(script, ctx.strictMode);
-  const projectPath = runner.activeProjectPath;
-
-  // Tier 1: hard block. Write audit, refuse to forward to the bridge.
-  if (policy.decision === 'hard_block') {
-    if (projectPath) {
-      writeAuditSidecar(projectPath, script, 'hard_block', policy, ctx.strictMode);
-    }
-    return err(
-      createErrorResponse(formatBlockMessage(policy.matches), collectSolutions(policy.matches)),
-    );
-  }
-
-  // Tier 2: elicit. Single prompt for the script — name the first finding +
-  // `+N more` suffix. Decline / cancel / elicitation-unavailable all map to
-  // denial. The audit sidecar records the actual outcome. When elicitation is
-  // disabled (GODOT_MCP_DISABLE_ELICITATION), the finding proceeds unprompted and is
-  // audited as `elicit_bypassed`. Note: strict mode promotes Tier 2 to
-  // `hard_block` in `evaluateScript` above, so this branch is never reached
-  // under strict — there is no strict/disableElicitation conflict to resolve here.
+  // Static-analysis gate. Decision drives audit + dispatch. Completely
+  // skipped when GODOT_MCP_DISABLE_SECURITY is set: no scan, no Tier 1/2/3
+  // decision, no elicitation, no warnings, no audit sidecar. Tier 1 hard
+  // blocks are included in the no-op — see McpContext.disableSecurity.
   let warningsFromPolicy: string[] = [];
-  let elicitBypassed = false;
-  if (policy.decision === 'elicit_required') {
-    if (ctx.disableElicitation) {
-      elicitBypassed = true;
-      warningsFromPolicy = matchesToWarnings(policy.matches);
-    } else {
-      let elicitResult: ElicitorResult;
-      try {
-        const head = summarizeMatch(policy.matches[0]!);
-        elicitResult = await ctx.elicitor({
-          message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
-          requestedSchema: {
-            type: 'object',
-            properties: {
-              confirm: { type: 'boolean', description: 'Allow the script to run' },
-            },
-            required: ['confirm'],
-          },
-        });
-      } catch (error) {
-        if (projectPath) {
-          writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
-        }
-        return err(
-          createErrorResponse(
-            `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
-            [
-              'Restructure the script to avoid the flagged primitive',
-              'Use an MCP client that supports the elicitation/create capability',
-            ],
-          ),
-        );
-      }
+  if (!ctx.disableSecurity) {
+    const policy = evaluateScript(script, ctx.strictMode);
+    const projectPath = runner.activeProjectPath;
 
-      if (!isElicitAccepted(elicitResult)) {
-        if (projectPath) {
-          writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
-        }
-        return err(
-          createErrorResponse(
-            `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
-            collectSolutions(policy.matches),
-          ),
-        );
+    // Tier 1: hard block. Write audit, refuse to forward to the bridge.
+    if (policy.decision === 'hard_block') {
+      if (projectPath) {
+        writeAuditSidecar(projectPath, script, 'hard_block', policy, ctx.strictMode);
       }
-      // Accept proceeds — record warnings for the success payload.
+      return err(
+        createErrorResponse(formatBlockMessage(policy.matches), collectSolutions(policy.matches)),
+      );
+    }
+
+    // Tier 2: elicit. Single prompt for the script — name the first finding +
+    // `+N more` suffix. Decline / cancel / elicitation-unavailable all map to
+    // denial. The audit sidecar records the actual outcome. When elicitation is
+    // disabled (GODOT_MCP_DISABLE_ELICITATION), the finding proceeds unprompted and is
+    // audited as `elicit_bypassed`. Note: strict mode promotes Tier 2 to
+    // `hard_block` in `evaluateScript` above, so this branch is never reached
+    // under strict — there is no strict/disableElicitation conflict to resolve here.
+    let elicitBypassed = false;
+    if (policy.decision === 'elicit_required') {
+      if (ctx.disableElicitation) {
+        elicitBypassed = true;
+        warningsFromPolicy = matchesToWarnings(policy.matches);
+      } else {
+        let elicitResult: ElicitorResult;
+        try {
+          const head = summarizeMatch(policy.matches[0]!);
+          elicitResult = await ctx.elicitor({
+            message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
+            requestedSchema: {
+              type: 'object',
+              properties: {
+                confirm: { type: 'boolean', description: 'Allow the script to run' },
+              },
+              required: ['confirm'],
+            },
+          });
+        } catch (error) {
+          if (projectPath) {
+            writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+          }
+          return err(
+            createErrorResponse(
+              `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
+              [
+                'Restructure the script to avoid the flagged primitive',
+                'Use an MCP client that supports the elicitation/create capability',
+              ],
+            ),
+          );
+        }
+
+        if (!isElicitAccepted(elicitResult)) {
+          if (projectPath) {
+            writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+          }
+          return err(
+            createErrorResponse(
+              `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
+              collectSolutions(policy.matches),
+            ),
+          );
+        }
+        // Accept proceeds — record warnings for the success payload.
+        warningsFromPolicy = matchesToWarnings(policy.matches);
+      }
+    } else if (policy.decision === 'warn') {
       warningsFromPolicy = matchesToWarnings(policy.matches);
     }
-  } else if (policy.decision === 'warn') {
-    warningsFromPolicy = matchesToWarnings(policy.matches);
-  }
 
-  // Audit successful / warn paths. Tier 2 accept lands here and is recorded
-  // distinctly from a plain Tier 3 warn so the audit trail preserves the
-  // user-confirmation event. A Tier 2 finding that ran unprompted because
-  // elicitation was disabled is recorded as `elicit_bypassed`.
-  if (projectPath) {
-    let auditDecision: AuditDecision;
-    if (policy.decision === 'ok') auditDecision = 'ok';
-    else if (policy.decision === 'elicit_required')
-      auditDecision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
-    else auditDecision = 'warn';
-    writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
+    // Audit successful / warn paths. Tier 2 accept lands here and is recorded
+    // distinctly from a plain Tier 3 warn so the audit trail preserves the
+    // user-confirmation event. A Tier 2 finding that ran unprompted because
+    // elicitation was disabled is recorded as `elicit_bypassed`.
+    if (projectPath) {
+      let auditDecision: AuditDecision;
+      if (policy.decision === 'ok') auditDecision = 'ok';
+      else if (policy.decision === 'elicit_required')
+        auditDecision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
+      else auditDecision = 'warn';
+      writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
+    }
   }
 
   const timeoutResult = optionalNumber(args, 'timeout');

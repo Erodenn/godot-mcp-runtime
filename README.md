@@ -157,11 +157,12 @@ If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will 
 
 All are set in the same `env` block as `GODOT_PATH`:
 
-| Variable                        | Effect                                                                                                                                                                                                                                                                            |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DEBUG`                         | `"true"` enables verbose `[DEBUG]` logging.                                                                                                                                                                                                                                       |
-| `GODOT_MCP_DISABLE_ELICITATION` | `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply. |
-| `GODOT_MCP_STRICT`              | `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.                                                                                                                    |
+| Variable                        | Effect                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEBUG`                         | `"true"` enables verbose `[DEBUG]` logging.                                                                                                                                                                                                                                                                |
+| `GODOT_MCP_DISABLE_ELICITATION` | `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.                          |
+| `GODOT_MCP_STRICT`              | `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.                                                                                                                                             |
+| `GODOT_MCP_DISABLE_SECURITY`    | `"true"` turns the entire `run_script`/`run_project` security gate off: no scan, no block, no elicitation, no warnings, no audit sidecars — Tier 1 included. Overrides `GODOT_MCP_STRICT` when both are set. **Enabling this is a human decision — an agent should decline to set it on a user's behalf.** |
 
 ```json
 {
@@ -207,7 +208,9 @@ Set `GODOT_MCP_STRICT=true` to promote every Tier 2 finding to a hard block — 
 
 Set `GODOT_MCP_DISABLE_ELICITATION=true` for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds (fail-open): `run_project` launches and Tier 2 `run_script` findings run with a warning. Tier 1 hard blocks are unaffected. Strict mode takes precedence when both are set. Off by default.
 
-Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/`. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
+Set `GODOT_MCP_DISABLE_SECURITY=true` to turn the gate off completely: no scan, no block, no elicitation, no warnings, no `.policy.json` sidecars, for both `run_script` and `run_project` (its pre-flight autoload/scene scan and its launch-confirmation prompt). Unlike `GODOT_MCP_DISABLE_ELICITATION`, this also removes the Tier 1 hard blocks — a sandboxed user who opted in and still could not run `OS.execute` would not actually have the access they opted in for. This flag overrides `GODOT_MCP_STRICT`: when both are set, security is off (a startup log records that strict mode was ignored). **Enabling this is a human decision.** It exists for developers who accept the risk, sandboxed environments, and CI — not for an agent to flip on its own initiative because a gate is in its way. An agent asked to set this on a user's behalf should decline and explain why. Off by default.
+
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/` — unless `GODOT_MCP_DISABLE_SECURITY` is set, in which case no sidecar is written at all. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
 
 ## Docs
 

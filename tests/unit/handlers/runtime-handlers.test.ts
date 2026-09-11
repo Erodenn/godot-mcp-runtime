@@ -48,7 +48,12 @@ import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
  * both the run_project session gate and any Tier 2 run_script elicitation.
  */
 function makeContext(
-  opts: { elicit?: Elicitor; strict?: boolean; disableElicitation?: boolean } = {},
+  opts: {
+    elicit?: Elicitor;
+    strict?: boolean;
+    disableElicitation?: boolean;
+    disableSecurity?: boolean;
+  } = {},
 ): McpContext {
   const defaultElicit: Elicitor = async () => ({
     action: 'accept',
@@ -58,6 +63,7 @@ function makeContext(
     elicitor: opts.elicit ?? defaultElicit,
     strictMode: opts.strict === true,
     disableElicitation: opts.disableElicitation === true,
+    disableSecurity: opts.disableSecurity === true,
     sessionState: { runProjectConfirmed: new Set<string>() },
   };
 }
@@ -1005,6 +1011,29 @@ describe('handleRunScript security policy', () => {
     expect(sidecar.tier).toBe(1);
   });
 
+  it('GODOT_MCP_DISABLE_SECURITY: runs a Tier 1 script with no elicitation, no warnings, no sidecar', async () => {
+    const dir = tmp.makeProject('run-script-disable-security-');
+    const fake = activeFake(dir);
+    let elicitCalls = 0;
+    const countingElicitor: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER1_SCRIPT },
+      makeContext({ elicit: countingElicitor, disableSecurity: true }),
+    );
+    // Complete no-op: the Tier 1 script actually reaches the bridge and succeeds.
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(1);
+    expect(elicitCalls).toBe(0);
+    const value = unwrap(result) as { warnings?: string[] };
+    expect(value.warnings).toBeUndefined();
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    expect(existsSync(scriptsDir)).toBe(false);
+  });
+
   it('elicits on Tier 2 HTTPRequest and proceeds on accept', async () => {
     const dir = tmp.makeProject('run-script-tier2-accept-');
     const fake = activeFake(dir);
@@ -1200,6 +1229,31 @@ describe('handleRunProject security pre-flight', () => {
     expectErrorMatching(result, /Strict mode: refusing to launch/);
     // Bridge must NOT be reached.
     expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('GODOT_MCP_DISABLE_SECURITY: launches with no pre-flight scan and no session-confirmation elicitation', async () => {
+    const dir = makeProjectWithAutoload(
+      'run-project-disable-security-',
+      'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCalls = 0;
+    const countingElicitor: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: countingElicitor, disableSecurity: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    expect(elicitCalls).toBe(0);
+    const text = unwrap(result).content[0].text;
+    expect(text).not.toMatch(/Security scan findings/);
+    expect(text).not.toMatch(/OS\.execute/);
   });
 
   it('strict mode allows launch when only Tier 3 findings present', async () => {

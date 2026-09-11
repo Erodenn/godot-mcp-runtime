@@ -195,7 +195,7 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 **Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch — it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
 
-**Not covered by strict mode.** `GODOT_MCP_STRICT` and `GODOT_MCP_DISABLE_ELICITATION` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate, but strict mode does not separately refuse to open the debugger port.
+**Not covered by strict mode.** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate (both skipped when `GODOT_MCP_DISABLE_SECURITY` is set), but none of the three flags separately refuses to open the debugger port.
 
 ---
 
@@ -223,6 +223,30 @@ When enabled, the interactive confirmation is skipped and treated as accepted (*
 **Strict mode takes precedence.** `GODOT_MCP_STRICT` mandates explicit confirmation, so when both are set, `GODOT_MCP_DISABLE_ELICITATION` is ignored (a startup log records the override). The three states form one axis: default = ask, `DISABLE_ELICITATION` = proceed unprompted, `STRICT` = hard-reject anything that would ask.
 
 Only enable this when you trust the project and the agent driving it — it removes the confirmation step, the same tradeoff as an MCP client's bypass-permissions mode.
+
+---
+
+## Disabling the entire gate
+
+`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar — for both handlers.
+
+Specifically, this flag skips:
+
+- `run_script`'s static-analysis gate entirely. **Tier 1 hard blocks are included** — unlike `GODOT_MCP_DISABLE_ELICITATION`, which leaves Tier 1 untouched, this flag removes it too. A sandboxed user who opted in explicitly still could not run `OS.execute`, which is precisely what they opted in for; leaving Tier 1 in place would make the flag dishonest about what it does.
+- `run_project`'s pre-flight scan of `[autoload]` scripts and the launched scene's attached scripts.
+- `run_project`'s session-confirmation elicitation (the "Launching a Godot project executes arbitrary code..." prompt).
+- The `.policy.json` audit sidecar write for `run_script` — a record of a gate that isn't running is just a file write, so it is skipped along with everything else.
+
+This exists for experienced users who do not need the gate: developers who accept the risk, sandboxed environments, CI.
+
+**Resolution order (three flags on one axis).** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` all govern the same gate. Resolved once, in this order:
+
+1. **`GODOT_MCP_DISABLE_SECURITY=true`** — wins outright. Security is off regardless of the other two flags. A startup log records that strict mode was ignored when both it and strict are set. This is the _opposite_ precedence from the strict/disable-elicitation pair below: disable-security has to be the weakest possible setting a human can opt into, so it wins when set, rather than deferring to strict.
+2. **`GODOT_MCP_STRICT=true`** (when disable-security is not set) — every Tier 2 match promotes to Tier 1, and `GODOT_MCP_DISABLE_ELICITATION` is ignored if also set.
+3. **`GODOT_MCP_DISABLE_ELICITATION=true`** (when neither of the above overrides it) — confirmation prompts are skipped fail-open; Tier 1 still blocks.
+4. Default — ask, per the elicitation and scan behavior described above.
+
+**Enabling this is a human decision.** An agent asked to set `GODOT_MCP_DISABLE_SECURITY` on a user's behalf should decline and explain that this is an operator-level trust decision, not something to be flipped to route around a gate that's in the way.
 
 ---
 
@@ -286,6 +310,8 @@ Audit failure (disk full, permission denied) is logged via `logDebug` and never 
 
 `run_project` does NOT emit per-call sidecars — findings flow into the response `warnings` array only.
 
+No sidecar is written at all when `GODOT_MCP_DISABLE_SECURITY` is set (see "Disabling the entire gate") — the gate that would have produced the decision never ran.
+
 ---
 
 ## What this does NOT do
@@ -303,6 +329,7 @@ This section exists because the doctrine at the top of this document demands it:
 - **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
 - No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch — mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
 - No telemetry / centralized reporting of blocks.
-- No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT` and `GODOT_MCP_DISABLE_ELICITATION` (both process-global, read once at start).
+- No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` (all process-global, read once at start).
+- **`GODOT_MCP_DISABLE_SECURITY` removes Tier 1 too.** Every other escape hatch in this document (`GODOT_MCP_DISABLE_ELICITATION`, `GODOT_MCP_STRICT`'s absence) leaves Tier 1 hard blocks standing. This one does not — see "Disabling the entire gate." Enabling it is a full opt-out, not a UX convenience.
 - No retroactive scanning of scripts already in the project — `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
 - `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.
