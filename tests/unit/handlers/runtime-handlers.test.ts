@@ -508,9 +508,9 @@ describe('ensureRuntimeSession (via handleTakeScreenshot)', () => {
     expect(fake.bridgeCalls).toHaveLength(0);
   });
 
-  // D10 auto-clear nulls the mode on process exit but retains the process, so
+  // The auto-clear nulls the mode on process exit but retains the process, so
   // the generic no-session message would otherwise replace the diagnosis.
-  it('reports the exited process after the session auto-cleared (AC3.9)', async () => {
+  it('reports the exited process after the session auto-cleared', async () => {
     const fake = createRuntimeFake();
     fake.setSession({
       mode: null,
@@ -622,8 +622,8 @@ describe('handleGetDebugOutput', () => {
     expect(parsed.tip).toMatch(/stop_project/);
   });
 
-  // D10 nulls the mode on exit but keeps the process; the logs are exactly
-  // what the caller wants at that point, so the gate must not error (AC3.9).
+  // The auto-clear nulls the mode on exit but keeps the process; the logs are exactly
+  // what the caller wants at that point, so the gate must not error.
   it('still returns the captured logs after the session auto-cleared', () => {
     const fake = createRuntimeFake();
     fake.setSession({
@@ -684,8 +684,8 @@ describe('handleStopProject', () => {
     expectErrorMatching(result, /No active Godot process/i);
   });
 
-  // D11 — the process exited on its own; the bridge was cleaned then.
-  it('reports alreadyExited with the exit code and captured logs (AC3.9)', async () => {
+  // The process exited on its own; the bridge was cleaned then.
+  it('reports alreadyExited with the exit code and captured logs', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({
       mode: 'spawned',
@@ -756,9 +756,9 @@ describe('handleStopProject', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleDetachProject', () => {
-  // D12 makes detach optional: an attached session whose bridge disconnected
+  // Detach is optional: an attached session whose bridge disconnected
   // clears itself, so a follow-up detach_project must succeed idempotently
-  // rather than erroring (AC3.11).
+  // rather than erroring.
   it('succeeds idempotently when the session already ended', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: null });
@@ -1763,10 +1763,10 @@ describe('handleTakeScreenshot bridge response shapes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC3.10 — reads of the fields D10 nulls
+// Reads of the fields the auto-clear nulls
 // ---------------------------------------------------------------------------
 
-describe('session auto-clear interactions (AC3.10)', () => {
+describe('session auto-clear interactions', () => {
   it('take_screenshot errors instead of resolving a null project path', async () => {
     const projectPath = tmp.make('mcp-autoclear-');
     const dir = screenshotsDir(projectPath);
@@ -1777,7 +1777,7 @@ describe('session auto-clear interactions (AC3.10)', () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'spawned', projectPath, process: makeRunningProcess() });
     fake.setBridgeResponse(JSON.stringify({ path: shot, width: 1, height: 1 }));
-    // The process exits while the screenshot command is in flight: D10 nulls
+    // The process exits while the screenshot command is in flight: the auto-clear nulls
     // activeProjectPath, and the containment check runs after the await.
     fake.setBridgeHook(() => {
       fake.setSession({

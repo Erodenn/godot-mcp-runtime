@@ -5,7 +5,7 @@ import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
-import { BridgeManager } from './bridge-manager.js';
+import { BridgeAutoloadCollisionError, BridgeManager } from './bridge-manager.js';
 import { DebuggerProfiler } from './profiler.js';
 import {
   DEFAULT_BRIDGE_PORT,
@@ -478,6 +478,12 @@ export class GodotRunner {
     try {
       this.bridge.inject(projectPath, port);
     } catch (err) {
+      // A name collision with a user's own McpBridge autoload is the one
+      // inject failure the caller can act on, and swallowing it would surface
+      // as a generic bridge timeout minutes later. Everything else (an
+      // unwritable project directory, a packaging problem in the shipped
+      // template) still degrades to a bridgeless run, as before.
+      if (err instanceof BridgeAutoloadCollisionError) throw err;
       logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
     }
     this.activeProjectPath = projectPath;
@@ -577,7 +583,7 @@ export class GodotRunner {
   }
 
   /**
-   * `'exit'` handler for a spawned Godot process (D10 auto-clear).
+   * `'exit'` handler for a spawned Godot process: the session auto-clear.
    *
    * WIDEST INPUT: this fires for every exit of every process this runner ever
    * spawned — a crash, a window the user closed, a `stopProject` kill, and the
@@ -622,7 +628,7 @@ export class GodotRunner {
   }
 
   /**
-   * Drop an attached session whose bridge has gone away (D12). Mirrors the
+   * Drop an attached session whose bridge has gone away. Mirrors the
    * attached branch of `stopProject` minus the `shutdown` command and the
    * process handling, since there is no process here and no peer to talk to.
    *
@@ -715,7 +721,7 @@ export class GodotRunner {
       }
 
       // The process exited on its own and handleSpawnedProcessExit already
-      // closed the connection and removed the bridge artifacts (D11). Nothing
+      // closed the connection and removed the bridge artifacts. Nothing
       // left to kill or clean — hand back the captured logs so stop_project
       // stays idempotent. A capture that finished before the exit survives;
       // only an unfinished one is torn down.
@@ -1050,12 +1056,15 @@ export class GodotRunner {
   private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
   private static readonly RETRYABLE_BRIDGE_COMMANDS = new Set(['get_ui_elements', 'screenshot']);
   /**
-   * Commands exempt from the attached-mode disconnect probe. `closeConnection`
-   * is itself one of the producers of `BridgeDisconnectedError` (it rejects any
-   * in-flight command with one), and the only command in flight during our own
-   * teardown is the `shutdown` that `stopProject` and the `attachProject` swap
-   * issue. Probing on those would clear a session that is already being torn
-   * down deliberately. `ping` is exempt because the probe itself is a `ping`.
+   * Commands exempt from the attached-mode disconnect probe: a teardown guard.
+   * `closeConnection` is itself one of the producers of
+   * `BridgeDisconnectedError` (it rejects any in-flight command with one), and
+   * the command in flight during our own teardown is a `shutdown`. Probing on
+   * that would clear a session already being torn down deliberately, and
+   * probing on a `ping` would recurse into the probe itself. Today both
+   * teardown `shutdown`s and the probe call `sendCommand` directly, so this
+   * set is unreached in production; it is here so routing either through the
+   * reconnect wrapper stays correct.
    */
   private static readonly DISCONNECT_EXEMPT_BRIDGE_COMMANDS = new Set(['shutdown', 'ping']);
 
@@ -1065,7 +1074,7 @@ export class GodotRunner {
 
   /**
    * `sendCommand` plus the transient-drop retry and, in attached mode, the
-   * disconnect-means-session-end probe (D12).
+   * disconnect-means-session-end probe.
    *
    * WIDEST INPUT of the disconnect predicate: `BridgeDisconnectedError` has
    * seven producers in `sendCommand` — connect failure, socket unavailable,
@@ -1073,7 +1082,7 @@ export class GodotRunner {
    * `'close'`, and `closeConnection`'s in-flight rejection. A per-command
    * timeout is a plain `Error` and never reaches here, so a wedged-but-alive
    * game is not mistaken for a dead one. The chain below narrows that set:
-   * spawned sessions keep today's behavior (D10's exit handler owns them),
+   * spawned sessions keep today's behavior (the exit handler owns them),
    * `shutdown`/`ping` are exempt, a retryable command spends its one retry
    * first, and every survivor must still fail a live `ping` before anything is
    * cleared.
@@ -1136,7 +1145,7 @@ export class GodotRunner {
     const marker = this.getErrorCount();
     const response = await this.sendCommandWithReconnect(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
-    // Keyed on the retained `activeProcess` rather than the session mode: D10's
+    // Keyed on the retained `activeProcess` rather than the session mode: the
     // auto-clear nulls the mode the moment a spawned process exits, but the
     // stderr buffer being classified here lives on `activeProcess`, which
     // survives. Attached sessions have no `activeProcess` and so still get [].

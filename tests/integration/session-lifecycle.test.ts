@@ -1,5 +1,5 @@
 /**
- * AC3.9's real-process half: a spawned Godot that dies on its own (killed
+ * A spawned Godot that dies on its own (killed
  * from outside, the same shape as a crash or a window the user closed) must
  * clear its own session and bridge artifacts, keep its captured logs readable
  * through `get_debug_output`, and let `stop_project` succeed idempotently.
@@ -84,7 +84,7 @@ describe('spawned session self-exit', () => {
       // The 'exit' listener under test is registered before this one, so it
       // has already run by the time the promise settles.
 
-      // D10: session fields cleared, process and its logs retained.
+      // Session fields cleared, process and its logs retained.
       expect(runner.activeSessionMode).toBeNull();
       expect(runner.activeProjectPath).toBeNull();
       expect(runner.activeBridgePort).toBeNull();
@@ -97,14 +97,14 @@ describe('spawned session self-exit', () => {
       expect(readFileSync(join(tmpProject, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
       expect(existsSync(mcpDir(tmpProject))).toBe(true);
 
-      // AC3.9: the logs are still reachable and the exit is reported.
+      // The logs are still reachable and the exit is reported.
       const debugResult = handleGetDebugOutput(runner, {});
       expect(hasError(debugResult)).toBe(false);
       const debug = JSON.parse(unwrap(debugResult).content[0].text);
       expect(debug.running).toBe(false);
       expect(debug.exitCode !== undefined).toBe(true);
 
-      // D11: stop_project succeeds and says the process had already exited.
+      // stop_project succeeds and says the process had already exited.
       const stopResult = await handleStopProject(runner);
       expect(hasError(stopResult)).toBe(false);
       const stopped = JSON.parse(unwrap(stopResult).content[0].text);

@@ -377,7 +377,7 @@ describe('handleValidate batch mode', () => {
 });
 
 // ---------------------------------------------------------------------------
-// writeTempGdScript placement (AC3.3) — observed through handleValidate, which
+// writeTempGdScript placement — observed through handleValidate, which
 // is the only caller. The fake runner records the script path it was handed;
 // the directory it was written into survives the per-call unlink, so its
 // presence plus the file's absence proves both halves.

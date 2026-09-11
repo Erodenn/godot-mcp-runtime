@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { BridgeManager } from '../../src/utils/bridge-manager.js';
+import { BridgeAutoloadCollisionError, BridgeManager } from '../../src/utils/bridge-manager.js';
 import {
   BRIDGE_SCRIPT_RES_PATH,
   LEGACY_BRIDGE_SCRIPT_FILENAME,
@@ -369,8 +369,8 @@ describe('BridgeManager handles project layouts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Migration off the legacy project-root script (AC3.4) and the reserved-name
-// collision guard (certification C3).
+// Migration off the legacy project-root script, and the guard against a
+// user's own autoload registered under the reserved McpBridge name.
 // ---------------------------------------------------------------------------
 
 describe('BridgeManager migration from the legacy root script', () => {
@@ -431,6 +431,22 @@ describe('BridgeManager guards a user-registered McpBridge autoload', () => {
     expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/reserved/i);
   });
 
+  // The collision is the one inject failure a caller must surface rather than
+  // degrade past, so it is a distinct type rather than a bare Error.
+  it('throws BridgeAutoloadCollisionError carrying the registered path', () => {
+    const { projectPath, manager } = setupCollision();
+    let thrown: unknown;
+    try {
+      manager.inject(projectPath, TEST_PORT);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(BridgeAutoloadCollisionError);
+    expect((thrown as BridgeAutoloadCollisionError).registeredPath).toBe(
+      'res://game/my_own_bridge.gd',
+    );
+  });
+
   it('inject leaves the user entry untouched and writes no autoload of its own', () => {
     const { projectPath, manager } = setupCollision();
     try {
@@ -463,7 +479,7 @@ describe('BridgeManager guards a user-registered McpBridge autoload', () => {
 });
 
 // ---------------------------------------------------------------------------
-// repairOrphaned: stranded artifacts from a hard-killed earlier process (AC3.5)
+// repairOrphaned: stranded artifacts from a hard-killed earlier process
 // ---------------------------------------------------------------------------
 
 describe('BridgeManager.repairOrphaned stranded artifacts', () => {

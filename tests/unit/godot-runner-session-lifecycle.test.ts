@@ -1,6 +1,6 @@
 /**
- * Session lifecycle: D10 auto-clear on spawned-process exit, D11's idempotent
- * stop after a self-exit, and D12's attached-mode disconnect handling.
+ * Session lifecycle: the auto-clear on spawned-process exit, the idempotent
+ * stop after a self-exit, and attached-mode disconnect handling.
  *
  * `child_process.spawn` is mocked at the I/O boundary so `runProject` runs its
  * real body — including the `'exit'` registration under test — without a Godot
@@ -66,7 +66,7 @@ function stubBridge(runner: Runner): BridgeRecorder {
   return rec;
 }
 
-/** Read the four fields D10 clears, so assertions read as one statement. */
+/** Read the four fields the auto-clear nulls, so assertions read as one statement. */
 function sessionFields(runner: Runner): Record<string, unknown> {
   const r = runner as unknown as {
     activeSessionMode: unknown;
@@ -84,7 +84,7 @@ function sessionFields(runner: Runner): Record<string, unknown> {
 
 const tmp = useTmpDirs();
 
-describe('spawned-process exit auto-clear (D10)', () => {
+describe('spawned-process exit auto-clear', () => {
   let runner: Runner;
   let bridge: BridgeRecorder;
   let proc: FakeChildProcess;
@@ -113,7 +113,7 @@ describe('spawned-process exit auto-clear (D10)', () => {
     await runner.runProject(projectPath, undefined, false, UNUSED_BRIDGE_PORT);
   }
 
-  it('clears the session, cleans the bridge, and retains the process (AC3.8)', async () => {
+  it('clears the session, cleans the bridge, and retains the process', async () => {
     await start();
     const captured = runner.activeProcess!;
     proc.stdout.emit('data', Buffer.from('hello from the game\n'));
@@ -138,7 +138,7 @@ describe('spawned-process exit auto-clear (D10)', () => {
     expect(runner.hasActiveRuntimeSession()).toBe(false);
   });
 
-  it('ignores an exit from a superseded session (epoch guard, DA)', async () => {
+  it('ignores an exit from a superseded session (epoch guard)', async () => {
     await start();
     const captured = runner.activeProcess!;
 
@@ -166,7 +166,7 @@ describe('spawned-process exit auto-clear (D10)', () => {
     });
   });
 
-  it('stopProject after a self-exit reports alreadyExited with the captured logs (D11)', async () => {
+  it('stopProject after a self-exit reports alreadyExited with the captured logs', async () => {
     await start();
     proc.stdout.emit('data', Buffer.from('line one\n'));
     proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: boom\n'));
@@ -210,6 +210,18 @@ describe('spawned-process exit auto-clear (D10)', () => {
     expect(runner.activeProfiler).toBeNull();
   });
 
+  // An McpBridge name collision is the one inject failure the user can act on,
+  // so runProject must surface it instead of degrading to a bridge timeout.
+  it('rethrows a bridge autoload collision instead of launching without a bridge', async () => {
+    const { BridgeAutoloadCollisionError } = await import('../../src/utils/bridge-manager.js');
+    (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
+      throw new BridgeAutoloadCollisionError('collision', 'res://game/mine.gd');
+    };
+
+    await expect(start()).rejects.toBeInstanceOf(BridgeAutoloadCollisionError);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it('returns null from stopProject when there is no session and no process', async () => {
     expect(await runner.stopProject()).toBeNull();
   });
@@ -229,7 +241,7 @@ describe('spawned-process exit auto-clear (D10)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// D12 — attached-mode disconnect
+// Attached-mode disconnect
 // ---------------------------------------------------------------------------
 
 type FrameAction = { kind: 'reply'; payload: string } | { kind: 'drop' };
@@ -286,7 +298,7 @@ async function startScriptedBridge(
 const PONG = '{"status":"pong"}';
 const OK = '{"ok":true}';
 
-describe('attached-mode bridge disconnect (D12)', () => {
+describe('attached-mode bridge disconnect', () => {
   let runner: Runner;
   let bridge: BridgeRecorder;
   let scripted: ScriptedBridge | null = null;

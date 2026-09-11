@@ -9,6 +9,7 @@
  */
 
 import type { GodotRunner } from './godot-runner.js';
+import { logError } from './logger.js';
 
 /** Exit code used for every graceful shutdown path below. */
 const GRACEFUL_EXIT_CODE = 0;
@@ -23,7 +24,7 @@ export interface LifecycleProcess {
 }
 
 /**
- * Register every process-lifetime teardown path (D16). Extracted from the
+ * Register every process-lifetime teardown path. Extracted from the
  * server constructor so a test can drive the real registration rather than a
  * re-implementation of it; the constructor's call, with both optional
  * arguments defaulted, IS the production wiring.
@@ -52,7 +53,14 @@ export function registerProcessLifecycle(opts: {
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await opts.cleanup();
+    try {
+      await opts.cleanup();
+    } catch (err) {
+      // A failed cleanup must not strand the process: without the exit below
+      // the server keeps running after its client went away, and the sync
+      // `'exit'` backstop never gets a chance to remove the artifacts.
+      logError(`Cleanup failed during shutdown: ${String(err)}`);
+    }
     exit(GRACEFUL_EXIT_CODE);
   };
   const startShutdown = (): void => {

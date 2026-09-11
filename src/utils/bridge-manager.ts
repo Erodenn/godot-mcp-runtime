@@ -18,6 +18,23 @@ import {
 } from './artifact-paths.js';
 
 const BRIDGE_AUTOLOAD_NAME = 'McpBridge' as const;
+
+/**
+ * Thrown when project.godot already registers an autoload named `McpBridge`
+ * at a path this server does not own. Distinct from the incidental filesystem
+ * failures `inject` can raise, because the caller must surface this one to the
+ * user: it is the only inject failure they can act on, and proceeding would
+ * leave them staring at a bridge timeout instead.
+ */
+export class BridgeAutoloadCollisionError extends Error {
+  constructor(
+    message: string,
+    readonly registeredPath: string,
+  ) {
+    super(message);
+    this.name = 'BridgeAutoloadCollisionError';
+  }
+}
 const MCP_GITIGNORE_ENTRY = '.mcp/' as const;
 
 // Matches the baked-port marker line inserted in src/scripts/mcp_bridge.gd —
@@ -68,8 +85,9 @@ export class BridgeManager {
    *   token via `MCP_SESSION_TOKEN` instead and should omit this so the
    *   shipped `""` default is left in place (fail-open only when no token is
    *   configured at all).
-   * @throws if an `[autoload]` entry named McpBridge already exists and points
-   *   at a path this server does not own (a name collision with user code).
+   * @throws {BridgeAutoloadCollisionError} if an `[autoload]` entry named
+   *   McpBridge already exists and points at a path this server does not own
+   *   (a name collision with user code). Callers must not swallow this one.
    */
   inject(projectPath: string, port: number, bakedToken?: string): void {
     // Always rewrite the destination — the per-project bridge script may
@@ -94,10 +112,11 @@ export class BridgeManager {
     const projectFile = join(projectPath, 'project.godot');
     const existingEntry = this.findBridgeAutoload(projectFile);
     if (existingEntry !== undefined && !isServerOwnedBridgePath(existingEntry)) {
-      throw new Error(
+      throw new BridgeAutoloadCollisionError(
         `project.godot already registers an autoload named ${BRIDGE_AUTOLOAD_NAME} at ` +
           `${existingEntry}, which this server does not own. The ${BRIDGE_AUTOLOAD_NAME} ` +
           `autoload name is reserved by this server; rename the existing autoload and retry.`,
+        existingEntry,
       );
     }
 
@@ -219,6 +238,11 @@ export class BridgeManager {
    * When the `McpBridge` entry points somewhere this server does not own, the
    * entry and the project-root script are both left alone: that combination is
    * a user's own autoload sharing a reserved name, not our artifact.
+   *
+   * Accepted gap: with no `McpBridge` entry at all there is nothing to test
+   * ownership against, so a project-root file named exactly `mcp_bridge.gd`
+   * (plus its `.uid`) is removed on the assumption it is ours. The blast
+   * radius is that one filename at the project root and nothing else.
    */
   private removeBridgeArtifacts(projectPath: string): void {
     const projectFile = join(projectPath, 'project.godot');
