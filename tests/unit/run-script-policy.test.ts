@@ -460,3 +460,203 @@ describe('evaluateScript — Tier 2 set_script bare identifier', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Write-primitive sweep (AC1.1-AC1.4, harness Phase 1 / handoff PR 1).
+// ---------------------------------------------------------------------------
+
+describe('evaluateScript — write-primitive sweep (AC1.1)', () => {
+  it('elicits on ResourceSaver.save(res, path)', () => {
+    expect(evalLine('ResourceSaver.save(res, path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on ResourceSaver.save(res) - no-path arity', () => {
+    expect(evalLine('ResourceSaver.save(res)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on cf.save(p) when ConfigFile.new() appears in the same script', () => {
+    const d = evalLine('var cf := ConfigFile.new()\n\tcf.save(p)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.config.ConfigFile')).toBe(true);
+  });
+
+  it('elicits on cf.save_encrypted(p, key) on any receiver', () => {
+    const d = evalLine('cf.save_encrypted(p, key)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.config.ConfigFile.save_encrypted')).toBe(true);
+  });
+
+  it('elicits on cf.save_encrypted_pass(p, pass) on any receiver', () => {
+    expect(evalLine('cf.save_encrypted_pass(p, pass)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on img.save_png(p) - instance receiver', () => {
+    expect(evalLine('img.save_png(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on img.save_jpg(p)', () => {
+    expect(evalLine('img.save_jpg(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on img.save_webp(p)', () => {
+    expect(evalLine('img.save_webp(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on img.save_exr(p)', () => {
+    expect(evalLine('img.save_exr(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on tex.get_image().save_png(p) - the chained-call idiomatic form', () => {
+    const d = evalLine('tex.get_image().save_png(p)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_png')).toBe(true);
+  });
+
+  it('elicits on tex.get_image().save_jpg(p) - sibling chained-call form', () => {
+    const d = evalLine('tex.get_image().save_jpg(p)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_jpg')).toBe(true);
+  });
+
+  it('elicits on a bare save_png(p) call with no receiver at all', () => {
+    const d = evalLine('save_png(p)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_png')).toBe(true);
+  });
+
+  it('regression: the matchLastSegment fallthrough does not widen bare save() or literal load()', () => {
+    expect(evalLine('some_manager.save()').decision).toBe('ok');
+    const d = evalLine('var r = load("res://x.tscn")');
+    expect(d.decision).toBe('warn');
+    expect(d.matches).toHaveLength(1);
+    expect(d.matches[0]?.ruleId).toBe('tier3.literal.load');
+  });
+
+  it('elicits on res.take_over_path(p)', () => {
+    expect(evalLine('res.take_over_path(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on FileAccess.open_encrypted(...)', () => {
+    expect(evalLine('FileAccess.open_encrypted(path, FileAccess.WRITE, key)').effectiveTier).toBe(
+      2,
+    );
+  });
+
+  it('elicits on FileAccess.open_encrypted_with_pass(...)', () => {
+    expect(
+      evalLine('FileAccess.open_encrypted_with_pass(path, FileAccess.WRITE, pass)').effectiveTier,
+    ).toBe(2);
+  });
+
+  it('elicits on FileAccess.open_compressed(...)', () => {
+    expect(evalLine('FileAccess.open_compressed(path, FileAccess.WRITE)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on dir.make_dir(path) - instance receiver', () => {
+    expect(evalLine('dir.make_dir(path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on DirAccess.make_dir_absolute(path) - static', () => {
+    expect(evalLine('DirAccess.make_dir_absolute(path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on dir.make_dir_recursive(path) - instance receiver', () => {
+    expect(evalLine('dir.make_dir_recursive(path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on DirAccess.make_dir_recursive_absolute(path) - static', () => {
+    expect(evalLine('DirAccess.make_dir_recursive_absolute(path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on OS.move_to_trash(p)', () => {
+    expect(evalLine('OS.move_to_trash(p)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on ZIPPacker.new() usage', () => {
+    expect(evalLine('var z = ZIPPacker.new()').effectiveTier).toBe(2);
+  });
+
+  it('elicits on PCKPacker.new() usage', () => {
+    expect(evalLine('var pck = PCKPacker.new()').effectiveTier).toBe(2);
+  });
+
+  it('elicits on ResourceUID.add_id(...)', () => {
+    expect(evalLine('ResourceUID.add_id(id, path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on ResourceUID.set_id(...)', () => {
+    expect(evalLine('ResourceUID.set_id(id, path)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on ResourceUID.remove_id(...)', () => {
+    expect(evalLine('ResourceUID.remove_id(id)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on FileAccess.create_temp(...)', () => {
+    expect(evalLine('FileAccess.create_temp(FileAccess.WRITE)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on FileAccess.set_read_only_attribute(...)', () => {
+    expect(evalLine('FileAccess.set_read_only_attribute(path, true)').effectiveTier).toBe(2);
+  });
+
+  it('elicits on FileAccess.set_hidden_attribute(...)', () => {
+    expect(evalLine('FileAccess.set_hidden_attribute(path, true)').effectiveTier).toBe(2);
+  });
+});
+
+describe('evaluateScript — write-primitive sweep negatives (AC1.2)', () => {
+  it('does not flag some_manager.save() - bare "save" stays unmatched', () => {
+    expect(evalLine('some_manager.save()').decision).toBe('ok');
+  });
+
+  it('does not flag Image construction plus a get_pixel read', () => {
+    const d = evalLine('var img := Image.new()\n\timg.get_pixel(0, 0)');
+    expect(d.decision).toBe('ok');
+  });
+
+  it('load("res://x.tscn") with a literal produces only the existing Tier 3 warn', () => {
+    const d = evalLine('var r = load("res://x.tscn")');
+    expect(d.decision).toBe('warn');
+    expect(d.matches).toHaveLength(1);
+    expect(d.matches[0]?.ruleId).toBe('tier3.literal.load');
+  });
+});
+
+describe('evaluateScript — ConfigFile.load prefix hole (AC1.3, D5)', () => {
+  it('blocks cf.load(path) - instance receiver', () => {
+    const d = evalLine('cf.load(path)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.config.ConfigFile.load')).toBe(true);
+  });
+
+  it('bare load(path) with a non-literal argument still matches only the indirect rule', () => {
+    const d = evalLine('var r = load(path)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches).toHaveLength(1);
+    expect(d.matches[0]?.ruleId).toBe('tier1.indirect.load.nonliteral');
+  });
+
+  it('ResourceLoader.load(non_literal) still matches its own rule, not the generic load fix', () => {
+    const d = evalLine('ResourceLoader.load(var_path)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches).toHaveLength(1);
+    expect(d.matches[0]?.ruleId).toBe('tier1.indirect.ResourceLoader.load.nonliteral');
+  });
+
+  it('ResourceLoader.load("literal") still warns via its own Tier 3 rule', () => {
+    const d = evalLine('ResourceLoader.load("res://x.tscn")');
+    expect(d.decision).toBe('warn');
+    expect(d.matches).toHaveLength(1);
+    expect(d.matches[0]?.ruleId).toBe('tier3.literal.ResourceLoader.load');
+  });
+});
+
+describe('evaluateScript — strict mode promotes new Tier 2 primitives (AC1.4)', () => {
+  it('promotes ResourceSaver.save to hard_block under strict mode', () => {
+    const source = VALID_PREFIX + 'ResourceSaver.save(res, path)\n';
+    const strict = evaluateScript(source, true);
+    expect(strict.decision).toBe('hard_block');
+    expect(strict.promotedByStrict).toBe(true);
+  });
+});
