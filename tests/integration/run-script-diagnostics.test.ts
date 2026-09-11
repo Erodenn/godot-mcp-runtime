@@ -20,23 +20,10 @@ import { cpSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot } from '../helpers/godot-skip.js';
+import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript } from '../../src/tools/runtime-tools.js';
-// Heuristic: bridge failures we treat as "no display server" (skip-worthy)
-// rather than real failures. Mirrors runtime-smoke.test.ts.
-function isHeadlessEnvironmentError(err: string | undefined): boolean {
-  if (!err) return false;
-  const lower = err.toLowerCase();
-  return (
-    lower.includes('display') ||
-    lower.includes('no x server') ||
-    lower.includes('wayland') ||
-    lower.includes('cannot open display')
-  );
-}
-
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
   const dst = join(tmpdir(), `godot-mcp-runscript-diag-${id}`);
