@@ -54,6 +54,7 @@ Key behaviors:
 - Headless Godot initializes ALL registered autoloads. If any autoload is broken, headless operations will fail. Use list_autoloads / remove_autoload to diagnose.
 - run_project verifies bridge readiness before returning success. If it reports degraded status, retry runtime tools after a moment or check get_debug_output.
 - attach_project is the fallback path for a manually launched Godot process. It injects the bridge and marks the project active, but it does not spawn Godot or capture stdout/stderr.
+- A runtime session ends by itself when the game exits or an attached bridge disconnects: the bridge autoload is removed at that moment and the scene-editing tools unblock. stop_project is still worth calling (it frees the retained process slot and returns the captured logs) and succeeds either way.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.

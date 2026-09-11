@@ -99,14 +99,16 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 The gate emits a three-tier decision:
 
 - **Tier 1 — hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
-- **Tier 2 — elicit.** Filesystem writes (`FileAccess.open`, `DirAccess.remove`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
+- **Tier 2 — elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
 - **Tier 3 — warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
 
 `GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch — MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
 
 `GODOT_MCP_DISABLE_ELICITATION=true` is the opposite escape hatch, for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds fail-open: `run_project`'s launch gate is bypassed and Tier 2 `run_script` findings run with a warning (audited as `elicit_bypassed`). Tier 1 hard blocks are unaffected. When both flags are set, strict mode wins and `GODOT_MCP_DISABLE_ELICITATION` is ignored.
 
-Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/`. See `docs/security.md` for the full rule catalogue.
+`GODOT_MCP_DISABLE_SECURITY=true` turns the whole gate off: no scan, no tier decision, no elicitation, no warnings, no sidecar, for both handlers. Tier 1 is included, unlike the elicitation opt-out. It outranks both flags above, which is the reverse of the strict/disable-elicitation precedence — a flag whose purpose is turning the gate off would be useless if a stricter flag outranked it. Enabling it is an operator's decision, not an agent's.
+
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/`, unless the gate is disabled. See `docs/security.md` for the full rule catalogue and the three-flag resolution order.
 
 When adding a new tool that forwards GDScript to the bridge, route it through the same policy evaluator — don't inline rejection logic.
 
