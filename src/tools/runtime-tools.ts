@@ -138,7 +138,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors if called outside an attached session.',
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors if called outside an attached session. Call this even if the externally launched Godot process is already closed — it clears the session flag that blocks scene-editing tools and removes the bridge autoload the project would otherwise be left with.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -183,7 +183,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up MCP bridge state. Always call when done with runtime testing, even after a crash, to free the process slot for run_project. Attached sessions detach without killing the external process. Returns: message, mode ("spawned"/"attached"), externalProcessPreserved (true only for attached), and condensed finalOutput/finalErrors (blank and startup-banner lines dropped, capped at 200 lines); get_debug_output has the full log. Errors if no session is active.',
+      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot, clears the flag blocking scene-editing tools, and removes the bridge autoload left in the project. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors if no session is active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
