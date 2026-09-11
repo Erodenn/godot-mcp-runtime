@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { cleanStdout, condenseProcessTail } from '../../src/utils/output-parsing.js';
+import {
+  cleanStdout,
+  condenseProcessTail,
+  normalizeExitCode,
+} from '../../src/utils/output-parsing.js';
 
 // Observed in production: headless operations emit Godot RID-leak warnings on
 // stdout, both AFTER a JSON payload (benign — handled) and INSTEAD of one,
@@ -70,5 +74,29 @@ describe('condenseProcessTail', () => {
 
   it('returns an empty array for empty input', () => {
     expect(condenseProcessTail([], 200)).toEqual([]);
+  });
+});
+
+// A force-killed process can report its exit code as the unsigned 32-bit
+// representation of a negative signal-kill status. See CLAUDE.md / plan A5.
+describe('normalizeExitCode', () => {
+  it('normalizes the unsigned 32-bit representation of -1 to -1', () => {
+    expect(normalizeExitCode(4294967295)).toBe(-1);
+  });
+
+  it('leaves 0 unchanged', () => {
+    expect(normalizeExitCode(0)).toBe(0);
+  });
+
+  it('leaves 1 unchanged', () => {
+    expect(normalizeExitCode(1)).toBe(1);
+  });
+
+  it('passes null through unchanged', () => {
+    expect(normalizeExitCode(null)).toBe(null);
+  });
+
+  it('leaves a normal small exit code unchanged', () => {
+    expect(normalizeExitCode(255)).toBe(255);
   });
 });

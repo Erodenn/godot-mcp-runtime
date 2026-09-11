@@ -18,7 +18,7 @@ import {
 } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
-import { cleanStdout, normalizeForCompare } from './output-parsing.js';
+import { cleanStdout, normalizeForCompare, normalizeExitCode } from './output-parsing.js';
 import { checkDisplayAvailable, validateSubPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
 
@@ -125,6 +125,10 @@ export class GodotRunner {
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
   public activeBridgePort: number | null = null;
+  // Set once by attachProject and never cleared, so detach_project can tell
+  // "an attached session existed and ended" from "this server never attached
+  // to anything" after activeSessionMode has already gone back to null.
+  public hasEverAttached = false;
   // Debugger receiver for `run_project({ profiling: true })`. Bound before the
   // spawn so `--remote-debug` has a port to dial, and torn down with the
   // session. Null in attached mode — the channel is set at launch or never.
@@ -603,8 +607,9 @@ export class GodotRunner {
     epoch: number,
     code: number | null,
   ): void {
-    logDebug(`Godot process exited with code ${code}`);
-    proc.exitCode = code;
+    const normalizedCode = normalizeExitCode(code);
+    logDebug(`Godot process exited with code ${normalizedCode}`);
+    proc.exitCode = normalizedCode;
     proc.hasExited = true;
 
     if (this.sessionEpoch !== epoch) {
@@ -707,6 +712,7 @@ export class GodotRunner {
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
+    this.hasEverAttached = true;
   }
 
   async stopProject(): Promise<RuntimeStopResult | null> {

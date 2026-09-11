@@ -1,5 +1,24 @@
 import { normalize } from 'path';
 
+// A force-killed process can report its exit code as the unsigned 32-bit
+// representation of a negative signal-kill status (e.g. 4294967295 for -1).
+// Godot's own exits are small non-negative integers, so any observed code at
+// or above 2^31 is reinterpreted as its signed 32-bit equivalent.
+const INT32_SIGN_BOUNDARY = 2147483648; // 2^31
+const UINT32_MODULUS = 4294967296; // 2^32
+
+/**
+ * Normalize a raw process exit code to a signed 32-bit value, so a
+ * force-killed process (e.g. `4294967295`) reports as `-1` instead of an
+ * unsigned value that reads like a real Godot exit status.
+ */
+export function normalizeExitCode(code: number | null): number | null {
+  if (code === null || code < INT32_SIGN_BOUNDARY) {
+    return code;
+  }
+  return code - UINT32_MODULUS;
+}
+
 /**
  * Normalize a path for cross-platform comparison.
  * Folds Windows backslashes to forward slashes and strips trailing slashes,
