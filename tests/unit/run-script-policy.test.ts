@@ -467,11 +467,15 @@ describe('evaluateScript — Tier 2 set_script bare identifier', () => {
 
 describe('evaluateScript — write primitives', () => {
   it('elicits on ResourceSaver.save(res, path)', () => {
-    expect(evalLine('ResourceSaver.save(res, path)').effectiveTier).toBe(2);
+    const d = evalLine('ResourceSaver.save(res, path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.resource_saver.save')).toBe(true);
   });
 
   it('elicits on ResourceSaver.save(res) - no-path arity', () => {
-    expect(evalLine('ResourceSaver.save(res)').effectiveTier).toBe(2);
+    const d = evalLine('ResourceSaver.save(res)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.resource_saver.save')).toBe(true);
   });
 
   it('elicits on cf.save(p) when ConfigFile.new() appears in the same script', () => {
@@ -487,23 +491,35 @@ describe('evaluateScript — write primitives', () => {
   });
 
   it('elicits on cf.save_encrypted_pass(p, pass) on any receiver', () => {
-    expect(evalLine('cf.save_encrypted_pass(p, pass)').effectiveTier).toBe(2);
+    const d = evalLine('cf.save_encrypted_pass(p, pass)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.config.ConfigFile.save_encrypted_pass')).toBe(
+      true,
+    );
   });
 
   it('elicits on img.save_png(p) - instance receiver', () => {
-    expect(evalLine('img.save_png(p)').effectiveTier).toBe(2);
+    const d = evalLine('img.save_png(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_png')).toBe(true);
   });
 
   it('elicits on img.save_jpg(p)', () => {
-    expect(evalLine('img.save_jpg(p)').effectiveTier).toBe(2);
+    const d = evalLine('img.save_jpg(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_jpg')).toBe(true);
   });
 
   it('elicits on img.save_webp(p)', () => {
-    expect(evalLine('img.save_webp(p)').effectiveTier).toBe(2);
+    const d = evalLine('img.save_webp(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_webp')).toBe(true);
   });
 
   it('elicits on img.save_exr(p)', () => {
-    expect(evalLine('img.save_exr(p)').effectiveTier).toBe(2);
+    const d = evalLine('img.save_exr(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.image.save_exr')).toBe(true);
   });
 
   it('elicits on tex.get_image().save_png(p) - the chained-call idiomatic form', () => {
@@ -533,75 +549,113 @@ describe('evaluateScript — write primitives', () => {
   });
 
   it('elicits on res.take_over_path(p)', () => {
-    expect(evalLine('res.take_over_path(p)').effectiveTier).toBe(2);
+    const d = evalLine('res.take_over_path(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.resource.take_over_path')).toBe(true);
   });
 
   it('elicits on FileAccess.open_encrypted(...)', () => {
-    expect(evalLine('FileAccess.open_encrypted(path, FileAccess.WRITE, key)').effectiveTier).toBe(
-      2,
-    );
+    const d = evalLine('FileAccess.open_encrypted(path, FileAccess.WRITE, key)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.open_encrypted')).toBe(true);
   });
 
   it('elicits on FileAccess.open_encrypted_with_pass(...)', () => {
+    const d = evalLine('FileAccess.open_encrypted_with_pass(path, FileAccess.WRITE, pass)');
+    expect(d.effectiveTier).toBe(2);
     expect(
-      evalLine('FileAccess.open_encrypted_with_pass(path, FileAccess.WRITE, pass)').effectiveTier,
-    ).toBe(2);
+      d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.open_encrypted_with_pass'),
+    ).toBe(true);
   });
 
   it('elicits on FileAccess.open_compressed(...)', () => {
-    expect(evalLine('FileAccess.open_compressed(path, FileAccess.WRITE)').effectiveTier).toBe(2);
+    const d = evalLine('FileAccess.open_compressed(path, FileAccess.WRITE)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.open_compressed')).toBe(true);
   });
 
   it('elicits on dir.make_dir(path) - instance receiver', () => {
-    expect(evalLine('dir.make_dir(path)').effectiveTier).toBe(2);
+    const d = evalLine('dir.make_dir(path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.DirAccess.make_dir')).toBe(true);
   });
 
   it('elicits on DirAccess.make_dir_absolute(path) - static', () => {
-    expect(evalLine('DirAccess.make_dir_absolute(path)').effectiveTier).toBe(2);
+    const d = evalLine('DirAccess.make_dir_absolute(path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.DirAccess.make_dir_absolute')).toBe(true);
   });
 
   it('elicits on dir.make_dir_recursive(path) - instance receiver', () => {
-    expect(evalLine('dir.make_dir_recursive(path)').effectiveTier).toBe(2);
+    const d = evalLine('dir.make_dir_recursive(path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.DirAccess.make_dir_recursive')).toBe(true);
   });
 
   it('elicits on DirAccess.make_dir_recursive_absolute(path) - static', () => {
-    expect(evalLine('DirAccess.make_dir_recursive_absolute(path)').effectiveTier).toBe(2);
+    const d = evalLine('DirAccess.make_dir_recursive_absolute(path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(
+      d.matches.some((m) => m.ruleId === 'tier2.fs.DirAccess.make_dir_recursive_absolute'),
+    ).toBe(true);
   });
 
   it('elicits on OS.move_to_trash(p)', () => {
-    expect(evalLine('OS.move_to_trash(p)').effectiveTier).toBe(2);
+    const d = evalLine('OS.move_to_trash(p)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.OS.move_to_trash')).toBe(true);
   });
 
   it('elicits on ZIPPacker.new() usage', () => {
-    expect(evalLine('var z = ZIPPacker.new()').effectiveTier).toBe(2);
+    const d = evalLine('var z = ZIPPacker.new()');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.archive.ZIPPacker')).toBe(true);
   });
 
   it('elicits on PCKPacker.new() usage', () => {
-    expect(evalLine('var pck = PCKPacker.new()').effectiveTier).toBe(2);
+    const d = evalLine('var pck = PCKPacker.new()');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.archive.PCKPacker')).toBe(true);
   });
 
   it('elicits on ResourceUID.add_id(...)', () => {
-    expect(evalLine('ResourceUID.add_id(id, path)').effectiveTier).toBe(2);
+    const d = evalLine('ResourceUID.add_id(id, path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.uid.ResourceUID.add_id')).toBe(true);
   });
 
   it('elicits on ResourceUID.set_id(...)', () => {
-    expect(evalLine('ResourceUID.set_id(id, path)').effectiveTier).toBe(2);
+    const d = evalLine('ResourceUID.set_id(id, path)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.uid.ResourceUID.set_id')).toBe(true);
   });
 
   it('elicits on ResourceUID.remove_id(...)', () => {
-    expect(evalLine('ResourceUID.remove_id(id)').effectiveTier).toBe(2);
+    const d = evalLine('ResourceUID.remove_id(id)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.uid.ResourceUID.remove_id')).toBe(true);
   });
 
   it('elicits on FileAccess.create_temp(...)', () => {
-    expect(evalLine('FileAccess.create_temp(FileAccess.WRITE)').effectiveTier).toBe(2);
+    const d = evalLine('FileAccess.create_temp(FileAccess.WRITE)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.create_temp')).toBe(true);
   });
 
   it('elicits on FileAccess.set_read_only_attribute(...)', () => {
-    expect(evalLine('FileAccess.set_read_only_attribute(path, true)').effectiveTier).toBe(2);
+    const d = evalLine('FileAccess.set_read_only_attribute(path, true)');
+    expect(d.effectiveTier).toBe(2);
+    expect(
+      d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.set_read_only_attribute'),
+    ).toBe(true);
   });
 
   it('elicits on FileAccess.set_hidden_attribute(...)', () => {
-    expect(evalLine('FileAccess.set_hidden_attribute(path, true)').effectiveTier).toBe(2);
+    const d = evalLine('FileAccess.set_hidden_attribute(path, true)');
+    expect(d.effectiveTier).toBe(2);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.set_hidden_attribute')).toBe(
+      true,
+    );
   });
 });
 
