@@ -5,7 +5,9 @@ import { join } from 'path';
 import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
 import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js';
 import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
-import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { GodotRunner, type GodotProcess } from '../../src/utils/godot-runner.js';
+import { createFakeRunner } from '../helpers/fake-runner.js';
+import type { ChildProcess } from 'child_process';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
@@ -356,5 +358,127 @@ describe('GodotRunner.attachProject bridge auth token', () => {
     expect(tokenA).not.toBeNull();
     expect(tokenB).not.toBeNull();
     expect(tokenA).not.toBe(tokenB);
+  });
+});
+
+// ─── GodotRunner.hasActiveRuntimeSession ─────────────────────────────────────
+
+const TRACKED_PROJECT = 'D:/projects/demo';
+
+/**
+ * Minimal stand-in for a tracked child process. The predicate reads only
+ * `hasExited`; the rest of GodotProcess is structural padding.
+ */
+function trackedProcess(hasExited: boolean): GodotProcess {
+  return {
+    process: {} as ChildProcess,
+    output: [],
+    errors: [],
+    totalErrorsWritten: 0,
+    exitCode: hasExited ? 0 : null,
+    hasExited,
+    sessionToken: 'test-token',
+  };
+}
+
+describe('GodotRunner.hasActiveRuntimeSession', () => {
+  it('reports no session on a freshly constructed runner', () => {
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    expect(runner.hasActiveRuntimeSession()).toBe(false);
+  });
+
+  it('reports a session while a spawned process is still running', () => {
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = TRACKED_PROJECT;
+    runner.activeProcess = trackedProcess(false);
+
+    expect(runner.hasActiveRuntimeSession()).toBe(true);
+  });
+
+  it('reports no session once the spawned process has exited', () => {
+    // A user closing the game window is the case that has to self-clear:
+    // activeSessionMode and activeProjectPath stay set until stopProject
+    // runs, so anything reading those fields directly would still see a
+    // session here.
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = TRACKED_PROJECT;
+    runner.activeProcess = trackedProcess(true);
+
+    expect(runner.hasActiveRuntimeSession()).toBe(false);
+  });
+
+  it('reports no session when a spawned launch never produced a process', () => {
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = TRACKED_PROJECT;
+    runner.activeProcess = null;
+
+    expect(runner.hasActiveRuntimeSession()).toBe(false);
+  });
+
+  it('reports a session in attached mode even with no process tracked', () => {
+    // The server does not own an attached process and never observes its
+    // exit, so attached liveness cannot be falsified from in here.
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = 'attached';
+    runner.activeProjectPath = TRACKED_PROJECT;
+    runner.activeProcess = null;
+
+    expect(runner.hasActiveRuntimeSession()).toBe(true);
+  });
+
+  it('reports no session when the project path is unset', () => {
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = null;
+    runner.activeProcess = trackedProcess(false);
+
+    expect(runner.hasActiveRuntimeSession()).toBe(false);
+  });
+
+  it('reports no session when the session mode is unset', () => {
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    runner.activeSessionMode = null;
+    runner.activeProjectPath = TRACKED_PROJECT;
+    runner.activeProcess = trackedProcess(false);
+
+    expect(runner.hasActiveRuntimeSession()).toBe(false);
+  });
+});
+
+// The guard tests in headless-op.test.ts drive the fake runner, not a real
+// GodotRunner, so the fake carries its own copy of this predicate. If the two
+// ever disagree, those tests go on passing while asserting nothing about
+// production behavior. Pin them together across the whole input space.
+describe('fake runner liveness predicate matches GodotRunner', () => {
+  const CASES: Array<{
+    mode: 'spawned' | 'attached' | null;
+    projectPath: string | null;
+    hasExited: boolean | null;
+  }> = [
+    { mode: null, projectPath: null, hasExited: null },
+    { mode: 'spawned', projectPath: TRACKED_PROJECT, hasExited: false },
+    { mode: 'spawned', projectPath: TRACKED_PROJECT, hasExited: true },
+    { mode: 'spawned', projectPath: TRACKED_PROJECT, hasExited: null },
+    { mode: 'attached', projectPath: TRACKED_PROJECT, hasExited: null },
+    { mode: 'spawned', projectPath: null, hasExited: false },
+    { mode: null, projectPath: TRACKED_PROJECT, hasExited: false },
+  ];
+
+  it.each(CASES)('agrees for mode=$mode path=$projectPath exited=$hasExited', (c) => {
+    const real = new GodotRunner({ godotPath: 'godot' });
+    real.activeSessionMode = c.mode;
+    real.activeProjectPath = c.projectPath;
+    real.activeProcess = c.hasExited === null ? null : trackedProcess(c.hasExited);
+
+    const fake = createFakeRunner().asRunner;
+    fake.activeSessionMode = c.mode;
+    fake.activeProjectPath = c.projectPath;
+    fake.activeProcess = c.hasExited === null ? null : trackedProcess(c.hasExited);
+
+    expect(fake.hasActiveRuntimeSession()).toBe(real.hasActiveRuntimeSession());
   });
 });
