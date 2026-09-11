@@ -17,7 +17,8 @@ import { existsSync, readFileSync, readdirSync, cpSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript } from '../../src/tools/runtime-tools.js';
@@ -85,19 +86,7 @@ describe('bridge artifact namespace', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-namespace-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(BRIDGE_WAIT_MS);
-
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(
-          `Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}. ` +
-            `This is not a "no display" skip - the autoload under .mcp/godot-runtime/bridge/ ` +
-            `did not load, or runProject is broken.`,
-        );
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject, { waitMs: BRIDGE_WAIT_MS });
 
       // 1. The script sits at the namespaced path, not the project root.
       expect(existsSync(bridgeScriptAbsPath(tmpProject))).toBe(true);
@@ -157,14 +146,7 @@ describe('bridge artifact namespace', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-audit-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(BRIDGE_WAIT_MS);
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject, { waitMs: BRIDGE_WAIT_MS });
 
       const result = await handleRunScript(runner, {
         script:
