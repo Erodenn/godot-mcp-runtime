@@ -39,6 +39,7 @@ import {
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
 import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
+import { BridgeAutoloadCollisionError } from '../utils/bridge-manager.js';
 import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
@@ -656,7 +657,7 @@ function ensureRuntimeSession(
   actionDescription: string,
 ): HandlerResult | null {
   // A spawned process that exited on its own clears the session fields but
-  // keeps `activeProcess` (D10), so this diagnosis has to come before the
+  // keeps `activeProcess`, so this diagnosis has to come before the
   // generic no-session message it would otherwise fall into.
   //
   // WIDEST INPUT: also matches a session torn down by `stopProject` in the
@@ -1040,6 +1041,14 @@ export async function handleRunProject(
     return ok({ content });
   } catch (error: unknown) {
     const errorMessage = getErrorMessage(error);
+    if (error instanceof BridgeAutoloadCollisionError) {
+      return err(
+        createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+          'Rename the existing McpBridge autoload in project.godot, then retry run_project',
+          'Use list_autoloads to see what the project currently registers',
+        ]),
+      );
+    }
     if (errorMessage.includes('No display server available')) {
       return err(
         createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
@@ -1137,17 +1146,24 @@ export async function handleAttachProject(
       ],
     });
   } catch (error: unknown) {
+    const solutions =
+      error instanceof BridgeAutoloadCollisionError
+        ? [
+            'Rename the existing McpBridge autoload in project.godot, then retry attach_project',
+            'Use list_autoloads to see what the project currently registers',
+          ]
+        : [
+            'Check if project.godot is accessible',
+            'Ensure MCP can write the bridge autoload into the project',
+          ];
     return err(
-      createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, [
-        'Check if project.godot is accessible',
-        'Ensure MCP can write the bridge autoload into the project',
-      ]),
+      createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, solutions),
     );
   }
 }
 
 export async function handleDetachProject(runner: GodotRunner): Promise<HandlerResult> {
-  // An attached session whose bridge disconnected clears itself (D12), so
+  // An attached session whose bridge disconnected clears itself, so
   // detach_project is optional rather than required. Report that idempotently
   // instead of erroring. Narrowed to `!activeProcess` so a spawned session
   // that auto-cleared on exit still gets pointed at stop_project, which is the
@@ -1183,7 +1199,7 @@ export function handleGetDebugOutput(
 ): HandlerResult {
   args = normalizeParameters(args);
 
-  // The mode is nulled the moment a spawned process exits (D10), but its logs
+  // The mode is nulled the moment a spawned process exits, but its logs
   // live on the retained `activeProcess` and are exactly what the caller is
   // here for. Gate on both.
   if (!runner.activeSessionMode && !runner.activeProcess) {

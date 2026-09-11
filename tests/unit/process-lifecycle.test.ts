@@ -1,5 +1,6 @@
 /**
- * D16 destructors (AC3.12's unit half).
+ * Process-lifetime destructors: signals, stdin close, and the synchronous
+ * exit handler.
  *
  * `registerProcessLifecycle` is the function the server constructor calls with
  * its two optional arguments defaulted, so driving it here with an injected
@@ -105,6 +106,25 @@ describe('registerProcessLifecycle', () => {
     await Promise.resolve();
 
     expect(cleanupCalls).toBe(1);
+  });
+
+  // A cleanup that throws must not strand the process: without the exit, the
+  // server outlives the client that closed stdin.
+  it('still exits when cleanup rejects', async () => {
+    const failingProc = makeFakeProcess();
+    const exits: number[] = [];
+    registerProcessLifecycle({
+      runner,
+      cleanup: () => Promise.reject(new Error('cleanup blew up')),
+      proc: failingProc,
+      exit: (code) => exits.push(code),
+    });
+
+    failingProc.stdinEmit('end');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(exits).toEqual([0]);
   });
 
   it("removes the bridge artifacts synchronously from the 'exit' handler", () => {

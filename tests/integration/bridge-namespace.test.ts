@@ -5,7 +5,7 @@
  * Godot resolves autoloads through `load()`, not the importer, and no `.uid`
  * sidecar is generated for the script at the new location.
  *
- * Also covers the sibling artifact directories (AC3.2): a screenshot and a
+ * Also covers the sibling artifact directories: a screenshot and a
  * run_script audit pair land under the namespace and survive `stopProject`,
  * which only removes `bridge/`.
  *
@@ -123,7 +123,7 @@ describe('bridge artifact namespace', () => {
       };
       expect(pong.status).toBe('pong');
 
-      // AC3.2 — sibling artifact dirs are written under the namespace.
+      // Sibling artifact dirs are written under the namespace.
       const shotResponse = JSON.parse(
         await runner.sendCommand('screenshot', {}, BRIDGE_COMMAND_TIMEOUT_MS),
       ) as { path?: string; error?: string };
