@@ -38,8 +38,12 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
-import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
-import { BridgeAutoloadCollisionError } from '../utils/bridge-manager.js';
+import {
+  auditScriptsDir,
+  isServerOwnedBridgePath,
+  screenshotsDir,
+} from '../utils/artifact-paths.js';
+import { BRIDGE_AUTOLOAD_NAME, BridgeAutoloadCollisionError } from '../utils/bridge-manager.js';
 import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
@@ -782,6 +786,14 @@ export async function handleRunProject(
       if (existsSync(projectGodot)) {
         const autoloads = parseAutoloads(projectGodot);
         for (const entry of autoloads) {
+          // Skip this server's own injected bridge. It is left registered
+          // between a launch and its cleanup, so a second run_project against
+          // the same project would otherwise scan it — and it legitimately
+          // calls the filesystem-write primitives the table flags, which would
+          // surface as warnings blaming the user's project and, under strict
+          // mode, hard-reject the launch. An McpBridge entry pointing anywhere
+          // this server does not own is a user's own autoload and still scans.
+          if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
           const stripped = stripResPrefix(entry.path);
           if (!stripped.endsWith('.gd')) continue;
           if (!validateSubPath(absProjectPath, stripped)) {
