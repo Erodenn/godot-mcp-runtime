@@ -125,7 +125,7 @@ export const profilerToolDefinitions = [
   {
     name: 'profile_project',
     description:
-      "Capture a window of Godot's function profiler — the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap — never sum totalMs. Returns: rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
+      "Capture a window of Godot's function profiler - the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -172,7 +172,7 @@ export const profilerToolDefinitions = [
   {
     name: 'stop_profiler',
     description:
-      'Stop the capture started by start_profiler and rank the recorded functions; a capture that already hit its time limit is read back as-is, and can be re-read with a different sort. Times are elapsed, not CPU; inclusive rows overlap — never sum totalMs. Returns: the same payload as profile_project — rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames, frameGaps, limitReached. Errors if no capture was started.',
+      'Stop the capture started by start_profiler and rank the recorded functions; a capture that already hit its time limit is read back as-is, and can be re-read with a different sort. Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: the same payload as profile_project - rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames, frameGaps, limitReached. Errors if no capture was started.',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -207,7 +207,7 @@ function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResp
     }
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
-        'Call run_project with profiling: true — the debugger channel is set at launch and cannot be added later',
+        'Call run_project with profiling: true - the debugger channel is set at launch and cannot be added later',
         'Attached sessions cannot profile; use run_project instead of attach_project',
       ]),
     );
@@ -273,7 +273,7 @@ function profilerFailure(error: unknown): ToolResponse {
     profile_busy: ['Call stop_profiler to close the running capture first'],
     profile_not_started: ['Call start_profiler first, or profile_project for a one-shot capture'],
     profile_timeout: [
-      'Godot only emits profiler frames while it renders — make sure the window is not minimized or paused',
+      'Godot only emits profiler frames while it renders - make sure the window is not minimized or paused',
       'Check get_debug_output for runtime errors',
     ],
     profile_disconnected: [
@@ -281,12 +281,12 @@ function profilerFailure(error: unknown): ToolResponse {
       'Call stop_project, then run_project with profiling: true again',
     ],
     profile_no_frames: [
-      'Capture for longer — a window shorter than two rendered frames has nothing to average',
+      'Capture for longer - a window shorter than two rendered frames has nothing to average',
       'Godot only emits profiler frames while it renders; make sure the window is not minimized or paused',
     ],
     profile_bad_frame: [
       'This Godot version may lay out profiler frames differently than the server expects',
-      'Report the Godot version — get_project_info returns it',
+      'Report the Godot version - get_project_info returns it',
     ],
   };
   return createErrorResponse(message, solutions[error.code]);

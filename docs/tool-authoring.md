@@ -1,6 +1,6 @@
 # Tool Authoring Standards
 
-Standards for adding or modifying MCP tools in Godot MCP Runtime. Every tool ships on every client handshake — its description, schema, and annotations are the entire interface an LLM agent has to work with. Treat them like a UI, not an API doc.
+Standards for adding or modifying MCP tools in Godot MCP Runtime. Every tool ships on every client handshake - its description, schema, and annotations are the entire interface an LLM agent has to work with. Treat them like a UI, not an API doc.
 
 If you change anything in `src/tools/*.ts`, work this checklist.
 
@@ -36,7 +36,7 @@ Every tool definition includes an `annotations` object. Pick from:
 | `readOnlyHint`    | `true` when the tool only reads state, never mutates files, project, or running process.                                                                  |
 | `destructiveHint` | `true` when the tool removes or replaces something hard to recover.                                                                                       |
 | `idempotentHint`  | `true` when calling N times with the same args produces the same result as calling once. Setters with absolute values, not appenders.                     |
-| `openWorldHint`   | `true` when the tool reaches outside this server's domain (network, foreign filesystem, external service). Most tools here stay in-project — leave unset. |
+| `openWorldHint`   | `true` when the tool reaches outside this server's domain (network, foreign filesystem, external service). Most tools here stay in-project - leave unset. |
 | `title`           | Optional human-readable display name. Set when the tool name is awkward to read in client UIs; otherwise omit and the client falls back to the tool name. |
 
 Defaults: omit annotations only if none apply. `readOnlyHint` and `destructiveHint` should be mutually exclusive.
@@ -45,24 +45,24 @@ Why this matters: clients ask for extra confirmation when a tool lacks a `readOn
 
 ---
 
-## 3. `outputSchema` and `Returns:` — two audiences
+## 3. `outputSchema` and `Returns:` - two audiences
 
 These are complementary, not alternatives. They speak to different consumers and convey different things:
 
 - **`outputSchema`** is the machine-readable contract for programmatic clients (validators, type generators, IDE tooling). JSON Schema, same shape as `inputSchema`. Top-level `type` must be `"object"` (MCP SDK constraint); bare-array or shape-variable returns omit it. Clients currently do not surface `outputSchema` to the LLM — it is invisible to the agent reading the tool.
 - **`Returns:` sentence in the description** is the agent-facing summary. It names the key fields and adds what the schema can't express — when fields are present, what values imply, how the agent should use them. One short sentence; the description budget (§1) is tight.
 
-When both are present, they must be consistent — same field names, same semantics — but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
+When both are present, they must be consistent - same field names, same semantics - but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
 
 When `outputSchema` is impractical (oneOf variants, bare-array, recursive trees, opaque values), the `Returns:` sentence is the only return-shape signal and carries the full load.
 
 ### `structuredContent` is mandatory when `outputSchema` is declared
 
-MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` — it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON, pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
+MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` - it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON, pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
 
-### Harness visibility — what the agent actually sees
+### Harness visibility - what the agent actually sees
 
-Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` — including every per-property `description` — into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.
+Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` - including every per-property `description` - into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.
 
 When a tool is too complex to cover in the top-level description budget (~500 chars), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
 
@@ -75,13 +75,13 @@ When a tool is too complex to cover in the top-level description budget (~500 ch
 - Singular subject → singular verb: `add_node({ nodeType, nodeName, ... })`, `attach_script({ nodePath, scriptPath })`
 - Array subject → plural verb: `set_node_properties({ updates: [...] })`, `delete_nodes({ nodePaths: [...] })`, `get_node_properties({ nodes: [...] })`
 
-The `batch_` prefix is **not** a naming convention — it's the symptom of a missed consolidation (see §5). If you're tempted to add `batch_foo`, reconsider whether `foos` should take an array.
+The `batch_` prefix is **not** a naming convention - it's the symptom of a missed consolidation (see §5). If you're tempted to add `batch_foo`, reconsider whether `foos` should take an array.
 
 Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/parameter-conversion.ts` bridge them.
 
 ### Implementation helpers
 
-Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/headless-op.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape — keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
+Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-tools.ts`) wrap through `executeSceneOp` from `src/utils/headless-op.ts` for the execute + empty-stdout-check + try/catch shell. New headless-op handlers should follow the same shape - keep normalize/validate/build-params in the handler and let `executeSceneOp` own the runner call and error mapping.
 
 ---
 
@@ -93,7 +93,7 @@ Headless-op handlers (the ~15 in `src/tools/scene-tools.ts` and `src/tools/node-
 | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Same outcome, varying cardinality (set property on 1 node vs 50 nodes) | **One tool, array param.** `set_node_properties({ updates: [...] })`. An LLM passing a 1-element array is trivial.                                                                                                                                                                                                                                                                                                                           |
 | Different outcomes (delete a node vs duplicate a node)                 | **Separate tools.** Different verbs, different shapes.                                                                                                                                                                                                                                                                                                                                                                                       |
-| Heterogeneous ordered operations on shared state in one process        | **One tool with per-item operation field is acceptable** if the discriminator is load-bearing — dropping it would force agents to chain N round-trips and lose the shared-state guarantee. `batch_scene_operations` is the documented exception in this server: the alternative (N singular calls) costs ~3s startup per call and loses the in-process scene cache. **Rare.** Never use as an escape hatch from designing per-outcome tools. |
+| Heterogeneous ordered operations on shared state in one process        | **One tool with per-item operation field is acceptable** if the discriminator is load-bearing - dropping it would force agents to chain N round-trips and lose the shared-state guarantee. `batch_scene_operations` is the documented exception in this server: the alternative (N singular calls) costs ~3s startup per call and loses the in-process scene cache. **Rare.** Never use as an escape hatch from designing per-outcome tools. |
 | Read-only diagnostic that agents almost never need                     | **Drop it.** Don't keep low-value tools in the surface "in case." Every tool ships on every handshake.                                                                                                                                                                                                                                                                                                                                       |
 
 ### Discriminator antipattern: how to recognize it
@@ -109,7 +109,7 @@ If your tool's `inputSchema` has:
 
 ## 6. Security policy for GDScript-executing tools
 
-Any tool that forwards arbitrary GDScript to a running Godot process — `run_script` today, and any future sibling — MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
+Any tool that forwards arbitrary GDScript to a running Godot process - `run_script` today, and any future sibling - MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
 
 For tools that launch a Godot project (`run_project`) or attach to one, the same module's helpers (`parseAutoloads`, `collectSceneScriptsRecursive`, `resolveLaunchScene`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1.
 

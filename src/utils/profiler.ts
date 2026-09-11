@@ -182,7 +182,7 @@ interface Waiter {
 function badFrame(what: string): ProfilerError {
   return new ProfilerError(
     'profile_bad_frame',
-    `Unrecognized profiler frame layout (${what}) — this Godot version may not be supported`,
+    `Unrecognized profiler frame layout (${what}) - this Godot version may not be supported`,
   );
 }
 

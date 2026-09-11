@@ -28,7 +28,7 @@ export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root — that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root - that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -280,7 +280,7 @@ export const nodeToolDefinitions = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names — connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     inputSchema: {
       type: 'object',
       properties: {

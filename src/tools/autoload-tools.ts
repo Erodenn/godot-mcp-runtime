@@ -23,7 +23,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
-      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures — broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns: [{ name, path, singleton }].',
+      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures - broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns: [{ name, path, singleton }].',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -36,7 +36,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode — a broken script will crash every subsequent headless op; validate before adding. Returns plain-text confirmation with the registered name, path, and singleton flag. Errors if an autoload with the same name already exists; use update_autoload to modify.',
+      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode - a broken script will crash every subsequent headless op; validate before adding. Returns plain-text confirmation with the registered name, path, and singleton flag. Errors if an autoload with the same name already exists; use update_autoload to modify.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -75,7 +75,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'update_autoload',
     description:
-      "Modify an existing autoload's path or singleton flag. Pass either or both — omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Returns plain-text confirmation on success. Errors if autoloadName is not registered.",
+      "Modify an existing autoload's path or singleton flag. Pass either or both - omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Returns plain-text confirmation on success. Errors if autoloadName is not registered.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -156,7 +156,7 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
       content: [
         {
           type: 'text',
-          text: `Autoload '${autoloadName.value}' registered at '${autoloadPath.value}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree — if it fails, use remove_autoload to remove it.`,
+          text: `Autoload '${autoloadName.value}' registered at '${autoloadPath.value}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree - if it fails, use remove_autoload to remove it.`,
         },
       ],
     });

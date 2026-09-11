@@ -1050,12 +1050,12 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
  * the agent-facing error message on Tier 1 hard-block and Tier 2 denial.
  */
 export function summarizeMatch(m: PolicyMatch): string {
-  return `line ${m.line} ${m.matchedText} — ${m.reason}`;
+  return `line ${m.line} ${m.matchedText} - ${m.reason}`;
 }
 
 /**
  * Build the human-readable warnings array attached to a `warn` decision.
  */
 export function matchesToWarnings(matches: readonly PolicyMatch[]): string[] {
-  return matches.map((m) => `Warning line ${m.line}: ${m.matchedText} — ${m.reason}`);
+  return matches.map((m) => `Warning line ${m.line}: ${m.matchedText} - ${m.reason}`);
 }

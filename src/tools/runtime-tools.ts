@@ -68,7 +68,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead — the editor cannot be controlled programmatically. Returns plain-text confirmation after spawning the editor process. Errors if projectPath has no project.godot.',
+      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead - the editor cannot be controlled programmatically. Returns plain-text confirmation after spawning the editor process. Errors if projectPath has no project.godot.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -112,7 +112,7 @@ export const runtimeToolDefinitions = [
         profiling: {
           type: 'boolean',
           description:
-            "Attach Godot's own remote debugger so profile_project, start_profiler and stop_profiler can measure this session. Must be set at launch — a session already running cannot be profiled — and costs a little runtime overhead.",
+            "Attach Godot's own remote debugger so profile_project, start_profiler and stop_profiler can measure this session. Must be set at launch - a session already running cannot be profiled - and costs a little runtime overhead.",
         },
       },
       required: ['projectPath'],
@@ -121,7 +121,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'attach_project',
     description:
-      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 15s for the bridge to respond. Call BEFORE Godot launches — Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
+      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 15s for the bridge to respond. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -162,7 +162,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -189,7 +189,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds — it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
+      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -212,7 +212,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport. responseMode: preview (default — saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/godot-runtime/screenshots/ (persists after stop_project). Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
+      'Capture a PNG of the running viewport. responseMode: preview (default - saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/godot-runtime/screenshots/ (persists after stop_project). Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -269,7 +269,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      "Simulate sequential input in a running project. Each action's `type` (key, mouse_button, mouse_motion, click_element, action, wait) gates which other fields apply — see per-property docs. For click_element use get_ui_elements first; resolution is by path/name, not visible text. Press/release require two actions; insert wait between for frame ticks. Returns: success, actions_processed, warnings for runtime errors fired by input handlers. Errors if no session or any action fails validation.",
+      "Simulate sequential input in a running project. Each action's `type` (key, mouse_button, mouse_motion, click_element, action, wait) gates which other fields apply - see per-property docs. For click_element use get_ui_elements first; resolution is by path/name, not visible text. Press/release require two actions; insert wait between for frame ticks. Returns: success, actions_processed, warnings for runtime errors fired by input handlers. Errors if no session or any action fails validation.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -294,7 +294,7 @@ export const runtimeToolDefinitions = [
               pressed: {
                 type: 'boolean',
                 description:
-                  '[key, mouse_button, action] Whether the input is pressed (true) or released (false). For mouse_button: omit to auto-click (press+release in one action); set explicitly only for hold/release. For key: defaults to true and does NOT auto-release — emit a second action with pressed:false to release.',
+                  '[key, mouse_button, action] Whether the input is pressed (true) or released (false). For mouse_button: omit to auto-click (press+release in one action); set explicitly only for hold/release. For key: defaults to true and does NOT auto-release - emit a second action with pressed:false to release.',
               },
               shift: { type: 'boolean', description: '[key] Shift modifier' },
               ctrl: { type: 'boolean', description: '[key] Ctrl modifier' },
@@ -423,7 +423,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output — it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
+      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output - it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -487,7 +487,7 @@ function parseBridgeJson<T = unknown>(
   } catch (error) {
     return err(
       createErrorResponse(`Invalid response from bridge (${context}): ${getErrorMessage(error)}`, [
-        'The bridge returned non-JSON data — check Godot stderr via get_debug_output',
+        'The bridge returned non-JSON data - check Godot stderr via get_debug_output',
         'Restart the project with stop_project followed by run_project',
       ]),
     );
@@ -619,7 +619,7 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
  */
 function formatScanFinding(sourcePath: string, projectPath: string, match: PolicyMatch): string {
   const rel = isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
-  return `${rel}:${match.line} ${match.matchedText} — ${match.reason}`;
+  return `${rel}:${match.line} ${match.matchedText} - ${match.reason}`;
 }
 
 /**
@@ -998,7 +998,7 @@ export async function handleRunProject(
         // Surface the precise poll failure (token/path mismatch, abort reason)
         // instead of burying it behind the generic timeout narrative.
         ...(bridgeResult.error ? [`- Actual reason: ${bridgeResult.error}`] : []),
-        '- The bridge listener never came up — likely an early _ready error or a stuck process holding the port',
+        '- The bridge listener never came up - likely an early _ready error or a stuck process holding the port',
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
       ];
@@ -1015,7 +1015,7 @@ export async function handleRunProject(
       ];
       if (raceDetected) {
         solutions.push(
-          'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
+          'Concurrent MCP clients in the same project are not supported - run them in separate projects or sequence the calls',
         );
       }
       return err(createErrorResponse(lines.join('\n'), solutions));
@@ -1125,14 +1125,14 @@ export async function handleAttachProject(
       // attach_project (or run_project) works without a manual detach first.
       await runner.stopProject();
       const solutions = [
-        'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup — do not sequentialize',
-        'If a human is launching Godot, retry attach_project once they have launched — bridge.inject is idempotent',
+        'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup - do not sequentialize',
+        'If a human is launching Godot, retry attach_project once they have launched - bridge.inject is idempotent',
         'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
         `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
       ];
       if (raceDetected) {
         solutions.push(
-          'Concurrent MCP clients in the same project are not supported — run them in separate projects or sequence the calls',
+          'Concurrent MCP clients in the same project are not supported - run them in separate projects or sequence the calls',
         );
       }
       return err(
@@ -1384,7 +1384,7 @@ export async function handleTakeScreenshot(
     if (!parsed.path) {
       return err(
         createErrorResponse('Screenshot server returned no file path', [
-          'The bridge response is missing the expected `path` field — this is a bridge bug, not a timing issue',
+          'The bridge response is missing the expected `path` field - this is a bridge bug, not a timing issue',
           'Check get_debug_output for runtime errors during the screenshot save',
         ]),
       );
@@ -1812,7 +1812,7 @@ export async function handleRunScript(
         success: true,
         result: null,
         warnings: [
-          'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
+          'Script returned null. If unexpected, check get_debug_output for runtime errors - GDScript does not propagate exceptions.',
           ...warningsFromPolicy,
         ],
         tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',

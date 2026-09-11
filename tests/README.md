@@ -64,7 +64,7 @@ GODOT_PATH="/path/to/godot" npm test
 $env:GODOT_PATH = "C:/path/to/godot.exe"; npm test
 ```
 
-CI does not install Godot, so those tests skip there. This is intentional — runtime/headless integration is verified locally before merge, not in the cloud.
+CI installs Godot too: the `godot-integration` job in `.github/workflows/ci.yml` downloads Godot 4.5.1 and 4.6.2 and runs the full suite with `GODOT_PATH` set, in a matrix separate from the Godot-less job that runs everywhere else. Locally, these tests skip cleanly unless you set `GODOT_PATH` yourself.
 
 ## Adding a fixture
 
@@ -78,7 +78,7 @@ If the fixture exercises tools that require Godot, add a row to the coverage map
 
 ## Testing rubric
 
-CI does not install Godot. Godot-required tests run only when contributors run them locally with `GODOT_PATH` set. Everything else runs everywhere.
+CI installs Godot in a dedicated `godot-integration` matrix job (see above); Godot-required tests otherwise run only when contributors set `GODOT_PATH` locally. Everything else runs everywhere.
 
 ### When to write a test
 

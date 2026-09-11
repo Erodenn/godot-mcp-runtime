@@ -414,7 +414,7 @@ export class GodotRunner {
     const operationRan = stdout.trim().length > 0 || stderr.includes('[INFO] Operation:');
     if (!operationRan && (stderr.includes('ERROR:') || stderr.includes('SCRIPT ERROR:'))) {
       throw new Error(
-        `Headless Godot failed before the operation could run — likely an autoload initialization error.\n` +
+        `Headless Godot failed before the operation could run - likely an autoload initialization error.\n` +
           `Stderr:\n${stderr.trim()}\n\n` +
           `Use list_autoloads and remove_autoload to inspect or remove the failing autoload, then retry.`,
       );
@@ -1226,7 +1226,7 @@ export class GodotRunner {
       timeoutMs,
       intervalMs,
       timeoutError:
-        'Bridge did not respond within timeout — is Godot running with the McpBridge autoload?',
+        'Bridge did not respond within timeout - is Godot running with the McpBridge autoload?',
       pingPayload: {},
       validatePong: (parsed) => parsed.status === 'pong',
     });
