@@ -108,6 +108,9 @@ interface RuntimeFake {
   /** Hook called after runProject sets session state but before returning. */
   setRunProjectAfterHook(hook: ((projectPath: string) => void) | null): void;
   setStopProjectError(error: Error | null): void;
+  /** Runs inside sendCommandWithErrors, before it returns — models session
+   *  state changing while a bridge command is in flight. */
+  setBridgeHook(hook: (() => void) | null): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -125,6 +128,7 @@ function createRuntimeFake(): RuntimeFake {
   let runProjectError: Error | null = null;
   let stopProjectError: Error | null = null;
   let runProjectAfterHook: ((projectPath: string) => void) | null = null;
+  let bridgeHook: (() => void) | null = null;
   let stopCallCount = 0;
 
   const state: {
@@ -153,6 +157,7 @@ function createRuntimeFake(): RuntimeFake {
       timeoutMs?: number,
     ) {
       bridgeCalls.push({ command, params, timeoutMs });
+      if (bridgeHook) bridgeHook();
       return { response: bridgeResponse, runtimeErrors: bridgeRuntimeErrors };
     },
     async stopProject() {
@@ -243,6 +248,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     setStopProjectError(error: Error | null) {
       stopProjectError = error;
+    },
+    setBridgeHook(hook) {
+      bridgeHook = hook;
     },
   };
 }
@@ -500,6 +508,20 @@ describe('ensureRuntimeSession (via handleTakeScreenshot)', () => {
     expect(fake.bridgeCalls).toHaveLength(0);
   });
 
+  // D10 auto-clear nulls the mode on process exit but retains the process, so
+  // the generic no-session message would otherwise replace the diagnosis.
+  it('reports the exited process after the session auto-cleared (AC3.9)', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({
+      mode: null,
+      projectPath: null,
+      process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+    });
+    const result = await handleTakeScreenshot(fake.asRunner, {});
+    expectErrorMatching(result, /spawned Godot process has exited/i);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
   it('rejects when spawned process is null', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'spawned', projectPath: '/p', process: null });
@@ -599,6 +621,29 @@ describe('handleGetDebugOutput', () => {
     expect(parsed.tip).toMatch(/Process has exited/i);
     expect(parsed.tip).toMatch(/stop_project/);
   });
+
+  // D10 nulls the mode on exit but keeps the process; the logs are exactly
+  // what the caller wants at that point, so the gate must not error (AC3.9).
+  it('still returns the captured logs after the session auto-cleared', () => {
+    const fake = createRuntimeFake();
+    fake.setSession({
+      mode: null,
+      projectPath: null,
+      process: makeRunningProcess({
+        hasExited: true,
+        exitCode: 139,
+        output: ['out'],
+        errors: ['SCRIPT ERROR: crashed'],
+      }),
+    });
+    const result = handleGetDebugOutput(fake.asRunner, {});
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.output).toEqual(['out']);
+    expect(parsed.errors).toEqual(['SCRIPT ERROR: crashed']);
+    expect(parsed.running).toBe(false);
+    expect(parsed.exitCode).toBe(139);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -637,6 +682,35 @@ describe('handleStopProject', () => {
     fake.setStopResult(null);
     const result = await handleStopProject(fake.asRunner);
     expectErrorMatching(result, /No active Godot process/i);
+  });
+
+  // D11 — the process exited on its own; the bridge was cleaned then.
+  it('reports alreadyExited with the exit code and captured logs (AC3.9)', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      output: ['PASS: scenario complete'],
+      errors: ['SCRIPT ERROR: crashed'],
+      alreadyExited: true,
+      exitCode: 139,
+    });
+    const result = await handleStopProject(fake.asRunner);
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.alreadyExited).toBe(true);
+    expect(parsed.exitCode).toBe(139);
+    expect(parsed.message).toMatch(/already exited/i);
+    expect(parsed.finalOutput).toEqual(['PASS: scenario complete']);
+    expect(parsed.finalErrors).toEqual(['SCRIPT ERROR: crashed']);
+  });
+
+  it('reports alreadyExited:false for an ordinary stop', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({ mode: 'spawned', output: [], errors: [] });
+    const result = await handleStopProject(fake.asRunner);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.alreadyExited).toBe(false);
+    expect(parsed.exitCode).toBeUndefined();
   });
 
   it('condenses finalOutput/finalErrors to diagnostic lines on success', async () => {
@@ -682,11 +756,30 @@ describe('handleStopProject', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleDetachProject', () => {
-  it('rejects when there is no session at all', async () => {
+  // D12 makes detach optional: an attached session whose bridge disconnected
+  // clears itself, so a follow-up detach_project must succeed idempotently
+  // rather than erroring (AC3.11).
+  it('succeeds idempotently when the session already ended', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: null });
     const result = await handleDetachProject(fake.asRunner);
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.externalProcessPreserved).toBe(true);
+    expect(parsed.message).toMatch(/already ended/i);
+    expect(fake.stopCalls()).toBe(0);
+  });
+
+  it('still points a spawned session that auto-cleared at stop_project', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({
+      mode: null,
+      projectPath: null,
+      process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+    });
+    const result = await handleDetachProject(fake.asRunner);
     expectErrorMatching(result, /No attached project to detach/i);
+    expect(unwrap(result).content[1]?.text ?? '').toMatch(/stop_project/);
   });
 
   it('rejects when an active session is spawned (must use stop_project)', async () => {
@@ -1666,5 +1759,56 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
     expectErrorMatching(result, /preview path outside \.mcp\/godot-runtime\/screenshots\//i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC3.10 — reads of the fields D10 nulls
+// ---------------------------------------------------------------------------
+
+describe('session auto-clear interactions (AC3.10)', () => {
+  it('take_screenshot errors instead of resolving a null project path', async () => {
+    const projectPath = tmp.make('mcp-autoclear-');
+    const dir = screenshotsDir(projectPath);
+    mkdirSync(dir, { recursive: true });
+    const shot = join(dir, 'shot.png');
+    writeFileSync(shot, 'png-data', 'utf8');
+
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ path: shot, width: 1, height: 1 }));
+    // The process exits while the screenshot command is in flight: D10 nulls
+    // activeProjectPath, and the containment check runs after the await.
+    fake.setBridgeHook(() => {
+      fake.setSession({
+        mode: null,
+        projectPath: null,
+        process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+      });
+    });
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+    expectErrorMatching(result, /session ended before the screenshot path/i);
+  });
+
+  it('run_project restarts after an auto-cleared session without double-cleaning', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setSession({
+      mode: null,
+      projectPath: null,
+      process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+    });
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.asRunner.activeSessionMode).toBe('spawned');
+    // The exit handler already cleaned this session up; nothing re-stops it.
+    expect(fake.stopCalls()).toBe(0);
   });
 });

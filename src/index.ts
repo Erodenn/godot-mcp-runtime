@@ -16,6 +16,7 @@ import { startProgressHeartbeat } from './utils/progress-heartbeat.js';
 import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
+import { registerProcessLifecycle } from './utils/process-lifecycle.js';
 
 import { dispatchToolCall } from './dispatch.js';
 import { resolveDisableSecurity, type Elicitor, type McpContext } from './utils/mcp-context.js';
@@ -152,15 +153,7 @@ class GodotMcpServer {
 
     this.server.onerror = (error) => console.error('[MCP Error]', error);
 
-    process.on('SIGINT', async () => {
-      await this.cleanup();
-      process.exit(0);
-    });
-
-    process.on('SIGTERM', async () => {
-      await this.cleanup();
-      process.exit(0);
-    });
+    registerProcessLifecycle({ runner: this.runner, cleanup: () => this.cleanup() });
   }
 
   private async cleanup() {

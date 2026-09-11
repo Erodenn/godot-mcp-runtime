@@ -139,7 +139,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors if called outside an attached session. Call this even if the externally launched Godot process is already closed — it clears the session flag that blocks scene-editing tools and removes the bridge autoload the project would otherwise be left with.',
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Mostly optional now: when the bridge disconnects (you closed Godot), the next runtime tool call probes once and ends the attached session itself, removing the autoload. Calling it afterwards succeeds idempotently and says the session had already ended. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors only when a spawned session is what is active; use stop_project for those.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -157,7 +157,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly — script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -184,7 +184,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot, clears the flag blocking scene-editing tools, and removes the bridge autoload left in the project. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors if no session is active.',
+      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds — it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -197,6 +197,8 @@ export const runtimeToolDefinitions = [
         message: { type: 'string' },
         mode: { type: 'string' },
         externalProcessPreserved: { type: 'boolean' },
+        alreadyExited: { type: 'boolean' },
+        exitCode: { type: ['number', 'null'] },
         finalOutput: { type: 'array', items: { type: 'string' } },
         finalErrors: { type: 'array', items: { type: 'string' } },
       },
@@ -640,10 +642,30 @@ function scanScriptFile(
   return { findings: decision.matches, warning: null };
 }
 
+function exitedProcessError(actionDescription: string): HandlerResult {
+  return err(
+    createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
+      'Use get_debug_output to inspect the last captured logs',
+      'Call stop_project to clean up, then run_project again',
+    ]),
+  );
+}
+
 function ensureRuntimeSession(
   runner: GodotRunner,
   actionDescription: string,
 ): HandlerResult | null {
+  // A spawned process that exited on its own clears the session fields but
+  // keeps `activeProcess` (D10), so this diagnosis has to come before the
+  // generic no-session message it would otherwise fall into.
+  //
+  // WIDEST INPUT: also matches a session torn down by `stopProject` in the
+  // same tick, but that path nulls `activeProcess` synchronously, so the
+  // window is not observable from a handler.
+  if (!runner.activeSessionMode && runner.activeProcess?.hasExited) {
+    return exitedProcessError(actionDescription);
+  }
+
   if (!runner.activeSessionMode || !runner.activeProjectPath) {
     return err(
       createErrorResponse(
@@ -656,16 +678,13 @@ function ensureRuntimeSession(
     );
   }
 
+  // Still reachable for a live spawned session whose process died between the
+  // auto-clear and this call, and for a spawn that never produced a process.
   if (
     runner.activeSessionMode === 'spawned' &&
     (!runner.activeProcess || runner.activeProcess.hasExited)
   ) {
-    return err(
-      createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
-        'Use get_debug_output to inspect the last captured logs',
-        'Call stop_project to clean up, then run_project again',
-      ]),
-    );
+    return exitedProcessError(actionDescription);
   }
 
   return null;
@@ -1128,6 +1147,19 @@ export async function handleAttachProject(
 }
 
 export async function handleDetachProject(runner: GodotRunner): Promise<HandlerResult> {
+  // An attached session whose bridge disconnected clears itself (D12), so
+  // detach_project is optional rather than required. Report that idempotently
+  // instead of erroring. Narrowed to `!activeProcess` so a spawned session
+  // that auto-cleared on exit still gets pointed at stop_project, which is the
+  // call that frees its retained process slot.
+  if (!runner.activeSessionMode && !runner.activeProcess) {
+    return createStructuredResponse({
+      message:
+        'No attached session to detach: it had already ended and the MCP bridge state was cleaned up then',
+      externalProcessPreserved: true,
+    });
+  }
+
   if (runner.activeSessionMode !== 'attached') {
     return err(
       createErrorResponse('No attached project to detach.', [
@@ -1151,7 +1183,10 @@ export function handleGetDebugOutput(
 ): HandlerResult {
   args = normalizeParameters(args);
 
-  if (!runner.activeSessionMode) {
+  // The mode is nulled the moment a spawned process exits (D10), but its logs
+  // live on the retained `activeProcess` and are exactly what the caller is
+  // here for. Gate on both.
+  if (!runner.activeSessionMode && !runner.activeProcess) {
     return err(
       createErrorResponse('No active runtime session.', [
         'Use run_project to start a Godot project first',
@@ -1216,13 +1251,18 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     );
   }
 
+  const alreadyExited = result.alreadyExited === true;
   return createStructuredResponse({
     message:
       result.mode === 'attached'
         ? 'Attached project detached and MCP bridge state cleaned up'
-        : 'Godot project stopped',
+        : alreadyExited
+          ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
+          : 'Godot project stopped',
     mode: result.mode,
     externalProcessPreserved: result.externalProcessPreserved === true,
+    alreadyExited,
+    ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     finalOutput: condenseProcessTail(result.output, STOP_OUTPUT_MAX_LINES),
     finalErrors: condenseProcessTail(result.errors, STOP_OUTPUT_MAX_LINES),
   });
@@ -1331,7 +1371,19 @@ export async function handleTakeScreenshot(
     // KEEP IN SYNC: src/scripts/mcp_bridge.gd `SCREENSHOT_DIR_RES_PATH` names
     // the directory the bridge saves into; this is the containment root that
     // decides what comes back. The two MUST move together.
-    const screenshotsRoot = resolve(screenshotsDir(runner.activeProjectPath!));
+    const activeProjectPath = runner.activeProjectPath;
+    if (!activeProjectPath) {
+      return err(
+        createErrorResponse(
+          'The runtime session ended before the screenshot path could be validated.',
+          [
+            'Use get_debug_output to see why the Godot process exited',
+            'Call stop_project, then run_project again, and retry the screenshot',
+          ],
+        ),
+      );
+    }
+    const screenshotsRoot = resolve(screenshotsDir(activeProjectPath));
     if (!isUnderDir(screenshotsRoot, screenshotPath)) {
       return err(
         createErrorResponse(

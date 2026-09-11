@@ -29,6 +29,8 @@ tests/
 | `unit/handlers/validate-handler.test.ts`      | `handleValidate` argument validation incl. single vs `targets[]` mode                                                         |                                                         |
 | `unit/bridge-manager.test.ts`                 | `BridgeManager` inject/cleanup/repair lifecycle against tmp project fixtures                                                  | Tmp dirs via `useTmpDirs()`                             |
 | `unit/mcp-dispatch.test.ts`                   | Dispatch table ↔ tool-definition parity, unknown-tool error, `instructions` category coverage                                 |                                                         |
+| `unit/godot-runner-session-lifecycle.test.ts` | Spawned-exit auto-clear and its session-epoch guard, idempotent `stopProject`, attached-mode disconnect probe                 | Mocks `child_process.spawn`; loopback bridge for D12    |
+| `unit/process-lifecycle.test.ts`              | `registerProcessLifecycle` signal / stdin-close / sync-exit wiring with an injected fake `process`                            | Tmp dirs via `useTmpDirs()`                             |
 | `integration/runner-executeOperation.test.ts` | `executeOperation` for `validate_resource` (scene + broken GDScript); `handleGetProjectInfo`                                  | Requires `GODOT_PATH`                                   |
 | `integration/scene-roundtrip.test.ts`         | `add_node` / `set_node_properties` / `delete_nodes` round-trip + auto-save invariant (all 3 operations)                       | Requires `GODOT_PATH`; tmp fixture copy                 |
 | `integration/runtime-smoke.test.ts`           | `run_project` → `take_screenshot` smoke test; skips gracefully if no display server                                           | Requires `GODOT_PATH`; may skip headless                |
@@ -37,6 +39,7 @@ tests/
 | `unit/profiler.test.ts`                       | `DebuggerProfiler` against a fake Godot debugger peer: frame aggregation, auto-stop, break-continue, error codes              |                                                         |
 | `unit/handlers/profiler-handlers.test.ts`     | Argument defaults, sort enum, and ProfilerError mapping in `src/tools/profiler-tools.ts`                                      |                                                         |
 | `integration/profiler-smoke.test.ts`          | `run_project({ profiling: true })` → `profile_project` / `start_profiler` + `stop_profiler` against a real engine             | Requires `GODOT_PATH`; needs a display server           |
+| `integration/session-lifecycle.test.ts`       | A real Godot killed from outside clears its own session and artifacts; `get_debug_output` and `stop_project` after the exit   | Requires `GODOT_PATH`; may skip headless                |
 | `integration/fixture.test.ts`                 | Smoke check that `tests/fixtures/godot-project/` is well-formed                                                               | No Godot required                                       |
 
 (Add new rows here as additional test files land.)
