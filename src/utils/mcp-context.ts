@@ -3,12 +3,13 @@
  *
  * Carries the elicitor (used by `run_script` / `run_project` to pause for
  * user confirmation on Tier 2 findings), the global strict-mode flag, the
- * disable-elicitation flag, and per-session state (currently the
- * once-per-project gate for `run_project`).
+ * disable-elicitation flag, the disable-security flag, and per-session state
+ * (currently the once-per-project gate for `run_project`).
  *
- * The strict-mode and no-elicit flags are captured when the context is built
- * (see `createContextFromServer` in `src/index.ts`). Toggling `GODOT_MCP_STRICT`
- * or `GODOT_MCP_DISABLE_ELICITATION` after the server starts has no effect.
+ * The strict-mode, no-elicit, and no-security flags are captured when the
+ * context is built (see `createContextFromServer` in `src/index.ts`).
+ * Toggling `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, or
+ * `GODOT_MCP_DISABLE_SECURITY` after the server starts has no effect.
  */
 
 /**
@@ -59,7 +60,58 @@ export interface McpContext {
    * hard-block primitives are unaffected — they never elicit and always block.
    */
   disableElicitation: boolean;
+  /**
+   * When true, the entire `run_script` / `run_project` security gate is a
+   * no-op: no static-analysis scan, no Tier 1/2/3 decision, no elicitation,
+   * no `warnings`, no `.policy.json` audit sidecar — for both handlers,
+   * Tier 1 hard blocks included. `run_project`'s pre-flight autoload/scene
+   * scan and its session-confirmation elicitation are both skipped too (see
+   * CLAUDE.md `run-script-policy.ts` invariant section).
+   *
+   * Set from `GODOT_MCP_DISABLE_SECURITY=true`. Overrides `GODOT_MCP_STRICT`:
+   * when both are set, security is off and a startup log records that strict
+   * mode was ignored. This is the opposite precedence from
+   * `disableElicitation` (where strict wins) — deliberate, not an
+   * inconsistency to "fix": the whole point of this flag is that it is the
+   * weakest setting a human can opt into, so it has to win when it's set.
+   * Enabling it is a human decision; an agent asked to set it on a user's
+   * behalf should decline (see README.md / docs/security.md).
+   */
+  disableSecurity: boolean;
   sessionState: SessionState;
+}
+
+/**
+ * Result of resolving `GODOT_MCP_DISABLE_SECURITY` against the already-resolved
+ * `strictMode` flag. Pure so it can be unit-tested without constructing a real
+ * SDK `Server` — `createContextFromServer` (`src/index.ts`) is the only caller
+ * and reads `process.env.GODOT_MCP_DISABLE_SECURITY` exactly once, here.
+ */
+export interface DisableSecurityResolution {
+  /** The resolved `McpContext.disableSecurity` value. */
+  disableSecurity: boolean;
+  /**
+   * True only when both `GODOT_MCP_DISABLE_SECURITY` and `strictMode` are set
+   * — disable-security wins per the R5 precedent, and the caller uses this to
+   * print the "strict mode ignored" startup line exactly in that case.
+   */
+  strictIgnored: boolean;
+}
+
+/**
+ * Resolve `GODOT_MCP_DISABLE_SECURITY` against `strictMode`. Unlike
+ * `disableElicitation` (which resolves to `false` when strict is on),
+ * disable-security is independent of strict mode's value: it is read as-is,
+ * and always wins when both are set — the gate is skipped either way, so
+ * `strictMode` is never consulted downstream. `strictIgnored` exists purely
+ * for the startup log, not for behavior.
+ */
+export function resolveDisableSecurity(
+  rawValue: string | undefined,
+  strictMode: boolean,
+): DisableSecurityResolution {
+  const disableSecurity = rawValue === 'true';
+  return { disableSecurity, strictIgnored: disableSecurity && strictMode };
 }
 
 /**
@@ -82,6 +134,7 @@ export function createNullContext(overrides?: Partial<McpContext>): McpContext {
     elicitor: async () => ({ action: 'decline' }),
     strictMode: false,
     disableElicitation: false,
+    disableSecurity: false,
     sessionState: {
       runProjectConfirmed: new Set<string>(),
     },

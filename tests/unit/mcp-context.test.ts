@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { normalizeProjectKey } from '../../src/utils/mcp-context.js';
+import { normalizeProjectKey, resolveDisableSecurity } from '../../src/utils/mcp-context.js';
 
 describe('normalizeProjectKey', () => {
   it.runIf(process.platform === 'win32')(
@@ -19,4 +19,34 @@ describe('normalizeProjectKey', () => {
       expect(normalizeProjectKey('D:\\proj')).toBe(normalizeProjectKey('d:\\proj'));
     },
   );
+});
+
+describe('resolveDisableSecurity', () => {
+  it('resolves false when GODOT_MCP_DISABLE_SECURITY is unset', () => {
+    expect(resolveDisableSecurity(undefined, false)).toEqual({
+      disableSecurity: false,
+      strictIgnored: false,
+    });
+  });
+
+  it('resolves true when set alone (strict off)', () => {
+    expect(resolveDisableSecurity('true', false)).toEqual({
+      disableSecurity: true,
+      strictIgnored: false,
+    });
+  });
+
+  it('resolves true and reports strict as ignored when set alongside strict mode', () => {
+    expect(resolveDisableSecurity('true', true)).toEqual({
+      disableSecurity: true,
+      strictIgnored: true,
+    });
+  });
+
+  it('leaves strict mode behavior unchanged when disable-security is unset (strict alone)', () => {
+    expect(resolveDisableSecurity(undefined, true)).toEqual({
+      disableSecurity: false,
+      strictIgnored: false,
+    });
+  });
 });
