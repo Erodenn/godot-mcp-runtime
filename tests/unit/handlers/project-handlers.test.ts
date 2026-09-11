@@ -279,6 +279,40 @@ describe('handleGetProjectSettings', () => {
     const parsed = parseText<{ settings: Record<string, unknown> }>(result);
     expect(parsed.settings).toEqual({});
   });
+
+  it('returns the whole multi-line value for a wrapped [input] action instead of just its first line', async () => {
+    const projectGodot = [
+      'config_version=5',
+      '',
+      '[input]',
+      '',
+      'jump={',
+      '"deadzone": 0.5,',
+      '"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":0,"physical_keycode":4194309,"key_label":0,"unicode":0,"echo":false,"script":null)',
+      ']',
+      '}',
+      '',
+      '[display]',
+      '',
+      'window/size/viewport_width=1920',
+      '',
+    ].join('\n');
+    const projectPath = tmp.makeProject('mcp-multiline-settings-', projectGodot);
+
+    const result = await handleGetProjectSettings({ projectPath, section: 'input' });
+    const parsed = parseText<{ settings: Record<string, unknown> }>(result);
+    const jump = parsed.settings.jump as string;
+
+    expect(typeof jump).toBe('string');
+    expect(jump).toContain('deadzone');
+    expect(jump).toContain('events');
+    expect(jump.endsWith('}')).toBe(true);
+
+    // The scan must not run past the [input] section into [display].
+    const allResult = await handleGetProjectSettings({ projectPath });
+    const allParsed = parseText<{ settings: Record<string, Record<string, unknown>> }>(allResult);
+    expect(allParsed.settings.display['window/size/viewport_width']).toBe(1920);
+  });
 });
 
 // ---------------------------------------------------------------------------
