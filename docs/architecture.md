@@ -20,7 +20,7 @@ src/
     ├── godot-runner.ts          # Process spawning, runtime session, bridge TCP client
     ├── output-parsing.ts        # Godot stdout parsing (extractJson, cleanOutput, cleanStdout, normalizeForCompare)
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
-    ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) — argument validators live in arg-parsing.ts
+    ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) - argument validators live in arg-parsing.ts
     ├── arg-parsing.ts           # Generic field helpers + parseProjectArgs/parseSceneArgs/parseNodePath, returning Result<T, ToolResponse>
     ├── branded.ts               # Brand<T, Tag> nominal-type helper + ProjectPath/ScenePath/NodePath brands
     ├── result.ts                # Result<T, E> shape + ok/err/isOk/isErr used across the handler/parser/dispatch boundary
@@ -64,10 +64,19 @@ sequenceDiagram
         Node-->>Agent: result
     end
 
-    Agent->>Node: stop_project
-    Node->>Bridge: shutdown command
-    Bridge->>Game: release port, exit
-    Node->>Node: remove bridge script + autoload entry
+    alt Explicit teardown
+        Agent->>Node: stop_project
+        Node->>Bridge: shutdown command
+        Bridge->>Game: release port, exit
+        Node->>Node: remove bridge script + autoload entry
+    else Game exits on its own (crash, or the window was closed)
+        Game--xNode: process 'exit' event
+        Node->>Node: clear session, remove bridge script + autoload entry
+    else Bridge disconnects (attached mode only)
+        Bridge--xNode: connection closed
+        Node->>Bridge: probe once with ping
+        Node->>Node: no pong: clear session, remove bridge script + autoload entry
+    end
 ```
 
 When `run_project` or `attach_project` is called:
@@ -83,7 +92,7 @@ When `run_project` or `attach_project` is called:
 
 Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, and validation temp files in `validate/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
 
-`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
+`take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
 
 - `responseMode: "full"` — return the full inline PNG when the agent needs to inspect exact pixels, small UI text, or texture detail.
 - `responseMode: "path_only"` — skip the inline image entirely when another tool or human will inspect the saved file.
