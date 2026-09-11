@@ -3,6 +3,10 @@ import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { useTmpDirs } from '../../helpers/tmp.js';
+import { validateTempDir } from '../../../src/utils/artifact-paths.js';
 
 // ---------------------------------------------------------------------------
 // handleValidate — single-target mode
@@ -369,5 +373,45 @@ describe('handleValidate batch mode', () => {
     expect(broken.errors[0].message).toContain('Expected parameter name');
     expect(broken.errors[0].line).toBe(3);
     expect(ok.valid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeTempGdScript placement (AC3.3) — observed through handleValidate, which
+// is the only caller. The fake runner records the script path it was handed;
+// the directory it was written into survives the per-call unlink, so its
+// presence plus the file's absence proves both halves.
+// ---------------------------------------------------------------------------
+
+describe('handleValidate inline-source temp files', () => {
+  const tmp = useTmpDirs();
+
+  it('writes and removes the temp script under .mcp/godot-runtime/validate/', async () => {
+    const projectPath = tmp.makeProject('mcp-validate-');
+    const fake = createFakeRunner({ stdout: '' });
+
+    await handleValidate(fake.asRunner, { projectPath, source: 'extends Node\n' });
+
+    // Single-target mode hands executeOperation camelCase params; the snake_case
+    // conversion happens inside the real runner, downstream of this fake.
+    const scriptPath = fake.calls[0]?.params.scriptPath as string;
+    expect(scriptPath).toMatch(/^\.mcp\/godot-runtime\/validate\/validate_temp_/);
+    expect(existsSync(validateTempDir(projectPath))).toBe(true);
+    expect(existsSync(join(projectPath, scriptPath))).toBe(false);
+  });
+
+  it('writes batch temp scripts under the same directory', async () => {
+    const projectPath = tmp.makeProject('mcp-validate-batch-');
+    const fake = createFakeRunner({ stdout: '' });
+
+    await handleValidate(fake.asRunner, {
+      projectPath,
+      targets: [{ source: 'extends Node\n' }],
+    });
+
+    const params = fake.calls[0]?.params as { targets?: Array<{ script_path?: string }> };
+    const batchPath = params.targets?.[0]?.script_path ?? '';
+    expect(batchPath).toMatch(/^\.mcp\/godot-runtime\/validate\/validate_batch_/);
+    expect(existsSync(join(projectPath, batchPath))).toBe(false);
   });
 });

@@ -26,7 +26,7 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
 | `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 
-`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
+`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
 
 ## Profiling (requires `run_project` with `profiling: true`)
 

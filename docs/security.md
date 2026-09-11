@@ -274,7 +274,7 @@ The first `run_project` call against a given `projectPath` in a session prompts 
 
 ## Audit trail
 
-Every `run_script` call writes two files to `.mcp/scripts/`:
+Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
 - `{timestamp}-{uuid}.gd` — the raw script source.
 - `{timestamp}-{uuid}.policy.json` — the policy decision:

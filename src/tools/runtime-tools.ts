@@ -38,6 +38,7 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
+import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
 import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
@@ -204,7 +205,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport. responseMode: preview (default — saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/screenshots. Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
+      'Capture a PNG of the running viewport. responseMode: preview (default — saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/godot-runtime/screenshots/ (persists after stop_project). Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -529,7 +530,9 @@ interface AuditSidecar {
 }
 
 /**
- * Write the audit pair (.gd + .policy.json) to `.mcp/scripts/`. Both writes
+ * Write the audit pair (.gd + .policy.json) to `.mcp/godot-runtime/scripts/`.
+ * The directory persists across sessions — session cleanup removes `bridge/`
+ * only, so the audit trail survives `stop_project`. Both writes
  * are best-effort — failures are logged via `logDebug` and never propagate,
  * matching the pre-existing `run_script` audit contract.
  */
@@ -542,7 +545,7 @@ function writeAuditSidecar(
 ): void {
   try {
     const projectRoot = resolve(projectPath);
-    const scriptsDir = resolve(join(projectRoot, '.mcp', 'scripts'));
+    const scriptsDir = resolve(auditScriptsDir(projectRoot));
     if (!isUnderDir(projectRoot, scriptsDir)) {
       logDebug(
         `Sidecar write skipped: resolved script dir ${scriptsDir} escapes projectRoot ${projectRoot}`,
@@ -1304,7 +1307,7 @@ export async function handleTakeScreenshot(
       return err(
         createErrorResponse(`Screenshot server error: ${parsed.error}`, [
           'Ensure the project has a viewport (a headless project with no display server cannot render)',
-          'Check disk space and permissions on the project directory (.mcp/screenshots/)',
+          'Check disk space and permissions on the project directory (.mcp/godot-runtime/screenshots/)',
         ]),
       );
     }
@@ -1323,12 +1326,16 @@ export async function handleTakeScreenshot(
 
     // Defense-in-depth: the bridge runs in user-controlled GDScript and could
     // be patched to return any path. Refuse to read anything outside the
-    // project's own .mcp/screenshots/ directory.
-    const screenshotsRoot = resolve(runner.activeProjectPath!, '.mcp', 'screenshots');
+    // project's own screenshots directory.
+    //
+    // KEEP IN SYNC: src/scripts/mcp_bridge.gd `SCREENSHOT_DIR_RES_PATH` names
+    // the directory the bridge saves into; this is the containment root that
+    // decides what comes back. The two MUST move together.
+    const screenshotsRoot = resolve(screenshotsDir(runner.activeProjectPath!));
     if (!isUnderDir(screenshotsRoot, screenshotPath)) {
       return err(
         createErrorResponse(
-          'Bridge returned a screenshot path outside .mcp/screenshots/. Refusing to read.',
+          'Bridge returned a screenshot path outside .mcp/godot-runtime/screenshots/. Refusing to read.',
           [
             'This indicates a tampered or misbehaving McpBridge autoload',
             'Stop the project, verify the bridge script is the one shipped with this server, and retry',
@@ -1374,7 +1381,7 @@ export async function handleTakeScreenshot(
       if (!isUnderDir(screenshotsRoot, previewPath)) {
         return err(
           createErrorResponse(
-            'Bridge returned a screenshot preview path outside .mcp/screenshots/. Refusing to read.',
+            'Bridge returned a screenshot preview path outside .mcp/godot-runtime/screenshots/. Refusing to read.',
             [
               'This indicates a tampered or misbehaving McpBridge autoload',
               'Stop the project, verify the bridge script is the one shipped with this server, and retry',

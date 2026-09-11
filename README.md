@@ -210,7 +210,7 @@ Set `GODOT_MCP_DISABLE_ELICITATION=true` for clients that cannot display elicita
 
 Set `GODOT_MCP_DISABLE_SECURITY=true` to turn the gate off completely: no scan, no block, no elicitation, no warnings, no `.policy.json` sidecars, for both `run_script` and `run_project` (its pre-flight autoload/scene scan and its launch-confirmation prompt). Unlike `GODOT_MCP_DISABLE_ELICITATION`, this also removes the Tier 1 hard blocks — a sandboxed user who opted in and still could not run `OS.execute` would not actually have the access they opted in for. This flag overrides `GODOT_MCP_STRICT`: when both are set, security is off (a startup log records that strict mode was ignored). **Enabling this is a human decision.** It exists for developers who accept the risk, sandboxed environments, and CI — not for an agent to flip on its own initiative because a gate is in its way. An agent asked to set this on a user's behalf should decline and explain why. Off by default.
 
-Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/` — unless `GODOT_MCP_DISABLE_SECURITY` is set, in which case no sidecar is written at all. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/` — unless `GODOT_MCP_DISABLE_SECURITY` is set, in which case no sidecar is written at all. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
 
 ## Docs
 

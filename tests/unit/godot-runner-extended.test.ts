@@ -1,7 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'fs';
-import { join } from 'path';
 import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
 import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js';
 import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
@@ -12,6 +11,7 @@ import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.j
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
 import { itGodot } from '../helpers/godot-skip.js';
+import { bridgeScriptAbsPath } from '../../src/utils/artifact-paths.js';
 
 // ─── cleanOutput ─────────────────────────────────────────────────────────────
 
@@ -330,7 +330,7 @@ describe('GodotRunner.attachProject bridge auth token', () => {
 
     await runner.attachProject(dir);
 
-    const bridgeScript = readFileSync(join(dir, 'mcp_bridge.gd'), 'utf8');
+    const bridgeScript = readFileSync(bridgeScriptAbsPath(dir), 'utf8');
     const match = bridgeScript.match(/const SESSION_TOKEN_BAKED := "([^"]*)"/);
     expect(match).not.toBeNull();
     const bakedToken = match?.[1] ?? '';

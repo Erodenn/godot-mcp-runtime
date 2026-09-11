@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { BridgeManager } from '../../src/utils/bridge-manager.js';
+import {
+  BRIDGE_SCRIPT_RES_PATH,
+  LEGACY_BRIDGE_SCRIPT_FILENAME,
+  bridgeDir,
+  bridgeScriptAbsPath,
+} from '../../src/utils/artifact-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();
@@ -47,17 +53,17 @@ function setupProject(opts: { projectGodot?: string; gitignore?: string } = {}):
 }
 
 describe('BridgeManager.inject', () => {
-  it('copies the bridge script, registers the autoload, and writes .mcp/.gdignore', () => {
+  it('writes the bridge script under .mcp/godot-runtime/bridge/, registers the namespaced autoload, and writes .mcp/.gdignore', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT);
 
-    const bridgeScript = join(projectPath, 'mcp_bridge.gd');
+    const bridgeScript = bridgeScriptAbsPath(projectPath);
     expect(existsSync(bridgeScript)).toBe(true);
     expect(readFileSync(bridgeScript, 'utf8')).toBe(bakedContent(TEST_PORT));
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(projectGodot).toContain('[autoload]');
-    expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
+    expect(projectGodot).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
 
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
   });
@@ -94,7 +100,9 @@ describe('BridgeManager.inject', () => {
     manager.inject(projectPath, TEST_PORT);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    const matches = projectGodot.match(/McpBridge="\*res:\/\/mcp_bridge\.gd"/g) ?? [];
+    const matches =
+      projectGodot.match(/McpBridge="\*res:\/\/\.mcp\/godot-runtime\/bridge\/mcp_bridge\.gd"/g) ??
+      [];
     expect(matches.length).toBe(1);
   });
 
@@ -105,7 +113,7 @@ describe('BridgeManager.inject', () => {
     firstManager.inject(projectPath, TEST_PORT);
 
     // Mutate the in-project bridge script to detect the refresh.
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     writeFileSync(destScript, '# mutated locally\n', 'utf8');
 
     // Fresh manager (no in-memory cache) re-injects against the same project.
@@ -117,7 +125,9 @@ describe('BridgeManager.inject', () => {
 
     // Autoload entry remains a single, canonical line.
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    const matches = projectGodot.match(/McpBridge="\*res:\/\/mcp_bridge\.gd"/g) ?? [];
+    const matches =
+      projectGodot.match(/McpBridge="\*res:\/\/\.mcp\/godot-runtime\/bridge\/mcp_bridge\.gd"/g) ??
+      [];
     expect(matches.length).toBe(1);
   });
 
@@ -125,7 +135,7 @@ describe('BridgeManager.inject', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, ALT_PORT);
 
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     expect(readFileSync(destScript, 'utf8')).toContain(`const PORT := ${ALT_PORT}`);
     expect(readFileSync(destScript, 'utf8')).not.toContain('const PORT := 9900');
   });
@@ -135,7 +145,7 @@ describe('BridgeManager.inject', () => {
     manager.inject(projectPath, TEST_PORT);
     manager.inject(projectPath, ALT_PORT);
 
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     expect(readFileSync(destScript, 'utf8')).toContain(`const PORT := ${ALT_PORT}`);
   });
 
@@ -161,7 +171,7 @@ describe('BridgeManager.inject', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT);
 
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     expect(readFileSync(destScript, 'utf8')).toContain('const SESSION_TOKEN_BAKED := ""');
   });
 
@@ -169,7 +179,7 @@ describe('BridgeManager.inject', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT, 'sekrit-token');
 
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     expect(readFileSync(destScript, 'utf8')).toBe(bakedContent(TEST_PORT, 'sekrit-token'));
   });
 
@@ -178,7 +188,7 @@ describe('BridgeManager.inject', () => {
     manager.inject(projectPath, TEST_PORT, 'first-token');
     manager.inject(projectPath, TEST_PORT, 'second-token');
 
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     const content = readFileSync(destScript, 'utf8');
     expect(content).toContain('const SESSION_TOKEN_BAKED := "second-token"');
     expect(content).not.toContain('first-token');
@@ -191,7 +201,7 @@ describe('BridgeManager.inject', () => {
     manager.inject(projectPath, TEST_PORT);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
+    expect(projectGodot).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
     const sectionCount = (projectGodot.match(/^\[autoload\]/gm) ?? []).length;
     expect(sectionCount).toBe(1);
   });
@@ -202,15 +212,35 @@ describe('BridgeManager.cleanup', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT);
     // Simulate a .uid sidecar that Godot would create.
-    writeFileSync(join(projectPath, 'mcp_bridge.gd.uid'), 'uid://fake', 'utf8');
+    writeFileSync(`${bridgeScriptAbsPath(projectPath)}.uid`, 'uid://fake', 'utf8');
 
     manager.cleanup(projectPath);
 
-    expect(existsSync(join(projectPath, 'mcp_bridge.gd'))).toBe(false);
-    expect(existsSync(join(projectPath, 'mcp_bridge.gd.uid'))).toBe(false);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(existsSync(`${bridgeScriptAbsPath(projectPath)}.uid`)).toBe(false);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(projectGodot).not.toContain('McpBridge=');
+  });
+
+  it('removes an empty bridge/ directory but keeps one holding an unexpected file', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+    const strayFile = join(bridgeDir(projectPath), 'stray.txt');
+    writeFileSync(strayFile, 'not ours\n', 'utf8');
+
+    manager.cleanup(projectPath);
+
+    // The script still goes; only the rmdir of the now-non-empty dir is skipped.
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(existsSync(bridgeDir(projectPath))).toBe(true);
+    expect(existsSync(strayFile)).toBe(true);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+
+    // With the stray file gone, a second cleanup reclaims the empty directory.
+    unlinkSync(strayFile);
+    manager.cleanup(projectPath);
+    expect(existsSync(bridgeDir(projectPath))).toBe(false);
   });
 
   it('drops the [autoload] section when the bridge was the only entry', () => {
@@ -242,9 +272,9 @@ describe('BridgeManager.cleanup', () => {
 
     manager.inject(projectPath, TEST_PORT);
 
-    expect(existsSync(join(projectPath, 'mcp_bridge.gd'))).toBe(true);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
+    expect(projectGodot).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
   });
 });
 
@@ -260,7 +290,7 @@ describe('BridgeManager.repairOrphaned', () => {
     const manager = new BridgeManager(bridgeSourcePath);
 
     // Precondition: autoload entry exists, but no script file in project.
-    expect(existsSync(join(projectPath, 'mcp_bridge.gd'))).toBe(false);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
 
     manager.repairOrphaned(projectPath);
 
@@ -275,8 +305,8 @@ describe('BridgeManager.repairOrphaned', () => {
     manager.repairOrphaned(projectPath);
 
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    expect(projectGodot).toContain('McpBridge="*res://mcp_bridge.gd"');
-    expect(existsSync(join(projectPath, 'mcp_bridge.gd'))).toBe(true);
+    expect(projectGodot).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
   });
 
   it('is a no-op when project.godot has no McpBridge entry', () => {
@@ -312,7 +342,7 @@ describe('BridgeManager.readBakedPort', () => {
   it('returns null when the const PORT line is corrupted', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT);
-    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const destScript = bridgeScriptAbsPath(projectPath);
     writeFileSync(destScript, '# corrupted - no port marker\nextends Node\n', 'utf8');
     expect(manager.readBakedPort(projectPath)).toBeNull();
   });
@@ -335,5 +365,142 @@ describe('BridgeManager handles project layouts', () => {
 
     expect(() => manager.inject(projectPath, TEST_PORT)).not.toThrow();
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration off the legacy project-root script (AC3.4) and the reserved-name
+// collision guard (certification C3).
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager migration from the legacy root script', () => {
+  it('rewrites a legacy root autoload entry to the namespaced path and relocates the script', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: 'config_version=5\n\n[autoload]\nMcpBridge="*res://mcp_bridge.gd"\n',
+    });
+    const legacyScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
+    writeFileSync(legacyScript, BRIDGE_SOURCE_CONTENT, 'utf8');
+
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    expect(projectGodot).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
+    expect(projectGodot).not.toContain('McpBridge="*res://mcp_bridge.gd"');
+  });
+
+  it('removes the legacy root script and its .uid on cleanup', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: 'config_version=5\n\n[autoload]\nMcpBridge="*res://mcp_bridge.gd"\n',
+    });
+    const legacyScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
+    writeFileSync(legacyScript, BRIDGE_SOURCE_CONTENT, 'utf8');
+    writeFileSync(`${legacyScript}.uid`, 'uid://fake', 'utf8');
+
+    manager.inject(projectPath, TEST_PORT);
+    manager.cleanup(projectPath);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(existsSync(bridgeDir(projectPath))).toBe(false);
+    expect(existsSync(legacyScript)).toBe(false);
+    expect(existsSync(`${legacyScript}.uid`)).toBe(false);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+  });
+
+  it('leaves .mcp/.gdignore in place after cleanup', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+    manager.cleanup(projectPath);
+
+    expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+  });
+});
+
+describe('BridgeManager guards a user-registered McpBridge autoload', () => {
+  const USER_AUTOLOAD_LINE = 'McpBridge="*res://game/my_own_bridge.gd"';
+
+  function setupCollision() {
+    return setupProject({
+      projectGodot: `config_version=5\n\n[autoload]\n${USER_AUTOLOAD_LINE}\n`,
+    });
+  }
+
+  it('inject fails with a collision error naming the registered path', () => {
+    const { projectPath, manager } = setupCollision();
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/res:\/\/game\/my_own_bridge\.gd/);
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/reserved/i);
+  });
+
+  it('inject leaves the user entry untouched and writes no autoload of its own', () => {
+    const { projectPath, manager } = setupCollision();
+    try {
+      manager.inject(projectPath, TEST_PORT);
+    } catch {
+      // expected — assertions are about what survived
+    }
+    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    expect(projectGodot).toContain(USER_AUTOLOAD_LINE);
+    expect(projectGodot).not.toContain(BRIDGE_SCRIPT_RES_PATH);
+  });
+
+  it('cleanup does not remove a user-owned McpBridge entry', () => {
+    const { projectPath, manager } = setupCollision();
+    manager.cleanup(projectPath);
+
+    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    expect(projectGodot).toContain(USER_AUTOLOAD_LINE);
+  });
+
+  it('cleanup does not delete a root mcp_bridge.gd shadowed by a user-owned entry', () => {
+    const { projectPath, manager } = setupCollision();
+    const rootScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
+    writeFileSync(rootScript, '# user code that happens to share the name\n', 'utf8');
+
+    manager.cleanup(projectPath);
+
+    expect(existsSync(rootScript)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// repairOrphaned: stranded artifacts from a hard-killed earlier process (AC3.5)
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager.repairOrphaned stranded artifacts', () => {
+  it('removes script and entry when both exist and this instance never injected', () => {
+    const { projectPath, manager, bridgeSourcePath } = setupProject();
+    // A previous process injected, then was hard-killed: artifacts survive.
+    const previousManager = new BridgeManager(bridgeSourcePath);
+    previousManager.inject(projectPath, TEST_PORT);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+
+    manager.repairOrphaned(projectPath);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+  });
+
+  it('leaves artifacts alone once this instance has injected them', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+
+    manager.repairOrphaned(projectPath);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain(
+      `McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`,
+    );
+  });
+
+  it('leaves a user-owned McpBridge entry alone', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: 'config_version=5\n\n[autoload]\nMcpBridge="*res://game/my_own_bridge.gd"\n',
+    });
+
+    manager.repairOrphaned(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain(
+      'McpBridge="*res://game/my_own_bridge.gd"',
+    );
   });
 });

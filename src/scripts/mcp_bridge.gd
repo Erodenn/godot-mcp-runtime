@@ -16,6 +16,12 @@ const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
 # user launched themselves). Spawned sessions deliver the token via the
 # MCP_SESSION_TOKEN env var instead and leave this at its shipped default.
 const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
+# KEEP IN SYNC: src/utils/artifact-paths.ts `screenshotsDir()` composes this
+# same directory on the Node side, and `handleTakeScreenshot` in
+# src/tools/runtime-tools.ts refuses to read any screenshot outside it. This
+# script cannot import TypeScript, so the path is spelled in both places and
+# the two MUST move together.
+const SCREENSHOT_DIR_RES_PATH := "res://.mcp/godot-runtime/screenshots"
 const MAX_FRAME_BYTES := 16 * 1024 * 1024
 const FRAME_HEADER_BYTES := 4
 
@@ -194,7 +200,7 @@ func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
 		return
 
 	var timestamp := str(Time.get_unix_time_from_system()).replace(".", "_")
-	var screenshot_dir := ProjectSettings.globalize_path("res://.mcp/screenshots")
+	var screenshot_dir := ProjectSettings.globalize_path(SCREENSHOT_DIR_RES_PATH)
 	DirAccess.make_dir_recursive_absolute(screenshot_dir)
 	var file_path := screenshot_dir.path_join("screenshot_%s.png" % timestamp)
 

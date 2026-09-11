@@ -80,9 +80,9 @@ When `run_project` or `attach_project` is called:
 
 ## Runtime Artifacts
 
-Files generated during runtime (screenshots, executed scripts) are stored in `.mcp/` inside the project directory. This directory is automatically added to `.gitignore` and has a `.gdignore` so Godot won't import it.
+Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, and validation temp files in `validate/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
 
-`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
+`take_screenshot` defaults to `responseMode: "preview"` — the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
 
 - `responseMode: "full"` — return the full inline PNG when the agent needs to inspect exact pixels, small UI text, or texture detail.
 - `responseMode: "path_only"` — skip the inline image entirely when another tool or human will inspect the saved file.
