@@ -563,9 +563,9 @@ describe('evaluateScript — write primitives', () => {
   it('elicits on FileAccess.open_encrypted_with_pass(...)', () => {
     const d = evalLine('FileAccess.open_encrypted_with_pass(path, FileAccess.WRITE, pass)');
     expect(d.effectiveTier).toBe(2);
-    expect(
-      d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.open_encrypted_with_pass'),
-    ).toBe(true);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.open_encrypted_with_pass')).toBe(
+      true,
+    );
   });
 
   it('elicits on FileAccess.open_compressed(...)', () => {
@@ -645,9 +645,9 @@ describe('evaluateScript — write primitives', () => {
   it('elicits on FileAccess.set_read_only_attribute(...)', () => {
     const d = evalLine('FileAccess.set_read_only_attribute(path, true)');
     expect(d.effectiveTier).toBe(2);
-    expect(
-      d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.set_read_only_attribute'),
-    ).toBe(true);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.fs.FileAccess.set_read_only_attribute')).toBe(
+      true,
+    );
   });
 
   it('elicits on FileAccess.set_hidden_attribute(...)', () => {
