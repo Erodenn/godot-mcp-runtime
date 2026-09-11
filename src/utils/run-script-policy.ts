@@ -365,12 +365,21 @@ export const policyRules: readonly PolicyRule[] = [
   },
 
   // ---- Tier 1: ConfigFile load family ----
-  // NOTE: `ConfigFile.load` itself moved further down in this table (search
-  // "ConfigFile.load prefix-hole fix") — its idiomatic call form is an
-  // instance method (`var cf := ConfigFile.new(); cf.load(p)`), never the
-  // static-looking `ConfigFile.load(p)` a two-segment chain prefix requires,
-  // so it now uses matchLastSegment instead and had to move past every
-  // ResourceLoader.load rule to preserve first-match-wins ordering.
+  // These three fire only on the static-looking `ConfigFile.method(p)` form.
+  // The idiomatic form is an instance method (`var cf := ConfigFile.new();
+  // cf.load(p)`), which a chain-prefix rule cannot reach and which no
+  // last-segment rule may reach either: `load`, `save`, and `parse` are
+  // generic names that appear on unrelated receivers throughout ordinary
+  // game code, so keying on them alone would hard-block that code. Instance
+  // usage is covered instead by the `tier2.config.ConfigFile` class anchor
+  // further down, which fires on the `ConfigFile` reference itself.
+  {
+    id: 'tier1.config.ConfigFile.load',
+    tier: 1,
+    chain: ['ConfigFile', 'load'],
+    reason: 'ConfigFile.load can pull in attacker-controlled config',
+    solutions: ['Load configuration from a known-safe path via FileAccess.READ'],
+  },
   {
     id: 'tier1.config.ConfigFile.load_encrypted',
     tier: 1,
@@ -661,27 +670,11 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the OS.alert call if running headlessly'],
   },
 
-  // ---- Tier 1: ConfigFile.load prefix-hole fix (D5) ----
-  // Moved here (after every ResourceLoader.load rule above, both the Tier 1
-  // non-literal and Tier 3 literal forms) so that a `ResourceLoader.load`
-  // memberChain keeps matching its own more specific rule first — first
-  // match wins per token, in table order. See the shape rationale where
-  // `tier1.config.ConfigFile.load_encrypted` used to sit, above.
-  {
-    id: 'tier1.config.ConfigFile.load',
-    tier: 1,
-    chain: ['load'],
-    matchLastSegment: true,
-    reason: 'ConfigFile.load can pull in attacker-controlled config',
-    solutions: ['Load configuration from a known-safe path via FileAccess.READ'],
-  },
-
-  // ---- Tier 2: write-primitive sweep (AC1.1, harness Phase 1 / handoff PR 1) ----
-  // Every rule below is Tier 2 per D3 (strict mode promotes each to Tier 1
-  // for free via the evaluator's existing promotion step). Scope is
-  // runtime-reachable classes only (D4) — no EditorInterface / editor-only
-  // surface. Shape choice per D1: matchLastSegment for distinctive method
-  // names that appear on arbitrary receivers (an instance-method primitive
+  // ---- Tier 2: resource and filesystem write primitives ----
+  // Every rule below is Tier 2; strict mode promotes each to Tier 1 for free
+  // via the evaluator's existing promotion step. Scope is runtime-reachable
+  // classes only — no EditorInterface / editor-only surface. Shape choice:
+  // matchLastSegment for distinctive method names that appear on arbitrary receivers (an instance-method primitive
   // whose receiver is a local variable, never the literal class name — the
   // exact bug this sweep is closing elsewhere); a two-segment chain prefix
   // for methods that are singletons or static (so `ClassName.method(...)`
@@ -690,7 +683,7 @@ export const policyRules: readonly PolicyRule[] = [
   // unreachable by a token-level scanner, so the class reference itself
   // (typically `ClassName.new()`) is the signal instead. No bare `save` or
   // `call`-style last-segment rule is added — see the negative tests in
-  // `run-script-policy.test.ts` "write-primitive sweep negatives".
+  // `run-script-policy.test.ts` "write-primitive negatives".
   {
     id: 'tier2.resource_saver.save',
     tier: 2,
@@ -723,18 +716,17 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Confirm the write is intentional'],
   },
   // The four Image writers below carry matchAsBareIdentifier in addition to
-  // matchLastSegment: AC1.1's idiomatic form is `tex.get_image().save_png(p)`
+  // matchLastSegment: the idiomatic form is `tex.get_image().save_png(p)`
   // — a call (`get_image()`) sits between the receiver and the write method,
   // which the scanner cannot chain across, so `save_png` etc. surface as a
   // bare identifier with zero receiver context (see tokenMatchesRule's
   // matchLastSegment fallthrough). Safe to match with no receiver at all
   // because these names are distinctive image-write verbs, not a generic
-  // name like `save` that appears on unrelated objects (the reasoning D1
-  // used to reject a bare `save` rule applies equally here and is why
-  // `take_over_path`, `save_encrypted`, and `save_encrypted_pass` above do
-  // NOT get this flag — their AC1.1 idiomatic forms are plain
+  // name like `save` that appears on unrelated objects. That same reasoning
+  // is why `take_over_path`, `save_encrypted`, and `save_encrypted_pass`
+  // above do NOT get this flag — their idiomatic forms are plain
   // `receiver.method(...)` with no intervening call, so matchLastSegment
-  // alone already reaches them).
+  // alone already reaches them.
   {
     id: 'tier2.image.save_png',
     tier: 2,

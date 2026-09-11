@@ -462,10 +462,10 @@ describe('evaluateScript — Tier 2 set_script bare identifier', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Write-primitive sweep (AC1.1-AC1.4, harness Phase 1 / handoff PR 1).
+// Resource and filesystem write primitives.
 // ---------------------------------------------------------------------------
 
-describe('evaluateScript — write-primitive sweep (AC1.1)', () => {
+describe('evaluateScript — write primitives', () => {
   it('elicits on ResourceSaver.save(res, path)', () => {
     expect(evalLine('ResourceSaver.save(res, path)').effectiveTier).toBe(2);
   });
@@ -605,7 +605,7 @@ describe('evaluateScript — write-primitive sweep (AC1.1)', () => {
   });
 });
 
-describe('evaluateScript — write-primitive sweep negatives (AC1.2)', () => {
+describe('evaluateScript — write-primitive negatives', () => {
   it('does not flag some_manager.save() - bare "save" stays unmatched', () => {
     expect(evalLine('some_manager.save()').decision).toBe('ok');
   });
@@ -623,9 +623,22 @@ describe('evaluateScript — write-primitive sweep negatives (AC1.2)', () => {
   });
 });
 
-describe('evaluateScript — ConfigFile.load prefix hole (AC1.3, D5)', () => {
-  it('blocks cf.load(path) - instance receiver', () => {
-    const d = evalLine('cf.load(path)');
+describe('evaluateScript — ConfigFile instance usage', () => {
+  it('elicits on cf.load(path) when ConfigFile.new() appears in the same script', () => {
+    const d = evalLine('var cf := ConfigFile.new()\n\tcf.load(path)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.config.ConfigFile')).toBe(true);
+  });
+
+  it('does not block a bare receiver.load(x) call — `load` is too generic to key on', () => {
+    // `save_manager.load(slot)` is ordinary game code. A last-segment rule on
+    // `load` would hard-block it, with a ConfigFile-flavoured reason string.
+    expect(evalLine('save_manager.load(slot)').decision).toBe('ok');
+    expect(evalLine('img.load("res://x.png")').decision).toBe('ok');
+  });
+
+  it('blocks the static-looking ConfigFile.load(path) form', () => {
+    const d = evalLine('ConfigFile.load(path)');
     expect(d.decision).toBe('hard_block');
     expect(d.matches.some((m) => m.ruleId === 'tier1.config.ConfigFile.load')).toBe(true);
   });
@@ -637,7 +650,7 @@ describe('evaluateScript — ConfigFile.load prefix hole (AC1.3, D5)', () => {
     expect(d.matches[0]?.ruleId).toBe('tier1.indirect.load.nonliteral');
   });
 
-  it('ResourceLoader.load(non_literal) still matches its own rule, not the generic load fix', () => {
+  it('ResourceLoader.load(non_literal) still matches its own rule', () => {
     const d = evalLine('ResourceLoader.load(var_path)');
     expect(d.decision).toBe('hard_block');
     expect(d.matches).toHaveLength(1);
@@ -652,7 +665,7 @@ describe('evaluateScript — ConfigFile.load prefix hole (AC1.3, D5)', () => {
   });
 });
 
-describe('evaluateScript — strict mode promotes new Tier 2 primitives (AC1.4)', () => {
+describe('evaluateScript — strict mode promotes the write primitives', () => {
   it('promotes ResourceSaver.save to hard_block under strict mode', () => {
     const source = VALID_PREFIX + 'ResourceSaver.save(res, path)\n';
     const strict = evaluateScript(source, true);
