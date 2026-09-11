@@ -157,9 +157,9 @@ If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will 
 
 All are set in the same `env` block as `GODOT_PATH`:
 
-| Variable | Effect                                            |
-| -------- | -------------------------------------------------- |
-| `DEBUG`  | `"true"` enables verbose `[DEBUG]` logging.        |
+| Variable | Effect                                      |
+| -------- | ------------------------------------------- |
+| `DEBUG`  | `"true"` enables verbose `[DEBUG]` logging. |
 
 The three security-gate flags below share one axis (see "Security model" for the full picture) and are wide enough to wrap badly in a table, so they get a list instead:
 
