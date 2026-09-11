@@ -1350,6 +1350,58 @@ describe('handleRunProject security pre-flight', () => {
     expect(text).not.toMatch(/OS\.execute/);
   });
 
+  it("skips this server's own bridge autoload so a relaunch does not self-reject", async () => {
+    // The injected bridge stays registered between a launch and its cleanup,
+    // and it writes screenshots — so it matches the filesystem-write rules.
+    const dir = tmp.makeProject(
+      'run-project-own-bridge-',
+      'config_version=5\n\n[application]\n[autoload]\n' +
+        'McpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
+    );
+    mkdirSync(join(dir, '.mcp', 'godot-runtime', 'bridge'), { recursive: true });
+    writeFileSync(
+      join(dir, '.mcp', 'godot-runtime', 'bridge', 'mcp_bridge.gd'),
+      'extends Node\nfunc _shot(image, p):\n' +
+        '\tDirAccess.make_dir_recursive_absolute("res://.mcp")\n' +
+        '\timage.save_png(p)\n',
+      'utf8',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      acceptingContext({ strict: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).not.toMatch(/save_png/);
+    expect(text).not.toMatch(/make_dir_recursive_absolute/);
+  });
+
+  it('still scans an McpBridge autoload pointing at a path the server does not own', async () => {
+    const dir = tmp.makeProject(
+      'run-project-foreign-bridge-',
+      'config_version=5\n\n[application]\n[autoload]\nMcpBridge="*res://game/mcp_bridge.gd"\n',
+    );
+    mkdirSync(join(dir, 'game'), { recursive: true });
+    writeFileSync(
+      join(dir, 'game', 'mcp_bridge.gd'),
+      'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n',
+      'utf8',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      acceptingContext({ strict: true }),
+    );
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+  });
+
   it('strict mode allows launch when only Tier 3 findings present', async () => {
     const dir = makeProjectWithAutoload(
       'run-project-strict-tier3-',

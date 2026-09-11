@@ -17,7 +17,12 @@ import {
   mcpDir,
 } from './artifact-paths.js';
 
-const BRIDGE_AUTOLOAD_NAME = 'McpBridge' as const;
+/**
+ * Autoload name this server reserves in a target project's `project.godot`.
+ * Exported so `run_project`'s pre-flight scan can recognize its own injected
+ * bridge and skip scanning it.
+ */
+export const BRIDGE_AUTOLOAD_NAME = 'McpBridge' as const;
 
 /**
  * Thrown when project.godot already registers an autoload named `McpBridge`
