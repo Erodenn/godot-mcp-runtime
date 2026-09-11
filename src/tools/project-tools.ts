@@ -162,7 +162,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns: { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types are returned as raw strings; keys outside any section appear under __global__.',
+      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns: { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types (including multi-line arrays/dicts, e.g. the full "[input]" action map) are returned as their complete raw string, not just the first line; keys outside any section appear under __global__.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -385,18 +385,51 @@ function searchInFiles(
 
 type SettingsValue = string | number | boolean;
 
+// Godot section headers are a bare identifier-ish name in brackets on its own
+// line (e.g. "[input]"), never containing commas or spaces the way a
+// multi-line array/dict literal's closing lines can. Used both to detect a
+// real section boundary and to cap a runaway multi-line scan at one.
+const SECTION_HEADER_REGEX = /^\[[A-Za-z0-9_/.]+\]$/;
+
+/**
+ * Net count of unmatched `{`/`[` in a single line, ignoring any such
+ * character inside a double-quoted segment so a brace embedded in a string
+ * value does not unbalance the scan.
+ */
+function scanBraceDelta(line: string): { curly: number; square: number } {
+  let curly = 0;
+  let square = 0;
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' && line[i - 1] !== '\\') {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (inQuote) continue;
+    if (ch === '{') curly++;
+    else if (ch === '}') curly--;
+    else if (ch === '[') square++;
+    else if (ch === ']') square--;
+  }
+  return { curly, square };
+}
+
 function parseProjectSettings(
   projectFilePath: string,
 ): Record<string, Record<string, SettingsValue>> {
   const content = readFileSync(projectFilePath, 'utf8');
+  const lines = content.split('\n');
   const result: Record<string, Record<string, SettingsValue>> = {};
   let currentSection = '__global__';
 
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
+  let i = 0;
+  while (i < lines.length) {
+    const line = (lines[i] ?? '').trim();
+    i++;
     if (line === '' || line.startsWith(';') || line.startsWith('#')) continue;
     if (line.startsWith('config_version')) continue; // header line
-    if (line.startsWith('[') && line.endsWith(']')) {
+    if (SECTION_HEADER_REGEX.test(line)) {
       currentSection = line.slice(1, -1);
       continue;
     }
@@ -405,7 +438,27 @@ function parseProjectSettings(
     const key = line.slice(0, eqIdx).trim();
     const rawVal = line.slice(eqIdx + 1).trim();
     let value: SettingsValue;
-    if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
+
+    if (rawVal.startsWith('{') || rawVal.startsWith('[')) {
+      // Multi-line array/dict literal: keep consuming lines until brace and
+      // bracket depth returns to zero, capping at the next section header (or
+      // EOF) so a malformed file cannot run away. The joined raw text is
+      // returned as-is; we do not attempt to parse Godot's Object(...) syntax.
+      const valueLines = [rawVal];
+      const delta = scanBraceDelta(rawVal);
+      let curly = delta.curly;
+      let square = delta.square;
+      while (curly !== 0 || square !== 0) {
+        const nextLine = lines[i];
+        if (nextLine === undefined || SECTION_HEADER_REGEX.test(nextLine.trim())) break;
+        valueLines.push(nextLine);
+        const nextDelta = scanBraceDelta(nextLine);
+        curly += nextDelta.curly;
+        square += nextDelta.square;
+        i++;
+      }
+      value = valueLines.join('\n').trim();
+    } else if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
       value = rawVal.slice(1, -1);
     } else if (rawVal === 'true') {
       value = true;
