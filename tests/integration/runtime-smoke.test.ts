@@ -21,24 +21,11 @@ import { cpSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import * as net from 'net';
-import { itGodot } from '../helpers/godot-skip.js';
+import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { screenshotsDir } from '../../src/utils/artifact-paths.js';
 import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
-
-// Heuristic: bridge failures we treat as "no display server" (skip-worthy)
-// rather than real failures. Anything else means runProject or the bridge is
-// genuinely broken and the test must fail loudly.
-function isHeadlessEnvironmentError(err: string | undefined): boolean {
-  if (!err) return false;
-  const lower = err.toLowerCase();
-  return (
-    lower.includes('display') ||
-    lower.includes('no x server') ||
-    lower.includes('wayland') ||
-    lower.includes('cannot open display')
-  );
-}
 
 describe('runtime bridge smoke', () => {
   let runner: GodotRunner;
@@ -111,8 +98,8 @@ describe('runtime bridge smoke', () => {
 
       expect(existsSync(screenshotPath)).toBe(true);
 
-      // The file should live inside .mcp/screenshots/ within the project dir
-      const screenshotDir = join(tmpProject, '.mcp', 'screenshots');
+      // The file should live inside .mcp/godot-runtime/screenshots/ within the project dir
+      const screenshotDir = screenshotsDir(tmpProject);
       expect(
         screenshotPath.startsWith(screenshotDir.replace(/\\/g, '/')) ||
           screenshotPath.startsWith(screenshotDir),

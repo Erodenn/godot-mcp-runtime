@@ -28,6 +28,7 @@ import {
   handleLaunchEditor,
 } from '../../../src/tools/runtime-tools.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
 import type {
   GodotRunner,
   GodotProcess,
@@ -935,7 +936,7 @@ describe('handleRunScript', () => {
     expect(parsed.warnings).toEqual(['SCRIPT ERROR: stale ref']);
   });
 
-  it('writes the script to .mcp/scripts/{timestamp}.gd for forensic replay', async () => {
+  it('writes the script to .mcp/godot-runtime/scripts/{timestamp}.gd for forensic replay', async () => {
     const dir = tmp.makeProject('run-script-audit-');
     const fake = createRuntimeFake();
     fake.setSession({
@@ -946,7 +947,7 @@ describe('handleRunScript', () => {
     fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
     await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
 
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     expect(existsSync(scriptsDir)).toBe(true);
     const files = readdirSync(scriptsDir).filter((f) => f.endsWith('.gd'));
     expect(files).toHaveLength(1);
@@ -1003,7 +1004,7 @@ describe('handleRunScript security policy', () => {
     expectErrorMatching(result, /Blocked.*OS\.execute/);
     expect(fake.bridgeCalls).toHaveLength(0);
     // Sidecar should record hard_block.
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
     const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
@@ -1030,7 +1031,7 @@ describe('handleRunScript security policy', () => {
     expect(elicitCalls).toBe(0);
     const value = unwrap(result) as { warnings?: string[] };
     expect(value.warnings).toBeUndefined();
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     expect(existsSync(scriptsDir)).toBe(false);
   });
 
@@ -1043,7 +1044,7 @@ describe('handleRunScript security policy', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
     // Sidecar must record elicit_accepted distinctly from a plain warn.
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
     const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
@@ -1098,7 +1099,7 @@ describe('handleRunScript security policy', () => {
     expectErrorMatching(result, /Elicitation unavailable/);
     expect(fake.bridgeCalls).toHaveLength(0);
     // Sidecar must record elicit_denied even on throw, preserving the audit trail.
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
     const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
@@ -1119,7 +1120,7 @@ describe('handleRunScript security policy', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
     // Sidecar records elicit_bypassed, distinct from a user-confirmed accept.
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
     const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
@@ -1169,7 +1170,7 @@ describe('handleRunScript security policy', () => {
     const dir = tmp.makeProject('run-script-sidecar-');
     const fake = activeFake(dir);
     await handleRunScript(fake.asRunner, { script: TIER3_SCRIPT });
-    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const scriptsDir = auditScriptsDir(dir);
     const files = readdirSync(scriptsDir);
     const gd = files.find((f) => f.endsWith('.gd'));
     const sidecar = files.find((f) => f.endsWith('.policy.json'));
@@ -1459,7 +1460,7 @@ describe('handleTakeScreenshot bridge response shapes', () => {
 
   beforeEach(() => {
     projectPath = tmp.make('mcp-project-');
-    screenshotDir = join(projectPath, '.mcp', 'screenshots');
+    screenshotDir = screenshotsDir(projectPath);
     mkdirSync(screenshotDir, { recursive: true });
     fake = createRuntimeFake();
     fake.setSession({
@@ -1654,16 +1655,16 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     expectErrorMatching(result, /Screenshot file not found/i);
   });
 
-  it('refuses to read a bridge path outside .mcp/screenshots/', async () => {
+  it('refuses to read a bridge path outside .mcp/godot-runtime/screenshots/', async () => {
     fake.setBridgeResponse(JSON.stringify({ path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
-    expectErrorMatching(result, /outside \.mcp\/screenshots\//i);
+    expectErrorMatching(result, /outside \.mcp\/godot-runtime\/screenshots\//i);
   });
 
-  it('refuses to read a bridge preview_path outside .mcp/screenshots/', async () => {
+  it('refuses to read a bridge preview_path outside .mcp/godot-runtime/screenshots/', async () => {
     const screenshotPath = writeScreenshot('screenshot.png');
     fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
-    expectErrorMatching(result, /preview path outside \.mcp\/screenshots\//i);
+    expectErrorMatching(result, /preview path outside \.mcp\/godot-runtime\/screenshots\//i);
   });
 });

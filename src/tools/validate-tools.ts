@@ -9,6 +9,7 @@ import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/e
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
+import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 
 export const validateToolDefinitions = [
   {
@@ -77,21 +78,28 @@ function parseGodotErrors(stderr: string): ValidationError[] {
 }
 
 /**
- * Write inline GDScript source to a uniquely-named file under <projectPath>/.mcp/
- * for validation. Returns the project-relative path (e.g. ".mcp/validate_temp_xxx.gd")
+ * Write inline GDScript source to a uniquely-named file under
+ * <projectPath>/.mcp/godot-runtime/validate/ for validation. Returns the
+ * project-relative path (e.g. ".mcp/godot-runtime/validate/validate_temp_xxx.gd")
  * that the runner consumes plus the absolute path the caller cleans up.
+ *
+ * The file is deleted per call at the two unlinkSync sites below; there is no
+ * orphan sweep. It needs no .gdignore of its own — it is handed to Godot as an
+ * explicit script_path on a headless run and never resolved through the
+ * importer, and .mcp/.gdignore (owned by BridgeManager) covers the subtree
+ * whenever this server has run the project.
  */
 function writeTempGdScript(
   projectPath: string,
   source: string,
   prefix: 'validate_temp' | 'validate_batch',
 ): { resPath: string; absPath: string } {
-  const mcpDir = join(projectPath, '.mcp');
-  mkdirSync(mcpDir, { recursive: true });
+  const tempDir = validateTempDir(projectPath);
+  mkdirSync(tempDir, { recursive: true });
   const name = `${prefix}_${randomUUID()}.gd`;
-  const absPath = join(mcpDir, name);
+  const absPath = join(tempDir, name);
   writeFileSync(absPath, source, 'utf8');
-  return { resPath: `.mcp/${name}`, absPath };
+  return { resPath: `${VALIDATE_RES_DIR}/${name}`, absPath };
 }
 
 /**

@@ -61,7 +61,7 @@ export function validateNodePath(path: string): boolean {
 /**
  * True when `child` resolves to `parent` or a path beneath it. Used by
  * defense-in-depth checks on bridge-returned paths (e.g. screenshot files
- * that must live under `.mcp/screenshots/`).
+ * that must live under `.mcp/godot-runtime/screenshots/`).
  */
 export function isUnderDir(parent: string, child: string): boolean {
   const parentResolved = resolve(parent);
