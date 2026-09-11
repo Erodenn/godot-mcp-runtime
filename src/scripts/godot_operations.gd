@@ -879,9 +879,21 @@ func get_node_signals(params):
 		var sig_name = sig["name"]
 		var connections = []
 		for conn in node.get_signal_connection_list(sig_name):
+			var target_object = conn["callable"].get_object()
+			# get_object().get_path() returns "" for any node instantiated outside
+			# the live SceneTree, which headless scenes always are - that made
+			# every connection target empty, not just self-connections. Report the
+			# target relative to scene_root in the same "root/..." form
+			# connect_signal / disconnect_signal accept as targetNodePath, so a
+			# reported connection round-trips without the caller rewriting it.
+			var target_str = "unknown"
+			if target_object == scene_root:
+				target_str = "root"
+			elif target_object is Node:
+				target_str = "root/" + String(scene_root.get_path_to(target_object))
 			connections.append({
 				"signal": sig_name,
-				"target": str(conn["callable"].get_object().get_path()) if conn["callable"].get_object() else "unknown",
+				"target": target_str,
 				"method": conn["callable"].get_method()
 			})
 		signals.append({

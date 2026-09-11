@@ -365,6 +365,102 @@ describe('connect_signal persists with CONNECT_PERSIST (Bug #2)', () => {
   );
 });
 
+describe('get_node_signals reports scene-root-relative connection targets', () => {
+  const tmpDirs: string[] = [];
+  let tmpProject: string;
+
+  beforeEach(() => {
+    tmpProject = makeTmpProject();
+    tmpDirs.push(tmpProject);
+  });
+
+  afterAll(() => cleanup(tmpDirs));
+
+  itGodot(
+    'reports a child target as "root/<Child>" and a self-connection as "root", both usable by disconnect_signal',
+    async () => {
+      // get_object().get_path() returns "" for a node instantiated outside the
+      // live SceneTree (which headless scenes always are), so before the fix
+      // every connection target read as empty, not only self-connections.
+      await runner.executeOperation(
+        'connect_signal',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'root',
+          signal: 'tree_exiting',
+          targetNodePath: 'root/Label',
+          method: 'queue_free',
+        },
+        tmpProject,
+        30000,
+      );
+      await runner.executeOperation(
+        'connect_signal',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'root',
+          signal: 'ready',
+          targetNodePath: 'root',
+          method: 'queue_free',
+        },
+        tmpProject,
+        30000,
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'get_node_signals',
+        { scenePath: 'main.tscn', nodePath: 'root' },
+        tmpProject,
+        30000,
+      );
+      const result = JSON.parse(extractJson(stdout));
+      const connections = result.signals.flatMap((s: { connections: unknown[] }) => s.connections);
+
+      const childConn = connections.find(
+        (c: { signal: string }) => c.signal === 'tree_exiting',
+      ) as { target: string; method: string };
+      expect(childConn.target).toBe('root/Label');
+
+      const selfConn = connections.find((c: { signal: string }) => c.signal === 'ready') as {
+        target: string;
+        method: string;
+      };
+      expect(selfConn.target).toBe('root');
+
+      // Both reported targets must round-trip straight into disconnect_signal
+      // with no rewriting by the caller.
+      await runner.executeOperation(
+        'disconnect_signal',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'root',
+          signal: 'tree_exiting',
+          targetNodePath: childConn.target,
+          method: childConn.method,
+        },
+        tmpProject,
+        30000,
+      );
+      await runner.executeOperation(
+        'disconnect_signal',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'root',
+          signal: 'ready',
+          targetNodePath: selfConn.target,
+          method: selfConn.method,
+        },
+        tmpProject,
+        30000,
+      );
+
+      const tscnContent = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
+      expect(tscnContent).not.toMatch(/\[connection/);
+    },
+    60000,
+  );
+});
+
 describe('load_sprite rejects unimported textures with a clear error (Bug #4)', () => {
   const tmpDirs: string[] = [];
   let tmpProject: string;

@@ -234,7 +234,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_node_signals',
     description:
-      'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. The connections[].target field uses Godot absolute path format (/root/Scene/Node) — convert to scene-root-relative (root/Node) before passing to connect/disconnect_signal. Returns: nodeType and signals[], each with name and current connections (signal/target/method). Errors if node not found.',
+      'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. The connections[].target field is already scene-root-relative in the "root/..." form connect_signal/disconnect_signal accept as targetNodePath (a self-connection reports as "root") - pass it straight through with no conversion. Returns: nodeType and signals[], each with name and current connections (signal/target/method). Errors if node not found.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -262,7 +262,11 @@ export const nodeToolDefinitions = [
                   type: 'object',
                   properties: {
                     signal: { type: 'string' },
-                    target: { type: 'string' },
+                    target: {
+                      type: 'string',
+                      description:
+                        'Scene-root-relative path in "root/..." form (a self-connection is "root"), directly usable as targetNodePath in connect_signal/disconnect_signal. "unknown" for a freed or null object.',
+                    },
                     method: { type: 'string' },
                   },
                 },
