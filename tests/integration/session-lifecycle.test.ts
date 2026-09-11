@@ -12,7 +12,8 @@ import { existsSync, readFileSync, cpSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleGetDebugOutput, handleStopProject } from '../../src/tools/runtime-tools.js';
@@ -57,14 +58,8 @@ describe('spawned session self-exit', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-selfexit-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      const spawned = await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(BRIDGE_WAIT_MS);
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject, { waitMs: BRIDGE_WAIT_MS });
+      const spawned = runner.activeProcess!;
       expect(existsSync(bridgeDir(tmpProject))).toBe(true);
 
       // Kill it the way the engine crashing or the user closing the window

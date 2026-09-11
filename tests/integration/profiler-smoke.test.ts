@@ -10,11 +10,13 @@
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
+import type { TestContext } from 'vitest';
 import { join } from 'path';
 import { cpSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { profilingFixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import {
@@ -64,19 +66,12 @@ describe('profiler smoke', () => {
     }
   });
 
-  async function launchProfilingSession(ctx: { skip: (reason: string) => void }): Promise<void> {
+  async function launchProfilingSession(ctx: TestContext): Promise<void> {
     const id = randomBytes(6).toString('hex');
     tmpProject = join(tmpdir(), `godot-mcp-profiling-${id}`);
     cpSync(profilingFixtureProjectPath, tmpProject, { recursive: true });
 
-    await runner.runProject(tmpProject, undefined, false, undefined, true);
-    const bridgeResult = await runner.waitForBridge(20000);
-    if (!bridgeResult.ready) {
-      if (isHeadlessEnvironmentError(bridgeResult.error)) {
-        ctx.skip(`display server unavailable (${bridgeResult.error})`);
-      }
-      throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-    }
+    await runProjectOrSkip(runner, ctx, tmpProject, { profiling: true });
     expect(runner.activeProfiler).not.toBeNull();
   }
 

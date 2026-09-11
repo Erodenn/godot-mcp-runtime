@@ -20,7 +20,8 @@ import { cpSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript } from '../../src/tools/runtime-tools.js';
@@ -61,16 +62,9 @@ afterAll(() => {
 describe('run_script compile-error diagnostics (live bridge)', () => {
   itGodot(
     'enriches error-43 compile failures with stderr compiler diagnostics',
-    async () => {
+    async (ctx) => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(20000);
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          return; // no display server — same skip semantics as runtime-smoke
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject);
 
       // Line 3 references an undeclared identifier — compile error 43 class.
       const badScript =
@@ -96,16 +90,9 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
 
   itGodot(
     'a syntactically valid script still executes normally',
-    async () => {
+    async (ctx) => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(20000);
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          return;
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject);
 
       const goodScript =
         'extends RefCounted\n' +

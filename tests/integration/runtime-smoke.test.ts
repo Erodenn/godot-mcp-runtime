@@ -21,7 +21,8 @@ import { cpSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import * as net from 'net';
-import { itGodot, isHeadlessEnvironmentError } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
@@ -62,22 +63,7 @@ describe('runtime bridge smoke', () => {
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
       // Start the project — waitForBridge polls until the TCP ping responds
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(20000);
-
-      if (!bridgeResult.ready) {
-        // Distinguish "no display server" (acceptable skip) from "process exited
-        // / port collision / bridge code is broken" (real failure that must not
-        // pass silently). ctx.skip() reports the test as skipped — a bare
-        // `return` would silently mark it passed, hiding the no-display case.
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(
-          `Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}. ` +
-            `This is not a "no display" skip — runProject or the bridge is broken.`,
-        );
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject);
 
       const response = await runner.sendCommand('screenshot', {}, 15000);
       const parsed = JSON.parse(response) as { path?: string; error?: string };
@@ -115,15 +101,7 @@ describe('runtime bridge smoke', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-input-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(20000);
-
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject);
 
       // Inject a LineEdit, focus it via run_script
       const setupScript = `
@@ -186,15 +164,7 @@ func execute(scene_tree: SceneTree) -> Variant:
       tmpProject = join(tmpdir(), `godot-mcp-runtime-auth-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      await runner.runProject(tmpProject);
-      const bridgeResult = await runner.waitForBridge(20000);
-
-      if (!bridgeResult.ready) {
-        if (isHeadlessEnvironmentError(bridgeResult.error)) {
-          ctx.skip(`display server unavailable (${bridgeResult.error})`);
-        }
-        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
-      }
+      await runProjectOrSkip(runner, ctx, tmpProject);
 
       const port = runner.activeBridgePort;
       expect(port).not.toBeNull();
