@@ -2,15 +2,15 @@
 
 GDScript executed via `run_script` runs inside the live Godot process with full user privileges. `run_project` launches the configured main scene and all `[autoload]` scripts, which is equally arbitrary code. Treat both as user-level RCE primitives.
 
-**This is a best-effort accident guard, not a sandbox and not a security boundary.** It exists to catch the _obvious, unobfuscated_ dangerous primitive when it appears verbatim in a `run_script` payload, or in an autoload/scene script that `run_project` is about to launch — the "a non-programmer downloaded a malicious Godot project and ran it through the server" case. It does **not** defend against an adversary who knows the ruleset (the tool is open source), and it _cannot_ — GDScript is Turing-complete and reflective, and tokenizer-level static analysis of it is unsound by construction.
+**This is a best-effort accident guard, not a sandbox and not a security boundary.** It exists to catch the _obvious, unobfuscated_ dangerous primitive when it appears verbatim in a `run_script` payload, or in an autoload/scene script that `run_project` is about to launch - the "a non-programmer downloaded a malicious Godot project and ran it through the server" case. It does **not** defend against an adversary who knows the ruleset (the tool is open source), and it _cannot_ - GDScript is Turing-complete and reflective, and tokenizer-level static analysis of it is unsound by construction.
 
-The defense has two parts: a **three-tier static-analysis gate** that inspects GDScript before it reaches the bridge, and a **per-session bridge auth token** on every bridge frame (see "Bridge authentication" below). Together: every bridge frame is authenticated with a per-session token and every `run_script` payload is scanned, but the scan is a best-effort filter with known holes, and neither the token nor the scan is a hard sandbox. MCP client bypass-permissions modes (Claude Code `--dangerously-skip-permissions`, Cursor YOLO, etc.) auto-answer elicitation requests, so elicitation alone is a UX speed bump, not a hard boundary. Strict mode (`GODOT_MCP_STRICT=true`) lets operators running unattended opt into hard-rejecting everything the filter would otherwise elicit — it raises the floor, it does not close the structural gaps listed under "What this does NOT do."
+The defense has two parts: a **three-tier static-analysis gate** that inspects GDScript before it reaches the bridge, and a **per-session bridge auth token** on every bridge frame (see "Bridge authentication" below). Together: every bridge frame is authenticated with a per-session token and every `run_script` payload is scanned, but the scan is a best-effort filter with known holes, and neither the token nor the scan is a hard sandbox. MCP client bypass-permissions modes (Claude Code `--dangerously-skip-permissions`, Cursor YOLO, etc.) auto-answer elicitation requests, so elicitation alone is a UX speed bump, not a hard boundary. Strict mode (`GODOT_MCP_STRICT=true`) lets operators running unattended opt into hard-rejecting everything the filter would otherwise elicit - it raises the floor, it does not close the structural gaps listed under "What this does NOT do."
 
-The rule catalogue below is the auditable surface, and because it's auditable, anyone can read it and construct a bypass — that's accepted as inherent to a best-effort filter, not a bug we're hiding. Tier assignments were calibrated against nine real Godot projects under `D:/Godot/Projects` — `OS.execute` and family have zero hits in real game code; literal `load()` / `preload()` / `call()` appear in nearly every game script and were demoted to Tier 3 to avoid conditioning users to click "yes" reflexively.
+The rule catalogue below is the auditable surface, and because it's auditable, anyone can read it and construct a bypass - that's accepted as inherent to a best-effort filter, not a bug we're hiding. Tier assignments were calibrated against nine real Godot projects under `D:/Godot/Projects` - `OS.execute` and family have zero hits in real game code; literal `load()` / `preload()` / `call()` appear in nearly every game script and were demoted to Tier 3 to avoid conditioning users to click "yes" reflexively.
 
 ---
 
-## Tier 1 — Hard block
+## Tier 1 - Hard block
 
 The server rejects the call. The bridge never sees the script (or the project never launches, for strict-mode `run_project` with Tier 1 autoload findings). No client cooperation required.
 
@@ -65,7 +65,7 @@ The server rejects the call. The bridge never sees the script (or the project ne
 
 ### Non-literal indirection
 
-These primitives fire when the call's **whole first argument** does not classify as a lone string literal — not just its first token. `load("res://" + evil_var)` is non-literal (the argument is a string concatenated with a variable) even though a string literal appears first; only a call whose first argument is a single bare string token, like `load("res://main.tscn")`, classifies as literal and drops to Tier 3 (warn).
+These primitives fire when the call's **whole first argument** does not classify as a lone string literal - not just its first token. `load("res://" + evil_var)` is non-literal (the argument is a string concatenated with a variable) even though a string literal appears first; only a call whose first argument is a single bare string token, like `load("res://main.tscn")`, classifies as literal and drops to Tier 3 (warn).
 
 | Primitive                          | Rule ID                                         |
 | ---------------------------------- | ----------------------------------------------- |
@@ -77,7 +77,7 @@ These primitives fire when the call's **whole first argument** does not classify
 
 ---
 
-## Tier 2 — Elicit
+## Tier 2 - Elicit
 
 The server pauses and sends an `elicitation/create` request to the client. User accept proceeds; decline returns an error naming the primitive. Elicitation failure (older SDK or unsupported client) falls back to a hard denial with a clear error.
 
@@ -105,7 +105,7 @@ The server pauses and sends an `elicitation/create` request to the client. User 
 | `DirAccess.make_dir_recursive_absolute` (static)         | `tier2.fs.DirAccess.make_dir_recursive_absolute` |
 | `OS.move_to_trash`                                       | `tier2.fs.OS.move_to_trash`                      |
 | `ResourceSaver.save` (either arity)                      | `tier2.resource_saver.save`                      |
-| `ConfigFile` (any usage — see note below)                | `tier2.config.ConfigFile`                        |
+| `ConfigFile` (any usage - see note below)                | `tier2.config.ConfigFile`                        |
 | `ConfigFile.save_encrypted`                              | `tier2.config.ConfigFile.save_encrypted`         |
 | `ConfigFile.save_encrypted_pass`                         | `tier2.config.ConfigFile.save_encrypted_pass`    |
 | `Image.save_png` / `save_jpg` / `save_webp` / `save_exr` | `tier2.image.save_png` etc.                      |
@@ -116,13 +116,13 @@ The server pauses and sends an `elicitation/create` request to the client. User 
 
 `FileAccess.open` is conservatively flagged uniformly. The READ vs WRITE distinction lives in the second argument; we accept the false-positive cost on read-only opens to keep the rule simple. Confirm "READ mode" and accept the elicitation if your script is reading.
 
-`DirAccess.make_dir` and `make_dir_recursive` are instance methods (`dir.make_dir(path)`), so a `DirAccess.make_dir` chain-prefix rule would never fire on that call form. These two match on their last segment instead, on any receiver — both names are distinctive enough to be safe with no receiver information. Their `_absolute` siblings are static (`DirAccess.make_dir_absolute(path)`) and keep the ordinary two-segment prefix shape.
+`DirAccess.make_dir` and `make_dir_recursive` are instance methods (`dir.make_dir(path)`), so a `DirAccess.make_dir` chain-prefix rule would never fire on that call form. These two match on their last segment instead, on any receiver - both names are distinctive enough to be safe with no receiver information. Their `_absolute` siblings are static (`DirAccess.make_dir_absolute(path)`) and keep the ordinary two-segment prefix shape.
 
-`ConfigFile`'s own instance methods (`save`, `save_encrypted`, `save_encrypted_pass`) are called the same way — `cf.save(p)`, never `ConfigFile.save(p)`. `save_encrypted` and `save_encrypted_pass` are distinctive enough names to match on their last segment directly. Plain `save` is not — `some_manager.save()` is common, ordinary game code, and a last-segment rule on bare `save` would hard-block it under strict mode. Instead, the rule anchors on the `ConfigFile` class reference itself (typically `ConfigFile.new()`) — the same shape `ZIPPacker` and `PCKPacker` use below — since reaching that class at all is the signal, when none of its generic method names can be matched safely on their own.
+`ConfigFile`'s own instance methods (`save`, `save_encrypted`, `save_encrypted_pass`) are called the same way - `cf.save(p)`, never `ConfigFile.save(p)`. `save_encrypted` and `save_encrypted_pass` are distinctive enough names to match on their last segment directly. Plain `save` is not - `some_manager.save()` is common, ordinary game code, and a last-segment rule on bare `save` would hard-block it under strict mode. Instead, the rule anchors on the `ConfigFile` class reference itself (typically `ConfigFile.new()`) - the same shape `ZIPPacker` and `PCKPacker` use below - since reaching that class at all is the signal, when none of its generic method names can be matched safely on their own.
 
 That anchor is also the only rule that reaches `cf.load(p)`. The Tier 1 `ConfigFile.load` / `load_encrypted` / `parse` rules are chain-prefix rules and fire only on the static-looking `ConfigFile.load(p)` form; the idiomatic instance form is caught one tier lower, by the class anchor, at the point the script names `ConfigFile`. A last-segment rule on bare `load` would close that gap and is deliberately not used: `save_manager.load(slot)` and `img.load(path)` are ordinary code, and a Tier 1 rule keyed on `load` would hard-block them with no elicitation escape.
 
-`Image.save_png` / `save_jpg` / `save_webp` / `save_exr` go one step further: their idiomatic call form is `tex.get_image().save_png(p)`, where `get_image()` is itself a call sitting between the receiver and the write method. The tokenizer never chains across a call (see `src/utils/gdscript-scanner.ts`), so `save_png` surfaces as a bare identifier with no receiver information at all, not as a two-segment chain — a last-segment rule alone would miss it. These four rules additionally set `matchAsBareIdentifier`, so they fire on the bare identifier form too (`save_png(p)` with no receiver whatsoever also elicits). This is safe specifically because the four names are distinctive image-write verbs; it is not applied to `take_over_path`, `save_encrypted`, or `save_encrypted_pass` above, whose idiomatic forms are plain `receiver.method(...)` with no intervening call, so the ordinary last-segment match already reaches them without widening to a receiver-less match.
+`Image.save_png` / `save_jpg` / `save_webp` / `save_exr` go one step further: their idiomatic call form is `tex.get_image().save_png(p)`, where `get_image()` is itself a call sitting between the receiver and the write method. The tokenizer never chains across a call (see `src/utils/gdscript-scanner.ts`), so `save_png` surfaces as a bare identifier with no receiver information at all, not as a two-segment chain - a last-segment rule alone would miss it. These four rules additionally set `matchAsBareIdentifier`, so they fire on the bare identifier form too (`save_png(p)` with no receiver whatsoever also elicits). This is safe specifically because the four names are distinctive image-write verbs; it is not applied to `take_over_path`, `save_encrypted`, or `save_encrypted_pass` above, whose idiomatic forms are plain `receiver.method(...)` with no intervening call, so the ordinary last-segment match already reaches them without widening to a receiver-less match.
 
 ### Network
 
@@ -141,18 +141,18 @@ That anchor is also the only rule that reaches `cf.load(p)`. The Tier 1 `ConfigF
 
 ### Generic non-literal dispatch (any receiver)
 
-The named-receiver rules above (`Object.call`, `OS.call`, `Engine.call`, `ClassDB.call`, `ProjectSettings.call`) only fire on those five singletons. `.call`/`.callv` with a non-literal method name on _any other receiver_ — `some_node.call(method_var)` — is still dynamic dispatch that bypasses static analysis, so it's flagged too, matched on the last segment of the member chain rather than a fixed prefix.
+The named-receiver rules above (`Object.call`, `OS.call`, `Engine.call`, `ClassDB.call`, `ProjectSettings.call`) only fire on those five singletons. `.call`/`.callv` with a non-literal method name on _any other receiver_ - `some_node.call(method_var)` - is still dynamic dispatch that bypasses static analysis, so it's flagged too, matched on the last segment of the member chain rather than a fixed prefix.
 
 | Primitive                           | Rule ID                          |
 | ----------------------------------- | -------------------------------- |
 | `<any receiver>.call(non_literal)`  | `tier2.generic.call.nonliteral`  |
 | `<any receiver>.callv(non_literal)` | `tier2.generic.callv.nonliteral` |
 
-This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)`, and hard-blocking it would train reflexive elicitation approval. `Object.call(var)` (and the other four named receivers) still hard-blocks via the more specific Tier 1 rule — the generic rule only fires when none of the named rules already matched.
+This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)`, and hard-blocking it would train reflexive elicitation approval. `Object.call(var)` (and the other four named receivers) still hard-blocks via the more specific Tier 1 rule - the generic rule only fires when none of the named rules already matched.
 
 ---
 
-## Tier 3 — Warn
+## Tier 3 - Warn
 
 Executes. Matched rules attach to a `warnings: string[]` array on the success response.
 
@@ -170,30 +170,30 @@ Literal `load`/`preload`/`call` are extremely common in real game scripts; gatin
 
 ## Bridge authentication
 
-The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-formed frame from any local process that found the port — a `run_script` payload sent directly to the bridge would bypass the static-analysis gate entirely, since the gate runs on the Node side before a command is ever sent. Every request frame now carries a per-session token, and the bridge rejects any frame whose token doesn't match.
+The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-formed frame from any local process that found the port - a `run_script` payload sent directly to the bridge would bypass the static-analysis gate entirely, since the gate runs on the Node side before a command is ever sent. Every request frame now carries a per-session token, and the bridge rejects any frame whose token doesn't match.
 
-**What this buys, stated honestly:** the token stops the _unauthenticated drive-by_ — a process that finds the open port and blasts commands without knowing the secret. It does **not** stop a same-user process that reads the token from the environment (`/proc/<pid>/environ` on Linux, `OpenProcess` on Windows) or from the injected bridge script on disk. That's an accepted limitation of a same-machine, same-user token, not a gap we're hiding.
+**What this buys, stated honestly:** the token stops the _unauthenticated drive-by_ - a process that finds the open port and blasts commands without knowing the secret. It does **not** stop a same-user process that reads the token from the environment (`/proc/<pid>/environ` on Linux, `OpenProcess` on Windows) or from the injected bridge script on disk. That's an accepted limitation of a same-machine, same-user token, not a gap we're hiding.
 
 Token delivery differs by session mode, because the channel available differs:
 
 - **Spawned (`run_project`)** — Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode — the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
 - **Attached (`attach_project`)** — Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
 
-A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all — the standalone script run outside the MCP server (manual debugging, `validate`).
+A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all - the standalone script run outside the MCP server (manual debugging, `validate`).
 
 ---
 
 ## The profiler debug channel
 
-`run_project({ profiling: true })` opens a **second** local TCP channel, and it is not the bridge. Before spawning Godot the server binds a listener on `127.0.0.1:0` and passes `--remote-debug tcp://127.0.0.1:<port>` on the command line, so the engine dials back into it and speaks Godot's own remote-debugger protocol. The measurements are the stock editor ones — nothing is injected into the project — but the channel's properties differ from the bridge's in one way that matters.
+`run_project({ profiling: true })` opens a **second** local TCP channel, and it is not the bridge. Before spawning Godot the server binds a listener on `127.0.0.1:0` and passes `--remote-debug tcp://127.0.0.1:<port>` on the command line, so the engine dials back into it and speaks Godot's own remote-debugger protocol. The measurements are the stock editor ones - nothing is injected into the project - but the channel's properties differ from the bridge's in one way that matters.
 
 **This channel has no token.** The bridge authenticates every frame because both ends are ours. Godot defines the debugger protocol, there is no field to carry a secret, and the engine would not check one. The listener therefore accepts the first connection that arrives and destroys every later one. That is the same trust assumption the bridge token already concedes it cannot exceed: a process able to scan the local TCP table and win the race between bind and the engine's dial-back can equally read `MCP_SESSION_TOKEN` out of the spawned engine's environment and drive the _authenticated_ bridge, which is strictly more powerful. The missing token here does not open a door that a same-user process did not already have.
 
-**What a hostile peer could do, and where it stops.** It is confined to the profiler. The receiver acts on five message names — `set_pid`, `debug_enter`, `servers:function_signature`, `servers:profile_frame` and `servers:profile_total` — and drops everything else. None of them reaches script execution, the filesystem, process control, or any other tool's behaviour; the profiler's state is read only by the three profiling tools. The realistic ceiling is fabricated profiling numbers and denial of profiling for the rest of the session. A peer that connects but never speaks the protocol surfaces as a `profile_timeout` within five seconds, and the engine's own "unable to connect" lands in `get_debug_output`. A peer that _does_ speak it can return plausible-looking measurements with no signal. Treat profiler output as measurement data, not as a trusted assertion about your project.
+**What a hostile peer could do, and where it stops.** It is confined to the profiler. The receiver acts on five message names - `set_pid`, `debug_enter`, `servers:function_signature`, `servers:profile_frame` and `servers:profile_total` - and drops everything else. None of them reaches script execution, the filesystem, process control, or any other tool's behaviour; the profiler's state is read only by the three profiling tools. The realistic ceiling is fabricated profiling numbers and denial of profiling for the rest of the session. A peer that connects but never speaks the protocol surfaces as a `profile_timeout` within five seconds, and the engine's own "unable to connect" lands in `get_debug_output`. A peer that _does_ speak it can return plausible-looking measurements with no signal. Treat profiler output as measurement data, not as a trusted assertion about your project.
 
-**Errors still do not pause the game.** A connected debugger normally halts the engine on a script error or `breakpoint`. Every `debug_enter` is answered immediately with `continue`, so profiling mode preserves the behaviour documented under "Runtime errors and `breakpoint`" — the engine runs past errors, `SCRIPT ERROR` output keeps reaching stderr, and `breakpoint` remains a no-op. Verified empirically against a project with a deliberate runtime error: stderr was byte-identical with and without `--remote-debug`, and the game ran on past the fault.
+**Errors still do not pause the game.** A connected debugger normally halts the engine on a script error or `breakpoint`. Every `debug_enter` is answered immediately with `continue`, so profiling mode preserves the behaviour documented under "Runtime errors and `breakpoint`" - the engine runs past errors, `SCRIPT ERROR` output keeps reaching stderr, and `breakpoint` remains a no-op. Verified empirically against a project with a deliberate runtime error: stderr was byte-identical with and without `--remote-debug`, and the game ran on past the fault.
 
-**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch — it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
+**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch - it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
 
 **Not covered by strict mode.** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate (both skipped when `GODOT_MCP_DISABLE_SECURITY` is set), but none of the three flags separately refuses to open the debugger port.
 
@@ -206,13 +206,15 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 - Every Tier 2 match becomes Tier 1 (hard reject). No elicitation prompt is sent.
 - `run_project` becomes a hard reject if any autoload script or the launched scene's attached scripts contain a Tier 1 primitive.
 
+This promotion has a consequence worth naming explicitly: the `tier2.config.ConfigFile` class anchor (see "Tier 2 - Elicit" above) matches on `ConfigFile.new()` because none of `ConfigFile`'s own instance methods can be matched safely on their own, and that anchor fires whether the following code path reads or writes. Under strict mode, a pure config **read** - `var cf = ConfigFile.new(); cf.load(path)` and nothing else - hard-blocks exactly like a `save`, since the gate never distinguishes them. This is existing, intended behavior, not a bug to fix: narrowing the anchor to only writes would reopen the hole `cf.load(p)` already can't be matched any other way (see the class-anchor note above).
+
 Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on upgrade.
 
 ---
 
 ## Disabling elicitation
 
-`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients — notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) — advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
+`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients - notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) - advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
 
 When enabled, the interactive confirmation is skipped and treated as accepted (**fail-open**):
 
@@ -222,13 +224,13 @@ When enabled, the interactive confirmation is skipped and treated as accepted (*
 
 **Strict mode takes precedence.** `GODOT_MCP_STRICT` mandates explicit confirmation, so when both are set, `GODOT_MCP_DISABLE_ELICITATION` is ignored (a startup log records the override). The three states form one axis: default = ask, `DISABLE_ELICITATION` = proceed unprompted, `STRICT` = hard-reject anything that would ask.
 
-Only enable this when you trust the project and the agent driving it — it removes the confirmation step, the same tradeoff as an MCP client's bypass-permissions mode.
+Only enable this when you trust the project and the agent driving it - it removes the confirmation step, the same tradeoff as an MCP client's bypass-permissions mode.
 
 ---
 
 ## Disabling the entire gate
 
-`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar — for both handlers.
+`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar - for both handlers.
 
 Specifically, this flag skips:
 
@@ -252,7 +254,7 @@ This exists for experienced users who do not need the gate: developers who accep
 
 ## `run_project` pre-flight
 
-**Stated plainly: in default mode, `run_project` blocks nothing.** The project launches — autoloads run with full privileges immediately — and the scan below only _warns_. Only strict mode blocks.
+**Stated plainly: in default mode, `run_project` blocks nothing.** The project launches - autoloads run with full privileges immediately - and the scan below only _warns_. Only strict mode blocks.
 
 `run_project` runs the same scanner over:
 
@@ -264,7 +266,7 @@ Findings are aggregated and:
 - **Default mode**: surfaced as `warnings: string[]` on the success response. The project still launches.
 - **Strict mode**: any Tier 1 finding hard-rejects before launch.
 
-Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides — see "What this does NOT do."
+Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides - see "What this does NOT do."
 
 ### Session-confirmation gate
 
@@ -308,9 +310,9 @@ Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
 Audit failure (disk full, permission denied) is logged via `logDebug` and never blocks the call.
 
-`run_project` does NOT emit per-call sidecars — findings flow into the response `warnings` array only.
+`run_project` does NOT emit per-call sidecars - findings flow into the response `warnings` array only.
 
-No sidecar is written at all when `GODOT_MCP_DISABLE_SECURITY` is set (see "Disabling the entire gate") — the gate that would have produced the decision never ran.
+No sidecar is written at all when `GODOT_MCP_DISABLE_SECURITY` is set (see "Disabling the entire gate") - the gate that would have produced the decision never ran.
 
 ---
 

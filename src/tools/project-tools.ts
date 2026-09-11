@@ -57,7 +57,7 @@ export const projectToolDefinitions = [
         projectPath: {
           type: 'string',
           description:
-            'Path to the Godot project directory (optional — omit to get Godot version only)',
+            'Path to the Godot project directory (optional - omit to get Godot version only)',
         },
       },
       required: [],
@@ -89,7 +89,7 @@ export const projectToolDefinitions = [
   {
     name: 'search_project',
     description:
-      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text) and truncated:true when maxResults was hit — consider raising it.',
+      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text) and truncated:true when maxResults was hit - consider raising it.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',

@@ -1,8 +1,10 @@
 /**
  * Gate for tests that require a real Godot binary.
  *
- * CI does not have Godot installed. Locally, set `GODOT_PATH` to enable
- * these tests. Use `itGodot` exactly like `it`:
+ * CI does install Godot, in the dedicated `godot-integration` matrix job
+ * (see `.github/workflows/ci.yml`), which sets `GODOT_PATH` before running
+ * the suite. Locally, set `GODOT_PATH` yourself to enable these tests. Use
+ * `itGodot` exactly like `it`:
  *
  *     import { itGodot } from '../helpers/godot-skip.js';
  *     itGodot('runs a real headless Godot operation', async () => { ... });

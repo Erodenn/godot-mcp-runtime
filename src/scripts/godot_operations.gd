@@ -436,7 +436,7 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	# A texture without a resource_path is a runtime-only object — PackedScene.pack()
 	# cannot serialize it, so the assignment would silently vanish on save.
 	if texture.resource_path == "":
-		return {"ok": false, "error": "Texture has no resource_path — likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+		return {"ok": false, "error": "Texture has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
 	sprite_node.texture = texture
 	return {"ok": true, "error": ""}
 

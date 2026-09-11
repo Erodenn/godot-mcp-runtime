@@ -23,7 +23,7 @@ export const sceneToolDefinitions = [
   {
     name: 'create_scene',
     description:
-      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D — pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D - pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -57,7 +57,7 @@ export const sceneToolDefinitions = [
         nodeType: {
           type: 'string',
           description:
-            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label"), or a project-relative scene path (.tscn or .scn, e.g. "scenes/enemy.tscn") to instance an existing scene as a child — instanced children serialize as `instance=ExtResource(...)` on save',
+            'Godot node class to instantiate (e.g. "Sprite2D", "CollisionShape2D", "Label"), or a project-relative scene path (.tscn or .scn, e.g. "scenes/enemy.tscn") to instance an existing scene as a child - instanced children serialize as `instance=ExtResource(...)` on save',
         },
         nodeName: {
           type: 'string',
@@ -126,7 +126,7 @@ export const sceneToolDefinitions = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save — only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -168,7 +168,7 @@ export const sceneToolDefinitions = [
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes — runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes - runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -217,23 +217,23 @@ export const sceneToolDefinitions = [
               position: {
                 type: 'object',
                 description:
-                  '[add_node] Position — {"x","y"} for 2D nodes, {"x","y","z"} for 3D. Shorthand for properties.position',
+                  '[add_node] Position - {"x","y"} for 2D nodes, {"x","y","z"} for 3D. Shorthand for properties.position',
               },
               rotation: {
                 type: 'number',
-                description: '[add_node] Rotation in radians — shorthand for properties.rotation',
+                description: '[add_node] Rotation in radians - shorthand for properties.rotation',
               },
               scale: {
                 type: 'object',
-                description: '[add_node] Vector2 scale — shorthand for properties.scale',
+                description: '[add_node] Vector2 scale - shorthand for properties.scale',
               },
               visible: {
                 type: 'boolean',
-                description: '[add_node] Visibility — shorthand for properties.visible',
+                description: '[add_node] Visibility - shorthand for properties.visible',
               },
               modulate: {
                 type: 'object',
-                description: '[add_node] Color modulation — shorthand for properties.modulate',
+                description: '[add_node] Color modulation - shorthand for properties.modulate',
               },
               nodePath: { type: 'string', description: '[load_sprite] Target node path' },
               texturePath: {

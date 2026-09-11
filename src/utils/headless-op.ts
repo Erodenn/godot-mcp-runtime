@@ -161,7 +161,7 @@ export async function executeSceneOp(
           createErrorResponse(
             `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
             [
-              'This indicates a bug in godot_operations.gd — the operation should emit a JSON payload matching its outputSchema',
+              'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
               'Check get_debug_output for the raw stdout and stderr',
             ],
           ),

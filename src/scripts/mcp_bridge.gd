@@ -682,7 +682,7 @@ func _close_all_peers() -> void:
 
 func _exit_tree() -> void:
 	if not _shutting_down:
-		push_warning("McpBridge: removed from tree without shutdown — bridge connection will be lost")
+		push_warning("McpBridge: removed from tree without shutdown - bridge connection will be lost")
 	_close_all_peers()
 	if tcp_server != null:
 		tcp_server.stop()

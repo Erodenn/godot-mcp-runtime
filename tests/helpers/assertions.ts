@@ -1,10 +1,10 @@
 /**
  * Shared assertion helpers for handler tests.
  *
- * After Phase 3 commit 4, handlers return `Result<ToolSuccessPayload, ToolResponse>`
- * instead of `ToolResponse` directly — the dispatch edge in `src/dispatch.ts`
- * maps the Result back to the MCP wire envelope. These helpers accept either
- * shape so tests written before or after the flip stay readable.
+ * Handlers return `Result<ToolSuccessPayload, ToolResponse>` instead of
+ * `ToolResponse` directly - the dispatch edge in `src/dispatch.ts` maps the
+ * Result back to the MCP wire envelope. These helpers accept either shape so
+ * tests written before or after that change stay readable.
  *
  * `hasError` is the canonical predicate. `unwrap` returns the underlying
  * envelope (the success `value` or the error `error`) so test code that needs
