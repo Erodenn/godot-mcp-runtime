@@ -85,16 +85,42 @@ The server pauses and sends an `elicitation/create` request to the client. User 
 
 ### Filesystem writes
 
-| Primitive                    | Rule ID                              |
-| ---------------------------- | ------------------------------------ |
-| `FileAccess.open` (any mode) | `tier2.fs.FileAccess.open`           |
-| `DirAccess.remove`           | `tier2.fs.DirAccess.remove`          |
-| `DirAccess.remove_absolute`  | `tier2.fs.DirAccess.remove_absolute` |
-| `DirAccess.copy`             | `tier2.fs.DirAccess.copy`            |
-| `DirAccess.rename`           | `tier2.fs.DirAccess.rename`          |
-| `DirAccess.create_link`      | `tier2.fs.DirAccess.create_link`     |
+| Primitive                                                | Rule ID                                          |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| `FileAccess.open` (any mode)                             | `tier2.fs.FileAccess.open`                       |
+| `FileAccess.open_encrypted`                              | `tier2.fs.FileAccess.open_encrypted`             |
+| `FileAccess.open_encrypted_with_pass`                    | `tier2.fs.FileAccess.open_encrypted_with_pass`   |
+| `FileAccess.open_compressed`                             | `tier2.fs.FileAccess.open_compressed`            |
+| `FileAccess.create_temp`                                 | `tier2.fs.FileAccess.create_temp`                |
+| `FileAccess.set_read_only_attribute`                     | `tier2.fs.FileAccess.set_read_only_attribute`    |
+| `FileAccess.set_hidden_attribute`                        | `tier2.fs.FileAccess.set_hidden_attribute`       |
+| `DirAccess.remove`                                       | `tier2.fs.DirAccess.remove`                      |
+| `DirAccess.remove_absolute`                              | `tier2.fs.DirAccess.remove_absolute`             |
+| `DirAccess.copy`                                         | `tier2.fs.DirAccess.copy`                        |
+| `DirAccess.rename`                                       | `tier2.fs.DirAccess.rename`                      |
+| `DirAccess.create_link`                                  | `tier2.fs.DirAccess.create_link`                 |
+| `DirAccess.make_dir` (instance)                          | `tier2.fs.DirAccess.make_dir`                    |
+| `DirAccess.make_dir_absolute` (static)                   | `tier2.fs.DirAccess.make_dir_absolute`           |
+| `DirAccess.make_dir_recursive` (instance)                | `tier2.fs.DirAccess.make_dir_recursive`          |
+| `DirAccess.make_dir_recursive_absolute` (static)         | `tier2.fs.DirAccess.make_dir_recursive_absolute` |
+| `OS.move_to_trash`                                       | `tier2.fs.OS.move_to_trash`                      |
+| `ResourceSaver.save` (either arity)                      | `tier2.resource_saver.save`                      |
+| `ConfigFile` (any usage — see note below)                | `tier2.config.ConfigFile`                        |
+| `ConfigFile.save_encrypted`                              | `tier2.config.ConfigFile.save_encrypted`         |
+| `ConfigFile.save_encrypted_pass`                         | `tier2.config.ConfigFile.save_encrypted_pass`    |
+| `Image.save_png` / `save_jpg` / `save_webp` / `save_exr` | `tier2.image.save_png` etc.                      |
+| `Resource.take_over_path`                                | `tier2.resource.take_over_path`                  |
+| `ZIPPacker` (any usage)                                  | `tier2.archive.ZIPPacker`                        |
+| `PCKPacker` (any usage)                                  | `tier2.archive.PCKPacker`                        |
+| `ResourceUID.add_id` / `set_id` / `remove_id`            | `tier2.uid.ResourceUID.add_id` etc.              |
 
 `FileAccess.open` is conservatively flagged uniformly. The READ vs WRITE distinction lives in the second argument; we accept the false-positive cost on read-only opens to keep the rule simple. Confirm "READ mode" and accept the elicitation if your script is reading.
+
+`DirAccess.make_dir` and `make_dir_recursive` are instance methods (`dir.make_dir(path)`) — like the `ConfigFile.load` fix described under "Tier 1 — Hard block" below, a `DirAccess.make_dir` chain-prefix rule would never fire on that call form, so these two match on their last segment instead, on any receiver. Their `_absolute` siblings are static (`DirAccess.make_dir_absolute(path)`) and keep the ordinary two-segment prefix shape.
+
+`ConfigFile`'s own instance methods (`save`, `save_encrypted`, `save_encrypted_pass`) are called the same way — `cf.save(p)`, never `ConfigFile.save(p)`. `save_encrypted` and `save_encrypted_pass` are distinctive enough names to match on their last segment directly. Plain `save` is not — `some_manager.save()` is common, ordinary game code, and a last-segment rule on bare `save` would hard-block it under strict mode. Instead, the rule anchors on the `ConfigFile` class reference itself (typically `ConfigFile.new()`) — the same shape `ZIPPacker` and `PCKPacker` use below — since reaching that class at all is the signal, when none of its generic method names can be matched safely on their own.
+
+`Image.save_png` / `save_jpg` / `save_webp` / `save_exr` go one step further: their idiomatic call form is `tex.get_image().save_png(p)`, where `get_image()` is itself a call sitting between the receiver and the write method. The tokenizer never chains across a call (see `src/utils/gdscript-scanner.ts`), so `save_png` surfaces as a bare identifier with no receiver information at all, not as a two-segment chain — a last-segment rule alone would miss it. These four rules additionally set `matchAsBareIdentifier`, so they fire on the bare identifier form too (`save_png(p)` with no receiver whatsoever also elicits). This is safe specifically because the four names are distinctive image-write verbs; it is not applied to `take_over_path`, `save_encrypted`, or `save_encrypted_pass` above, whose AC-specified idiomatic forms are plain `receiver.method(...)` with no intervening call, so the ordinary last-segment match already reaches them without widening to a receiver-less match.
 
 ### Network
 
@@ -265,6 +291,7 @@ Audit failure (disk full, permission denied) is logged via `logDebug` and never 
 This section exists because the doctrine at the top of this document demands it: a best-effort filter that hides its own holes is worse than one that documents them.
 
 - **No runtime sandbox.** The gate is static-analysis only. Bridge authentication is a per-session token, not process isolation.
+- **Tier 2 degrades to advisory whenever the client cannot service elicitation.** Elicitation is a real MCP capability, not every client implements it, and some that advertise it auto-cancel every prompt (see "Disabling elicitation"). When elicitation isn't actually serviced — the client lacks the capability, or `GODOT_MCP_DISABLE_ELICITATION` is set to work around an auto-cancelling one — a Tier 2 finding stops being a gate and becomes a warning: the call proceeds, and the finding is recorded (`warnings`, `elicit_denied`/`elicit_bypassed` in the audit sidecar) rather than blocked. Only Tier 1 stays a hard block regardless of elicitation support. `GODOT_MCP_STRICT` is the way to keep Tier 2 load-bearing on such a client — it promotes every Tier 2 match to Tier 1 before elicitation would otherwise be attempted.
 - **The profiler debug channel is unauthenticated.** Godot defines the remote-debugger protocol and it has no place for a token, so the listener accepts the first connection that reaches it. A same-user process that wins that race can feed the server fabricated profiling data. See "The profiler debug channel" — it cannot reach anything beyond the profiler, and it is a strictly weaker position than reading the bridge token from the engine's environment.
 - **Loopback is not a boundary in every host configuration.** Both listeners bind `127.0.0.1` and are unreachable from the network, but a Linux process under WSL2 in mirrored networking mode shares the Windows host's loopback. The bridge is token-protected there; the profiler channel is not.
 - **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.

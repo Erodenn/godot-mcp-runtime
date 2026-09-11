@@ -78,7 +78,17 @@ interface PolicyRule {
   /**
    * Optional: also fire when the chain appears as a bare identifier (e.g.
    * `load(...)` rather than `Foo.load(...)`). Used for the global functions
-   * `load`, `preload`, `str_to_var`, `bytes_to_var_with_objects`.
+   * `load`, `preload`, `str_to_var`, `bytes_to_var_with_objects` — and,
+   * combined with `matchLastSegment` below, for an instance-method
+   * primitive whose receiver expression contains a call
+   * (`tex.get_image().save_png(p)`), which the scanner cannot chain at all
+   * (a call always breaks chain-building — see gdscript-scanner.ts), so the
+   * method surfaces as a bare `identifier` token with zero receiver
+   * context. Only set this on a rule whose bare method name is distinctive
+   * enough to be safe with no receiver information whatsoever — the same
+   * bar `matchLastSegment` alone already applies, just stricter, since a
+   * bare-identifier match can't even be narrowed by "is this a two-segment
+   * chain."
    */
   matchAsBareIdentifier?: boolean;
   /**
@@ -87,6 +97,18 @@ interface PolicyRule {
    * Used for the generic non-literal `.call`/`.callv` rule, which must fire
    * on any receiver (`some_node.call(var)`), not just the named singletons
    * that already have dedicated prefix rules above it in the table.
+   *
+   * May be combined with `matchAsBareIdentifier` on the same rule: the two
+   * flags are independent and cover two different token shapes for the
+   * same underlying primitive. `matchLastSegment` alone covers
+   * `receiver.method(...)` (a genuine two-segment-or-longer memberChain).
+   * Adding `matchAsBareIdentifier` additionally covers `method(...)` with
+   * no receiver info at all (a bare identifier) — the case produced when a
+   * call sits between the real receiver and the method
+   * (`foo().method(...)`), which the tokenizer cannot chain across. See
+   * `tokenMatchesRule`: when a `matchLastSegment` rule's token isn't a
+   * qualifying memberChain, it falls through to the bare-identifier check
+   * only if the rule opted into `matchAsBareIdentifier` too.
    */
   matchLastSegment?: boolean;
   reason: string;
@@ -343,13 +365,12 @@ export const policyRules: readonly PolicyRule[] = [
   },
 
   // ---- Tier 1: ConfigFile load family ----
-  {
-    id: 'tier1.config.ConfigFile.load',
-    tier: 1,
-    chain: ['ConfigFile', 'load'],
-    reason: 'ConfigFile.load can pull in attacker-controlled config',
-    solutions: ['Load configuration from a known-safe path via FileAccess.READ'],
-  },
+  // NOTE: `ConfigFile.load` itself moved further down in this table (search
+  // "ConfigFile.load prefix-hole fix") — its idiomatic call form is an
+  // instance method (`var cf := ConfigFile.new(); cf.load(p)`), never the
+  // static-looking `ConfigFile.load(p)` a two-segment chain prefix requires,
+  // so it now uses matchLastSegment instead and had to move past every
+  // ResourceLoader.load rule to preserve first-match-wins ordering.
   {
     id: 'tier1.config.ConfigFile.load_encrypted',
     tier: 1,
@@ -640,6 +661,239 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the OS.alert call if running headlessly'],
   },
 
+  // ---- Tier 1: ConfigFile.load prefix-hole fix (D5) ----
+  // Moved here (after every ResourceLoader.load rule above, both the Tier 1
+  // non-literal and Tier 3 literal forms) so that a `ResourceLoader.load`
+  // memberChain keeps matching its own more specific rule first — first
+  // match wins per token, in table order. See the shape rationale where
+  // `tier1.config.ConfigFile.load_encrypted` used to sit, above.
+  {
+    id: 'tier1.config.ConfigFile.load',
+    tier: 1,
+    chain: ['load'],
+    matchLastSegment: true,
+    reason: 'ConfigFile.load can pull in attacker-controlled config',
+    solutions: ['Load configuration from a known-safe path via FileAccess.READ'],
+  },
+
+  // ---- Tier 2: write-primitive sweep (AC1.1, harness Phase 1 / handoff PR 1) ----
+  // Every rule below is Tier 2 per D3 (strict mode promotes each to Tier 1
+  // for free via the evaluator's existing promotion step). Scope is
+  // runtime-reachable classes only (D4) — no EditorInterface / editor-only
+  // surface. Shape choice per D1: matchLastSegment for distinctive method
+  // names that appear on arbitrary receivers (an instance-method primitive
+  // whose receiver is a local variable, never the literal class name — the
+  // exact bug this sweep is closing elsewhere); a two-segment chain prefix
+  // for methods that are singletons or static (so `ClassName.method(...)`
+  // really is the idiomatic call form); a single-segment class anchor for a
+  // class whose own generic-named instance methods (bare `save`, etc.) are
+  // unreachable by a token-level scanner, so the class reference itself
+  // (typically `ClassName.new()`) is the signal instead. No bare `save` or
+  // `call`-style last-segment rule is added — see the negative tests in
+  // `run-script-policy.test.ts` "write-primitive sweep negatives".
+  {
+    id: 'tier2.resource_saver.save',
+    tier: 2,
+    chain: ['ResourceSaver', 'save'],
+    reason: 'ResourceSaver.save writes a resource to disk (with or without an explicit path)',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.config.ConfigFile',
+    tier: 2,
+    chain: ['ConfigFile'],
+    reason:
+      'ConfigFile instances can write arbitrary config data via save/save_encrypted/save_encrypted_pass, none of which carry a distinctive-enough method name to match on their own',
+    solutions: ['Confirm the ConfigFile usage only reads, or that the write is intentional'],
+  },
+  {
+    id: 'tier2.config.ConfigFile.save_encrypted',
+    tier: 2,
+    chain: ['save_encrypted'],
+    matchLastSegment: true,
+    reason: 'ConfigFile.save_encrypted writes an encrypted config file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.config.ConfigFile.save_encrypted_pass',
+    tier: 2,
+    chain: ['save_encrypted_pass'],
+    matchLastSegment: true,
+    reason: 'ConfigFile.save_encrypted_pass writes an encrypted config file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  // The four Image writers below carry matchAsBareIdentifier in addition to
+  // matchLastSegment: AC1.1's idiomatic form is `tex.get_image().save_png(p)`
+  // — a call (`get_image()`) sits between the receiver and the write method,
+  // which the scanner cannot chain across, so `save_png` etc. surface as a
+  // bare identifier with zero receiver context (see tokenMatchesRule's
+  // matchLastSegment fallthrough). Safe to match with no receiver at all
+  // because these names are distinctive image-write verbs, not a generic
+  // name like `save` that appears on unrelated objects (the reasoning D1
+  // used to reject a bare `save` rule applies equally here and is why
+  // `take_over_path`, `save_encrypted`, and `save_encrypted_pass` above do
+  // NOT get this flag — their AC1.1 idiomatic forms are plain
+  // `receiver.method(...)` with no intervening call, so matchLastSegment
+  // alone already reaches them).
+  {
+    id: 'tier2.image.save_png',
+    tier: 2,
+    chain: ['save_png'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
+    reason: 'Image.save_png writes an image file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.image.save_jpg',
+    tier: 2,
+    chain: ['save_jpg'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
+    reason: 'Image.save_jpg writes an image file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.image.save_webp',
+    tier: 2,
+    chain: ['save_webp'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
+    reason: 'Image.save_webp writes an image file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.image.save_exr',
+    tier: 2,
+    chain: ['save_exr'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
+    reason: 'Image.save_exr writes an image file to disk',
+    solutions: ['Confirm the write is intentional'],
+  },
+  {
+    id: 'tier2.resource.take_over_path',
+    tier: 2,
+    chain: ['take_over_path'],
+    matchLastSegment: true,
+    reason: "Resource.take_over_path rewrites the resource's on-disk path binding",
+    solutions: ['Confirm the path reassignment is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.open_encrypted',
+    tier: 2,
+    chain: ['FileAccess', 'open_encrypted'],
+    reason: 'FileAccess.open_encrypted may return a writable encrypted file handle',
+    solutions: ['Confirm the mode flag and that the write is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.open_encrypted_with_pass',
+    tier: 2,
+    chain: ['FileAccess', 'open_encrypted_with_pass'],
+    reason: 'FileAccess.open_encrypted_with_pass may return a writable encrypted file handle',
+    solutions: ['Confirm the mode flag and that the write is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.open_compressed',
+    tier: 2,
+    chain: ['FileAccess', 'open_compressed'],
+    reason: 'FileAccess.open_compressed may return a writable compressed file handle',
+    solutions: ['Confirm the mode flag and that the write is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.create_temp',
+    tier: 2,
+    chain: ['FileAccess', 'create_temp'],
+    reason: 'FileAccess.create_temp writes a new temporary file to disk',
+    solutions: ['Confirm the temp-file write is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.set_read_only_attribute',
+    tier: 2,
+    chain: ['FileAccess', 'set_read_only_attribute'],
+    reason: 'FileAccess.set_read_only_attribute mutates a file attribute on disk',
+    solutions: ['Confirm the attribute change is intentional'],
+  },
+  {
+    id: 'tier2.fs.FileAccess.set_hidden_attribute',
+    tier: 2,
+    chain: ['FileAccess', 'set_hidden_attribute'],
+    reason: 'FileAccess.set_hidden_attribute mutates a file attribute on disk',
+    solutions: ['Confirm the attribute change is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.make_dir',
+    tier: 2,
+    chain: ['make_dir'],
+    matchLastSegment: true,
+    reason: 'DirAccess.make_dir creates a directory on disk',
+    solutions: ['Confirm the directory creation is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.make_dir_absolute',
+    tier: 2,
+    chain: ['DirAccess', 'make_dir_absolute'],
+    reason: 'DirAccess.make_dir_absolute creates a directory on disk',
+    solutions: ['Confirm the directory creation is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.make_dir_recursive',
+    tier: 2,
+    chain: ['make_dir_recursive'],
+    matchLastSegment: true,
+    reason: 'DirAccess.make_dir_recursive creates a directory tree on disk',
+    solutions: ['Confirm the directory creation is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.make_dir_recursive_absolute',
+    tier: 2,
+    chain: ['DirAccess', 'make_dir_recursive_absolute'],
+    reason: 'DirAccess.make_dir_recursive_absolute creates a directory tree on disk',
+    solutions: ['Confirm the directory creation is intentional'],
+  },
+  {
+    id: 'tier2.fs.OS.move_to_trash',
+    tier: 2,
+    chain: ['OS', 'move_to_trash'],
+    reason: 'OS.move_to_trash deletes (moves) a file or directory',
+    solutions: ['Confirm the deletion is intentional'],
+  },
+  {
+    id: 'tier2.archive.ZIPPacker',
+    tier: 2,
+    chain: ['ZIPPacker'],
+    reason: 'ZIPPacker writes an arbitrary ZIP archive to disk',
+    solutions: ['Confirm the archive write is intentional'],
+  },
+  {
+    id: 'tier2.archive.PCKPacker',
+    tier: 2,
+    chain: ['PCKPacker'],
+    reason: 'PCKPacker writes an arbitrary Godot PCK archive to disk',
+    solutions: ['Confirm the archive write is intentional'],
+  },
+  {
+    id: 'tier2.uid.ResourceUID.add_id',
+    tier: 2,
+    chain: ['ResourceUID', 'add_id'],
+    reason: 'ResourceUID.add_id mutates the project-wide UID registry',
+    solutions: ['Confirm the UID registration is intentional'],
+  },
+  {
+    id: 'tier2.uid.ResourceUID.set_id',
+    tier: 2,
+    chain: ['ResourceUID', 'set_id'],
+    reason: 'ResourceUID.set_id mutates the project-wide UID registry',
+    solutions: ['Confirm the UID reassignment is intentional'],
+  },
+  {
+    id: 'tier2.uid.ResourceUID.remove_id',
+    tier: 2,
+    chain: ['ResourceUID', 'remove_id'],
+    reason: 'ResourceUID.remove_id mutates the project-wide UID registry',
+    solutions: ['Confirm the UID removal is intentional'],
+  },
+
   // ---- Tier 2: generic non-literal .call/.callv (any receiver) ----
   // Placed after every named-receiver .call/.callv rule above (per-token
   // first-match-wins, so Object.call(var) still fires the more specific
@@ -690,13 +944,37 @@ function indexOfOpenParen(tokens: readonly Token[], i: number): number {
   return -1;
 }
 
+/**
+ * `matchAsBareIdentifier`, evaluated on its own regardless of any other flag
+ * on the rule: does this token qualify as the rule's bare identifier form?
+ * Shared by the plain bare-identifier path and the `matchLastSegment`
+ * fallthrough below, so both stay in sync by construction.
+ */
+function matchesBareIdentifier(tok: Token, rule: PolicyRule): boolean {
+  return (
+    !!rule.matchAsBareIdentifier &&
+    rule.chain.length === 1 &&
+    tok.kind === 'identifier' &&
+    tok.text === rule.chain[0]
+  );
+}
+
 function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
   if (rule.matchLastSegment) {
-    if (tok.kind !== 'memberChain' || !tok.chain || tok.chain.length < 2) return false;
-    return tok.chain[tok.chain.length - 1] === rule.chain[0];
+    if (tok.kind === 'memberChain' && tok.chain && tok.chain.length >= 2) {
+      return tok.chain[tok.chain.length - 1] === rule.chain[0];
+    }
+    // Not a qualifying memberChain — e.g. a call broke the chain, leaving
+    // the method as a bare identifier (`tex.get_image().save_png(p)`
+    // tokenizes `save_png` as `identifier`, not `memberChain`; see
+    // gdscript-scanner.ts). Only rules that opted in via
+    // `matchAsBareIdentifier` get a second chance here; a rule that sets
+    // only `matchLastSegment` returns false, unchanged from before this
+    // fallthrough existed.
+    return matchesBareIdentifier(tok, rule);
   }
-  if (rule.matchAsBareIdentifier && rule.chain.length === 1 && tok.kind === 'identifier') {
-    return tok.text === rule.chain[0];
+  if (matchesBareIdentifier(tok, rule)) {
+    return true;
   }
   if (rule.chain.length === 1) {
     // Single-segment "chain" applied to a type reference like `Expression` or
