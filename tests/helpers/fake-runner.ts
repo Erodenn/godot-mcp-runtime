@@ -62,6 +62,11 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
 
   const fake = {
     calls,
+    // No live runtime session by default -- tests that need one (e.g. the
+    // executeSceneOp guard tests) set these fields directly on `asRunner`.
+    activeSessionMode: null as 'spawned' | 'attached' | null,
+    activeProjectPath: null as string | null,
+    activeProcess: null as { hasExited: boolean } | null,
     async executeOperation(
       operation: string,
       params: OperationParams,
@@ -77,6 +82,15 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     },
     async getVersion(): Promise<string> {
       return godotVersion;
+    },
+    // Mirrors the real GodotRunner.hasActiveRuntimeSession() predicate so
+    // guard tests exercise the same liveness logic production code does.
+    hasActiveRuntimeSession(): boolean {
+      if (!fake.activeSessionMode || !fake.activeProjectPath) return false;
+      if (fake.activeSessionMode === 'spawned') {
+        return fake.activeProcess !== null && !fake.activeProcess.hasExited;
+      }
+      return true;
     },
   };
 

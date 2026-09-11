@@ -28,7 +28,7 @@ export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root — that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message).',
+      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root — that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -66,7 +66,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null to clear. Full value rules: the Property Values section of docs/tools.md. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error).",
+      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null to clear. Full value rules: the Property Values section of docs/tools.md. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -153,7 +153,7 @@ export const nodeToolDefinitions = [
   {
     name: 'attach_script',
     description:
-      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Returns: success with the resolved nodePath and scriptPath that were attached. Errors if scriptPath does not exist or nodePath is not found.',
+      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Returns: success with the resolved nodePath and scriptPath that were attached. Errors if scriptPath does not exist or nodePath is not found. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -204,7 +204,7 @@ export const nodeToolDefinitions = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a Godot scene. Use to clone a configured subtree without re-creating it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives — use newPath for follow-up edits. Errors if nodePath does not exist or targetParentPath cannot accept children.',
+      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives. Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -276,7 +276,7 @@ export const nodeToolDefinitions = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal on a source node to a method on a target node, persisting the connection in the .tscn. Use after get_node_signals to confirm the signal name on the source and the method name on the target. Connecting the same signal+method pair twice creates a duplicate connection — call get_node_signals first if uncertain. Saves automatically. Returns a plain-text confirmation naming the source, signal, target, and method. Errors if the signal does not exist on the source node or the method does not exist on the target node.',
+      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names — connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -302,7 +302,7 @@ export const nodeToolDefinitions = [
   {
     name: 'disconnect_signal',
     description:
-      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist.',
+      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -347,7 +347,7 @@ export async function handleDeleteNodes(
     'Failed to delete nodes',
     ['Check if the node paths are correct'],
     undefined,
-    { parseStdoutAsJson: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -378,7 +378,7 @@ export async function handleSetNodeProperties(
     'Failed to set node properties',
     ['Check node paths and property names'],
     undefined,
-    { parseStdoutAsJson: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -446,7 +446,7 @@ export async function handleAttachScript(
     'Failed to attach script',
     ['Ensure the script is valid for this node type'],
     undefined,
-    { parseStdoutAsJson: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -508,7 +508,7 @@ export async function handleDuplicateNode(
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
     undefined,
-    { parseStdoutAsJson: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -593,6 +593,8 @@ export async function handleConnectSignal(
     parsed.value.projectPath,
     'Failed to connect signal',
     ['Ensure the signal exists on the source node and the method exists on the target node'],
+    undefined,
+    { mutatesSceneFile: true },
   );
 }
 
@@ -618,5 +620,7 @@ export async function handleDisconnectSignal(
     parsed.value.projectPath,
     'Failed to disconnect signal',
     ['Ensure the signal connection exists before trying to disconnect it'],
+    undefined,
+    { mutatesSceneFile: true },
   );
 }

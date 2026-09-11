@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
+import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 import { cleanStdout } from '../../src/utils/output-parsing.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
@@ -18,18 +19,30 @@ const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
 const EXCEPTION_SOLUTIONS = ['exc: a', 'exc: b'];
 
-/** Fake runner with live runtime-session state for the guard tests. */
-function runnerWithLiveSession(
-  session: { mode: 'spawned' | 'attached'; projectPath: string } | null,
-): GodotRunner {
+interface LiveSession {
+  mode: 'spawned' | 'attached';
+  projectPath: string;
+  /** Only meaningful for a 'spawned' session. Default: false (process still running). */
+  hasExited?: boolean;
+}
+
+/**
+ * Fake runner with live runtime-session state for the guard tests. Sets the
+ * fields `hasActiveRuntimeSession()` actually reads, so the tests exercise
+ * the real predicate rather than a stand-in.
+ */
+function runnerWithLiveSession(session: LiveSession | null): FakeRunner {
   const fake = createFakeRunner({ stdout: '{"ok":true}' });
   const runner = fake.asRunner as GodotRunner & {
-    activeSessionMode: string | null;
+    activeSessionMode: 'spawned' | 'attached' | null;
     activeProjectPath: string | null;
+    activeProcess: { hasExited: boolean } | null;
   };
   runner.activeSessionMode = session?.mode ?? null;
   runner.activeProjectPath = session?.projectPath ?? null;
-  return fake.asRunner;
+  runner.activeProcess =
+    session?.mode === 'spawned' ? { hasExited: session.hasExited ?? false } : null;
+  return fake;
 }
 
 describe('executeSceneOp', () => {
@@ -122,55 +135,90 @@ describe('executeSceneOp', () => {
 
   describe('live-session scene guard', () => {
     it('errors when mutating a scene while a spawned session is active on the same project', async () => {
-      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
       const result = await executeSceneOp(
-        runner,
+        fake.asRunner,
         'add_node',
         { scenePath: 'scenes/main.tscn' },
         '/proj',
         TEST_FAILURE_PREFIX,
         EMPTY_SOLUTIONS,
         EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
       );
       expectErrorMatching(result, /active.*session|session.*active/i);
-      expect(runner.calls.length).toBe(0); // rejected before spawning headless Godot
+      expect(fake.calls.length).toBe(0); // rejected before spawning headless Godot
     });
 
     it('errors when mutating a scene while an attached session is active on the same project', async () => {
-      const runner = runnerWithLiveSession({ mode: 'attached', projectPath: '/proj' });
+      const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/proj' });
       const result = await executeSceneOp(
-        runner,
+        fake.asRunner,
         'attach_script',
         { scenePath: 'scenes/main.tscn' },
         '/proj',
         TEST_FAILURE_PREFIX,
         EMPTY_SOLUTIONS,
         EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
       );
       expectErrorMatching(result, /active.*session|session.*active/i);
-      expect(runner.calls.length).toBe(0);
+      expect(fake.calls.length).toBe(0);
     });
 
     it('allows scene mutations when no runtime session is active', async () => {
-      const runner = runnerWithLiveSession(null);
+      const fake = runnerWithLiveSession(null);
       const result = await executeSceneOp(
-        runner,
+        fake.asRunner,
         'add_node',
         { scenePath: 'scenes/main.tscn' },
         '/proj',
         TEST_FAILURE_PREFIX,
         EMPTY_SOLUTIONS,
         EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
       );
       expect(hasError(result)).toBe(false);
-      expect((runner as ReturnType<typeof createFakeRunner>).calls.length).toBe(1);
+      expect(fake.calls.length).toBe(1);
     });
 
     it('allows scene mutations when the live session is on a different project', async () => {
-      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/other' });
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/other' });
       const result = await executeSceneOp(
-        runner,
+        fake.asRunner,
         'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expect(hasError(result)).toBe(false);
+      expect(fake.calls.length).toBe(1);
+    });
+
+    it('points the caller at stop_project as the remedy', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      const solutionsText = JSON.stringify(unwrap(result).content);
+      expect(solutionsText).toMatch(/stop_project/i);
+    });
+
+    it('allows a read-only op (no mutatesSceneFile) while a session is live on the same project', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'get_scene_tree',
         { scenePath: 'scenes/main.tscn' },
         '/proj',
         TEST_FAILURE_PREFIX,
@@ -178,22 +226,43 @@ describe('executeSceneOp', () => {
         EXCEPTION_SOLUTIONS,
       );
       expect(hasError(result)).toBe(false);
-      expect((runner as ReturnType<typeof createFakeRunner>).calls.length).toBe(1);
+      expect(fake.calls.length).toBe(1);
     });
 
-    it('points the caller at stop_project as the remedy', async () => {
-      const runner = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+    it('does not block a mutating op once the spawned process has exited', async () => {
+      const fake = runnerWithLiveSession({
+        mode: 'spawned',
+        projectPath: '/proj',
+        hasExited: true,
+      });
       const result = await executeSceneOp(
-        runner,
+        fake.asRunner,
         'add_node',
         { scenePath: 'scenes/main.tscn' },
         '/proj',
         TEST_FAILURE_PREFIX,
         EMPTY_SOLUTIONS,
         EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
       );
-      const solutionsText = JSON.stringify(unwrap(result).content);
-      expect(solutionsText).toMatch(/stop_project/i);
+      expect(hasError(result)).toBe(false);
+      expect(fake.calls.length).toBe(1);
+    });
+
+    it('tolerates a trailing slash and a "." segment when comparing project paths', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj/' });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj/./',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(fake.calls.length).toBe(0);
     });
   });
 });

@@ -2,7 +2,12 @@ import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 import { createStructuredResponse } from './structured-response.js';
-import { extractJson, parseScriptDiagnostics, type StderrDiagnostic } from './output-parsing.js';
+import {
+  extractJson,
+  normalizeForCompare,
+  parseScriptDiagnostics,
+  type StderrDiagnostic,
+} from './output-parsing.js';
 import { ok, err } from './result.js';
 
 /**
@@ -108,17 +113,12 @@ export async function executeSceneOp(
   failurePrefix: string,
   emptyStdoutSolutions: string[],
   exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
-  options: { parseStdoutAsJson?: boolean } = {},
+  options: { parseStdoutAsJson?: boolean; mutatesSceneFile?: boolean } = {},
 ): Promise<HandlerResult> {
-  // Live-session guard: a running (spawned or attached) engine process keeps
-  // the project's scenes in memory in the same process's game state, while a
-  // headless mutation writes to the scene files on disk. The two views of the
-  // scene race — the engine's save actions and the headless write land in
-  // either order, and the file contents diverge from whichever view the
-  // engine last applied. Reject up front with the remedy instead of letting
-  // an edit report success and then race the running session.
-  const guard = rejectIfLiveSessionOnProject(runner, projectPath);
-  if (guard) return guard;
+  if (options.mutatesSceneFile) {
+    const guard = rejectIfLiveSessionOnProject(runner, projectPath);
+    if (guard) return guard;
+  }
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
     if (!stdout.trim()) {
@@ -176,22 +176,28 @@ export async function executeSceneOp(
   }
 }
 
+// A running (spawned or attached) engine process can write its own project's
+// scene files at any point during its lifetime -- not just in response to an
+// MCP call. An autoload's _process loop calling ResourceSaver.save is enough;
+// no run_script invocation is required. A headless mutation writes the same
+// files from outside that process. Two writers on one file race regardless of
+// which one triggers the write, so the guard covers the whole session rather
+// than trying to serialize around individual calls.
 function rejectIfLiveSessionOnProject(
   runner: GodotRunner,
   projectPath: string,
 ): HandlerResult | null {
-  const mode = runner.activeSessionMode;
+  if (!runner.hasActiveRuntimeSession()) return null;
   const activeProject = runner.activeProjectPath;
-  if (!mode || !activeProject || !isSameProjectPath(activeProject, projectPath)) return null;
+  const isSameProject =
+    activeProject !== null &&
+    normalizeForCompare(activeProject).toLowerCase() ===
+      normalizeForCompare(projectPath).toLowerCase();
+  if (!isSameProject) return null;
   return err(
     createErrorResponse(
-      "A live runtime session is active on this project; scene files and the running process's in-memory scene state race when both change. Stop the session before editing scene files.",
+      "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
       ['Call stop_project (or detach_project for attached sessions), then retry the scene edit'],
     ),
   );
-}
-
-function isSameProjectPath(a: string, b: string): boolean {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  return norm(a) === norm(b);
 }
