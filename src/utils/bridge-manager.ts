@@ -323,7 +323,11 @@ export class BridgeManager {
   private ensureMcpGdignore(projectPath: string): void {
     const dir = mcpDir(projectPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, '.gdignore'), '', 'utf8');
+    const gdignorePath = join(dir, '.gdignore');
+    if (existsSync(gdignorePath)) {
+      return;
+    }
+    writeFileSync(gdignorePath, '', 'utf8');
     logDebug('Created .mcp/.gdignore');
   }
 

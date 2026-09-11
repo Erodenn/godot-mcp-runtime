@@ -366,6 +366,18 @@ describe('BridgeManager handles project layouts', () => {
     expect(() => manager.inject(projectPath, TEST_PORT)).not.toThrow();
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
   });
+
+  it('leaves an existing .mcp/.gdignore untouched instead of truncating it', () => {
+    const { projectPath, manager } = setupProject();
+    mkdirSync(join(projectPath, '.mcp'), { recursive: true });
+    const gdignorePath = join(projectPath, '.mcp', '.gdignore');
+    const preseeded = '# do not delete this comment\nsomething-else\n';
+    writeFileSync(gdignorePath, preseeded, 'utf8');
+
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(readFileSync(gdignorePath, 'utf8')).toBe(preseeded);
+  });
 });
 
 // ---------------------------------------------------------------------------

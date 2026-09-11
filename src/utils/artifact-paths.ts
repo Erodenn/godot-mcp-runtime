@@ -120,7 +120,7 @@ export function validateTempDir(projectPath: string): string {
 export function isServerOwnedBridgePath(autoloadPath: string): boolean {
   const stripped = autoloadPath
     .replace(/\\/g, '/')
-    .replace(/^res:\/\//, '')
+    .replace(/^res:\/\//i, '')
     .replace(/^\.\//, '');
   return stripped === BRIDGE_SCRIPT_FILENAME || stripped.startsWith(`${MCP_DIR_NAME}/`);
 }
