@@ -99,6 +99,9 @@ interface RuntimeFake {
     mode: RuntimeSessionMode | null;
     projectPath?: string | null;
     process?: Partial<GodotProcess> | null;
+    /** Mirrors GodotRunner.hasEverAttached. Defaults to true when mode is
+     *  'attached', preserved otherwise unless explicitly overridden. */
+    hasEverAttached?: boolean;
   }): void;
   setBridgeResponse(response: string, runtimeErrors?: string[]): void;
   setStopResult(result: RuntimeStopResult | null): void;
@@ -135,7 +138,9 @@ function createRuntimeFake(): RuntimeFake {
     activeSessionMode: RuntimeSessionMode | null;
     activeProjectPath: string | null;
     activeProcess: GodotProcess | null;
+    hasEverAttached: boolean;
   } = {
+    hasEverAttached: false,
     activeSessionMode: null,
     activeProjectPath: null,
     activeProcess: null,
@@ -150,6 +155,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     get activeProcess() {
       return state.activeProcess;
+    },
+    get hasEverAttached() {
+      return state.hasEverAttached;
     },
     async sendCommandWithErrors(
       command: string,
@@ -221,10 +229,15 @@ function createRuntimeFake(): RuntimeFake {
     stopCalls() {
       return stopCallCount;
     },
-    setSession({ mode, projectPath = null, process = null }) {
+    setSession({ mode, projectPath = null, process = null, hasEverAttached }) {
       state.activeSessionMode = mode;
       state.activeProjectPath = projectPath;
       state.activeProcess = process as GodotProcess | null;
+      if (hasEverAttached !== undefined) {
+        state.hasEverAttached = hasEverAttached;
+      } else if (mode === 'attached') {
+        state.hasEverAttached = true;
+      }
     },
     setBridgeResponse(response, runtimeErrors = []) {
       bridgeResponse = response;
@@ -761,12 +774,26 @@ describe('handleDetachProject', () => {
   // rather than erroring.
   it('succeeds idempotently when the session already ended', async () => {
     const fake = createRuntimeFake();
-    fake.setSession({ mode: null });
+    fake.setSession({ mode: null, hasEverAttached: true });
     const result = await handleDetachProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.externalProcessPreserved).toBe(true);
     expect(parsed.message).toMatch(/already ended/i);
+    expect(fake.stopCalls()).toBe(0);
+  });
+
+  // Distinct from the "already ended" case above: this server never called
+  // attach_project at all, so there is no prior session to report as ended.
+  it('says this server never attached when it never has, distinctly from "already ended"', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: null, hasEverAttached: false });
+    const result = await handleDetachProject(fake.asRunner);
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.externalProcessPreserved).toBe(true);
+    expect(parsed.message).toMatch(/never attached/i);
+    expect(parsed.message).not.toMatch(/already ended/i);
     expect(fake.stopCalls()).toBe(0);
   });
 

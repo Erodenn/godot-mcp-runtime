@@ -144,7 +144,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'detach_project',
     description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process — that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Mostly optional now: when the bridge disconnects (you closed Godot), the next runtime tool call probes once and ends the attached session itself, removing the autoload. Calling it afterwards succeeds idempotently and says the session had already ended. Returns: message confirming detach plus externalProcessPreserved (always true here — that is the point of detach vs stop_project). Errors only when a spawned session is what is active; use stop_project for those.',
+      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process - that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Mostly optional now: when the bridge disconnects (you closed Godot), the next runtime tool call probes once and ends the attached session itself, removing the autoload. Calling it afterwards still succeeds idempotently, wording the message to distinguish "an attached session existed and already ended" from "this server never attached to a project". Returns: message confirming detach plus externalProcessPreserved (always true here - that is the point of detach vs stop_project). Errors only when a spawned session is what is active; use stop_project for those.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -1182,8 +1182,9 @@ export async function handleDetachProject(runner: GodotRunner): Promise<HandlerR
   // call that frees its retained process slot.
   if (!runner.activeSessionMode && !runner.activeProcess) {
     return createStructuredResponse({
-      message:
-        'No attached session to detach: it had already ended and the MCP bridge state was cleaned up then',
+      message: runner.hasEverAttached
+        ? 'No attached session to detach: it had already ended and the MCP bridge state was cleaned up then'
+        : 'No attached session to detach: this server never attached to a project',
       externalProcessPreserved: true,
     });
   }
