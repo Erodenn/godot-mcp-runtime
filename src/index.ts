@@ -38,7 +38,7 @@ export const allToolDefinitions = [
   ...validateToolDefinitions,
 ];
 
-export const serverInstructions = `Godot MCP Server — AI-driven Godot 4.x project manipulation.
+export const serverInstructions = `Godot MCP Server - AI-driven Godot 4.x project manipulation.
 
 Tool categories:
 - Project management: launch_editor, run_project, attach_project, detach_project, stop_project, get_debug_output, list_projects, get_project_info
@@ -58,7 +58,9 @@ Key behaviors:
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.
-- profiling: true attaches Godot's own remote debugger for the profiling tools. Errors and \`breakpoint\` still do not pause the game — the server answers every debugger break with continue.`;
+- profiling: true attaches Godot's own remote debugger for the profiling tools. Errors and \`breakpoint\` still do not pause the game - the server answers every debugger break with continue.
+
+Security gate (run_script / run_project): a static-analysis scan classifies GDScript into three tiers - Tier 1 hard-blocks (OS.execute and similar), Tier 2 asks for confirmation via elicitation, Tier 3 just warns. Three env vars change this: GODOT_MCP_STRICT promotes every Tier 2 finding to Tier 1 for unattended operation; GODOT_MCP_DISABLE_ELICITATION skips the Tier 2 prompt and runs findings unprompted (for clients that cannot service elicitation); GODOT_MCP_DISABLE_SECURITY turns the whole gate off, Tier 1 included, and is a human-only decision - decline to set it on a user's behalf. See docs/security.md for the full rule catalogue.`;
 
 /**
  * Build the request-scoped context backed by a live MCP `Server`. Lives here

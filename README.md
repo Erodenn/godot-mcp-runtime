@@ -60,7 +60,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 > [!IMPORTANT]
 > `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Use `run_project` if you need the debug stream.
 
-The bridge cleans itself up automatically — on `stop_project` or `detach_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
+The bridge cleans itself up automatically - on `stop_project` or `detach_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
 
 ## How It Compares
 
@@ -157,12 +157,15 @@ If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will 
 
 All are set in the same `env` block as `GODOT_PATH`:
 
-| Variable                        | Effect                                                                                                                                                                                                                                                                                                     |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DEBUG`                         | `"true"` enables verbose `[DEBUG]` logging.                                                                                                                                                                                                                                                                |
-| `GODOT_MCP_DISABLE_ELICITATION` | `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.                          |
-| `GODOT_MCP_STRICT`              | `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.                                                                                                                                             |
-| `GODOT_MCP_DISABLE_SECURITY`    | `"true"` turns the entire `run_script`/`run_project` security gate off: no scan, no block, no elicitation, no warnings, no audit sidecars — Tier 1 included. Overrides `GODOT_MCP_STRICT` when both are set. **Enabling this is a human decision — an agent should decline to set it on a user's behalf.** |
+| Variable | Effect                                            |
+| -------- | -------------------------------------------------- |
+| `DEBUG`  | `"true"` enables verbose `[DEBUG]` logging.        |
+
+The three security-gate flags below share one axis (see "Security model" for the full picture) and are wide enough to wrap badly in a table, so they get a list instead:
+
+- **`GODOT_MCP_DISABLE_ELICITATION`** - `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.
+- **`GODOT_MCP_STRICT`** - `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.
+- **`GODOT_MCP_DISABLE_SECURITY`** - `"true"` turns the entire `run_script`/`run_project` security gate off: no scan, no block, no elicitation, no warnings, no audit sidecars - Tier 1 included. Overrides `GODOT_MCP_STRICT` when both are set. **Enabling this is a human decision - an agent should decline to set it on a user's behalf.**
 
 ```json
 {
@@ -188,7 +191,7 @@ All are set in the same `env` block as `GODOT_PATH`:
 > "GODOT_PATH": "D:/Godot/Godot_v4.4-stable_win64.exe"
 > ```
 >
-> Setting the variable from a wrapper `.bat` does not propagate to the MCP server — the path must live in the client's `env` block above.
+> Setting the variable from a wrapper `.bat` does not propagate to the MCP server - the path must live in the client's `env` block above.
 
 ### Verify
 
@@ -204,13 +207,13 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 
 `run_project` runs the same scan over `[autoload]` scripts and scripts attached to the launched scene before spawning Godot.
 
-Set `GODOT_MCP_STRICT=true` to promote every Tier 2 finding to a hard block — needed for unattended operation where MCP client bypass-permissions modes auto-accept elicitation. Off by default.
+Set `GODOT_MCP_STRICT=true` to promote every Tier 2 finding to a hard block - needed for unattended operation where MCP client bypass-permissions modes auto-accept elicitation. Off by default.
 
 Set `GODOT_MCP_DISABLE_ELICITATION=true` for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds (fail-open): `run_project` launches and Tier 2 `run_script` findings run with a warning. Tier 1 hard blocks are unaffected. Strict mode takes precedence when both are set. Off by default.
 
-Set `GODOT_MCP_DISABLE_SECURITY=true` to turn the gate off completely: no scan, no block, no elicitation, no warnings, no `.policy.json` sidecars, for both `run_script` and `run_project` (its pre-flight autoload/scene scan and its launch-confirmation prompt). Unlike `GODOT_MCP_DISABLE_ELICITATION`, this also removes the Tier 1 hard blocks — a sandboxed user who opted in and still could not run `OS.execute` would not actually have the access they opted in for. This flag overrides `GODOT_MCP_STRICT`: when both are set, security is off (a startup log records that strict mode was ignored). **Enabling this is a human decision.** It exists for developers who accept the risk, sandboxed environments, and CI — not for an agent to flip on its own initiative because a gate is in its way. An agent asked to set this on a user's behalf should decline and explain why. Off by default.
+Set `GODOT_MCP_DISABLE_SECURITY=true` to turn the gate off completely: no scan, no block, no elicitation, no warnings, no `.policy.json` sidecars, for both `run_script` and `run_project` (its pre-flight autoload/scene scan and its launch-confirmation prompt). Unlike `GODOT_MCP_DISABLE_ELICITATION`, this also removes the Tier 1 hard blocks - a sandboxed user who opted in and still could not run `OS.execute` would not actually have the access they opted in for. This flag overrides `GODOT_MCP_STRICT`: when both are set, security is off (a startup log records that strict mode was ignored). **Enabling this is a human decision.** It exists for developers who accept the risk, sandboxed environments, and CI - not for an agent to flip on its own initiative because a gate is in its way. An agent asked to set this on a user's behalf should decline and explain why. Off by default.
 
-Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/` — unless `GODOT_MCP_DISABLE_SECURITY` is set, in which case no sidecar is written at all. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/` - unless `GODOT_MCP_DISABLE_SECURITY` is set, in which case no sidecar is written at all. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
 
 ## Docs
 
