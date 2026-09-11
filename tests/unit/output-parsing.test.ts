@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanStdout } from '../../src/utils/output-parsing.js';
+import { cleanStdout, condenseProcessTail } from '../../src/utils/output-parsing.js';
 
 // Observed in production: headless operations emit Godot RID-leak warnings on
 // stdout, both AFTER a JSON payload (benign — handled) and INSTEAD of one,
@@ -27,5 +27,48 @@ describe('stdout JSON extraction with interleaved engine noise', () => {
     // covered in headless-op.test.ts.
     expect(cleaned).toBe(stdout.trim());
     expect(() => JSON.parse(cleaned)).toThrow(SyntaxError);
+  });
+});
+
+// ─── condenseProcessTail ────────────────────────────────────────────────────
+
+describe('condenseProcessTail', () => {
+  it('drops the renderer/device startup banner', () => {
+    const lines = [
+      'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org',
+      'Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro',
+      'PASS: scenario complete',
+    ];
+    expect(condenseProcessTail(lines, 200)).toEqual(['PASS: scenario complete']);
+  });
+
+  it('keeps a genuine WARNING: line', () => {
+    const lines = ['WARNING: Node not found: "res://missing.tscn"', 'PASS: scenario complete'];
+    expect(condenseProcessTail(lines, 200)).toEqual(lines);
+  });
+
+  it('keeps a renderer-name line that is not the startup banner', () => {
+    const lines = ['OpenGL context lost', 'PASS: scenario complete'];
+    expect(condenseProcessTail(lines, 200)).toEqual(lines);
+  });
+
+  it('caps the result to maxLines, keeping the tail', () => {
+    const lines = Array.from({ length: 5 }, (_, i) => `line${i}`);
+    expect(condenseProcessTail(lines, 3)).toEqual(['line2', 'line3', 'line4']);
+  });
+
+  it('falls back to the last non-empty original line when everything is filtered', () => {
+    const lines = [
+      'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org',
+      '',
+      'Vulkan 1.3.280 - Forward+ - Using Device #0: NVIDIA GeForce RTX 4070',
+    ];
+    expect(condenseProcessTail(lines, 200)).toEqual([
+      'Vulkan 1.3.280 - Forward+ - Using Device #0: NVIDIA GeForce RTX 4070',
+    ]);
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(condenseProcessTail([], 200)).toEqual([]);
   });
 });

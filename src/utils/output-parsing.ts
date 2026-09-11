@@ -83,6 +83,37 @@ export function cleanStdout(stdout: string): string {
   return cleanOutput(stdout);
 }
 
+/**
+ * Renderer/device startup banner and engine URL — printed once per process
+ * launch and carrying no diagnostic value on their own. Anchored on the
+ * actual Godot banner shape (renderer name + version + " - " + the
+ * "- Using Device #" marker) rather than a bare word prefix, so a genuine
+ * runtime line like "OpenGL context lost" or "Vulkan device removed" is
+ * never mistaken for the banner.
+ */
+const PROCESS_TAIL_BANNER_NOISE =
+  /^(https:\/\/godotengine\.org|(?:Metal|Vulkan|OpenGL)\s+[\d.]+\s+-\s+.*-\s+Using Device #\d+:)/i;
+
+/**
+ * Condense a process's stdout/stderr tail to its diagnostically relevant
+ * lines, capped to the last `maxLines`. Reuses `cleanOutput`'s blank-line /
+ * version-banner / debug-log rules and additionally drops the
+ * renderer/device banner and engine URL. If nothing survives filtering,
+ * falls back to the last non-empty original line so the caller sees
+ * something of the process tail rather than an unexplained empty array.
+ */
+export function condenseProcessTail(lines: string[], maxLines: number): string[] {
+  const cleaned = cleanOutput(lines.join('\n'));
+  const bannerFiltered = (cleaned === '' ? [] : cleaned.split('\n')).filter(
+    (line) => !PROCESS_TAIL_BANNER_NOISE.test(line.trim()),
+  );
+  if (bannerFiltered.length > 0) {
+    return bannerFiltered.slice(-maxLines);
+  }
+  const lastNonEmpty = [...lines].reverse().find((l) => l.trim() !== '');
+  return lastNonEmpty !== undefined ? [lastNonEmpty] : [];
+}
+
 export interface StderrDiagnostic {
   message: string;
   line?: number;
