@@ -92,8 +92,8 @@ export interface DisableSecurityResolution {
   disableSecurity: boolean;
   /**
    * True only when both `GODOT_MCP_DISABLE_SECURITY` and `strictMode` are set
-   * — disable-security wins per the R5 precedent, and the caller uses this to
-   * print the "strict mode ignored" startup line exactly in that case.
+   * — disable-security wins, and the caller uses this to print the "strict
+   * mode ignored" startup line exactly in that case.
    */
   strictIgnored: boolean;
 }

@@ -828,7 +828,7 @@ export async function handleRunProject(
   // Session-confirmation gate: one elicitation per absolute projectPath per
   // server session. Skipped when an active runtime session already targets
   // the same project (the user just attached/ran), or entirely when
-  // GODOT_MCP_DISABLE_SECURITY is set (R6 — the no-op covers this gate too).
+  // GODOT_MCP_DISABLE_SECURITY is set — the gate no-op covers this prompt too.
   const projectKey = normalizeProjectKey(absProjectPath);
   if (!ctx.disableSecurity && !ctx.sessionState.runProjectConfirmed.has(projectKey)) {
     if (ctx.disableElicitation) {

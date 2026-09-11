@@ -82,11 +82,23 @@ function createContextFromServer(server: Server): McpContext {
   const disableElicitation = process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && !strictMode;
   // Disable-security is the opposite precedence from disableElicitation above:
   // it overrides strict mode rather than deferring to it (see
-  // McpContext.disableSecurity / resolveDisableSecurity).
-  const { disableSecurity } = resolveDisableSecurity(
+  // McpContext.disableSecurity / resolveDisableSecurity). The startup lines are
+  // emitted here, switching on the resolution, so the precedence is decided and
+  // announced in one place instead of being recomputed by the caller.
+  const { disableSecurity, strictIgnored } = resolveDisableSecurity(
     process.env.GODOT_MCP_DISABLE_SECURITY,
     strictMode,
   );
+  if (disableSecurity) {
+    console.error(
+      '[SERVER] Security gate disabled (GODOT_MCP_DISABLE_SECURITY=true); run_script and run_project execute without scanning, blocking, or confirmation (Tier 1 included)',
+    );
+  }
+  if (strictIgnored) {
+    console.error(
+      '[SERVER] Strict mode ignored: GODOT_MCP_DISABLE_SECURITY overrides GODOT_MCP_STRICT',
+    );
+  }
   return {
     elicitor,
     strictMode,
@@ -118,26 +130,22 @@ class GodotMcpServer {
     );
 
     this.ctx = createContextFromServer(this.server);
-    if (this.ctx.disableSecurity) {
-      console.error(
-        '[SERVER] Security gate disabled (GODOT_MCP_DISABLE_SECURITY=true); run_script and run_project execute without scanning, blocking, or confirmation (Tier 1 included)',
-      );
+    // The disable-security startup lines are emitted by createContextFromServer.
+    // Strict mode and the elicitation opt-out only describe a gate that still
+    // runs, so both stay silent once security is off.
+    if (!this.ctx.disableSecurity) {
       if (this.ctx.strictMode) {
+        console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
+      }
+      if (process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && this.ctx.strictMode) {
         console.error(
-          '[SERVER] Strict mode ignored: GODOT_MCP_DISABLE_SECURITY overrides GODOT_MCP_STRICT',
+          '[SERVER] GODOT_MCP_DISABLE_ELICITATION ignored: strict mode requires explicit confirmation',
+        );
+      } else if (this.ctx.disableElicitation) {
+        console.error(
+          '[SERVER] Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION=true); confirmation prompts auto-accepted',
         );
       }
-    } else if (this.ctx.strictMode) {
-      console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
-    }
-    if (process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && this.ctx.strictMode) {
-      console.error(
-        '[SERVER] GODOT_MCP_DISABLE_ELICITATION ignored: strict mode requires explicit confirmation',
-      );
-    } else if (this.ctx.disableElicitation) {
-      console.error(
-        '[SERVER] Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION=true); confirmation prompts auto-accepted',
-      );
     }
 
     this.setupToolHandlers();
