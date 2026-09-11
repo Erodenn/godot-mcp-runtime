@@ -65,6 +65,14 @@ export interface RuntimeStopResult {
   output: string[];
   errors: string[];
   externalProcessPreserved?: boolean;
+  /**
+   * True when the spawned process had already exited on its own and
+   * `handleSpawnedProcessExit` had already cleared the session and its bridge
+   * artifacts. Read by `handleStopProject` for message wording and payload.
+   */
+  alreadyExited?: boolean;
+  /** Exit code captured by the auto-clear, when `alreadyExited`. */
+  exitCode?: number | null;
 }
 
 export interface GodotServerConfig {
@@ -126,6 +134,18 @@ export class GodotRunner {
   // script (see BridgeManager.inject). Attached to every outgoing frame in
   // sendCommand so the bridge can reject unauthenticated drive-by commands.
   private activeSessionToken: string | null = null;
+  /**
+   * Monotonic counter bumped at the head of every session transition
+   * (`runProject`, `attachProject`, `stopProject`). A spawned process's exit
+   * handler captures the value current at registration and does nothing when
+   * it no longer matches, so a late exit from a superseded session cannot
+   * clear the session that replaced it. Identity of `activeProcess` is not
+   * enough: under `profiling: true`, `runProject` awaits
+   * `DebuggerProfiler.create()` between `bridge.inject()` and the new
+   * `activeProcess` assignment, and an identity-guarded handler firing in that
+   * window would clean the new session's freshly injected bridge script.
+   */
+  private sessionEpoch = 0;
 
   private socket: net.Socket | null = null;
   // Receive buffer kept as an array of chunks until at least one complete frame
@@ -425,6 +445,7 @@ export class GodotRunner {
     // The bridge reports an absolute project_path in its pong, so a relative
     // expectedPath makes pollBridge's path guard fail immediately and mask
     // the real reason as a generic bridge timeout.
+    const epoch = this.beginSessionTransition();
     projectPath = resolve(projectPath);
     this.closeProfiler();
 
@@ -527,11 +548,9 @@ export class GodotRunner {
       });
     });
 
+    const exitProjectPath = projectPath;
     proc.on('exit', (code: number | null) => {
-      logDebug(`Godot process exited with code ${code}`);
-      godotProcess.exitCode = code;
-      godotProcess.hasExited = true;
-      // Don't clear activeProcess immediately - keep it so output can be retrieved
+      this.handleSpawnedProcessExit(godotProcess, exitProjectPath, epoch, code);
     });
 
     proc.on('error', (err: Error) => {
@@ -547,7 +566,104 @@ export class GodotRunner {
     return this.activeProcess;
   }
 
+  /**
+   * Open a new session epoch. Called as the first statement of every entry
+   * point that installs or tears down session state, so handlers registered
+   * under a previous epoch become inert the moment the transition starts.
+   */
+  private beginSessionTransition(): number {
+    this.sessionEpoch += 1;
+    return this.sessionEpoch;
+  }
+
+  /**
+   * `'exit'` handler for a spawned Godot process (D10 auto-clear).
+   *
+   * WIDEST INPUT: this fires for every exit of every process this runner ever
+   * spawned — a crash, a window the user closed, a `stopProject` kill, and the
+   * kill `runProject` issues before starting a replacement. `exitCode` and
+   * `hasExited` are recorded unconditionally because the buffer belongs to the
+   * captured process regardless of which session is current; everything after
+   * the epoch check mutates shared session state and so runs only for the
+   * session that registered this handler.
+   *
+   * `activeProcess` and `activeProfiler` are deliberately left alone: the
+   * output buffer and exit code live on the former, and a capture that
+   * finished just before a crash stays readable through the latter.
+   */
+  private handleSpawnedProcessExit(
+    proc: GodotProcess,
+    projectPath: string,
+    epoch: number,
+    code: number | null,
+  ): void {
+    logDebug(`Godot process exited with code ${code}`);
+    proc.exitCode = code;
+    proc.hasExited = true;
+
+    if (this.sessionEpoch !== epoch) {
+      logDebug('Ignoring exit from a superseded Godot session (session epoch moved on)');
+      return;
+    }
+
+    this.activeSessionMode = null;
+    this.activeProjectPath = null;
+    this.activeBridgePort = null;
+    this.activeSessionToken = null;
+    // The socket to a dead peer is garbage. Idempotent, and the rejection it
+    // issues on an in-flight command is a BridgeDisconnectedError the spawned
+    // branch of sendCommandWithReconnect already ignores.
+    this.closeConnection();
+    try {
+      this.bridge.cleanup(projectPath);
+    } catch (err) {
+      logDebug(`Bridge cleanup after process exit failed (ignored): ${err}`);
+    }
+  }
+
+  /**
+   * Drop an attached session whose bridge has gone away (D12). Mirrors the
+   * attached branch of `stopProject` minus the `shutdown` command and the
+   * process handling, since there is no process here and no peer to talk to.
+   *
+   * Production call site: the disconnect probe in `sendCommandWithReconnect`.
+   */
+  private clearAttachedSession(): void {
+    this.closeConnection();
+    const projectPath = this.activeProjectPath;
+    if (projectPath) {
+      try {
+        this.bridge.cleanup(projectPath);
+      } catch (err) {
+        logDebug(`Bridge cleanup after attached disconnect failed (ignored): ${err}`);
+      }
+    }
+    this.activeSessionMode = null;
+    this.activeProjectPath = null;
+    this.activeBridgePort = null;
+    this.activeSessionToken = null;
+  }
+
+  /**
+   * Synchronous, never-throwing bridge artifact removal for the active
+   * project. `BridgeManager.cleanup` is pure synchronous `fs`, so this is safe
+   * from a `process.on('exit')` handler, where promises never settle.
+   *
+   * Production call site: the `'exit'` handler registered by
+   * `registerProcessLifecycle` in `src/index.ts`.
+   */
+  cleanupBridgeArtifactsSync(): void {
+    const projectPath = this.activeProjectPath;
+    if (!projectPath) return;
+    try {
+      this.bridge.cleanup(projectPath);
+    } catch {
+      // Exit handlers must not throw; there is nowhere left to report to.
+    }
+  }
+
   async attachProject(projectPath: string, bridgePort?: number): Promise<void> {
+    this.beginSessionTransition();
     // Resolve relative paths for the same reason as runProject — pollBridge
     // compares against the absolute path the bridge reports.
     projectPath = resolve(projectPath);
@@ -588,12 +704,33 @@ export class GodotRunner {
   }
 
   async stopProject(): Promise<RuntimeStopResult | null> {
-    // Release the debugger listener before any early return. A spawn that
-    // failed after the profiler bound leaves `activeProcess` null, and
-    // stop_project is exactly where the user goes to clean that up.
+    this.beginSessionTransition();
     if (!this.activeSessionMode) {
-      this.closeProfiler();
-      return null;
+      // Release the debugger listener before any early return. A spawn that
+      // failed after the profiler bound leaves `activeProcess` null, and
+      // stop_project is exactly where the user goes to clean that up.
+      if (!this.activeProcess) {
+        this.closeProfiler();
+        return null;
+      }
+
+      // The process exited on its own and handleSpawnedProcessExit already
+      // closed the connection and removed the bridge artifacts (D11). Nothing
+      // left to kill or clean — hand back the captured logs so stop_project
+      // stays idempotent. A capture that finished before the exit survives;
+      // only an unfinished one is torn down.
+      const exited = this.activeProcess;
+      if (this.activeProfiler !== null && !this.activeProfiler.hasResult) {
+        this.closeProfiler();
+      }
+      this.activeProcess = null;
+      return {
+        mode: 'spawned',
+        output: exited.output,
+        errors: exited.errors,
+        alreadyExited: true,
+        exitCode: exited.exitCode,
+      };
     }
 
     if (this.activeSessionMode === 'attached') {
@@ -912,30 +1049,83 @@ export class GodotRunner {
   // `GDScript error` substring also matches user printerr output and produces false positives.
   private static readonly SCRIPT_ERROR_PATTERNS = ['SCRIPT ERROR:', 'USER SCRIPT ERROR:'];
   private static readonly RETRYABLE_BRIDGE_COMMANDS = new Set(['get_ui_elements', 'screenshot']);
+  /**
+   * Commands exempt from the attached-mode disconnect probe. `closeConnection`
+   * is itself one of the producers of `BridgeDisconnectedError` (it rejects any
+   * in-flight command with one), and the only command in flight during our own
+   * teardown is the `shutdown` that `stopProject` and the `attachProject` swap
+   * issue. Probing on those would clear a session that is already being torn
+   * down deliberately. `ping` is exempt because the probe itself is a `ping`.
+   */
+  private static readonly DISCONNECT_EXEMPT_BRIDGE_COMMANDS = new Set(['shutdown', 'ping']);
 
   extractRuntimeErrors(lines: string[]): string[] {
     return lines.filter((line) => GodotRunner.SCRIPT_ERROR_PATTERNS.some((p) => line.includes(p)));
   }
 
+  /**
+   * `sendCommand` plus the transient-drop retry and, in attached mode, the
+   * disconnect-means-session-end probe (D12).
+   *
+   * WIDEST INPUT of the disconnect predicate: `BridgeDisconnectedError` has
+   * seven producers in `sendCommand` — connect failure, socket unavailable,
+   * oversized frame header, framing parse error, socket `'error'`, peer
+   * `'close'`, and `closeConnection`'s in-flight rejection. A per-command
+   * timeout is a plain `Error` and never reaches here, so a wedged-but-alive
+   * game is not mistaken for a dead one. The chain below narrows that set:
+   * spawned sessions keep today's behavior (D10's exit handler owns them),
+   * `shutdown`/`ping` are exempt, a retryable command spends its one retry
+   * first, and every survivor must still fail a live `ping` before anything is
+   * cleared.
+   */
   private async sendCommandWithReconnect(
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
   ): Promise<string> {
+    let failure: Error;
     try {
       return await this.sendCommand(command, params, timeoutMs);
     } catch (err) {
-      if (
-        err instanceof BridgeDisconnectedError &&
-        this.activeSessionMode &&
-        GodotRunner.RETRYABLE_BRIDGE_COMMANDS.has(command)
-      ) {
+      if (!(err instanceof BridgeDisconnectedError)) throw err;
+      failure = err;
+    }
+
+    const retryable = GodotRunner.RETRYABLE_BRIDGE_COMMANDS.has(command);
+
+    if (this.activeSessionMode !== 'attached') {
+      // Spawned (or already-cleared) session: unchanged behavior.
+      if (this.activeSessionMode && retryable) {
         this.closeConnection();
         await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
         return this.sendCommand(command, params, timeoutMs);
       }
-      throw err;
+      throw failure;
     }
+
+    if (GodotRunner.DISCONNECT_EXEMPT_BRIDGE_COMMANDS.has(command)) throw failure;
+
+    if (retryable) {
+      this.closeConnection();
+      await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
+      try {
+        return await this.sendCommand(command, params, timeoutMs);
+      } catch (retryErr) {
+        if (!(retryErr instanceof BridgeDisconnectedError)) throw retryErr;
+        failure = retryErr;
+      }
+    }
+
+    // Exactly one probe, on the existing ping timeout. A pong means the
+    // command failed but the session did not; a failure means the bridge is
+    // gone and the attached session ends here.
+    this.closeConnection();
+    try {
+      await this.sendCommand('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+    } catch {
+      this.clearAttachedSession();
+    }
+    throw failure;
   }
 
   async sendCommandWithErrors(
@@ -946,8 +1136,11 @@ export class GodotRunner {
     const marker = this.getErrorCount();
     const response = await this.sendCommandWithReconnect(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
-    const runtimeErrors =
-      this.activeSessionMode === 'spawned' ? this.extractRuntimeErrors(newErrors) : [];
+    // Keyed on the retained `activeProcess` rather than the session mode: D10's
+    // auto-clear nulls the mode the moment a spawned process exits, but the
+    // stderr buffer being classified here lives on `activeProcess`, which
+    // survives. Attached sessions have no `activeProcess` and so still get [].
+    const runtimeErrors = this.activeProcess !== null ? this.extractRuntimeErrors(newErrors) : [];
     // Unfiltered stderr window (newErrors) for callers that need the full
     // engine output around a failure — e.g. run_script compile diagnostics,
     // where the SCRIPT ERROR line is followed by an "at: <path>:<line>" line

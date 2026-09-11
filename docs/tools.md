@@ -9,9 +9,9 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 | `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                                                                                                  |
 | `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; `profiling: true` to enable the profiling tools; pass `bridgePort` (integer 1–65535) to pin the bridge port — auto-selects a free port when omitted |
 | `attach_project`   | Inject the MCP bridge for a project you'll launch yourself. Pass `bridgePort` (integer 1–65535) to pin a specific port — auto-selects a free port when omitted                                                                           |
-| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone. Call it even if that process is already closed — it clears state that otherwise blocks scene-editing tools                                       |
-| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state). Call it even if you closed the Godot window yourself — it clears state that otherwise blocks scene-editing tools                                     |
-| `get_debug_output` | Read stdout/stderr from an MCP-spawned project (unavailable in attached mode)                                                                                                                                                            |
+| `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone. Mostly optional: a disconnected bridge ends the attached session on the next tool call, and calling this afterwards succeeds idempotently        |
+| `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state). Call it even if you closed the Godot window yourself — it frees the retained process slot and reports `alreadyExited` with the logs captured then    |
+| `get_debug_output` | Read stdout/stderr from an MCP-spawned project, including after it exits or crashes (unavailable in attached mode)                                                                                                                       |
 | `list_projects`    | Find Godot projects in a directory                                                                                                                                                                                                       |
 | `get_project_info` | Get project metadata and Godot version                                                                                                                                                                                                   |
 
@@ -67,7 +67,7 @@ While the debugger is attached, a script error or a `breakpoint` would normally 
 
 All mutation operations save automatically. Use `save_scene` only for save-as (`newPath`) or to re-canonicalize a `.tscn` file.
 
-Every tool below errors while a Godot runtime session is active on the same project — a running process can write its own scene files at any point, so a headless write would race it. Call `stop_project` (or `detach_project`) to clear the block.
+Every tool below errors while a Godot runtime session is active on the same project — a running process can write its own scene files at any point, so a headless write would race it. Call `stop_project` (or `detach_project`) to clear the block. A spawned process that exits on its own clears the block at that moment, without a tool call.
 
 | Tool                     | Description                                                                              |
 | ------------------------ | ---------------------------------------------------------------------------------------- |
