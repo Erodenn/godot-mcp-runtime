@@ -27,6 +27,21 @@ function fileExtension(name: string): string {
 
 export const projectToolDefinitions = [
   {
+    name: 'import_assets',
+    description:
+      'Run headless asset import for a project (`godot --headless --import`). Needed on fresh projects (no .godot/imported yet): until the import step runs, textures and other resources fail to load in headless operations and runtime even though the files exist on disk. Also refreshes imports after assets are added or changed outside the editor. Idempotent: re-running on an already-imported project is safe. No runtime session required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to the Godot project directory',
+        },
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
     name: 'list_projects',
     description:
       'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use get_project_info. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
@@ -512,6 +527,35 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
       createErrorResponse(`Failed to list projects: ${getErrorMessage(error)}`, [
         'Ensure the directory exists and is accessible',
         'Check if you have permission to read the directory',
+      ]),
+    );
+  }
+}
+
+export async function handleImportAssets(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+
+  try {
+    const projectDir = parsed.value.projectPath;
+    await runner.importAssets(projectDir);
+    return ok({
+      content: [
+        {
+          type: 'text',
+          text: `Asset import completed for ${projectDir}. Resources are now available to headless operations (e.g. load_sprite, runtime resource loads).`,
+        },
+      ],
+    });
+  } catch (error: unknown) {
+    return err(
+      createErrorResponse(`Failed to import assets: ${getErrorMessage(error)}`, [
+        'Check the project.godot file is valid',
+        'Check the Godot executable version matches the project',
       ]),
     );
   }

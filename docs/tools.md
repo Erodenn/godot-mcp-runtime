@@ -14,6 +14,7 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 | `get_debug_output` | Read stdout/stderr from an MCP-spawned project, including after it exits or crashes (unavailable in attached mode)                                                                                                                       |
 | `list_projects`    | Find Godot projects in a directory                                                                                                                                                                                                       |
 | `get_project_info` | Get project metadata and Godot version                                                                                                                                                                                                   |
+| `import_assets`    | Run headless asset import (`godot --headless --import`). Needed on fresh projects: until the import step runs, textures and other resources fail to load even though the files exist on disk. Idempotent; no runtime session required    |
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
@@ -162,6 +163,8 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 | `get_project_files`      | Get the project file tree with types and extensions                  |
 | `search_project`         | Search for a string across project source files                      |
 | `get_scene_dependencies` | List all resources a scene depends on                                |
+
+Note: `import_assets` in the Project Management section also runs headless Godot (the `--import` step) but needs no runtime session.
 
 ## Validation: `validate`
 
