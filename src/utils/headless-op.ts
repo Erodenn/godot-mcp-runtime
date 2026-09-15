@@ -29,6 +29,14 @@ const STDOUT_TAIL_LINES = 10;
 const STDERR_TAIL_LINES = 5;
 
 /**
+ * Stderr marker godot_operations.gd prints when a scene-load probe finds a
+ * dependency that exists on disk but was never imported. `executeSceneOp`
+ * reacts by running the import step and retrying the operation once, capped
+ * structurally at one retry (see `executeSceneOp`).
+ */
+export const IMPORT_NEEDED_MARKER = '[IMPORT_NEEDED]';
+
+/**
  * Heuristic: does this non-JSON stdout look like the operation quit(1) before
  * emitting its payload? Canonical shape: a script compile error makes the
  * headless operation exit early, so stdout contains ONLY engine exit noise —
@@ -96,6 +104,72 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
 }
 
 /**
+ * Interprets a finished operation's {stdout, stderr} into a HandlerResult.
+ * The single interpretation path used by `executeSceneOp` regardless of
+ * whether an import retry ran first — the empty-stdout check and the
+ * parseStdoutAsJson/plain-text branches are identical either way, only the
+ * failurePrefix differs (an import retry that still failed gets a prefix
+ * noting the import step ran, so the caller doesn't mistake this for the
+ * marker never having been seen).
+ */
+function interpretOperationResult(
+  stdout: string,
+  stderr: string,
+  failurePrefix: string,
+  emptyStdoutSolutions: string[],
+  options: { parseStdoutAsJson?: boolean },
+): HandlerResult {
+  if (!stdout.trim()) {
+    return err(
+      createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
+    );
+  }
+  if (options.parseStdoutAsJson) {
+    // extractJson already strips leading/trailing engine noise around a
+    // payload (GodotRunner.executeOperation normally routes stdout through
+    // cleanStdout/extractJson before handlers ever see it — this call is
+    // belt-and-braces for callers that bypass that, e.g. fake runners in
+    // tests). No separate leading-noise stripper needed here.
+    const jsonCandidate = extractJson(stdout.trim());
+    try {
+      const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
+      return createStructuredResponse(payload);
+    } catch (parseErr) {
+      if (stdoutLooksLikeEarlyQuitNoise(stdout)) {
+        // The operation exited before emitting its JSON payload (early
+        // quit on error): stdout contains only engine exit noise. Surface
+        // the offending output instead of blaming the operation script's
+        // JSON emission. stderr carries the actual failure (compile
+        // errors print to stderr in Godot's canonical format).
+        const parts = [
+          `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
+        ];
+        const stderrPart = renderStderrForEarlyExit(stderr);
+        if (stderrPart) parts.push(stderrPart);
+        const stdoutTail = stdout.trim().split('\n').slice(-STDOUT_TAIL_LINES).join('\n');
+        if (stdoutTail) parts.push(`stdout (last lines): ${stdoutTail}`);
+        return err(
+          createErrorResponse(parts.join('\n'), [
+            'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
+            'Check get_debug_output for the raw output',
+          ]),
+        );
+      }
+      return err(
+        createErrorResponse(
+          `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
+          [
+            'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
+            'Check get_debug_output for the raw stdout and stderr',
+          ],
+        ),
+      );
+    }
+  }
+  return ok({ content: [{ type: 'text', text: stdout }] });
+}
+
+/**
  * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
  * operation. Used by the 15 scene/node mutation handlers in tools/scene-tools.ts
  * and tools/node-tools.ts to eliminate identical error-handling duplication.
@@ -104,6 +178,11 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
  * field validation, and constructing the `params` object — those run before the
  * call. Returns the canonical `Result<ToolSuccessPayload, ToolResponse>` shape;
  * the dispatch edge maps it back to the MCP wire envelope.
+ *
+ * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `IMPORT_NEEDED_MARKER`)
+ * by running `runner.importAssets` and retrying the operation exactly once,
+ * capped structurally rather than by a loop — a marker on the retried run
+ * falls through to normal error handling instead of importing again.
  */
 export async function executeSceneOp(
   runner: GodotRunner,
@@ -120,97 +199,47 @@ export async function executeSceneOp(
     if (guard) return guard;
   }
   try {
-    const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
+    let { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
+    let effectiveFailurePrefix = failurePrefix;
 
-    // Check for the cold-import marker first (may appear even if stdout has a JSON error).
-    if (stderr.includes('[IMPORT_NEEDED]')) {
-      await runner.importAssets(projectPath);
-      const { stdout: retryStdout, stderr: retryStderr } = await runner.executeOperation(
-        operation,
-        params,
-        projectPath,
-      );
-      if (!retryStdout.trim()) {
-        const stderrPart = renderStderrForEarlyExit(retryStderr);
-        const parts = [
-          `${failurePrefix}: the operation still exited early after the import step ran.`,
-        ];
-        if (stderrPart) parts.push(stderrPart);
-        return err(
-          createErrorResponse(parts.join('\n'), [
-            'Check the surfaced stderr above - the asset may be corrupted or incompatible with this Godot version',
-            'Check get_debug_output for the raw stdout and stderr',
-          ]),
-        );
-      }
-      if (options.parseStdoutAsJson) {
-        const jsonCandidate = extractJson(retryStdout.trim());
-        try {
-          const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
-          return createStructuredResponse(payload);
-        } catch (parseErr) {
-          return err(
-            createErrorResponse(
-              `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
-              [
-                'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
-                'Check get_debug_output for the raw stdout and stderr',
-              ],
-            ),
-          );
-        }
-      }
-      return ok({ content: [{ type: 'text', text: retryStdout }] });
-    }
-
-    if (!stdout.trim()) {
-      return err(
-        createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
-      );
-    }
-    if (options.parseStdoutAsJson) {
-      // extractJson already strips leading/trailing engine noise around a
-      // payload (GodotRunner.executeOperation normally routes stdout through
-      // cleanStdout/extractJson before handlers ever see it — this call is
-      // belt-and-braces for callers that bypass that, e.g. fake runners in
-      // tests). No separate leading-noise stripper needed here.
-      const jsonCandidate = extractJson(stdout.trim());
+    // Check for the cold-import marker (may appear even if stdout has a JSON
+    // error). One retry, structurally: this branch runs at most once per
+    // call, so a second marker on the retried run falls through to the
+    // normal interpretation path below rather than importing again.
+    if (stderr.includes(IMPORT_NEEDED_MARKER)) {
+      // importAssets writes .godot/ under the project. A running session on
+      // this same project is a second writer racing it, same as the
+      // mutatesSceneFile guard above — check it here too since this branch
+      // is reachable by read-only handlers that never pass that option.
+      const guard = rejectIfLiveSessionOnProject(runner, projectPath, [
+        'This project also needs an asset import, which will run automatically once the session is stopped',
+      ]);
+      if (guard) return guard;
       try {
-        const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
-        return createStructuredResponse(payload);
-      } catch (parseErr) {
-        if (stdoutLooksLikeEarlyQuitNoise(stdout)) {
-          // The operation exited before emitting its JSON payload (early
-          // quit on error): stdout contains only engine exit noise. Surface
-          // the offending output instead of blaming the operation script's
-          // JSON emission. stderr carries the actual failure (compile
-          // errors print to stderr in Godot's canonical format).
-          const parts = [
-            `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
-          ];
-          const stderrPart = renderStderrForEarlyExit(stderr);
-          if (stderrPart) parts.push(stderrPart);
-          const stdoutTail = stdout.trim().split('\n').slice(-STDOUT_TAIL_LINES).join('\n');
-          if (stdoutTail) parts.push(`stdout (last lines): ${stdoutTail}`);
-          return err(
-            createErrorResponse(parts.join('\n'), [
-              'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
-              'Check get_debug_output for the raw output',
-            ]),
-          );
-        }
+        await runner.importAssets(projectPath);
+      } catch (importErr) {
         return err(
           createErrorResponse(
-            `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
+            `${failurePrefix}: asset import failed - ${getErrorMessage(importErr)}`,
             [
-              'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
-              'Check get_debug_output for the raw stdout and stderr',
+              'A broken asset anywhere in the project blocks the import, not just one related to this operation',
+              'The file named in the import error is not necessarily the scene or asset this operation targeted',
+              'Fix or remove the broken asset, then retry',
             ],
           ),
         );
       }
+      ({ stdout, stderr } = await runner.executeOperation(operation, params, projectPath));
+      effectiveFailurePrefix = `${failurePrefix} (after the asset import step ran)`;
     }
-    return ok({ content: [{ type: 'text', text: stdout }] });
+
+    return interpretOperationResult(
+      stdout,
+      stderr,
+      effectiveFailurePrefix,
+      emptyStdoutSolutions,
+      options,
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions),
@@ -228,6 +257,7 @@ export async function executeSceneOp(
 function rejectIfLiveSessionOnProject(
   runner: GodotRunner,
   projectPath: string,
+  extraSolutions: string[] = [],
 ): HandlerResult | null {
   if (!runner.hasActiveRuntimeSession()) return null;
   const activeProject = runner.activeProjectPath;
@@ -239,7 +269,10 @@ function rejectIfLiveSessionOnProject(
   return err(
     createErrorResponse(
       "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
-      ['Call stop_project (or detach_project for attached sessions), then retry the scene edit'],
+      [
+        'Call stop_project (or detach_project for attached sessions), then retry the scene edit',
+        ...extraSolutions,
+      ],
     ),
   );
 }

@@ -212,16 +212,58 @@ func normalize_scene_path(scene_path: String) -> String:
 		return ""
 	return "res://" + relative
 
-# Cold-import probe shared by load_scene_instance and the batch pre-pass:
-# returns the ext_resources of `full_path` that exist on disk but were never
-# imported (ResourceLoader.exists false, FileAccess.file_exists true).
-func _unimported_deps(full_path: String) -> Array:
+# Resolves a ResourceLoader.get_dependencies() entry to its underlying
+# res:// path. Dependency strings come in two shapes:
+#   - bare:    "res://assets/tex.png"
+#   - uid-form: "uid://bq0sxwkx7p5xe::::res://assets/tex.png" (uid::type::path,
+#     type empty in practice) -- every scene saved by the Godot editor uses
+#     this form.
+# rfind (not get_slice) is used so both shapes parse correctly even if a
+# bare res:// path ever contained "::" itself. When the string is uid-form,
+# the uid is resolved via ResourceUID first and its current path preferred
+# over the embedded text path -- the editor may have moved the file since
+# the scene was saved.
+func _resolve_dep_path(dep: String) -> String:
+	var text_path = dep.substr(dep.rfind("::") + 2) if dep.contains("::") else dep
+	if not dep.begins_with("uid://"):
+		return text_path
+	var uid_text = dep.substr(0, dep.find("::")) if dep.contains("::") else dep
+	var id := ResourceUID.text_to_id(uid_text)
+	if id != ResourceUID.INVALID_ID and ResourceUID.has_id(id):
+		return ResourceUID.get_id_path(id)
+	return text_path
+
+# Classifies a resolved dependency path for the cold-import probe. Non-res://
+# paths (rare, but not impossible in a dependency list) are always "ok" since
+# there is nothing this probe can check about them. Shared by the scene-load
+# probe, the batch pre-pass, and the first-time asset-reference sites
+# (_apply_load_sprite, _prepare_property_value).
+func _classify_dep_path(path: String) -> String:
+	if not path.begins_with("res://"):
+		return "ok"
+	if ResourceLoader.exists(path):
+		return "ok"
+	if FileAccess.file_exists(path):
+		return "needs_import"
+	return "missing"
+
+# Cold-import + missing-file probe shared by load_scene_instance and the
+# batch pre-pass. Returns {"needs_import": [...], "missing": [...]} for the
+# ext_resources of `full_path`: "needs_import" are on disk but never
+# imported (ResourceLoader.exists false, FileAccess.file_exists true);
+# "missing" are not on disk at all.
+func _probe_scene_deps(full_path: String) -> Dictionary:
 	var deps = ResourceLoader.get_dependencies(full_path)
-	var unimported: Array = []
+	var needs_import: Array = []
+	var missing: Array = []
 	for dep in deps:
-		if dep.begins_with("res://") and not ResourceLoader.exists(dep) and FileAccess.file_exists(dep):
-			unimported.append(dep)
-	return unimported
+		var path = _resolve_dep_path(dep)
+		var status = _classify_dep_path(path)
+		if status == "needs_import":
+			needs_import.append(path)
+		elif status == "missing":
+			missing.append(path)
+	return {"needs_import": needs_import, "missing": missing}
 
 # Load and instantiate a scene. Before loading, probes for the cold-import
 # state: files that exist on disk but were never imported (no .godot/imported
@@ -233,10 +275,20 @@ func _unimported_deps(full_path: String) -> Array:
 # Returns null on failure and prints a structured error line that TS can
 # recognize: "[IMPORT_NEEDED] <scene_path>: <unimported_file1>, ...". The TS
 # layer catches this, runs the import step, and retries the operation once.
+# A dependency that is missing from disk entirely is a different failure and
+# refuses the load outright (see below) rather than feeding into the import
+# retry loop.
 #
 # The signal is self-terminating: a failed or broken import still writes the
 # .import sidecar, flipping exists() to true, so the same asset is never
 # probed again and instead correctly reports as a broken asset downstream.
+#
+# Tried and rejected: ResourceLoader.set_abort_on_missing_resources(false)
+# plus tolerating MissingResource placeholders. This does NOT fix either
+# case here -- the missing-file case still silently strips the reference on
+# save (a MissingResource still packs as nothing), and the unimported-file
+# case hangs the engine instead of returning cleanly. Probing dependencies
+# up front, before load() ever runs, is the only approach that avoided both.
 func load_scene_instance(scene_path: String):
 	var full_path = normalize_scene_path(scene_path)
 	if full_path.is_empty():
@@ -248,10 +300,15 @@ func load_scene_instance(scene_path: String):
 		log_error("Scene file does not exist: " + full_path)
 		return null
 
-	# Probe for unimported ext_resources before loading.
-	var unimported = _unimported_deps(full_path)
-	if unimported.size() > 0:
-		log_error("[IMPORT_NEEDED] " + scene_path + ": " + ", ".join(unimported))
+	# Probe dependencies before loading. Missing files are checked first: a
+	# scene with both problems is refused outright rather than imported and
+	# then refused, which would leave a half-fixed state behind.
+	var probe = _probe_scene_deps(full_path)
+	if probe.missing.size() > 0:
+		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing))
+		return null
+	if probe.needs_import.size() > 0:
+		log_error("[IMPORT_NEEDED] " + scene_path + ": " + ", ".join(probe.needs_import))
 		return null
 
 	var scene = load(full_path)
@@ -458,6 +515,12 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	var full_texture_path = normalize_scene_path(op.texture_path)
 	if full_texture_path.is_empty():
 		return {"ok": false, "error": "Path escapes the project root: " + op.texture_path}
+	# First-time reference to an asset the scene-load probe never saw (e.g. a
+	# texture just added to the project): check for the cold-import state
+	# before load() runs, same as the scene-dependency probe above.
+	if _classify_dep_path(full_texture_path) == "needs_import":
+		log_error("[IMPORT_NEEDED] load_sprite " + op.node_path + ": " + full_texture_path)
+		return {"ok": false, "error": "asset not yet imported: " + full_texture_path}
 	var texture = load(full_texture_path)
 	if not texture:
 		return {"ok": false, "error": "Failed to load texture: " + full_texture_path}
@@ -466,7 +529,7 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	# A texture without a resource_path is a runtime-only object — PackedScene.pack()
 	# cannot serialize it, so the assignment would silently vanish on save.
 	if texture.resource_path == "":
-		return {"ok": false, "error": "Texture has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+		return {"ok": false, "error": "Texture was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
 	sprite_node.texture = texture
 	return {"ok": true, "error": ""}
 
@@ -1186,11 +1249,17 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
+			# First-time reference to an asset the scene-load probe never saw
+			# (e.g. a res:// string assigned to an Object-typed property).
+			# Check for the cold-import state before load() runs.
+			if _classify_dep_path(coerced) == "needs_import":
+				log_error("[IMPORT_NEEDED] property " + property + ": " + coerced)
+				return {"ok": false, "value": null, "error": "asset not yet imported: " + coerced}
 			var res = load(coerced)
 			if not res:
 				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
 			if res.resource_path == "":
-				return {"ok": false, "value": null, "error": "Resource has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+				return {"ok": false, "value": null, "error": "Resource was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
 			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
 			if not hint_check.ok:
 				return {"ok": false, "value": null, "error": hint_check.error}
@@ -1305,27 +1374,62 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var results: Array = []
 	var scene_cache: Dictionary = {}
 
-	# Pre-pass: probe every referenced scene for the cold-import state BEFORE
-	# any mutation is applied. The probe re-runs against the marker exit below,
-	# so the TS layer imports and re-runs the whole batch cleanly; letting the
-	# main loop discover a cold scene lazily (after earlier ops already
-	# mutated and auto-saved other scenes) would duplicate those mutations on
-	# the retry. Plain load failures are NOT handled here — they stay lazy so
-	# per-operation error reporting keeps its existing shape.
+	# Pre-pass: probe every referenced scene, plus every first-time asset
+	# reference (load_sprite's texture_path, and any res:// string inside a
+	# set_node_properties update), for the cold-import state and for missing
+	# files -- BEFORE any mutation is applied. Missing files are checked
+	# first, across the whole batch: a batch that would otherwise import and
+	# then refuse mid-way is worse than refusing up front. The probe re-runs
+	# against the marker exit below, so the TS layer imports and re-runs the
+	# whole batch cleanly; letting the main loop discover a cold scene or
+	# asset lazily (after earlier ops already mutated and auto-saved other
+	# scenes) would duplicate those mutations on the retry. Plain scene load
+	# failures are NOT handled here — they stay lazy so per-operation error
+	# reporting keeps its existing shape. Dedup keys on the normalized path,
+	# not the raw string, so a scene referenced as both "a.tscn" and
+	# "./a.tscn" (or the same asset referenced from two ops) is probed once.
 	var seen_paths: Dictionary = {}
+	var prepass_missing: Array = []
+	var prepass_needs_import: Array = []
 	for op in params.operations:
 		var preload_path = op.get("scene_path", "")
-		if preload_path == "" or preload_path in seen_paths:
-			continue
-		seen_paths[preload_path] = true
-		var full_path = normalize_scene_path(preload_path)
-		if full_path.is_empty() or not FileAccess.file_exists(full_path):
-			continue
-		var unimported = _unimported_deps(full_path)
-		if unimported.size() > 0:
-			log_error("[IMPORT_NEEDED] " + preload_path + ": " + ", ".join(unimported))
-			quit(1)
-			return
+		if preload_path != "":
+			var full_path = normalize_scene_path(preload_path)
+			if not full_path.is_empty() and full_path not in seen_paths and FileAccess.file_exists(full_path):
+				seen_paths[full_path] = true
+				var probe = _probe_scene_deps(full_path)
+				prepass_missing.append_array(probe.missing)
+				prepass_needs_import.append_array(probe.needs_import)
+
+		var op_name = op.get("operation", "")
+		if op_name == "load_sprite" and op.get("texture_path", "") != "":
+			var asset_path = normalize_scene_path(op.texture_path)
+			if not asset_path.is_empty() and asset_path not in seen_paths:
+				seen_paths[asset_path] = true
+				if _classify_dep_path(asset_path) == "needs_import":
+					prepass_needs_import.append(asset_path)
+		elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
+			for update in op.updates:
+				if typeof(update) != TYPE_DICTIONARY or not update.has("value"):
+					continue
+				var raw_value = update.value
+				if typeof(raw_value) != TYPE_STRING or not raw_value.begins_with("res://"):
+					continue
+				var prop_path = normalize_scene_path(raw_value)
+				if prop_path.is_empty() or prop_path in seen_paths:
+					continue
+				seen_paths[prop_path] = true
+				if _classify_dep_path(prop_path) == "needs_import":
+					prepass_needs_import.append(prop_path)
+
+	if prepass_missing.size() > 0:
+		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(prepass_missing))
+		quit(1)
+		return
+	if prepass_needs_import.size() > 0:
+		log_error("[IMPORT_NEEDED] batch: " + ", ".join(prepass_needs_import))
+		quit(1)
+		return
 
 	for op in params.operations:
 		var op_name = op.get("operation", "")

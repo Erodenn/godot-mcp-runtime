@@ -505,17 +505,12 @@ describe('load_sprite rejects unimported textures with a clear error (Bug #4)', 
         errorMessage = err instanceof Error ? err.message : String(err);
       }
 
-      // Either a thrown error or a stderr message — but NOT silent success.
-      // Tolerate either the new explicit "resource_path" / "Texture2D" guard
-      // message, or Godot's lower-level "No loader found" / "Failed to load
-      // texture" error.
+      // Either a thrown error or a stderr message, but NOT silent success.
+      // At the raw runner level the cold-import probe fires before load():
+      // the marker names the texture so executeSceneOp can import and retry.
       expect(threw || errorMessage.length > 0).toBe(true);
-      const combined = errorMessage.toLowerCase();
-      expect(
-        combined.includes('texture') ||
-          combined.includes('loader') ||
-          combined.includes('resource'),
-      ).toBe(true);
+      expect(errorMessage).toContain('[IMPORT_NEEDED]');
+      expect(errorMessage).toContain('res://unimported.png');
 
       // .tscn must NOT have been mutated to add a texture line.
       const tscnContent = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');

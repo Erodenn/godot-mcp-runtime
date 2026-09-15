@@ -48,6 +48,10 @@ const BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS = 1500;
 const BRIDGE_PROCESS_EXIT_TIMEOUT_MS = 2000;
 const BRIDGE_RECONNECT_DELAY_MS = 1000;
 
+// A first import of an asset-heavy project can exceed 2 minutes; 5 minutes
+// leaves headroom without hanging forever on a genuinely stuck import.
+const IMPORT_TIMEOUT_MS = 300000;
+
 export interface GodotProcess {
   process: ChildProcess;
   output: string[];
@@ -113,6 +117,21 @@ function readBytesFromChunks(chunks: Buffer[], n: number): Buffer {
     if (copied >= n) break;
   }
   return result;
+}
+
+/**
+ * A `child_process.spawn` promise rejection carries `stdout`/`stderr`
+ * captured before the failure (e.g. a timeout kill) on top of the plain
+ * `Error` shape. Narrows `error: unknown` from a catch block to that shape,
+ * or returns null when it doesn't match. Shared by `executeOperation` and
+ * `importAssets`, which both need to recover partial output from a spawn
+ * failure rather than losing it to a rethrow.
+ */
+function asSpawnError(error: unknown): (Error & { stdout: string; stderr: string }) | null {
+  if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
+    return error as Error & { stdout: string; stderr: string };
+  }
+  return null;
 }
 
 export class GodotRunner {
@@ -400,13 +419,10 @@ export class GodotRunner {
     try {
       ({ stdout, stderr } = await this.spawnAsync(this.godotPath, args, timeoutMs));
     } catch (error: unknown) {
-      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-        const execError = error as Error & { stdout: string; stderr: string };
-        stdout = execError.stdout;
-        stderr = execError.stderr;
-      } else {
-        throw error;
-      }
+      const spawnError = asSpawnError(error);
+      if (!spawnError) throw error;
+      stdout = spawnError.stdout;
+      stderr = spawnError.stderr;
     }
 
     // If the process produced no operation output but has errors, initialization
@@ -434,15 +450,18 @@ export class GodotRunner {
 
   /**
    * Run `godot --headless --import --path <projectPath>` to (re)import assets
-   * into `.godot/imported`. On a fresh project no imported artifacts exist and
-   * resource-touching operations (load_sprite on a new texture, runtime
-   * resource loads) fail with `resource not found` even though the file is on
-   * disk — the import step has never run.
+   * into `.godot/imported`. Called by `executeSceneOp` (src/utils/headless-op.ts)
+   * when the scene-load probe in godot_operations.gd reports an unimported
+   * dependency via the `[IMPORT_NEEDED]` stderr marker: a fresh project (or a
+   * newly-added asset) has no imported artifacts yet, and resource-touching
+   * operations would otherwise fail with `resource not found` even though the
+   * file is on disk — the import step has never run for it.
    *
-   * Note: Godot exits 0 even when individual assets fail; this method inspects
-   * stderr for "ERROR: Error importing" and throws if found.
+   * Note: Godot exits 0 even when individual assets fail to import; this
+   * method inspects stderr for "ERROR: Error importing" and throws if found,
+   * since the caller has no other signal that the import didn't fully succeed.
    */
-  async importAssets(projectPath: string, timeoutMs: number = 120000): Promise<void> {
+  async importAssets(projectPath: string, timeoutMs: number = IMPORT_TIMEOUT_MS): Promise<void> {
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
@@ -458,11 +477,9 @@ export class GodotRunner {
         timeoutMs,
       ));
     } catch (error: unknown) {
-      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-        stderr = (error as Error & { stderr: string }).stderr;
-      } else {
-        throw error;
-      }
+      const spawnError = asSpawnError(error);
+      if (!spawnError) throw error;
+      stderr = spawnError.stderr;
     }
     // Godot exits 0 even when individual assets fail; check stderr for import errors.
     const failedFiles = [...stderr.matchAll(/ERROR: Error importing '([^']+)'/g)].map((m) => m[1]);

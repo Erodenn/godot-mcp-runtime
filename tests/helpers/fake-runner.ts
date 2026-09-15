@@ -9,7 +9,9 @@
  * Build a FakeRunner with `createFakeRunner({ stdout, stderr })` for the
  * happy path, or `createFakeRunner({ throws: new Error(...) })` to exercise
  * the catch branch. Pass `godotVersion` to control what `getVersion()`
- * returns for handlers that read it (e.g. handleGetProjectInfo).
+ * returns for handlers that read it (e.g. handleGetProjectInfo). Pass
+ * `importThrows` to make `importAssets()` reject, for tests of the
+ * cold-import retry's failure path in `executeSceneOp`.
  *
  * `runner.calls` is a spy surface — use it sparingly. The default rubric is
  * "assert outputs, not internal calls." Reach for `calls` only to confirm a
@@ -41,17 +43,22 @@ export interface FakeRunnerOptions {
    * Default: "4.3.stable".
    */
   godotVersion?: string;
+  /** If set, importAssets() rejects with this error instead of resolving. */
+  importThrows?: Error;
 }
 
 export interface FakeRunner {
   /** Recorded calls to executeOperation, in order. */
   calls: FakeRunnerCall[];
+  /** Project paths passed to importAssets(), in order. */
+  importCalls: string[];
   /** The runner cast to GodotRunner — pass directly to handlers. */
   asRunner: GodotRunner;
 }
 
 export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const calls: FakeRunnerCall[] = [];
+  const importCalls: string[] = [];
   const defaults: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'> = {
     stdout: options.stdout ?? '',
     stderr: options.stderr ?? '',
@@ -59,9 +66,11 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   };
   const responses = options.responses ?? [];
   const godotVersion = options.godotVersion ?? '4.3.stable';
+  const importThrows = options.importThrows;
 
   const fake = {
     calls,
+    importCalls,
     // No live runtime session by default -- tests that need one (e.g. the
     // executeSceneOp guard tests) set these fields directly on `asRunner`.
     activeSessionMode: null as 'spawned' | 'attached' | null,
@@ -80,6 +89,10 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       if (merged.throws) throw merged.throws;
       return { stdout: merged.stdout ?? '', stderr: merged.stderr ?? '' };
     },
+    async importAssets(projectPath: string): Promise<void> {
+      importCalls.push(projectPath);
+      if (importThrows) throw importThrows;
+    },
     async getVersion(): Promise<string> {
       return godotVersion;
     },
@@ -96,6 +109,7 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
 
   return {
     calls,
+    importCalls,
     asRunner: fake as unknown as GodotRunner,
   };
 }

@@ -267,6 +267,117 @@ describe('executeSceneOp', () => {
   });
 });
 
+// Cold-import retry contract: executeSceneOp reacts to the [IMPORT_NEEDED]
+// stderr marker by running importAssets() and retrying the operation exactly
+// once, capped structurally (no loop that could re-enter on a second marker).
+describe('executeSceneOp cold-import retry', () => {
+  it('imports once and retries once when the marker appears with empty stdout, then succeeds', async () => {
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: '', stderr: '[IMPORT_NEEDED] main.tscn: res://assets/tex.png' },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    expect(hasError(result)).toBe(false);
+    expect(unwrap(result).content).toEqual([{ type: 'text', text: '{"ok":true}' }]);
+  });
+
+  it('reports an error mentioning the import step when the retry still has empty stdout', async () => {
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: '', stderr: '[IMPORT_NEEDED] main.tscn: res://assets/tex.png' },
+        { stdout: '', stderr: '[ERROR] still broken' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    expectErrorMatching(result, /import step/i);
+  });
+
+  it('reports the thrown message and does not retry the operation when importAssets throws', async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://assets/tex.png',
+      importThrows: new Error('Asset import reported errors for 1 file(s)'),
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /Asset import reported errors for 1 file\(s\)/);
+  });
+
+  it('does not import and returns the live-session guard error when a session is active on the same project', async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://assets/tex.png',
+    });
+    const runner = fake.asRunner as GodotRunner & {
+      activeSessionMode: 'spawned' | 'attached' | null;
+      activeProjectPath: string | null;
+      activeProcess: { hasExited: boolean } | null;
+    };
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = '/proj';
+    runner.activeProcess = { hasExited: false };
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /active.*session|session.*active/i);
+  });
+
+  it('never calls importAssets when the marker is absent', async () => {
+    const fake = createFakeRunner({ stdout: '{"ok":true}', stderr: '' });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    expect(hasError(result)).toBe(false);
+  });
+});
+
 // parseStdoutAsJson failure diagnosis: when a headless operation exits before
 // emitting its JSON payload (early quit(1) on error), stdout contains only
 // engine noise — RID-leak warnings are the canonical production shape (the

@@ -126,11 +126,11 @@ Godot performs these on store, so they are allowed: float to int, string to `Nod
 
 Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.shape`, `Sprite2D.texture`) reject plain values. They accept one of three forms:
 
-| Form                                | Behavior                                                                                        |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `"res://path/to/file.tres"`         | Loads the saved resource. Errors if the path does not exist or the asset has not been imported. |
-| `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.     |
-| `null`                              | Clears the property.                                                                            |
+| Form                                | Behavior                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"res://path/to/file.tres"`         | Loads the saved resource. An asset that exists on disk but has never been imported triggers an automatic headless import and one retry, transparent to the caller. A path that does not exist on disk is an error, and a mutation on a scene that references a missing file is refused outright so the reference is not stripped on save. |
+| `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.                                                                                                                                                                                                                                               |
+| `null`                              | Clears the property.                                                                                                                                                                                                                                                                                                                      |
 
 Inline construction example:
 
