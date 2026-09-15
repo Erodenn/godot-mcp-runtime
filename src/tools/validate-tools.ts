@@ -6,8 +6,9 @@ import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.type
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
-import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
+import { parseProjectArgs, parseSceneArgs, optionalString } from '../utils/arg-parsing.js';
 import { parseScriptDiagnostics } from '../utils/output-parsing.js';
+import { executeSceneOp } from '../utils/headless-op.js';
 import { ok, err } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 
@@ -53,13 +54,53 @@ export const validateToolDefinitions = [
               source: { type: 'string', description: 'Inline GDScript source code' },
               scenePath: {
                 type: 'string',
-                description: 'Path to a .tscn file relative to the project',
+                description: 'Path to a .tscn scene file relative to the project',
               },
             },
           },
         },
       },
       required: ['projectPath'],
+    },
+  },
+  {
+    name: 'validate_scene_structure',
+    description:
+      'Validate a scene file against a structural schema (node types, children hierarchy, required properties). Use to enforce architectural invariants like "CollisionShape2D must have shape set"; for syntax/integrity checks use validate instead. Schema: { type?, children?, hasProperty? } - see docs/tools.md. Returns: { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }. Read-only; errors if the scene does not exist.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        scenePath: { type: 'string', description: 'Scene file path relative to the project' },
+        schema: {
+          type: 'object',
+          description:
+            'Validation schema: { type?: ClassName, children?: Schema[], hasProperty?: propertyName }. Omit type to skip root type check. hasProperty checks that a node has that property set (non-null/non-empty). Each children[] entry matches the first not-yet-consumed child of its declared type, in schema order - two entries of the same type require two distinct matching children.',
+        },
+      },
+      required: ['projectPath', 'scenePath', 'schema'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        valid: { type: 'boolean' },
+        missingNodes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { path: { type: 'string' }, expected: { type: 'string' } },
+          },
+        },
+        missingProperties: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { path: { type: 'string' }, property: { type: 'string' } },
+          },
+        },
+        errors: { type: 'array', items: { type: 'string' } },
+      },
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -398,4 +439,53 @@ export async function handleValidate(
       }
     }
   }
+}
+
+export async function handleValidateSceneStructure(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
+  const { projectPath, scenePath } = parsed.value;
+
+  const schema = args.schema;
+  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+    return err(
+      createErrorResponse(
+        'Invalid schema: must be an object like { type?, children?, hasProperty? }',
+        [
+          'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }',
+        ],
+      ),
+    );
+  }
+  const schemaObj = schema as { type?: unknown; children?: unknown; hasProperty?: unknown };
+  if (
+    schemaObj.type === undefined &&
+    schemaObj.children === undefined &&
+    schemaObj.hasProperty === undefined
+  ) {
+    return err(
+      createErrorResponse(
+        'Invalid schema: at least one of type, children, or hasProperty is required',
+        [
+          'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }',
+        ],
+      ),
+    );
+  }
+
+  return executeSceneOp(
+    runner,
+    'validate_scene_structure',
+    { scenePath, schema: schemaObj },
+    projectPath,
+    'Scene structure validation failed',
+    ['Check if the scene path is correct', 'Ensure the schema follows the documented shape'],
+    undefined,
+    { parseStdoutAsJson: true },
+  );
 }

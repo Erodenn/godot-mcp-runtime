@@ -64,6 +64,7 @@ import {
   handleGetSceneTree,
   handleDuplicateNode,
   handleGetNodeSignals,
+  handleVerifyNodeConnections,
   handleConnectSignal,
   handleDisconnectSignal,
 } from './tools/node-tools.js';
@@ -74,7 +75,7 @@ import {
   handleStopProfiler,
 } from './tools/profiler-tools.js';
 
-import { handleValidate } from './tools/validate-tools.js';
+import { handleValidate, handleValidateSceneStructure } from './tools/validate-tools.js';
 
 export const toolDispatch = {
   // Project tools
@@ -115,6 +116,7 @@ export const toolDispatch = {
   get_scene_tree: handleGetSceneTree,
   duplicate_node: handleDuplicateNode,
   get_node_signals: handleGetNodeSignals,
+  verify_node_connections: handleVerifyNodeConnections,
   connect_signal: handleConnectSignal,
   disconnect_signal: handleDisconnectSignal,
 
@@ -125,6 +127,7 @@ export const toolDispatch = {
 
   // Validate tools
   validate: handleValidate,
+  validate_scene_structure: handleValidateSceneStructure,
 } as const satisfies Record<ToolName, ToolHandler>;
 
 export async function dispatchToolCall(

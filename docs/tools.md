@@ -90,19 +90,29 @@ Every path argument is confined to the project root. A path that resolves outsid
 
 All mutation operations save automatically. Property and delete tools take always-array input - pass a single-element array for one-off operations, or many for batched work in one Godot process.
 
-`set_node_properties`, `attach_script`, `duplicate_node`, `delete_nodes`, `connect_signal`, and `disconnect_signal` error while a Godot runtime session is active on the same project - a running process can write its own scene files at any point, so a headless write would race it. Call `stop_project` (or `detach_project`) to clear the block. The three read-only tools (`get_scene_tree`, `get_node_properties`, `get_node_signals`) are unaffected.
+`set_node_properties`, `attach_script`, `duplicate_node`, `delete_nodes`, `connect_signal`, and `disconnect_signal` error while a Godot runtime session is active on the same project - a running process can write its own scene files at any point, so a headless write would race it. Call `stop_project` (or `detach_project`) to clear the block. The four read-only tools (`get_scene_tree`, `get_node_properties`, `get_node_signals`, `verify_node_connections`) are unaffected.
 
-| Tool                  | Description                                                               |
-| --------------------- | ------------------------------------------------------------------------- |
-| `get_scene_tree`      | Get the full scene tree hierarchy (use `maxDepth: 1` for shallow listing) |
-| `get_node_properties` | Read properties from one or more nodes (always-array `nodes`)             |
-| `set_node_properties` | Set properties on one or more nodes (always-array `updates`)              |
-| `attach_script`       | Attach a GDScript to a node                                               |
-| `duplicate_node`      | Duplicate a node within the scene                                         |
-| `delete_nodes`        | Remove one or more nodes from the scene (always-array `nodePaths`)        |
-| `get_node_signals`    | List all signals on a node with their connections                         |
-| `connect_signal`      | Connect a signal to a method on another node                              |
-| `disconnect_signal`   | Disconnect a signal connection                                            |
+| Tool                      | Description                                                               |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `get_scene_tree`          | Get the full scene tree hierarchy (use `maxDepth: 1` for shallow listing) |
+| `get_node_properties`     | Read properties from one or more nodes (always-array `nodes`)             |
+| `set_node_properties`     | Set properties on one or more nodes (always-array `updates`)              |
+| `attach_script`           | Attach a GDScript to a node                                               |
+| `duplicate_node`          | Duplicate a node within the scene                                         |
+| `delete_nodes`            | Remove one or more nodes from the scene (always-array `nodePaths`)        |
+| `get_node_signals`        | List all signals on a node with their connections                         |
+| `connect_signal`          | Connect a signal to a method on another node                              |
+| `disconnect_signal`       | Disconnect a signal connection                                            |
+| `verify_node_connections` | Verify signal wiring across a scene or subtree (read-only)                |
+
+`verify_node_connections` walks every connection reachable from the scope (whole scene, or the subtree under `nodePath`) and reports one issue per problem found. Issues carry `{ node, signal, target, method, problem }`; `node`, `target` are scene-root-relative paths. The problem codes:
+
+| Code                       | Meaning                                                                                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                                                                         |
+| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. Engine-internal connections (e.g. `Label::_maximum_size_changed`) are excluded. |
+| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                                                                             |
+| `orphaned_handler`         | A script-defined `_on_*` method on a node with no incoming connection pointing at it - dead code, or leftover after a disconnect.                                                        |
 
 ## Property Values (`add_node`, `set_node_properties`)
 
@@ -166,3 +176,22 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 ## Validation: `validate`
 
 Validate before attaching or running. Catches syntax errors and missing resource references before they cause headless crashes or runtime failures. Supports `scriptPath`, `source` (inline GDScript), `scenePath`, or a `targets` array for batch validation.
+
+## Structural validation: `validate_scene_structure`
+
+`validate` checks one scene's syntax and resource integrity; `validate_scene_structure` checks a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene has exactly one `CharacterBody2D` root", "a `CollisionShape2D` always has `shape` set".
+
+The schema is a recursive object:
+
+```json
+{
+  "type": "CharacterBody2D",
+  "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }, { "type": "Sprite2D" }]
+}
+```
+
+- `type` — the node's Godot class name, checked against the instantiated node's class.
+- `children` — schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
+- `hasProperty` — the node must have this property set to a non-null, non-empty value.
+
+Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked.

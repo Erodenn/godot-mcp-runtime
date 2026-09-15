@@ -83,12 +83,16 @@ func _init():
 			duplicate_node(params)
 		"get_node_signals":
 			get_node_signals(params)
+		"verify_node_connections":
+			verify_node_connections(params)
 		"connect_signal":
 			connect_signal(params)
 		"disconnect_signal":
 			disconnect_signal(params)
 		"validate_resource":
 			validate_resource(params)
+		"validate_scene_structure":
+			validate_scene_structure(params)
 		# Batch operations
 		"validate_batch":
 			validate_batch(params)
@@ -1000,6 +1004,211 @@ func get_node_signals(params):
 		"signals": signals
 	}))
 
+# Verify signal wiring across a scene (or a single node subtree) by checking
+# four things per connection: the target node is reachable from the scene
+# root, the handler method exists on the target, the method follows the
+# _on_<node>_<signal> naming convention, and no handler-looking method
+# (_on_*) on any node lacks a matching connection (orphaned handlers).
+func verify_node_connections(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root:
+		quit(1)
+		return
+
+	var scope_node = scene_root
+	if params.has("node_path") and params.node_path != "":
+		scope_node = find_node_by_path(scene_root, params.node_path)
+		if not scope_node:
+			log_error("Node not found: " + params.node_path)
+			quit(1)
+			return
+
+	var issues = []
+	_collect_connection_issues(scope_node, scene_root, issues)
+	_collect_orphaned_handlers(scope_node, scene_root, issues)
+
+	print(JSON.stringify({
+		"verified": issues.size() == 0,
+		"issueCount": issues.size(),
+		"issues": issues
+	}))
+
+# Check every live connection reachable from scope_node. Target paths are
+# resolved against the scene root so they appear in the same "root/..." form
+# get_node_signals reports and connect_signal accepts.
+func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) -> void:
+	# walk the subtree rooted at scope (includes scope itself)
+	for node in _iter_subtree(scope):
+		var node_rel = _relative_path(scene_root, node)
+		for sig in node.get_signal_list():
+			var sig_name = sig["name"]
+			for conn in node.get_signal_connection_list(sig_name):
+				var callable: Callable = conn["callable"]
+				var target_object = callable.get_object()
+				var method = String(callable.get_method())
+
+				var target_str = "unknown"
+				if target_object == scene_root:
+					target_str = "root"
+				elif target_object is Node:
+					target_str = "root/" + String(scene_root.get_path_to(target_object))
+
+				# Issue 1: connection target is not a node reachable from this scene
+				if not (target_object is Node) or _relative_path(scene_root, target_object).is_empty():
+					issues.append({
+						"node": node_rel,
+						"signal": sig_name,
+						"target": target_str,
+						"method": method,
+						"problem": "target_not_in_scene"
+					})
+					continue
+
+				# Issue 2: handler method does not exist on the target node
+				# Skip engine-internal methods (e.g. Label::_maximum_size_changed)
+				if not target_object.has_method(method):
+					if _is_engine_internal_connection(target_object, method):
+						continue
+					issues.append({
+						"node": node_rel,
+						"signal": sig_name,
+						"target": target_str,
+						"method": method,
+						"problem": "method_missing_on_target"
+					})
+					continue
+
+				# Issue 3 (warning-level): handler does not follow _on_<node>_<signal> naming
+				if not method.begins_with("_on_"):
+					issues.append({
+						"node": node_rel,
+						"signal": sig_name,
+						"target": target_str,
+						"method": method,
+						"problem": "naming_convention"
+					})
+
+# Handlers on nodes within scope that begin with _on_ but have no connection
+# pointing at them: signatures wired in code but never connected, or leftover
+# after a disconnect. These are silent at runtime.
+func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) -> void:
+	# index every connection target (node path) reachable in the whole
+	# scene so a handler connected to a sibling outside the scope is not
+	# falsely reported. Use (node_path, method) tuples as keys because Object identity
+	# in dictionaries doesn't match across iterations.
+	var wired_pairs := {}  # keyed by "node_path::method"
+	for node in _iter_subtree(scene_root):
+		for sig in node.get_signal_list():
+			var sig_name = sig["name"]
+			for conn in node.get_signal_connection_list(sig_name):
+				var callable: Callable = conn["callable"]
+				var target_object = callable.get_object()
+				if target_object is Node:
+					# Skip engine-internal connections (their method is not
+					# user script): they do not make a user handler wired.
+					if _is_engine_internal_connection(target_object, String(callable.get_method())):
+						continue
+					var target_path = _relative_path(scene_root, target_object)
+					var method_name = String(callable.get_method())
+					if not target_path.is_empty():
+						wired_pairs[target_path + "::" + method_name] = true
+
+	for node in _iter_subtree(scope):
+		var node_rel = _relative_path(scene_root, node)
+		if node_rel.is_empty():
+			continue
+		var script_methods = _get_script_user_defined_methods(node)
+		log_debug("Checking node " + node_rel + " for orphaned handlers, found " + str(script_methods.size()) + " methods: " + str(script_methods))
+		for method_name in script_methods:
+			if not method_name.begins_with("_on_"):
+				continue
+			var pair_key = node_rel + "::" + method_name
+			if not wired_pairs.has(pair_key):
+				log_debug("Found orphaned handler: " + method_name + " on " + node_rel)
+				issues.append({
+					"node": node_rel,
+					"signal": "",
+					"target": node_rel,
+					"method": method_name,
+					"problem": "orphaned_handler"
+				})
+
+# Yield node and every descendant (depth-first, preorder).
+func _iter_subtree(root: Node) -> Array:
+	var out := []
+	var stack := [root]
+	while not stack.is_empty():
+		var node = stack.pop_back()
+		out.append(node)
+		for child in node.get_children():
+			stack.push_front(child)
+	return out
+
+# Scene-root-relative path in the "root/..." form, "" when node is outside the tree.
+func _relative_path(scene_root: Node, node: Node) -> String:
+	if node == scene_root:
+		return "root"
+	if not scene_root.is_ancestor_of(node):
+		return ""
+	return "root/" + String(scene_root.get_path_to(node))
+
+# A connection is engine-internal when its method resolves to no script
+# handler: engine code connects private slots (e.g. Label::_maximum_size_changed)
+# that are not visible to user scripts. Used both to skip false
+# method_missing_on_target issues and to keep internal connections from marking
+# a node as "wired" in orphaned-handler detection. The reported method name may
+# carry a "Class::" prefix; normalized before matching.
+func _is_engine_internal_connection(target_object: Object, method: String) -> bool:
+	var m = method
+	var sep = m.rfind("::")
+	if sep != -1:
+		m = m.substr(sep + 2)
+	if _is_user_script_method(target_object, m):
+		return false
+	if target_object.has_method(m):
+		return true
+	return _is_engine_builtin_declared(target_object, m)
+
+# True when method is declared by the attached script (vs inherited engine class).
+func _is_user_script_method(target_object: Object, method: String) -> bool:
+	var script = target_object.get_script()
+	if script == null:
+		return false
+	for m in script.get_script_method_list():
+		if String(m["name"]) == method:
+			return true
+	return false
+
+# True when method is an engine builtin even though has_method() reported false
+# (headless instances do not expose some private slots). Conservative: only
+# methods with the leading underscore typical of internal slots qualify. The
+# reported method name may carry a "Class::" prefix (e.g. Label::_changed),
+# so strip everything before the last "::" first.
+func _is_engine_builtin_declared(target_object: Object, method: String) -> bool:
+	var m = method
+	var sep = m.rfind("::")
+	if sep != -1:
+		m = m.substr(sep + 2)
+	return m.begins_with("_") and not m.begins_with("_on_")
+
+# Extract user-defined method names from a node's attached script by parsing
+# the script source file. Returns an array of method names that are defined
+# in the script (excluding inherited methods). Used to detect orphaned handlers.
+func _get_script_user_defined_methods(node: Node) -> Array:
+	var script = node.get_script()
+	if script == null:
+		return []
+
+	var methods := []
+	for m in script.get_script_method_list():
+		var method_name = String(m["name"])
+		# Only keep _on_* methods (signal handlers) - these are always user-defined
+		# and are exactly what we need for orphaned-handler detection.
+		if method_name.begins_with("_on_"):
+			methods.append(method_name)
+
+	return methods
+
 # Connect a signal from one node to a method on another node
 func connect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
@@ -1089,6 +1298,87 @@ func validate_resource(params):
 		return
 	var result = _validate_single(params)
 	print(JSON.stringify({"valid": result.valid, "errors": result.errors}))
+
+# Validate a scene file against a structural schema. Schema: { type?: string, children?: Schema[], hasProperty?: string }.
+# Returns { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }.
+func validate_scene_structure(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root:
+		quit(1)
+		return
+	
+	var issues = []
+	var missing_nodes = []
+	var missing_properties = []
+	
+	_validate_schema_node(scene_root, scene_root, params.schema, missing_nodes, missing_properties, issues)
+	
+	print(JSON.stringify({
+		"valid": issues.size() == 0 and missing_nodes.size() == 0 and missing_properties.size() == 0,
+		"missingNodes": missing_nodes,
+		"missingProperties": missing_properties,
+		"errors": issues
+	}))
+
+func _validate_schema_node(node: Node, scene_root: Node, schema: Dictionary, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
+	# Check type if specified
+	if schema.has("type"):
+		var expected_type = str(schema.type)
+		if node.get_class() != expected_type:
+			missing_nodes.append({
+				"path": "root/" + str(scene_root.get_path_to(node)),
+				"expected": expected_type
+			})
+	
+	# Check hasProperty if specified
+	if schema.has("has_property"):
+		var prop_name = str(schema.has_property)
+		if not _node_has_property_set(node, prop_name):
+			missing_properties.append({
+				"path": "root/" + str(scene_root.get_path_to(node)),
+				"property": prop_name
+			})
+	
+	# Recurse into children if children schema provided
+	if schema.has("children"):
+		var children_schema = schema.children
+		if typeof(children_schema) == TYPE_ARRAY:
+			# Track consumed children so two schema entries of the same type
+			# match two distinct nodes instead of the first one twice.
+			var available := node.get_children().duplicate()
+			for child_schema in children_schema:
+				var found = _find_child_matching(available, child_schema)
+				if found:
+					available.erase(found)
+					_validate_schema_node(found, scene_root, child_schema, missing_nodes, missing_properties, issues)
+				else:
+					var expected_type = str(child_schema.get("type", "?")) if child_schema is Dictionary else "?"
+					missing_nodes.append({
+						"path": "root/" + str(scene_root.get_path_to(node)),
+						"expected": expected_type
+					})
+
+# Find the first unconsumed child that satisfies child_schema's declared
+# type (any child if type is not declared). Returns null when none matches.
+func _find_child_matching(available: Array, child_schema) -> Node:
+	var expected_type = str(child_schema.get("type", "")) if child_schema is Dictionary else ""
+	for child in available:
+		if expected_type.is_empty() or child.get_class() == expected_type:
+			return child
+	return null
+
+func _node_has_property_set(node: Node, prop_name: String) -> bool:
+	# `in` guards against Godot printing "Invalid get index" errors to
+	# stderr for properties the node type does not declare.
+	if not (prop_name in node):
+		return false
+	var val = node.get(prop_name)
+	if val == null:
+		return false
+	if typeof(val) == TYPE_STRING and str(val).is_empty():
+		return false
+	return true
+
 
 # ============================================
 # BATCH OPERATIONS
