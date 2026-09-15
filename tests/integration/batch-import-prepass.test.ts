@@ -13,29 +13,17 @@
  * Requires GODOT_PATH. Skipped in CI without it.
  */
 
-import { describe, beforeAll, afterAll, expect } from 'vitest';
+import { describe, beforeAll, expect } from 'vitest';
 import { cpSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
-import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { useTmpDirs } from '../helpers/tmp.js';
+import { minimalPng } from '../helpers/png-fixtures.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 
-function makeTmpProject(): string {
-  const id = randomBytes(6).toString('hex');
-  const dst = join(tmpdir(), `godot-mcp-test-${id}`);
-  cpSync(fixtureProjectPath, dst, { recursive: true });
-  return dst;
-}
-
-/** 1x1 transparent PNG. */
-function minimalPng(): Buffer {
-  return Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
-    'base64',
-  );
-}
+/** Integration tests spawn a real Godot process; give them room to run. */
+const IMPORT_TEST_TIMEOUT_MS = 180000;
 
 /** A scene with exactly one node of `name`, countable after the fact. */
 function sceneWithNode(name: string, textureExtResourceId?: string): string {
@@ -53,7 +41,6 @@ function sceneWithNode(name: string, textureExtResourceId?: string): string {
   );
 }
 
-const tmpDirs: string[] = [];
 let runner: GodotRunner;
 
 beforeAll(async () => {
@@ -61,22 +48,14 @@ beforeAll(async () => {
   await runner.detectGodotPath();
 });
 
-afterAll(() => {
-  for (const dir of tmpDirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-});
-
 describe('batch cold-import pre-pass (integration)', () => {
+  const tmp = useTmpDirs();
+
   itGodot(
     'does not mutate any scene when a later-referenced scene is cold',
     async () => {
-      const project = makeTmpProject();
-      tmpDirs.push(project);
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
 
       const assetsDir = join(project, 'assets');
       mkdirSync(assetsDir, { recursive: true });
@@ -152,6 +131,6 @@ describe('batch cold-import pre-pass (integration)', () => {
       const after = readFileSync(join(project, 'warm.tscn'), 'utf8');
       expect(after.match(/WarmChild/g)?.length).toBe(1);
     },
-    180000,
+    IMPORT_TEST_TIMEOUT_MS,
   );
 });

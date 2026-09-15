@@ -15,46 +15,38 @@
  * is self-terminating: failed imports still write `.import` sidecars, so the
  * same asset is never probed again and instead reports as a broken asset.
  *
+ * A dependency that is missing from disk entirely (not just unimported) is a
+ * different failure: the scene load is refused outright rather than fed into
+ * the import retry, so the reference is never silently stripped on save.
+ *
  * Rules:
  * - a fresh project with a new PNG asset: a scene op emits [IMPORT_NEEDED]
  *   rather than a plain failure
+ * - the same holds for a uid-form dependency string (every scene saved by
+ *   the Godot editor uses this form, not the bare res:// form)
+ * - a scene referencing a file that does not exist on disk at all is refused
+ *   outright, not imported-then-stripped
  * - after import_assets, the same op succeeds and .godot/imported exists
+ * - a warm project still catches a first-time reference to a brand new,
+ *   never-imported asset (load_sprite naming a texture with no prior deps)
  * - GodotRunner.importAssets() throws on individual import failures
  *   (Godot exits 0 even when assets fail — stderr is the only signal)
  *
  * Requires GODOT_PATH. Skipped in CI without it.
  */
 
-import { describe, beforeAll, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { describe, beforeAll, expect } from 'vitest';
+import { cpSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
-import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { useTmpDirs } from '../helpers/tmp.js';
+import { minimalPng, invalidPng } from '../helpers/png-fixtures.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 
-function makeTmpProject(): string {
-  const id = randomBytes(6).toString('hex');
-  const dst = join(tmpdir(), `godot-mcp-test-${id}`);
-  cpSync(fixtureProjectPath, dst, { recursive: true });
-  return dst;
-}
+/** Integration tests spawn a real Godot process; give them room to run. */
+const IMPORT_TEST_TIMEOUT_MS = 180000;
 
-/** 1x1 transparent PNG. */
-function minimalPng(): Buffer {
-  return Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
-    'base64',
-  );
-}
-
-/** Garbage bytes with a .png extension — import fails but writes an .import sidecar. */
-function invalidPng(): Buffer {
-  return Buffer.from('this is not a png at all');
-}
-
-const tmpDirs: string[] = [];
 let runner: GodotRunner;
 
 beforeAll(async () => {
@@ -62,22 +54,14 @@ beforeAll(async () => {
   await runner.detectGodotPath();
 });
 
-afterAll(() => {
-  for (const dir of tmpDirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-});
-
 describe('reactive import on demand (integration)', () => {
+  const tmp = useTmpDirs();
+
   itGodot(
     'emits [IMPORT_NEEDED] on a cold project, then succeeds after import and retry',
     async () => {
-      const project = makeTmpProject();
-      tmpDirs.push(project);
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
 
       // New asset that was never imported.
       const assetsDir = join(project, 'assets');
@@ -134,14 +118,120 @@ describe('reactive import on demand (integration)', () => {
       // Idempotent re-run.
       await runner.importAssets(project);
     },
-    180000,
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'emits [IMPORT_NEEDED] for a uid-form dependency string, the shape every editor-saved scene uses',
+    async () => {
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
+
+      const assetsDir = join(project, 'assets');
+      mkdirSync(assetsDir, { recursive: true });
+      writeFileSync(join(assetsDir, 'test_texture.png'), minimalPng());
+      writeFileSync(join(project, 'placeholder.png'), minimalPng());
+      rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
+
+      writeFileSync(
+        join(project, 'main.tscn'),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '',
+          '[ext_resource type="Texture2D" uid="uid://bq0sxwkx7p5xe" path="res://assets/test_texture.png" id="1"]',
+          '',
+          '[node name="Main" type="Node2D"]',
+          '',
+          '[node name="Sprite2D" type="Sprite2D" parent="."]',
+          'texture = ExtResource("1")',
+          '',
+        ].join('\n'),
+      );
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'get_scene_tree',
+        { scenePath: 'main.tscn' },
+        project,
+      );
+      expect(stdout.trim()).toBe('');
+      expect(stderr).toContain('[IMPORT_NEEDED]');
+      expect(stderr).toContain('res://assets/test_texture.png');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'refuses to load (and never mutates) a scene referencing a file that does not exist on disk',
+    async () => {
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
+
+      writeFileSync(
+        join(project, 'main.tscn'),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '',
+          '[ext_resource type="Texture2D" path="res://assets/nope.png" id="1"]',
+          '',
+          '[node name="Main" type="Node2D"]',
+          '',
+          '[node name="Sprite2D" type="Sprite2D" parent="."]',
+          'texture = ExtResource("1")',
+          '',
+        ].join('\n'),
+      );
+      const before = readFileSync(join(project, 'main.tscn'), 'utf8');
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeName: 'Extra', nodeType: 'Node2D' },
+        project,
+      );
+      expect(stdout.trim()).toBe('');
+      expect(stderr).toContain('do not exist on disk');
+      expect(readFileSync(join(project, 'main.tscn'), 'utf8')).toBe(before);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'catches a first-time asset reference on an already-warm project (load_sprite naming a brand new texture)',
+    async () => {
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
+      writeFileSync(join(project, 'placeholder.png'), minimalPng());
+
+      // Warm the project up first — no texture refs in main.tscn yet.
+      await runner.importAssets(project);
+      expect(existsSync(join(project, '.godot', 'imported'))).toBe(true);
+
+      // Now add a brand new asset the scene-load probe never saw (it wasn't
+      // a dependency of anything at import time).
+      const assetsDir = join(project, 'assets');
+      mkdirSync(assetsDir, { recursive: true });
+      writeFileSync(join(assetsDir, 'new_texture.png'), minimalPng());
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'load_sprite',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'Sprite2D',
+          texturePath: 'res://assets/new_texture.png',
+        },
+        project,
+      );
+      expect(stdout.trim()).toBe('');
+      expect(stderr).toContain('[IMPORT_NEEDED]');
+      expect(stderr).toContain('res://assets/new_texture.png');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
   );
 
   itGodot(
     'importAssets throws when an individual asset fails to import (exit code stays 0)',
     async () => {
-      const project = makeTmpProject();
-      tmpDirs.push(project);
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
 
       const assetsDir = join(project, 'assets');
       mkdirSync(assetsDir, { recursive: true });
@@ -152,6 +242,6 @@ describe('reactive import on demand (integration)', () => {
       // Godot exits 0 even when the asset fails to import; only stderr knows.
       await expect(runner.importAssets(project)).rejects.toThrow(/broken\.png/);
     },
-    180000,
+    IMPORT_TEST_TIMEOUT_MS,
   );
 });
