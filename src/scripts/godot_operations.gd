@@ -212,7 +212,31 @@ func normalize_scene_path(scene_path: String) -> String:
 		return ""
 	return "res://" + relative
 
-# Helper to load and instantiate a scene
+# Cold-import probe shared by load_scene_instance and the batch pre-pass:
+# returns the ext_resources of `full_path` that exist on disk but were never
+# imported (ResourceLoader.exists false, FileAccess.file_exists true).
+func _unimported_deps(full_path: String) -> Array:
+	var deps = ResourceLoader.get_dependencies(full_path)
+	var unimported: Array = []
+	for dep in deps:
+		if dep.begins_with("res://") and not ResourceLoader.exists(dep) and FileAccess.file_exists(dep):
+			unimported.append(dep)
+	return unimported
+
+# Load and instantiate a scene. Before loading, probes for the cold-import
+# state: files that exist on disk but were never imported (no .godot/imported
+# artifacts). In that state ResourceLoader.exists(dep) is false while
+# FileAccess.file_exists(dep) is true — loading the scene "succeeds" with
+# null resources, and the save cycle silently strips those references from
+# the .tscn.
+#
+# Returns null on failure and prints a structured error line that TS can
+# recognize: "[IMPORT_NEEDED] <scene_path>: <unimported_file1>, ...". The TS
+# layer catches this, runs the import step, and retries the operation once.
+#
+# The signal is self-terminating: a failed or broken import still writes the
+# .import sidecar, flipping exists() to true, so the same asset is never
+# probed again and instead correctly reports as a broken asset downstream.
 func load_scene_instance(scene_path: String):
 	var full_path = normalize_scene_path(scene_path)
 	if full_path.is_empty():
@@ -222,6 +246,12 @@ func load_scene_instance(scene_path: String):
 
 	if not FileAccess.file_exists(full_path):
 		log_error("Scene file does not exist: " + full_path)
+		return null
+
+	# Probe for unimported ext_resources before loading.
+	var unimported = _unimported_deps(full_path)
+	if unimported.size() > 0:
+		log_error("[IMPORT_NEEDED] " + scene_path + ": " + ", ".join(unimported))
 		return null
 
 	var scene = load(full_path)
@@ -1274,6 +1304,28 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var abort_on_error = params.get("abort_on_error", false)
 	var results: Array = []
 	var scene_cache: Dictionary = {}
+
+	# Pre-pass: probe every referenced scene for the cold-import state BEFORE
+	# any mutation is applied. The probe re-runs against the marker exit below,
+	# so the TS layer imports and re-runs the whole batch cleanly; letting the
+	# main loop discover a cold scene lazily (after earlier ops already
+	# mutated and auto-saved other scenes) would duplicate those mutations on
+	# the retry. Plain load failures are NOT handled here — they stay lazy so
+	# per-operation error reporting keeps its existing shape.
+	var seen_paths: Dictionary = {}
+	for op in params.operations:
+		var preload_path = op.get("scene_path", "")
+		if preload_path == "" or preload_path in seen_paths:
+			continue
+		seen_paths[preload_path] = true
+		var full_path = normalize_scene_path(preload_path)
+		if full_path.is_empty() or not FileAccess.file_exists(full_path):
+			continue
+		var unimported = _unimported_deps(full_path)
+		if unimported.size() > 0:
+			log_error("[IMPORT_NEEDED] " + preload_path + ": " + ", ".join(unimported))
+			quit(1)
+			return
 
 	for op in params.operations:
 		var op_name = op.get("operation", "")

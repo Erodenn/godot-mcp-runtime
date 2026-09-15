@@ -121,6 +121,48 @@ export async function executeSceneOp(
   }
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
+
+    // Check for the cold-import marker first (may appear even if stdout has a JSON error).
+    if (stderr.includes('[IMPORT_NEEDED]')) {
+      await runner.importAssets(projectPath);
+      const { stdout: retryStdout, stderr: retryStderr } = await runner.executeOperation(
+        operation,
+        params,
+        projectPath,
+      );
+      if (!retryStdout.trim()) {
+        const stderrPart = renderStderrForEarlyExit(retryStderr);
+        const parts = [
+          `${failurePrefix}: the operation still exited early after the import step ran.`,
+        ];
+        if (stderrPart) parts.push(stderrPart);
+        return err(
+          createErrorResponse(parts.join('\n'), [
+            'Check the surfaced stderr above - the asset may be corrupted or incompatible with this Godot version',
+            'Check get_debug_output for the raw stdout and stderr',
+          ]),
+        );
+      }
+      if (options.parseStdoutAsJson) {
+        const jsonCandidate = extractJson(retryStdout.trim());
+        try {
+          const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
+          return createStructuredResponse(payload);
+        } catch (parseErr) {
+          return err(
+            createErrorResponse(
+              `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
+              [
+                'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
+                'Check get_debug_output for the raw stdout and stderr',
+              ],
+            ),
+          );
+        }
+      }
+      return ok({ content: [{ type: 'text', text: retryStdout }] });
+    }
+
     if (!stdout.trim()) {
       return err(
         createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
