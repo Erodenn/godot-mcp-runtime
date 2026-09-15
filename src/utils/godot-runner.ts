@@ -432,6 +432,49 @@ export class GodotRunner {
     return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
   }
 
+  /**
+   * Run `godot --headless --import --path <projectPath>` to (re)import assets
+   * into `.godot/imported`. On a fresh project no imported artifacts exist and
+   * resource-touching operations (load_sprite on a new texture, runtime
+   * resource loads) fail with `resource not found` even though the file is on
+   * disk — the import step has never run.
+   *
+   * Note: Godot exits 0 even when individual assets fail; this method inspects
+   * stderr for "ERROR: Error importing" and throws if found.
+   */
+  async importAssets(projectPath: string, timeoutMs: number = 120000): Promise<void> {
+    if (!this.godotPath) {
+      await this.detectGodotPath();
+      if (!this.godotPath) {
+        throw new Error('Could not find a valid Godot executable path');
+      }
+    }
+    logDebug(`Importing assets for project: ${projectPath}`);
+    let stderr = '';
+    try {
+      ({ stderr } = await this.spawnAsync(
+        this.godotPath,
+        ['--headless', '--import', '--path', projectPath],
+        timeoutMs,
+      ));
+    } catch (error: unknown) {
+      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
+        stderr = (error as Error & { stderr: string }).stderr;
+      } else {
+        throw error;
+      }
+    }
+    // Godot exits 0 even when individual assets fail; check stderr for import errors.
+    const failedFiles = [...stderr.matchAll(/ERROR: Error importing '([^']+)'/g)].map((m) => m[1]);
+    if (failedFiles.length > 0) {
+      throw new Error(
+        `Asset import reported errors for ${failedFiles.length} file(s):\n` +
+          failedFiles.map((f) => `  - ${f}`).join('\n') +
+          '\nCheck the files are valid (PNG/SVG/etc.) and the Godot version matches the project.',
+      );
+    }
+  }
+
   async runProject(
     projectPath: string,
     scene?: string,
