@@ -173,6 +173,8 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			await _handle_input(peer, actions)
 		"get_ui_elements":
 			_handle_get_ui_elements(peer, payload)
+		"click_ui_element":
+			await _handle_click_ui_element(peer, payload)
 		"run_script":
 			await _handle_run_script(peer, payload)
 		"screenshot":
@@ -470,6 +472,72 @@ func _inject_click_element(action: Dictionary) -> String:
 
 # --- UI Element Discovery ---
 
+# Click a single UI element and report the effect. Unlike the fire-and-forget
+# click_element action inside _handle_input, this observes the outcome:
+# - BaseButton (Button/CheckBox/...): records button_pressed before, performs the
+#   same event injection, awaits two frames for the signal chain, reports the
+#   new button_pressed and the "pressed"/"toggled" signal that fired.
+# - Other Controls: gui_input delivery cannot be observed directly, so only
+#   clicked=true is reported.
+# Every path must reach _send_response (bridge invariant).
+func _handle_click_ui_element(peer: PeerState, payload: Dictionary) -> void:
+	var identifier: String = payload.get("element", "")
+	if identifier == "":
+		_send_response(peer, {"error": "element identifier is required"})
+		return
+
+	var target := _find_control_by_identifier(identifier)
+	if target == null:
+		_send_response(peer, {"error": "Could not find UI element: %s" % identifier})
+		return
+
+	if not target.is_visible_in_tree():
+		_send_response(peer, {"error": "UI element '%s' is not visible" % identifier})
+		return
+
+	var button_result := _resolve_button_name(payload.get("button", "left"))
+	if button_result[1] != "":
+		_send_response(peer, {"error": button_result[1]})
+		return
+	var button_index: MouseButton = button_result[0]
+
+	var result := {
+		"clicked": false,
+		"element_path": str(target.get_path()),
+		"element_type": target.get_class(),
+	}
+
+	var base_button := target as BaseButton
+	var toggles: bool = base_button != null and base_button.toggle_mode
+	var old_value: bool = base_button.button_pressed if base_button != null else false
+
+	# Reuse the battle-tested event injection from _handle_input.
+	var inject_error := _inject_click_element({
+		"element": identifier,
+		"button": payload.get("button", "left"),
+	})
+	if inject_error != "":
+		result["error"] = inject_error
+		_send_response(peer, result)
+		return
+	result["clicked"] = true
+
+	# Let the signal chain and any SCRIPT ERRORs fire before responding.
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	if base_button != null:
+		if toggles:
+			var new_value: bool = base_button.button_pressed
+			result["new_value"] = new_value
+			result["signal_emitted"] = "toggled" if new_value != old_value else "pressed"
+		else:
+			# A momentary button returns to pressed=false after the press;
+			# reporting it would read as "the click did nothing".
+			result["signal_emitted"] = "pressed"
+
+	_send_response(peer, result)
+
 func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 	var visible_only: bool = payload.get("visible_only", true)
 	var type_filter: String = payload.get("type_filter", "")
@@ -534,13 +602,22 @@ func _find_control_by_identifier(identifier: String) -> Control:
 	var node := root.get_node_or_null(NodePath(identifier))
 	if node is Control:
 		return node as Control
+	# Strip "root/" prefix if present for name/path matching
+	var name_to_match := identifier
+	if name_to_match.begins_with("root/"):
+		name_to_match = name_to_match.substr(5)
+		# The stripped remainder may itself be a path from the tree root
+		# (e.g. "root/Main/HUD/Button" -> "Main/HUD/Button").
+		var stripped_node := root.get_node_or_null(NodePath(name_to_match))
+		if stripped_node is Control:
+			return stripped_node as Control
 	# BFS: match by node name
 	var queue: Array[Node] = []
 	queue.append(root)
 	while not queue.is_empty():
 		var current: Node = queue.pop_front()
 		if current is Control:
-			if String(current.name) == identifier:
+			if String(current.name) == name_to_match:
 				return current as Control
 		for child in current.get_children():
 			queue.append(child)

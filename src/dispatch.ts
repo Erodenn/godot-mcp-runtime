@@ -27,6 +27,7 @@ import {
   handleStopProject,
   handleTakeScreenshot,
   handleSimulateInput,
+  handleClickUiElement,
   handleGetUiElements,
   handleRunScript,
 } from './tools/runtime-tools.js';
@@ -88,6 +89,7 @@ export const toolDispatch = {
   get_project_info: handleGetProjectInfo,
   take_screenshot: handleTakeScreenshot,
   simulate_input: handleSimulateInput,
+  click_ui_element: handleClickUiElement,
   get_ui_elements: handleGetUiElements,
   run_script: handleRunScript,
   list_autoloads: (_runner, args) => handleListAutoloads(args),

@@ -368,6 +368,39 @@ export const runtimeToolDefinitions = [
     },
   },
   {
+    name: 'click_ui_element',
+    description:
+      'Click a single UI element and report the resulting state: whether the press landed, which signal fired, and the toggle value after the click. Resolution matches simulate_input click_element (node path or name - use get_ui_elements to discover identifiers). Returns: { clicked, element_path, element_type, signal_emitted, new_value? } - new_value appears for toggle buttons only. Prefer this over simulate_input click_element when you need post-click state. Errors if the element is not found or not visible.',
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        element: {
+          type: 'string',
+          description:
+            'Identifies the UI element to click. Accepts absolute node path (e.g. "/root/HUD/Button"), relative node path, or node name (BFS matched). Use get_ui_elements to discover valid names and paths.',
+        },
+        button: {
+          type: 'string',
+          enum: ['left', 'right', 'middle'],
+          description: 'Mouse button to click with (default: left)',
+        },
+      },
+      required: ['element'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        clicked: { type: 'boolean' },
+        element_path: { type: 'string' },
+        element_type: { type: 'string' },
+        signal_emitted: { type: 'string' },
+        new_value: { type: 'boolean', description: 'Present for toggle buttons only' },
+        warnings: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+  {
     name: 'get_ui_elements',
     description:
       'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
@@ -1567,6 +1600,69 @@ export async function handleSimulateInput(
       createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
         'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
         'If the game has exited, call stop_project, then run_project again',
+      ]),
+    );
+  }
+}
+
+export async function handleClickUiElement(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+
+  const sessionError = ensureRuntimeSession(runner, 'click a UI element');
+  if (sessionError) return sessionError;
+
+  const elementResult = requireString(args, 'element');
+  if (!elementResult.ok) return elementResult;
+  const element = elementResult.value;
+
+  const buttonResult = optionalString(args, 'button');
+  if (!buttonResult.ok) return buttonResult;
+  const button = buttonResult.value ?? 'left';
+
+  try {
+    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
+      'click_ui_element',
+      { element, button },
+    );
+
+    const parsedResult = parseBridgeJson<{
+      clicked?: boolean;
+      element_path?: string;
+      element_type?: string;
+      signal_emitted?: string;
+      new_value?: boolean;
+      error?: string;
+    }>(responseStr, 'click_ui_element');
+    if (!parsedResult.ok) return parsedResult;
+    const parsed = parsedResult.value;
+
+    if (parsed.error) {
+      return err(
+        createErrorResponse(`Failed to click UI element: ${parsed.error}`, [
+          'Use get_ui_elements first to confirm the element exists and is visible',
+        ]),
+      );
+    }
+
+    const result: Record<string, unknown> = {
+      clicked: parsed.clicked ?? false,
+      element_path: parsed.element_path ?? '',
+      element_type: parsed.element_type ?? '',
+    };
+    if (parsed.signal_emitted !== undefined) result.signal_emitted = parsed.signal_emitted;
+    if (parsed.new_value !== undefined) result.new_value = parsed.new_value;
+
+    attachRuntimeWarnings(result, runtimeErrors);
+
+    return createStructuredResponse(result);
+  } catch (error: unknown) {
+    return err(
+      createErrorResponse(`Failed to click UI element: ${getErrorMessage(error)}`, [
+        'Ensure the element identifier is valid (use get_ui_elements first)',
+        'Check if the project is still running',
       ]),
     );
   }
