@@ -59,6 +59,7 @@ describe('outputSchema — expected coverage', () => {
     'stop_profiler',
     'stop_project',
     'take_screenshot',
+    'verify_node_connections',
   ];
 
   it('every tool with outputSchema is on the explicit allowlist', () => {

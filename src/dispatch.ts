@@ -64,6 +64,7 @@ import {
   handleGetSceneTree,
   handleDuplicateNode,
   handleGetNodeSignals,
+  handleVerifyNodeConnections,
   handleConnectSignal,
   handleDisconnectSignal,
 } from './tools/node-tools.js';
@@ -115,6 +116,7 @@ export const toolDispatch = {
   get_scene_tree: handleGetSceneTree,
   duplicate_node: handleDuplicateNode,
   get_node_signals: handleGetNodeSignals,
+  verify_node_connections: handleVerifyNodeConnections,
   connect_signal: handleConnectSignal,
   disconnect_signal: handleDisconnectSignal,
 

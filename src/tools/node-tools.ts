@@ -278,6 +278,45 @@ export const nodeToolDefinitions = [
     },
   },
   {
+    name: 'verify_node_connections',
+    description:
+      'Verify signal wiring across a scene or one node subtree in a single read-only pass. Checks that every connection has its target in the scene, the handler method exists, the handler follows the _on_<node>_<signal> convention, and no script-defined _on_* handler is left unconnected. Returns: { verified, issueCount, issues[] }; see docs/tools.md for issue codes. Use after connect_signal or when debugging a signal that never fires. Does not save; errors if scene or node not found.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        scenePath: { type: 'string', description: 'Scene file path relative to the project' },
+        nodePath: {
+          type: 'string',
+          description:
+            '[optional] Node path from scene root limiting verification to that subtree. Omit to verify the entire scene.',
+        },
+      },
+      required: ['projectPath', 'scenePath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        verified: { type: 'boolean' },
+        issueCount: { type: 'number' },
+        issues: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              node: { type: 'string' },
+              signal: { type: 'string' },
+              target: { type: 'string' },
+              method: { type: 'string' },
+              problem: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
     name: 'connect_signal',
     description:
       'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
@@ -535,6 +574,31 @@ export async function handleGetNodeSignals(
     parsed.value.projectPath,
     'Failed to get node signals',
     ['Check if the node path is correct'],
+    undefined,
+    { parseStdoutAsJson: true },
+  );
+}
+
+export async function handleVerifyNodeConnections(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const parsed = parseSceneArgs(args);
+  if (!parsed.ok) return parsed;
+
+  const nodePath = parseOptionalNodePath(args, 'nodePath');
+  if (!nodePath.ok) return nodePath;
+
+  const params: OperationParams = { scenePath: parsed.value.scenePath };
+  if (nodePath.value) params.nodePath = nodePath.value;
+  return executeSceneOp(
+    runner,
+    'verify_node_connections',
+    params,
+    parsed.value.projectPath,
+    'Failed to verify node connections',
+    ['Check if the scene path is correct'],
     undefined,
     { parseStdoutAsJson: true },
   );
