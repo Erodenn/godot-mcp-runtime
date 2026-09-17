@@ -42,6 +42,7 @@ describe('outputSchema — expected coverage', () => {
   const TOOLS_WITH_OUTPUT_SCHEMA: readonly string[] = [
     'attach_script',
     'batch_scene_operations',
+    'check_health',
     'create_scene',
     'delete_nodes',
     'detach_project',
