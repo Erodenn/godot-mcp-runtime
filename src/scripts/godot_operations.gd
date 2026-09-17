@@ -89,6 +89,8 @@ func _init():
 			disconnect_signal(params)
 		"validate_resource":
 			validate_resource(params)
+		"validate_scene_structure":
+			validate_scene_structure(params)
 		# Batch operations
 		"validate_batch":
 			validate_batch(params)
@@ -1089,6 +1091,87 @@ func validate_resource(params):
 		return
 	var result = _validate_single(params)
 	print(JSON.stringify({"valid": result.valid, "errors": result.errors}))
+
+# Validate a scene file against a structural schema. Schema: { type?: string, children?: Schema[], hasProperty?: string }.
+# Returns { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }.
+func validate_scene_structure(params):
+	var scene_root = load_scene_instance(params.scene_path)
+	if not scene_root:
+		quit(1)
+		return
+	
+	var issues = []
+	var missing_nodes = []
+	var missing_properties = []
+	
+	_validate_schema_node(scene_root, scene_root, params.schema, missing_nodes, missing_properties, issues)
+	
+	print(JSON.stringify({
+		"valid": issues.size() == 0 and missing_nodes.size() == 0 and missing_properties.size() == 0,
+		"missingNodes": missing_nodes,
+		"missingProperties": missing_properties,
+		"errors": issues
+	}))
+
+func _validate_schema_node(node: Node, scene_root: Node, schema: Dictionary, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
+	# Check type if specified
+	if schema.has("type"):
+		var expected_type = str(schema.type)
+		if node.get_class() != expected_type:
+			missing_nodes.append({
+				"path": "root/" + str(scene_root.get_path_to(node)),
+				"expected": expected_type
+			})
+	
+	# Check hasProperty if specified
+	if schema.has("has_property"):
+		var prop_name = str(schema.has_property)
+		if not _node_has_property_set(node, prop_name):
+			missing_properties.append({
+				"path": "root/" + str(scene_root.get_path_to(node)),
+				"property": prop_name
+			})
+	
+	# Recurse into children if children schema provided
+	if schema.has("children"):
+		var children_schema = schema.children
+		if typeof(children_schema) == TYPE_ARRAY:
+			# Track consumed children so two schema entries of the same type
+			# match two distinct nodes instead of the first one twice.
+			var available := node.get_children().duplicate()
+			for child_schema in children_schema:
+				var found = _find_child_matching(available, child_schema)
+				if found:
+					available.erase(found)
+					_validate_schema_node(found, scene_root, child_schema, missing_nodes, missing_properties, issues)
+				else:
+					var expected_type = str(child_schema.get("type", "?")) if child_schema is Dictionary else "?"
+					missing_nodes.append({
+						"path": "root/" + str(scene_root.get_path_to(node)),
+						"expected": expected_type
+					})
+
+# Find the first unconsumed child that satisfies child_schema's declared
+# type (any child if type is not declared). Returns null when none matches.
+func _find_child_matching(available: Array, child_schema) -> Node:
+	var expected_type = str(child_schema.get("type", "")) if child_schema is Dictionary else ""
+	for child in available:
+		if expected_type.is_empty() or child.get_class() == expected_type:
+			return child
+	return null
+
+func _node_has_property_set(node: Node, prop_name: String) -> bool:
+	# `in` guards against Godot printing "Invalid get index" errors to
+	# stderr for properties the node type does not declare.
+	if not (prop_name in node):
+		return false
+	var val = node.get(prop_name)
+	if val == null:
+		return false
+	if typeof(val) == TYPE_STRING and str(val).is_empty():
+		return false
+	return true
+
 
 # ============================================
 # BATCH OPERATIONS

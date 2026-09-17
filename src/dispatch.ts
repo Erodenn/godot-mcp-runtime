@@ -74,7 +74,7 @@ import {
   handleStopProfiler,
 } from './tools/profiler-tools.js';
 
-import { handleValidate } from './tools/validate-tools.js';
+import { handleValidate, handleValidateSceneStructure } from './tools/validate-tools.js';
 
 export const toolDispatch = {
   // Project tools
@@ -125,6 +125,7 @@ export const toolDispatch = {
 
   // Validate tools
   validate: handleValidate,
+  validate_scene_structure: handleValidateSceneStructure,
 } as const satisfies Record<ToolName, ToolHandler>;
 
 export async function dispatchToolCall(

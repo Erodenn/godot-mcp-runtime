@@ -59,6 +59,7 @@ describe('outputSchema — expected coverage', () => {
     'stop_profiler',
     'stop_project',
     'take_screenshot',
+    'validate_scene_structure',
   ];
 
   it('every tool with outputSchema is on the explicit allowlist', () => {

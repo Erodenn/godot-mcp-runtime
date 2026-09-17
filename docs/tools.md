@@ -166,3 +166,22 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 ## Validation: `validate`
 
 Validate before attaching or running. Catches syntax errors and missing resource references before they cause headless crashes or runtime failures. Supports `scriptPath`, `source` (inline GDScript), `scenePath`, or a `targets` array for batch validation.
+
+## Structural validation: `validate_scene_structure`
+
+`validate` checks one scene's syntax and resource integrity; `validate_scene_structure` checks a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene has exactly one `CharacterBody2D` root", "a `CollisionShape2D` always has `shape` set".
+
+The schema is a recursive object:
+
+```json
+{
+  "type": "CharacterBody2D",
+  "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }, { "type": "Sprite2D" }]
+}
+```
+
+- `type` — the node's Godot class name, checked against the instantiated node's class.
+- `children` — schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
+- `hasProperty` — the node must have this property set to a non-null, non-empty value.
+
+Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked.
