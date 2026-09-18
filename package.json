@@ -23,7 +23,8 @@
     "verify": "bash scripts/verify.sh",
     "safe-install": "node scripts/safe-install.js",
     "snapshot-cross-platform-deps": "node scripts/snapshot-cross-platform-deps.js",
-    "install-hooks": "node scripts/install-hooks.js"
+    "install-hooks": "node scripts/install-hooks.js",
+    "prepare": "npm run build"
   },
   "keywords": [
     "mcp",
