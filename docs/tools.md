@@ -19,14 +19,17 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 
 Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 15 s for the externally launched Godot process to come up. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup - don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent). Both `run_project` and `attach_project` auto-select a free bridge port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port.
 
-| Tool              | Description                                                                                                                             |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `take_screenshot` | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
-| `simulate_input`  | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
-| `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
-| `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
+| Tool               | Description                                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `take_screenshot`  | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
+| `simulate_input`   | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
+| `click_ui_element` | Click one UI element and observe the result (signal fired, toggle state)                                                                |
+| `get_ui_elements`  | Get all visible Control nodes with positions, types, and text                                                                           |
+| `run_script`       | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
+
+`simulate_input`'s `click_element` action fires the input events and moves on; `click_ui_element` performs the same click but waits two frames for the signal chain to run and reports what happened: whether a `BaseButton` actually received the press (`signal_emitted: "pressed"`), whether a toggle changed (`"toggled"` plus the new `button_pressed` value), or whether a handler logged a script error into the click's `warnings`. Prefer `simulate_input` for input _sequences_ (drag, key chords, multiple clicks in one call); prefer `click_ui_element` for observing a _single_ interactive element's reaction.
 
 ## Profiling (requires `run_project` with `profiling: true`)
 
