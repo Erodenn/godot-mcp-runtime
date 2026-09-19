@@ -166,3 +166,54 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 ## Validation: `validate`
 
 Validate before attaching or running. Catches syntax errors and missing resource references before they cause headless crashes or runtime failures. Supports `scriptPath`, `source` (inline GDScript), `scenePath`, or a `targets` array for batch validation.
+
+A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds structural and signal-verification checks in the same validation call. With `scenePath + checks`, both the resource-integrity validation and the checks run; their errors are merged into one `errors` array, each check-attributed error carrying a `check` discriminator.
+
+```json
+{
+  "projectPath": "/path/to/project",
+  "scenePath": "scenes/player.tscn",
+  "checks": [
+    {
+      "type": "structure",
+      "schema": {
+        "type": "CharacterBody2D",
+        "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }]
+      }
+    },
+    { "type": "signals", "nodePath": "root/HUD" }
+  ]
+}
+```
+
+## Structural checks: `checks: [{ type: "structure" }]`
+
+`validate` with a plain `scenePath` checks one scene's syntax and resource integrity; a `structure` check validates a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene has exactly one `CharacterBody2D` root", "a `CollisionShape2D` always has `shape` set".
+
+The schema is a recursive object:
+
+```json
+{
+  "type": "CharacterBody2D",
+  "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }, { "type": "Sprite2D" }]
+}
+```
+
+- `type` — the node's Godot class name, checked against the instantiated node's class.
+- `children` — schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
+- `hasProperty` — the node must have this property set to a non-null, non-empty value.
+
+Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked.
+
+Structural failures are returned in the `validate` output's `errors` array with `"check": "structure"` and a human-readable `message` naming the expected type/property and path.
+
+## Signal checks: `checks: [{ type: "signals" }]`
+
+Walks every connection reachable from the scope (whole scene, or the subtree under `nodePath`) and reports one issue per problem found. Read-only. Issues appear in `errors` with `"check": "signals"` and `{ node, signal, target, method, problem }`; `node`, `target` are scene-root-relative paths. The problem codes:
+
+| Code                       | Meaning                                                                                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                                                                         |
+| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. Engine-internal connections (e.g. `Label::_maximum_size_changed`) are excluded. |
+| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                                                                             |
+| `orphaned_handler`         | A script-defined `_on_*` method on a node with no incoming connection pointing at it - dead code, or leftover after a disconnect.                                                        |
