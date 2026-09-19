@@ -21,6 +21,7 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `check_health`    | One-call runtime diagnostics: session, bridge, process, engine version - never errors                                                   |
 | `take_screenshot` | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
 | `simulate_input`  | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
