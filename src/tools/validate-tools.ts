@@ -9,6 +9,7 @@ import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/e
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
+import type { Result } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 
 export const validateToolDefinitions = [
@@ -39,6 +40,32 @@ export const validateToolDefinitions = [
           description:
             '[single] Path to a .tscn scene file relative to the project to validate (e.g. "scenes/main.tscn")',
         },
+        checks: {
+          type: 'array',
+          description:
+            '[single, requires scenePath] Structural and signal-verification checks to run against the scene. Types: "structure" (validate node tree against a schema) and "signals" (verify signal connections and handler methods, optional nodePath scope). Merged into the errors array with a "check" discriminator.',
+          items: {
+            type: 'object',
+            properties: {
+              type: {
+                type: 'string',
+                enum: ['structure', 'signals'],
+                description: 'The kind of check to run',
+              },
+              schema: {
+                type: 'object',
+                description:
+                  '[structure] Recursive node schema: { type?: string, children?: Schema[], hasProperty?: string }. Checks the root node and subtree.',
+              },
+              nodePath: {
+                type: 'string',
+                description:
+                  '[signals] Optional node path to scope the check to a subtree (e.g. "root/HUD")',
+              },
+            },
+            required: ['type'],
+          },
+        },
         targets: {
           type: 'array',
           description:
@@ -53,7 +80,32 @@ export const validateToolDefinitions = [
               source: { type: 'string', description: 'Inline GDScript source code' },
               scenePath: {
                 type: 'string',
-                description: 'Path to a .tscn file relative to the project',
+                description: 'Path to a .tscn scene file relative to the project',
+              },
+              checks: {
+                type: 'array',
+                description:
+                  '[requires scenePath] Structural / signal checks for this target. Same shape as the top-level checks array.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    type: {
+                      type: 'string',
+                      enum: ['structure', 'signals'],
+                      description: 'The kind of check to run',
+                    },
+                    schema: {
+                      type: 'object',
+                      description:
+                        '[structure] Recursive node schema: { type?: string, children?: Schema[], hasProperty?: string }',
+                    },
+                    nodePath: {
+                      type: 'string',
+                      description: '[signals] Optional node path to scope the check to a subtree',
+                    },
+                  },
+                  required: ['type'],
+                },
               },
             },
           },
@@ -67,6 +119,13 @@ export const validateToolDefinitions = [
 interface ValidationError {
   line?: number;
   message: string;
+}
+
+/** A check-attributed error from the checks[] array (structure/signals). */
+interface CheckError {
+  check?: string;
+  message: string;
+  [key: string]: unknown;
 }
 
 function parseGodotErrors(stderr: string): ValidationError[] {
@@ -135,6 +194,7 @@ export async function handleValidate(
       scriptPath?: string;
       source?: string;
       scenePath?: string;
+      checks?: unknown[];
     }>;
     const tempFiles: string[] = [];
 
@@ -235,7 +295,11 @@ export async function handleValidate(
       // Merge pre-validation failures back into their original positions so
       // output order matches input order. Pre-validation errors are ours, not
       // Godot's — they bypass the stderr overlay above.
-      const results: Array<{ target: string; valid: boolean; errors: ValidationError[] }> = [];
+      const results: Array<{
+        target: string;
+        valid: boolean;
+        errors: Array<ValidationError | CheckError>;
+      }> = [];
       let godotIdx = 0;
       for (let i = 0; i < targets.length; i++) {
         if (preErrors.has(i)) {
@@ -247,6 +311,24 @@ export async function handleValidate(
           // and godotResults has exactly that many entries.
           if (r === undefined) continue;
           results.push(r);
+        }
+      }
+
+      // Per-target checks[]: structural / signal verification against each
+      // scene target, merged into that target's error list.
+      for (const [i, t] of targets.entries()) {
+        const tChecks = (t as { checks?: unknown }).checks;
+        if (!Array.isArray(tChecks) || tChecks.length === 0) continue;
+        const tScene = (t as { scenePath?: string }).scenePath;
+        if (!tScene) continue; // checks require a scene target
+        const checkErrors = await runSceneChecks(runner, projectPath, tScene, tChecks);
+        if (!checkErrors.ok) return checkErrors.error;
+        if (checkErrors.value.length > 0) {
+          results[i] = {
+            target: results[i]?.target ?? tScene,
+            valid: false,
+            errors: [...(results[i]?.errors ?? []), ...checkErrors.value],
+          };
         }
       }
 
@@ -277,13 +359,23 @@ export async function handleValidate(
   const scenePathResult = optionalString(args, 'scenePath');
   if (!scenePathResult.ok) return scenePathResult;
 
+  const checksRaw = args.checks;
+  const hasChecks = checksRaw !== undefined && (!Array.isArray(checksRaw) || checksRaw.length > 0);
+
   const modeCount = [scriptPathResult.value, sourceResult.value, scenePathResult.value].filter(
     Boolean,
   ).length;
-  if (modeCount === 0) {
+  if (modeCount === 0 && !hasChecks) {
     return err(
       createErrorResponse('One of scriptPath, source, or scenePath is required', [
         'Provide scriptPath to validate an existing .gd file, source to validate inline GDScript, or scenePath to validate a .tscn file',
+      ]),
+    );
+  }
+  if (hasChecks && scenePathResult.value === undefined) {
+    return err(
+      createErrorResponse('checks requires scenePath — checks run against a scene', [
+        'Pass scenePath alongside checks, e.g. { "scenePath": "main.tscn", "checks": [{ "type": "structure", "schema": {...} }] }',
       ]),
     );
   }
@@ -375,10 +467,23 @@ export async function handleValidate(
     // returns a non-null placeholder Resource even when parsing fails, so
     // resource != null is true. Fall back to the parsed stderr errors as the
     // authoritative signal — matches the batch branch above.
-    const result = {
+    let result: { valid: boolean; errors: Array<ValidationError | CheckError> } = {
       valid: valid && allErrors.length === 0,
       errors: allErrors,
     };
+
+    // checks[]: structural / signal verification against the scene, merged
+    // into the same output shape with a `check` discriminator per error.
+    if (hasChecks && resolvedScenePath) {
+      const checkErrors = await runSceneChecks(runner, projectPath, resolvedScenePath, checksRaw);
+      if (!checkErrors.ok) return checkErrors.error;
+      if (checkErrors.value.length > 0) {
+        result = {
+          valid: false,
+          errors: [...result.errors, ...checkErrors.value],
+        };
+      }
+    }
 
     return ok({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
   } catch (error: unknown) {
@@ -398,4 +503,107 @@ export async function handleValidate(
       }
     }
   }
+}
+
+/**
+ * Run structural / signal-verification checks against one scene via the
+ * validate_checks GDScript op. Used by handleValidate when the caller passes
+ * a checks[] array alongside scenePath (single mode) or inside a targets[]
+ * item (batch mode). Returns either check-attributed errors to merge into
+ * the caller's error list, or a HandlerResult failure to return directly.
+ */
+async function runSceneChecks(
+  runner: GodotRunner,
+  projectPath: string,
+  scenePath: string,
+  checks: unknown,
+): Promise<Result<CheckError[], HandlerResult>> {
+  if (!Array.isArray(checks)) {
+    return fail(
+      createErrorResponse(
+        'Invalid checks: must be an array of { type: "structure" | "signals", ... }',
+        [
+          'Example: { "scenePath": "main.tscn", "checks": [{ "type": "structure", "schema": { "type": "Node2D" } }] }',
+        ],
+      ),
+    );
+  }
+  for (const check of checks) {
+    if (typeof check !== 'object' || check === null) {
+      return fail(
+        createErrorResponse('Invalid checks: each item must be an object', [
+          'Example: { "type": "signals", "nodePath": "root/HUD" }',
+        ]),
+      );
+    }
+    const t = (check as { type?: unknown }).type;
+    if (t !== 'structure' && t !== 'signals') {
+      return fail(
+        createErrorResponse(
+          `Invalid check type: ${String(t)} (expected "structure" or "signals")`,
+          ['Supported types: "structure" (with schema) and "signals" (optional nodePath)'],
+        ),
+      );
+    }
+    if (t === 'structure') {
+      const schema = (check as { schema?: unknown }).schema;
+      if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+        return fail(
+          createErrorResponse(
+            'Invalid schema: must be an object like { type?, children?, hasProperty? }',
+            [
+              'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }',
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+  try {
+    const opParams: OperationParams = { scene_path: scenePath, checks };
+    const { stdout, stderr } = await runner.executeOperation(
+      'validate_checks',
+      opParams,
+      projectPath,
+    );
+    if (!stdout.trim()) {
+      return fail(
+        createErrorResponse(`Scene checks failed: ${extractGdError(stderr)}`, [
+          'Check if the scene path is correct',
+          'Ensure the schema follows the documented shape',
+        ]),
+      );
+    }
+    let parsed: { valid?: boolean; errors?: unknown[] };
+    try {
+      parsed = JSON.parse(stdout.trim());
+    } catch {
+      return fail(
+        createErrorResponse(`Invalid response from validate_checks: ${stdout}`, [
+          'Ensure Godot is installed correctly',
+        ]),
+      );
+    }
+    const errors = Array.isArray(parsed.errors) ? (parsed.errors as CheckError[]) : [];
+    return ok(errors);
+  } catch (error: unknown) {
+    return fail(
+      createErrorResponse(`Scene checks failed: ${getErrorMessage(error)}`, [
+        'Ensure Godot is installed correctly',
+        'Check if the GODOT_PATH environment variable is set correctly',
+      ]),
+    );
+  }
+}
+
+// Helper so runSceneChecks can return a HandlerResult-shaped failure from
+// err() without fighting the Result<T, E> variance.
+function fail(
+  response: ReturnType<typeof createErrorResponse>,
+): Result<CheckError[], HandlerResult> {
+  return { ok: false, error: { ok: false, error: response } } as unknown as Result<
+    CheckError[],
+    HandlerResult
+  >;
 }
