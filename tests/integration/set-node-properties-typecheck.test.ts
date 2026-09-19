@@ -604,4 +604,341 @@ describe('set_node_properties type validation against a scripted node', () => {
     },
     60000,
   );
+
+  // --- Packed*Array properties (e.g. Polygon2D polygon) ---
+  // JSON sends a PackedVector2Array as an array of {x, y} dicts. node.set()
+  // casts each dict element to the zero Vector2, the compat table accepts
+  // TYPE_ARRAY, and the tool reported success:true while the array was
+  // silently zeroed (observed in agent-driven builds: Polygon2D geometry
+  // wiped by a later write, caught only on read-back).
+  itGodot(
+    'round-trips PackedVector2Array from array-of-dicts (was silent zero-write)',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Polygon2D',
+          nodeName: 'Poly',
+          parentNodePath: '.',
+        },
+        tmpProject,
+        30000,
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: 'Poly',
+              property: 'polygon',
+              value: [
+                { x: 10, y: 20 },
+                { x: 30, y: 40 },
+                { x: 50, y: 60 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+
+      // Read back via get_node_properties — the zeroed-array tell.
+      // The read path stringifies Vector arrays ("[(10.0, 20.0), ...]"),
+      // so assert on the serialized form.
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'Poly' }] },
+        tmpProject,
+        30000,
+      );
+      const rbp = JSON.parse(extractJson(rb));
+      const poly = rbp.results?.[0]?.properties?.polygon;
+      expect(poly).toBeDefined();
+      expect(String(poly)).toMatch(/\(10(\.0)?, 20(\.0)?\)/);
+      expect(String(poly)).not.toMatch(/\(0(\.0)?, 0(\.0)?\)/);
+
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).toMatch(
+        /polygon\s*=\s*PackedVector2Array\(10(\.0)?, 20(\.0)?, 30(\.0)?, 40(\.0)?, 50(\.0)?, 60(\.0)?\)/,
+      );
+    },
+    60000,
+  );
+
+  itGodot(
+    'round-trips PackedColorArray from array of color dicts (vertex_colors)',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Polygon2D',
+          nodeName: 'Colors',
+          parentNodePath: '.',
+        },
+        tmpProject,
+        30000,
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: 'Colors',
+              property: 'vertex_colors',
+              value: [
+                { r: 1, g: 0, b: 0, a: 1 },
+                { r: 0, g: 0, b: 1, a: 1 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'Colors' }] },
+        tmpProject,
+        30000,
+      );
+      const rbp = JSON.parse(extractJson(rb));
+      const colors = rbp.results?.[0]?.properties?.vertex_colors;
+      expect(colors).toBeDefined();
+      expect(String(colors)).toMatch(/\(1(\.0)?, 0(\.0)?, 0(\.0)?, 1(\.0)?\)/);
+      expect(String(colors)).not.toMatch(/\(0(\.0)?, 0(\.0)?, 0(\.0)?, 0(\.0)?\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'round-trips integer elements widened into a PackedFloat32Array property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'RichTextLabel',
+          nodeName: 'Tabs',
+          parentNodePath: '.',
+        },
+        tmpProject,
+        30000,
+      );
+
+      // RichTextLabel.tab_stops is a PackedFloat32Array; JSON ints are
+      // the natural wire form and must land as floats, not zeros.
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'Tabs', property: 'tab_stops', value: [4, 8, 12] }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'Tabs' }] },
+        tmpProject,
+        30000,
+      );
+      const rbp = JSON.parse(extractJson(rb));
+      const stops = rbp.results?.[0]?.properties?.tab_stops;
+      expect(String(stops)).toMatch(/\[4(\.0)?, 8(\.0)?, 12(\.0)?\]/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'still allows an empty array to clear a packed-array property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Polygon2D',
+          nodeName: 'ClearPoly',
+          parentNodePath: '.',
+        },
+        tmpProject,
+        30000,
+      );
+
+      await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: 'ClearPoly',
+              property: 'polygon',
+              value: [
+                { x: 10, y: 20 },
+                { x: 30, y: 40 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'ClearPoly', property: 'polygon', value: [] }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'ClearPoly' }] },
+        tmpProject,
+        30000,
+      );
+      const rbp = JSON.parse(extractJson(rb));
+      const poly = rbp.results?.[0]?.properties?.polygon;
+      expect(String(poly)).toBe('[]');
+
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).not.toMatch(/polygon\s*=\s*PackedVector2Array\(10/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'errors (not zero-writes) on elements that cannot be coerced to the packed element type',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Polygon2D',
+          nodeName: 'BadPoly',
+          parentNodePath: '.',
+        },
+        tmpProject,
+        30000,
+      );
+
+      // String elements cannot become Vector2s — must be an explicit
+      // error, never a zero write with success:true.
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'BadPoly', property: 'polygon', value: ['not', 'points'] }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].error).toMatch(/cannot be coerced/i);
+      expect(parsed.results[0].error).toMatch(/element 0/);
+      expect(parsed.results[0].success).toBeUndefined();
+    },
+    60000,
+  );
+
+  itGodot(
+    'applies packed-array element coercion to initial properties in add_node',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'CollisionPolygon2D',
+          nodeName: 'Collider',
+          parentNodePath: '.',
+          properties: {
+            polygon: [
+              { x: 0, y: 0 },
+              { x: 20, y: 0 },
+              { x: 20, y: 10 },
+            ],
+          },
+        },
+        tmpProject,
+        30000,
+      );
+
+      // Read back: the CollisionPolygon2D polygon (PackedVector2Array)
+      // must carry the supplied points, not zeros.
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: 'Collider' }] },
+        tmpProject,
+        30000,
+      );
+      const rbp = JSON.parse(extractJson(rb));
+      const poly = rbp.results?.[0]?.properties?.polygon;
+      expect(poly).toBeDefined();
+      expect(String(poly)).toMatch(
+        /\(0(\.0)?, 0(\.0)?\), \(20(\.0)?, 0(\.0)?\), \(20(\.0)?, 10(\.0)?\)/,
+      );
+
+      // And the bad-element rule fires through the add_node path too
+      // (reported via stderr, matching other add_node property errors).
+      let stdoutSeen = '';
+      let stderrSeen = '';
+      try {
+        ({ stdout: stdoutSeen, stderr: stderrSeen } = await runner.executeOperation(
+          'add_node',
+          {
+            scenePath: 'main.tscn',
+            nodeType: 'CollisionPolygon2D',
+            nodeName: 'BadCollider',
+            parentNodePath: '.',
+            properties: { polygon: ['nope'] },
+          },
+          tmpProject,
+          30000,
+        ));
+      } catch (err) {
+        stderrSeen = err instanceof Error ? err.message : String(err);
+      }
+      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stderrSeen).toMatch(/cannot be coerced/i);
+    },
+    60000,
+  );
 });
