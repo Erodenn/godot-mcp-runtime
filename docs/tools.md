@@ -122,6 +122,19 @@ A property whose declared type is `Dictionary` skips this coercion, so a dict wi
 
 Godot performs these on store, so they are allowed: float to int, string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
 
+### Packed arrays
+
+`Array` to a `Packed*Array` conversion also applies per element: each element is coerced with the scalar rules above (`{"x": 1, "y": 2}` becomes `Vector2(1, 2)`, ints widen to floats in `PackedFloat32Array`, and so on). An element that cannot represent the packed element type — a string in a `PackedVector2Array`, a bool in a `PackedColorArray` — errors instead of storing Godot's silent zero value, and the error names the offending element index. An empty array clears the property.
+
+```json
+{
+  "polygon": [
+    { "x": 10, "y": 20 },
+    { "x": 30, "y": 40 }
+  ]
+}
+```
+
 ### Object-typed properties
 
 Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.shape`, `Sprite2D.texture`) reject plain values. They accept one of three forms:
