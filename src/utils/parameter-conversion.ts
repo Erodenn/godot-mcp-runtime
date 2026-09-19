@@ -33,6 +33,7 @@ const parameterMappings = {
   file_types: 'fileTypes',
   max_results: 'maxResults',
   capture_limit: 'captureLimit',
+  has_property: 'hasProperty', // nested in validate checks[].schema; flows through strict converter
 } as const satisfies Record<string, string>;
 
 type ForwardMap = typeof parameterMappings;
