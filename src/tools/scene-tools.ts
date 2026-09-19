@@ -204,7 +204,7 @@ export const sceneToolDefinitions = [
                     property: { type: 'string', description: 'Property name in snake_case' },
                     value: {
                       description:
-                        'New value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through',
+                        'New value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. For Packed*Array properties, a plain array applies the same conversions element-wise (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the packed element type errors instead of silently storing zeros.',
                     },
                   },
                   required: ['nodePath', 'property', 'value'],

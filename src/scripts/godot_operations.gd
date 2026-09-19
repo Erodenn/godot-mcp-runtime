@@ -1107,6 +1107,49 @@ func _coerce_property_value(value):
 			return Color(value.r, value.g, value.b, a)
 	return value
 
+# Helper: element-wise coercion for packed-array properties. Called from
+# _prepare_property_value when the declared type is a Packed*Array and the
+# raw JSON value is a non-empty plain Array. Each element is coerced through
+# _coerce_property_value -- turning {"x": 1, "y": 2} into Vector2(1, 2),
+# {"r": .., "g": .., "b": ..} into Color, etc. -- and any element that is
+# not already, and cannot be coerced into, the packed element type makes
+# the whole assignment fail loudly (node.set() would otherwise silently
+# store the zero value for every element while reporting success).
+# Element rules mirror what Godot's typed setters accept without zeroing
+# (e.g. ints for float arrays, Vector2i for Vector2 arrays); a bool or a
+# string on a Vector2 element, for example, is rejected up front.
+func _prepare_packed_array_elements(property: String, node_class: String, declared: int, arr: Array) -> Dictionary:
+	var out: Array = []
+	for i in range(arr.size()):
+		var element = _coerce_property_value(arr[i])
+		var ok := false
+		match declared:
+			TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY:
+				ok = typeof(element) in [TYPE_INT, TYPE_FLOAT, TYPE_BOOL]
+			TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY:
+				ok = typeof(element) in [TYPE_INT, TYPE_FLOAT, TYPE_BOOL]
+			TYPE_PACKED_STRING_ARRAY:
+				ok = typeof(element) in [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
+			TYPE_PACKED_VECTOR2_ARRAY:
+				ok = typeof(element) in [TYPE_VECTOR2, TYPE_VECTOR2I]
+			TYPE_PACKED_VECTOR3_ARRAY:
+				ok = typeof(element) in [TYPE_VECTOR3, TYPE_VECTOR3I]
+			TYPE_PACKED_COLOR_ARRAY:
+				ok = typeof(element) == TYPE_COLOR
+			TYPE_PACKED_VECTOR4_ARRAY:
+				ok = typeof(element) in [TYPE_VECTOR4, TYPE_VECTOR4I]
+			_:
+				ok = true
+		if not ok:
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type of %s" % [
+					property, node_class, i, str(element), type_string(declared)],
+			}
+		out.push_back(element)
+	return {"ok": true, "value": out, "error": ""}
+
 # Helper: find a property's full descriptor from get_property_list(), or null
 # if the node has no property by that name. Callers that only need the
 # Variant type should use _declared_property_type instead.
@@ -1154,6 +1197,23 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_PACKED_VECTOR3_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR3_ARRAY],
 	TYPE_PACKED_COLOR_ARRAY: [TYPE_ARRAY, TYPE_PACKED_COLOR_ARRAY],
 	TYPE_PACKED_VECTOR4_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR4_ARRAY],
+}
+
+# Packed-array declarations eligible for element-wise coercion in
+# _prepare_property_value (values are unused; the element rules live in
+# _prepare_packed_array_elements). Kept separate from _PROPERTY_TYPE_COMPAT
+# so scalar compat widening is unaffected.
+const _PACKED_ELEMENT_RULES: Dictionary = {
+	TYPE_PACKED_BYTE_ARRAY: true,
+	TYPE_PACKED_INT32_ARRAY: true,
+	TYPE_PACKED_INT64_ARRAY: true,
+	TYPE_PACKED_FLOAT32_ARRAY: true,
+	TYPE_PACKED_FLOAT64_ARRAY: true,
+	TYPE_PACKED_STRING_ARRAY: true,
+	TYPE_PACKED_VECTOR2_ARRAY: true,
+	TYPE_PACKED_VECTOR3_ARRAY: true,
+	TYPE_PACKED_COLOR_ARRAY: true,
+	TYPE_PACKED_VECTOR4_ARRAY: true,
 }
 
 # Helper: enforce a property's PROPERTY_HINT_RESOURCE_TYPE class filter
@@ -1246,6 +1306,18 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 	var coerced = raw_value if declared == TYPE_DICTIONARY else _coerce_property_value(raw_value)
 	if coerced == null:
 		return {"ok": true, "value": coerced, "error": ""}
+
+	# Element-wise coercion for packed-array properties. JSON sends a
+	# PackedVector2Array (etc.) as a plain Array whose elements are still
+	# raw dicts/strings; node.set()'s typed setter silently casts each
+	# element to the zero value instead of failing. Coerce each element
+	# individually via _coerce_property_value and fail loudly on any
+	# element that cannot be represented.
+	if _PACKED_ELEMENT_RULES.has(declared) and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
+		var element_prep = _prepare_packed_array_elements(property, node.get_class(), declared, coerced)
+		if not element_prep.ok:
+			return {"ok": false, "value": null, "error": element_prep.error}
+		coerced = element_prep.value
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
