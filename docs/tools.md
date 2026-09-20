@@ -262,6 +262,8 @@ A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds stru
 }
 ```
 
+**Batch cost.** `targets[].checks` run inside the same single Godot process as the rest of the batch, so adding checks to a batch costs no extra process launches. One target's failure (a bad schema, a missing scene, an unimported dependency) is reported on that target and the other targets still report, in input order.
+
 ## Structural checks: `checks: [{ type: "structure" }]`
 
 `validate` with a plain `scenePath` checks one scene's syntax and resource integrity; a `structure` check validates a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene has exactly one `CharacterBody2D` root", "a `CollisionShape2D` always has `shape` set".

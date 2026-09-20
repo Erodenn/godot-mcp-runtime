@@ -1284,16 +1284,50 @@ func validate_resource(params):
 # as the standalone checks: _validate_schema_node for structure,
 # _collect_connection_issues / _collect_orphaned_handlers for signals.
 func validate_checks(params):
-	var scene_root = load_scene_instance(params.scene_path)
-	if not scene_root:
+	var outcome = _run_scene_checks(str(params.scene_path), params.checks if params.has("checks") else [])
+	if not outcome.ok:
+		log_error(outcome.error)
 		quit(1)
 		return
+	print(JSON.stringify({"valid": outcome.errors.is_empty(), "errors": outcome.errors}))
 
-	var checks = params.checks if params.has("checks") else []
+# Runs the checks[] array against one scene and returns
+# {"ok": bool, "error": String, "errors": Array}. ok=false means the scene
+# itself could not be loaded (path rejected, file missing, or a dependency
+# that was never imported); "error" then carries the reason and "errors" is
+# empty. load_scene_instance has already written its own diagnosis to stderr,
+# including the [IMPORT_NEEDED] marker the TS layer reacts to.
+#
+# Never quits: validate_batch runs this once per target and needs per-target
+# isolation, so a bad target must not take the whole process down with it.
+# Freeing the instance here (rather than at the call sites) is what keeps a
+# batch of N scenes from holding N live trees at once.
+func _run_scene_checks(scene_path: String, checks) -> Dictionary:
+	var scene_root = load_scene_instance(scene_path)
+	if not scene_root:
+		return {"ok": false, "error": "Scene checks skipped: could not load scene " + scene_path, "errors": []}
+	var errors := _collect_check_errors(scene_root, checks)
+	scene_root.free()
+	return {"ok": true, "error": "", "errors": errors}
+
+# Runs every entry of the checks[] array against an already-instantiated scene
+# and returns the collected error dictionaries. Does not free scene_root: the
+# caller owns that instance. A non-Array checks value collects nothing.
+#
+# Every entry is hedged rather than trusted: batch sub-operations reach this
+# function without passing through the Node-side check validators, so a
+# malformed entry must be reported, not crash the process.
+func _collect_check_errors(scene_root: Node, checks) -> Array:
 	var errors: Array = []
-	var valid := true
-
+	if typeof(checks) != TYPE_ARRAY:
+		return errors
 	for check in checks:
+		if not (check is Dictionary):
+			errors.append({
+				"check": "",
+				"message": "Invalid check entry: expected an object, got " + type_string(typeof(check)),
+			})
+			continue
 		var check_type = str(check.get("type", ""))
 		if check_type == "structure":
 			var schema = check.get("schema", {})
@@ -1324,7 +1358,6 @@ func validate_checks(params):
 						"check": "signals",
 						"message": "Node not found: " + str(check.node_path),
 					})
-					valid = false
 					continue
 			var sig_issues: Array = []
 			_collect_connection_issues(scope_node, scene_root, sig_issues)
@@ -1346,13 +1379,7 @@ func validate_checks(params):
 				"message": "Unknown check type: " + check_type + " (expected \"structure\" or \"signals\")",
 			})
 
-	if errors.size() > 0:
-		valid = false
-
-	print(JSON.stringify({
-		"valid": valid,
-		"errors": errors
-	}))
+	return errors
 
 func _validate_schema_node(node: Node, scene_root: Node, schema: Dictionary, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
 	# Check type if specified
@@ -1874,11 +1901,34 @@ func _validate_single(target: Dictionary) -> Dictionary:
 	else:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
 
-# Validate multiple scripts/scenes in a single headless process
+# Validate multiple scripts/scenes in a single headless process. A target that
+# carries a non-empty checks[] array also gets the structural / signal checks
+# run against it here, in this same process, reported on that target's own
+# "checkErrors" field.
+#
+# checkErrors is a separate field rather than an addition to "errors" because
+# the TS layer overlays Godot's stderr diagnostics over "errors" whenever a
+# target produced any: check errors merged into "errors" would be discarded
+# for exactly those targets. Every failure mode lands on the target that
+# caused it and the loop continues, so one bad target cannot cost the others
+# their result.
 func validate_batch(params: Dictionary) -> void:
 	var results: Array = []
 	for target in params.targets:
-		results.append(_validate_single(target))
+		var result = _validate_single(target)
+		var checks = target.get("checks", []) if target is Dictionary else []
+		if typeof(checks) == TYPE_ARRAY and not checks.is_empty():
+			var scene_path = str(target.get("scene_path", ""))
+			var outcome = _run_scene_checks(scene_path, checks)
+			if not outcome.ok:
+				result["checkErrors"] = [{"message": outcome.error}]
+				result["valid"] = false
+			elif not outcome.errors.is_empty():
+				result["checkErrors"] = outcome.errors
+				result["valid"] = false
+			else:
+				result["checkErrors"] = []
+		results.append(result)
 	print(JSON.stringify({"results": results}))
 
 # Execute multiple scene operations in a single headless process

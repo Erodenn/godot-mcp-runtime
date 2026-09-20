@@ -11,12 +11,40 @@ import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
 import type { Result } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
+import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
+
+/**
+ * Item schema for the checks[] array. Referenced by both the top-level
+ * `checks` property and `targets[].checks`, which are the same shape;
+ * inputSchema ships on every handshake, so the duplicate costs bytes as
+ * well as maintenance.
+ */
+const CHECK_ITEM_SCHEMA = {
+  type: 'object',
+  properties: {
+    type: {
+      type: 'string',
+      enum: ['structure', 'signals'],
+      description: 'The kind of check to run',
+    },
+    schema: {
+      type: 'object',
+      description:
+        '[structure] Recursive node schema: { type?: string, children?: Schema[], hasProperty?: string }. Checks the root node and subtree.',
+    },
+    nodePath: {
+      type: 'string',
+      description: '[signals] Optional node path to scope the check to a subtree (e.g. "root/HUD")',
+    },
+  },
+  required: ['type'],
+} as const;
 
 export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene file integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Single-target: provide exactly one of scriptPath, source, or scenePath. Batch: provide a targets array - runs all in one Godot process. A checks array (with scenePath, or per targets[] item) adds structural and signal-wiring verification. Returns { valid, errors: [{ line?, message }] } for single, or { results: [{ target, valid, errors }] } for batch. Line numbers appear when Godot's stderr includes them (not always). Returns valid:false on any parse error; never throws.",
+      'Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. Any parse error yields valid:false; never throws.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -44,27 +72,7 @@ export const validateToolDefinitions = [
           type: 'array',
           description:
             '[single, requires scenePath] Structural and signal-verification checks to run against the scene. Types: "structure" (validate node tree against a schema) and "signals" (verify signal connections and handler methods, optional nodePath scope). Merged into the errors array with a "check" discriminator.',
-          items: {
-            type: 'object',
-            properties: {
-              type: {
-                type: 'string',
-                enum: ['structure', 'signals'],
-                description: 'The kind of check to run',
-              },
-              schema: {
-                type: 'object',
-                description:
-                  '[structure] Recursive node schema: { type?: string, children?: Schema[], hasProperty?: string }. Checks the root node and subtree.',
-              },
-              nodePath: {
-                type: 'string',
-                description:
-                  '[signals] Optional node path to scope the check to a subtree (e.g. "root/HUD")',
-              },
-            },
-            required: ['type'],
-          },
+          items: CHECK_ITEM_SCHEMA,
         },
         targets: {
           type: 'array',
@@ -85,27 +93,8 @@ export const validateToolDefinitions = [
               checks: {
                 type: 'array',
                 description:
-                  '[requires scenePath] Structural / signal checks for this target. Same shape as the top-level checks array.',
-                items: {
-                  type: 'object',
-                  properties: {
-                    type: {
-                      type: 'string',
-                      enum: ['structure', 'signals'],
-                      description: 'The kind of check to run',
-                    },
-                    schema: {
-                      type: 'object',
-                      description:
-                        '[structure] Recursive node schema: { type?: string, children?: Schema[], hasProperty?: string }',
-                    },
-                    nodePath: {
-                      type: 'string',
-                      description: '[signals] Optional node path to scope the check to a subtree',
-                    },
-                  },
-                  required: ['type'],
-                },
+                  '[requires scenePath] Structural / signal checks for this target, run in the same Godot process as the rest of the batch. Same shape as the top-level checks array.',
+                items: CHECK_ITEM_SCHEMA,
               },
             },
           },
@@ -178,6 +167,36 @@ function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> 
   return result;
 }
 
+/**
+ * Runs a validate operation, and on the `[IMPORT_NEEDED]` stderr marker runs
+ * the asset import step and retries exactly once. Structurally capped: a
+ * marker on the retried run falls through to the caller's normal error
+ * handling instead of importing again. Mirrors the retry in `executeSceneOp`,
+ * which validate cannot use (it returns a wrapped HandlerResult, while both
+ * validate branches need raw stdout plus stderr for the per-path diagnostic
+ * overlay).
+ *
+ * The retry is skipped while any runtime session is live: importAssets writes
+ * .godot/ under the project and a running engine is a second writer. Skipping
+ * only costs the caller the existing unimported-dependency error.
+ *
+ * An importAssets rejection propagates: both call sites sit inside a try whose
+ * catch produces a structured error response.
+ */
+async function executeValidateOp(
+  runner: GodotRunner,
+  operation: string,
+  params: OperationParams,
+  projectPath: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const first = await runner.executeOperation(operation, params, projectPath);
+  if (!first.stderr.includes(IMPORT_NEEDED_MARKER) || runner.hasActiveRuntimeSession()) {
+    return first;
+  }
+  await runner.importAssets(projectPath);
+  return runner.executeOperation(operation, params, projectPath);
+}
+
 export async function handleValidate(
   runner: GodotRunner,
   args: OperationParams,
@@ -199,10 +218,25 @@ export async function handleValidate(
     const tempFiles: string[] = [];
 
     try {
-      const snakeTargets: Array<{ script_path?: string; scene_path?: string }> = [];
+      const snakeTargets: Array<{
+        script_path?: string;
+        scene_path?: string;
+        checks?: unknown[];
+      }> = [];
       const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
       for (const [i, t] of targets.entries()) {
+        const tChecks = Array.isArray(t.checks) && t.checks.length > 0 ? t.checks : undefined;
+        // Checks run against an instantiated scene, so a target without a
+        // scenePath has nothing to run them on. That is this target's own
+        // failure: it is never forwarded, and every other target still reports.
+        if (tChecks && !t.scenePath) {
+          preErrors.set(i, {
+            target: t.scriptPath ?? '',
+            errors: [{ message: 'Target checks require scenePath - checks run against a scene' }],
+          });
+          continue;
+        }
         if (t.source) {
           const { resPath, absPath } = writeTempGdScript(projectPath, t.source, 'validate_batch');
           tempFiles.push(absPath);
@@ -233,7 +267,15 @@ export async function handleValidate(
               ],
             });
           } else {
-            snakeTargets.push({ scene_path: t.scenePath });
+            // Check items are forwarded camelCase and untouched: the runner's
+            // convertCamelToSnakeCase rewrites nodePath and every nested
+            // hasProperty on the way out, so pre-converting here would
+            // double-convert.
+            const accepted: { scene_path: string; checks?: unknown[] } = {
+              scene_path: t.scenePath,
+            };
+            if (tChecks) accepted.checks = tChecks;
+            snakeTargets.push(accepted);
           }
         } else {
           snakeTargets.push({});
@@ -250,7 +292,8 @@ export async function handleValidate(
         return ok({ content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] });
       }
 
-      const { stdout, stderr } = await runner.executeOperation(
+      const { stdout, stderr } = await executeValidateOp(
+        runner,
         'validate_batch',
         { targets: snakeTargets },
         projectPath,
@@ -266,7 +309,12 @@ export async function handleValidate(
       }
 
       let batchParsed: {
-        results: Array<{ target: string; valid: boolean; errors: ValidationError[] }>;
+        results: Array<{
+          target: string;
+          valid: boolean;
+          errors: ValidationError[];
+          checkErrors?: CheckError[];
+        }>;
       };
       try {
         batchParsed = JSON.parse(stdout.trim());
@@ -280,15 +328,20 @@ export async function handleValidate(
 
       const errorsByPath = parseGodotErrorsByPath(stderr || '');
 
+      // Three error sources per target: Godot's stderr diagnostics (which
+      // supersede the GDScript-reported parse errors when present), and the
+      // per-target checks[] findings, which are additive because they describe
+      // something else entirely. checkErrors is internal to this merge; the
+      // tool keeps returning one flat errors array per target.
       const godotResults = batchParsed.results.map((r) => {
         const key = r.target.startsWith('res://') ? r.target : `res://${r.target}`;
         const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
-        const allErrors: ValidationError[] =
-          stderrErrors.length > 0 ? stderrErrors : r.errors || [];
+        const parseErrors = stderrErrors.length > 0 ? stderrErrors : (r.errors ?? []);
+        const checkErrors = Array.isArray(r.checkErrors) ? r.checkErrors : [];
         return {
           target: r.target,
-          valid: r.valid && stderrErrors.length === 0,
-          errors: allErrors,
+          valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
+          errors: [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>,
         };
       });
 
@@ -311,33 +364,6 @@ export async function handleValidate(
           // and godotResults has exactly that many entries.
           if (r === undefined) continue;
           results.push(r);
-        }
-      }
-
-      // Per-target checks[]: structural / signal verification against each
-      // scene target, merged into that target's error list.
-      for (const [i, t] of targets.entries()) {
-        const tChecks = (t as { checks?: unknown }).checks;
-        if (!Array.isArray(tChecks) || tChecks.length === 0) continue;
-        const tScene = (t as { scenePath?: string }).scenePath;
-        if (!tScene) {
-          return err(
-            createErrorResponse(
-              `Target ${i}: checks requires scenePath — checks run against a scene`,
-              [
-                'Give every target with checks a scenePath, e.g. { "scenePath": "main.tscn", "checks": [...] }',
-              ],
-            ),
-          );
-        }
-        const checkErrors = await runSceneChecks(runner, projectPath, tScene, tChecks);
-        if (!checkErrors.ok) return err(checkErrors.error);
-        if (checkErrors.value.length > 0) {
-          results[i] = {
-            target: results[i]?.target ?? tScene,
-            valid: false,
-            errors: [...(results[i]?.errors ?? []), ...checkErrors.value],
-          };
         }
       }
 
@@ -586,7 +612,8 @@ async function runSceneChecks(
 
   try {
     const opParams: OperationParams = { scene_path: scenePath, checks };
-    const { stdout, stderr } = await runner.executeOperation(
+    const { stdout, stderr } = await executeValidateOp(
+      runner,
       'validate_checks',
       opParams,
       projectPath,
