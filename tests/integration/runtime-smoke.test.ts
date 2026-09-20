@@ -207,4 +207,31 @@ func execute(scene_tree: SceneTree) -> Variant:
     },
     60000,
   );
+
+  itGodot(
+    'launches the scene named by the scene argument instead of the project main scene',
+    async (ctx) => {
+      const id = randomBytes(6).toString('hex');
+      tmpProject = join(tmpdir(), `godot-mcp-runtime-scene-arg-${id}`);
+      cpSync(fixtureProjectPath, tmpProject, { recursive: true });
+
+      await runProjectOrSkip(runner, ctx, tmpProject, { scene: 'input_probe.tscn' });
+
+      const source = [
+        'extends RefCounted',
+        'func execute(scene_tree: SceneTree) -> Variant:',
+        '\treturn {"path": scene_tree.current_scene.scene_file_path, "root": scene_tree.current_scene.name}',
+      ].join('\n');
+      const response = await runner.sendCommand('run_script', { source }, 10000);
+      const parsed = JSON.parse(response) as {
+        result?: { path?: string; root?: string };
+        error?: string;
+      };
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.result?.path).toMatch(/input_probe\.tscn$/);
+      expect(parsed.result?.path).not.toContain('main.tscn');
+      expect(parsed.result?.root).toBe('InputProbe');
+    },
+    60000,
+  );
 });
