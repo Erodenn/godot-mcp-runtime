@@ -1583,11 +1583,41 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 	if not hint_check.ok:
 		return {"ok": false, "value": null, "error": hint_check.error}
 
-	# Recursively assign inner properties with full validation.
+	# Assign 'shader' (or any plain inner property) before slash-suffixed
+	# keys: virtual properties -- most importantly ShaderMaterial's
+	# shader_parameter/<uniform> keys, the primary way shader uniforms are
+	# set -- only come into existence on the instance once the resource
+	# they depend on is assigned. JSON preserves dict iteration order, so
+	# a pre-pass extracts every plain (non-virtual) property first; without
+	# it, {"shader": ..., "shader_parameter/x": ...} would hit the
+	# existence gate below and fail even though set() works fine.
+	var ordered_keys: Array = []
+	var virtual_keys: Array = []
 	for inner_prop in spec.keys():
 		if inner_prop == "type":
 			continue
-		if not (inner_prop in instance):
+		if "/" in String(inner_prop):
+			virtual_keys.append(inner_prop)
+		else:
+			ordered_keys.append(inner_prop)
+	ordered_keys.append_array(virtual_keys)
+
+	# Recursively assign inner properties with full validation.
+	for inner_prop in ordered_keys:
+		# Existence gate. The `in` operator is not sufficient for virtual
+		# properties: it misses shader_parameter/<uniform> keys even after
+		# the shader is assigned (and only starts returning true after an
+		# unrelated set() call refreshes its cache), so a slash-suffixed
+		# key is also accepted when it is listed in the instance's live
+		# property list -- which is where its declared type lives, so the
+		# normal validation below applies unchanged. set() alone must not
+		# be used as the gate: it accepts unknown names silently.
+		var exists: bool = inner_prop in instance
+		if not exists and "/" in String(inner_prop):
+			exists = _find_property_descriptor(instance, String(inner_prop)) != null
+		if not exists:
+			if "/" in String(inner_prop):
+				return {"ok": false, "value": null, "error": "Property '%s' does not resolve on resource of type '%s' (constructed for property '%s') -- for shader_parameter/<name>, the shader must be assigned first and <name> must be a uniform it declares" % [inner_prop, class_name_str, property]}
 			return {"ok": false, "value": null, "error": "Property '%s' does not exist on resource of type '%s' (constructed for property '%s')" % [inner_prop, class_name_str, property]}
 		var prepared = _prepare_property_value(instance, inner_prop, spec[inner_prop])
 		if not prepared.ok:

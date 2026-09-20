@@ -191,6 +191,26 @@ Inline construction example:
 
 Inner properties are assigned through the same validation described above, so nested typed dicts and nested `res://` paths both work at any depth. The scene is persisted with `PackedScene.pack()`, so a constructed Resource is written out as a normal `[sub_resource]` block.
 
+#### Virtual properties (slash-suffixed keys, e.g. `shader_parameter/*`)
+
+Keys containing `/` (most importantly `ShaderMaterial`'s `shader_parameter/<uniform>` entries) name _virtual_ properties that only exist on an instance after the property they depend on is assigned. They are handled specially:
+
+- Dependency-first ordering: plain keys are assigned before slash-suffixed keys, so `"shader": "res://neon.gdshader"` lands before `"shader_parameter/glow"`.
+- Validation is against the instance's live property list — `set()` alone accepts unknown names silently, so a `shader_parameter/<name>` that the assigned shader does not declare as a uniform is an explicit error, as is any slash-suffixed key when no shader is assigned.
+
+```json
+{
+  "material": {
+    "type": "ShaderMaterial",
+    "shader": "res://shaders/neon.gdshader",
+    "shader_parameter/glow": 2.5,
+    "shader_parameter/tint": { "r": 0.2, "g": 0.9, "b": 1.0 }
+  }
+}
+```
+
+The persisted scene references the shader as an `ext_resource` plus one line per explicitly set parameter (unset uniforms are serialized as `null` lines — that is stock `PackedScene.pack()` behavior, identical to any scene saved by the editor with a partially-configured material).
+
 Construction errors are explicit and nothing is persisted when one fires:
 
 - `type` names an unknown class
@@ -198,6 +218,7 @@ Construction errors are explicit and nothing is persisted when one fires:
 - `type` names an abstract or native-only class that cannot be instantiated
 - the constructed class does not satisfy the property's declared resource hint (for example a `RectangleShape2D` assigned to `Sprite2D.texture`)
 - an inner property does not exist on the constructed class, or its value fails the type check (the error names the inner property)
+- a slash-suffixed key does not resolve on the instance — for `shader_parameter/<name>`, either no shader was assigned before it, or the assigned shader does not declare `<name>` as a uniform
 
 ## Project Config (no Godot process required)
 
