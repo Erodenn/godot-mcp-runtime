@@ -552,6 +552,38 @@ describe('simulate_input observed results (live bridge)', () => {
   );
 
   itGodot(
+    'a non-boolean double_click is rejected before anything is injected',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const result = await simulateExpectingError({
+        actions: [{ type: 'click_element', element: p('PanelBtn'), double_click: 'yes' }],
+      });
+
+      expect(
+        result.ok,
+        `a batch rejected before injection must be an error response; result=${JSON.stringify(result)}`,
+      ).toBe(false);
+      if (result.ok) return;
+      const text = JSON.stringify(result.error);
+      expect(text).toContain('action 0');
+      expect(text).toContain('double_click');
+
+      // Rejected in the bridge's own pre-validation, so nothing was injected:
+      // the panel the click would have revealed must still be hidden.
+      const state = (await script([
+        'return {',
+        '\t"visible": scene_tree.root.get_node("InputProbe/HiddenPanel").visible,',
+        '}',
+      ])) as { visible?: boolean } | null;
+      expect(state?.visible, `the panel must not have opened; state=${JSON.stringify(state)}`).toBe(
+        false,
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
     'an unresolvable watch path samples null',
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());
