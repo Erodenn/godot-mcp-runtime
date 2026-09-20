@@ -32,7 +32,8 @@
  * - GodotRunner.importAssets() throws on individual import failures
  *   (Godot exits 0 even when assets fail — stderr is the only signal)
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, expect } from 'vitest';

@@ -6,7 +6,8 @@
  * mutation (add_node, set_node_property, delete_node) must persist to disk
  * without an explicit save_scene call.
  *
- * Requires GODOT_PATH. Skipped in CI.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';

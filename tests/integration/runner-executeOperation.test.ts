@@ -7,7 +7,8 @@
  * path where stdout JSON is the sole signal.
  *
  * Requires a real Godot binary. Set GODOT_PATH to run these locally.
- * They are skipped in CI where Godot is not installed.
+ * They skip locally when GODOT_PATH is unset. CI sets it in the
+ * godot-integration job and runs them on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, expect } from 'vitest';

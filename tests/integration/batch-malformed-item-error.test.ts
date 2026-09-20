@@ -20,7 +20,8 @@
  * — the agent population this regression was observed on — reach the
  * guard, so the diagnostic is live code, not dead defense.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';

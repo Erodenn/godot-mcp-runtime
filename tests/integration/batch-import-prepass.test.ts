@@ -10,7 +10,8 @@
  * is applied; a cold scene exits the whole batch with quit(1) before
  * anything is touched, so the retry replays cleanly.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, expect } from 'vitest';

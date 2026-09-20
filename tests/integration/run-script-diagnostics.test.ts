@@ -12,7 +12,8 @@
  * error response. This test runs a REAL engine + bridge and asserts the
  * enriched error comes back over the live MCP path.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
