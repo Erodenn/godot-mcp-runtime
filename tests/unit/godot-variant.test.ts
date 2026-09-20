@@ -80,7 +80,7 @@ describe('decodeVariant rejects malformed packets', () => {
 
 /**
  * The encoder only ever emits the 64-bit form, so a round-trip test can never
- * reach the 32-bit branch — but the wire format allows it and a real engine may
+ * reach the 32-bit branch: but the wire format allows it and a real engine may
  * send it. These build the narrow encodings by hand.
  */
 describe('decodeVariant handles the encodings our encoder never emits', () => {

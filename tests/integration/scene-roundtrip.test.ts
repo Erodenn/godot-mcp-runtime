@@ -6,7 +6,8 @@
  * mutation (add_node, set_node_property, delete_node) must persist to disk
  * without an explicit save_scene call.
  *
- * Requires GODOT_PATH. Skipped in CI.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
@@ -139,7 +140,7 @@ describe('add_node round-trip', () => {
       // The Godot side should have reported the parent-not-found error to stderr.
       expect(stderrSeen.toLowerCase()).toContain('parent node not found');
 
-      // The scene must not have been mutated — no phantom Orphan node entry.
+      // The scene must not have been mutated: no phantom Orphan node entry.
       const tscnAfter = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
       expect(tscnAfter).not.toMatch(/\[node name="Orphan"/);
       // Belt-and-suspenders: the file should be byte-identical to the original.
@@ -247,7 +248,7 @@ describe('delete_nodes round-trip', () => {
     'get_scene_tree no longer lists the node after delete_nodes',
     async () => {
       // Fixture invariant: tests/fixtures/godot-project/main.tscn ships with a Sprite2D
-      // child of the root Node2D — fixture.test.ts guards this shape.
+      // child of the root Node2D: fixture.test.ts guards this shape.
       await runner.executeOperation(
         'delete_nodes',
         { scenePath: 'main.tscn', nodePaths: ['root/Sprite2D'] },

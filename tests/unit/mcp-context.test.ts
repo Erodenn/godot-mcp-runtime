@@ -5,7 +5,7 @@
  * platform-gated flakiness in the handler-level session-gate tests.
  *
  * The function branches on `process.platform`, which vitest cannot safely
- * override mid-run — so the assertion only runs on win32 and is a no-op
+ * override mid-run: so the assertion only runs on win32 and is a no-op
  * (via `it.runIf`) everywhere else.
  */
 

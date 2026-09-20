@@ -8,7 +8,7 @@
  * truly headless environments (no X server, no Wayland, no Windows desktop)
  * Godot's display server will fail to start and the test will time out or
  * error before the bridge is ready. If this is the case in your environment,
- * the test is marked it.skip with a comment — do not remove the test, flag
+ * the test is marked it.skip with a comment: do not remove the test, flag
  * it to the team lead instead.
  *
  * Requires GODOT_PATH; skipped only when it is unset. CI sets it in the
@@ -63,7 +63,7 @@ describe('runtime bridge smoke', () => {
       tmpProject = join(tmpdir(), `godot-mcp-runtime-smoke-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      // Start the project — waitForBridge polls until the TCP ping responds
+      // Start the project: waitForBridge polls until the TCP ping responds
       await runProjectOrSkip(runner, ctx, tmpProject);
 
       const response = await runner.sendCommand('screenshot', {}, 15000);

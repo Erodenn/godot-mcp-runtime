@@ -3,7 +3,7 @@
  *
  * End-to-end regression for a real-world failure class: run_script compile
  * failures returned only "Script compilation failed (error 43). Check
- * syntax." — the parser's
+ * syntax.": the parser's
  * actual message + line number sat on the engine process stderr. Agents
  * retried identical scripts and hunted get_debug_output for details.
  *
@@ -12,7 +12,8 @@
  * error response. This test runs a REAL engine + bridge and asserts the
  * enriched error comes back over the live MCP path.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
@@ -66,7 +67,7 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       await runProjectOrSkip(runner, ctx, tmpProject);
 
-      // Line 3 references an undeclared identifier — compile error 43 class.
+      // Line 3 references an undeclared identifier: compile error 43 class.
       const badScript =
         'extends RefCounted\n' +
         'func execute(scene_tree: SceneTree) -> Variant:\n' +

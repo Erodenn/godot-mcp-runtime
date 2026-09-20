@@ -2,7 +2,7 @@
  * Regression tests: run_script compile-error diagnostics enrichment.
  *
  * Observed in production agent workflows: run_script compile failures each
- * returned only "Script compilation failed (error 43). Check syntax." — no
+ * returned only "Script compilation failed (error 43). Check syntax.": no
  * line, no message. Agents blindly retried identical scripts and repeatedly
  * called get_debug_output hunting for details that were sitting on the
  * engine process stderr.
@@ -12,7 +12,7 @@
  * engine-stderr SCRIPT ERROR block) and appends "Compiler diagnostics:" with
  * message + line to the error response.
  *
- * Uses a minimal fake runner — run_script's handler path needs a runtime
+ * Uses a minimal fake runner: run_script's handler path needs a runtime
  * session shape, not the executeOperation fake.
  */
 

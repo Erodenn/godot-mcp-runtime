@@ -5,7 +5,7 @@
  * in the project: bridge response shaping, runtime-error escalation, mode
  * branching for debug-output and stop, ensureRuntimeSession gating, and the
  * timeout calculation in simulate_input. None of these need a Godot binary
- * to verify — they all branch on runner state + bridge response strings.
+ * to verify: they all branch on runner state + bridge response strings.
  *
  * The fake runner here extends the standard fake with the runtime surface
  * (sendCommandWithErrors, session state, stopProject). Kept inline because
@@ -112,7 +112,7 @@ interface RuntimeFake {
   /** Hook called after runProject sets session state but before returning. */
   setRunProjectAfterHook(hook: ((projectPath: string) => void) | null): void;
   setStopProjectError(error: Error | null): void;
-  /** Runs inside sendCommandWithErrors, before it returns — models session
+  /** Runs inside sendCommandWithErrors, before it returns: models session
    *  state changing while a bridge command is in flight. */
   setBridgeHook(hook: (() => void) | null): void;
   /** Stands in for the boundary-sentinel attribution the real runner derives
@@ -298,7 +298,7 @@ const tmp = useTmpDirs();
 
 function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
   return {
-    // Intentionally unset — no covered handler reads `.process`. If a future handler calls
+    // Intentionally unset: no covered handler reads `.process`. If a future handler calls
     // `proc.process.kill()` or similar, give it a real (or stubbed) ChildProcess here.
     process: undefined as unknown as GodotProcess['process'],
     output: opts.output ?? [],
@@ -333,7 +333,7 @@ describe('handleRunProject validation', () => {
     expectErrorMatching(result, /not a valid godot project/i);
   });
 
-  // Regression: issue #15 — without an explicit Godot-path precheck, an
+  // Regression: issue #15: without an explicit Godot-path precheck, an
   // unresolved godotPath used to bubble up as a generic "Failed to run
   // Godot project" error pointing at a hardcoded `C:\Program Files\...`
   // fallback path the user never configured. The handler must now surface
@@ -522,7 +522,7 @@ describe('handleLaunchEditor validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// ensureRuntimeSession (via handleTakeScreenshot — same gate every runtime
+// ensureRuntimeSession (via handleTakeScreenshot: same gate every runtime
 // handler uses)
 // ---------------------------------------------------------------------------
 
@@ -871,7 +871,8 @@ describe('handleDetachProject', () => {
 // ---------------------------------------------------------------------------
 
 const TIMEOUT_BUFFER_MS = 10000;
-const PESSIMISTIC_FRAME_MS = 50;
+/** Mirrors INPUT_PESSIMISTIC_FRAME_MS: a 10 fps floor, not a frame-rate guess. */
+const PESSIMISTIC_FRAME_MS = 100;
 
 describe('computeInputTimeoutMs', () => {
   it('charges the buffer plus one settle frame per action when there are no waits', () => {
@@ -893,6 +894,15 @@ describe('computeInputTimeoutMs', () => {
   it('charges wait.frames at the pessimistic per-frame cost', () => {
     const actions = [{ type: 'wait', frames: 10 }];
     expect(computeInputTimeoutMs(actions)).toBe(11 * PESSIMISTIC_FRAME_MS + TIMEOUT_BUFFER_MS);
+  });
+
+  it('gives a frames wait enough wall clock for a game running at 10 fps', () => {
+    // The per-frame charge is a floor on the frame rate. A game under load, or
+    // one whose window is minimized, must not time out a batch that is running.
+    const SLOW_GAME_FPS = 10;
+    const frames = 30;
+    const realDurationMs = (frames / SLOW_GAME_FPS) * 1000;
+    expect(computeInputTimeoutMs([{ type: 'wait', frames }])).toBeGreaterThan(realDurationMs);
   });
 
   it('sums hold_ms', () => {
@@ -1163,7 +1173,7 @@ describe('handleSimulateInput', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleGetUiElements — defaulting + parameter renaming
+// handleGetUiElements: defaulting + parameter renaming
 // ---------------------------------------------------------------------------
 
 describe('handleGetUiElements', () => {
@@ -1204,7 +1214,7 @@ describe('handleGetUiElements', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleRunScript — false-positive null-result detection + audit write
+// handleRunScript: false-positive null-result detection + audit write
 // ---------------------------------------------------------------------------
 
 describe('handleRunScript', () => {
@@ -1336,7 +1346,7 @@ describe('handleRunScript', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleRunScript — security policy gate (Tier 1 / Tier 2 / Tier 3)
+// handleRunScript: security policy gate (Tier 1 / Tier 2 / Tier 3)
 // ---------------------------------------------------------------------------
 
 describe('handleRunScript security policy', () => {
@@ -1492,7 +1502,7 @@ describe('handleRunScript security policy', () => {
   it('denies Tier 2 when invoked with no ctx (default null context auto-declines)', async () => {
     const dir = tmp.makeProject('run-script-tier2-nullctx-');
     const fake = activeFake(dir);
-    // No context passed — handler builds its own null context whose elicitor
+    // No context passed: handler builds its own null context whose elicitor
     // auto-declines. Must produce a "User declined" error without crashing.
     const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT });
     expectErrorMatching(result, /User declined.*HTTPRequest/);
@@ -1547,7 +1557,7 @@ describe('handleRunScript security policy', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleRunProject — security policy pre-flight scan + session gate
+// handleRunProject: security policy pre-flight scan + session gate
 // ---------------------------------------------------------------------------
 
 describe('handleRunProject security pre-flight', () => {
@@ -1620,7 +1630,7 @@ describe('handleRunProject security pre-flight', () => {
 
   it("skips this server's own bridge autoload so a relaunch does not self-reject", async () => {
     // The injected bridge stays registered between a launch and its cleanup,
-    // and it writes screenshots — so it matches the filesystem-write rules.
+    // and it writes screenshots: so it matches the filesystem-write rules.
     const dir = tmp.makeProject(
       'run-project-own-bridge-',
       'config_version=5\n\n[application]\n[autoload]\n' +
@@ -1850,7 +1860,7 @@ describe('handleRunProject security pre-flight', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
-    // Explicit `other.tscn` should be scanned, NOT main.tscn — so no OS.execute warning.
+    // Explicit `other.tscn` should be scanned, NOT main.tscn: so no OS.execute warning.
     const result = await handleRunProject(
       fake.asRunner,
       { projectPath: dir, scene: 'other.tscn' },
@@ -1863,7 +1873,7 @@ describe('handleRunProject security pre-flight', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleTakeScreenshot — bridge response shape branches
+// handleTakeScreenshot: bridge response shape branches
 // ---------------------------------------------------------------------------
 
 describe('handleTakeScreenshot bridge response shapes', () => {

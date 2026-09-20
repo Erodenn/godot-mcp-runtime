@@ -2,7 +2,7 @@
  * Feature tests for scene instancing via add_node.
  *
  * Context: composing scenes by instancing a child scene (`[node ... instance=ExtResource(...)]`)
- * was not expressible through the MCP node tools — agents had to hand-edit the
+ * was not expressible through the MCP node tools: agents had to hand-edit the
  * parent .tscn to add `instance=` entries and the matching ext_resource header.
  *
  * The feature: `add_node` accepts a scene path as `nodeType` (e.g. "sub.tscn" or
@@ -18,7 +18,8 @@
  * - ordinary class names keep working unchanged
  * - `create_scene`'s rootNodeType still means a Godot class, not a scene
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
@@ -376,7 +377,7 @@ const OVERRIDE_POSITION_TSCN = 'position = Vector2(123, 456)';
  * A correct override serializes without a type, next to the instance= link:
  *   [node name="Inner" parent="A" index="0"]
  * The corrupted output would leave the loaded scene with TWO Inner children
- * under root/A, so file-text greps alone cannot distinguish them — hence the
+ * under root/A, so file-text greps alone cannot distinguish them: hence the
  * get_scene_tree check and the idempotency probe below.
  */
 async function assertInstancedOverrideRoundTrips(
@@ -462,7 +463,7 @@ describe('set_node_properties on nodes inside instanced children', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       writeEntitiesScenes(tmpProject);
 
-      // Seed: add the instanced child, apply the override, save — one batch.
+      // Seed: add the instanced child, apply the override, save: one batch.
       await runner.executeOperation(
         'batch_scene_operations',
         {
@@ -520,7 +521,7 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       writeEntitiesScenes(tmpProject);
 
-      // Two instanced children plus script attachment — the observed trigger mix.
+      // Two instanced children plus script attachment: the observed trigger mix.
       await runner.executeOperation(
         'add_node',
         { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },

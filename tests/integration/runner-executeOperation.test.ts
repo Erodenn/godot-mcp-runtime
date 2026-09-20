@@ -7,7 +7,8 @@
  * path where stdout JSON is the sole signal.
  *
  * Requires a real Godot binary. Set GODOT_PATH to run these locally.
- * They are skipped in CI where Godot is not installed.
+ * They skip locally when GODOT_PATH is unset. CI sets it in the
+ * godot-integration job and runs them on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, expect } from 'vitest';
@@ -31,7 +32,7 @@ describe('GodotRunner.executeOperation', () => {
     itGodot(
       'executeOperation returns valid:true for the committed fixture scene',
       async () => {
-        // Test executeOperation directly for the scene-validate path —
+        // Test executeOperation directly for the scene-validate path -
         // stdout JSON is the sole signal for scene files.
         const { stdout } = await runner.executeOperation(
           'validate_resource',
@@ -53,7 +54,7 @@ describe('GodotRunner.executeOperation', () => {
         // runs validate_resource, then merges stderr parse errors into the result.
         // Godot 4.x reports parse errors to stderr ("SCRIPT ERROR: Parse Error: ...").
         // Depending on whether load() returns non-null, `valid` may be true in some
-        // Godot versions — but the errors must always be surfaced in the errors array.
+        // Godot versions: but the errors must always be surfaced in the errors array.
         const result = await handleValidate(runner, {
           projectPath: fixtureProjectPath,
           source: 'extends Node\nfunc broken(\n  # unclosed paren\n',

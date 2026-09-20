@@ -180,7 +180,7 @@ describe('handleGetSceneDependencies', () => {
       scenePath: '../outside.tscn',
     });
     // handleGetSceneDependencies validates scenePath inline ("Invalid scenePath")
-    // rather than via parseSceneArgs ("Invalid scene path") — match either.
+    // rather than via parseSceneArgs ("Invalid scene path"): match either.
     expectErrorMatching(result, /invalid scene\s?path/i);
   });
 
@@ -399,7 +399,7 @@ describe('handleListProjects', () => {
   });
 
   it('returns a list (possibly empty) for a valid directory', async () => {
-    // Fresh empty dir — guarantees no ambient Godot projects scanned.
+    // Fresh empty dir: guarantees no ambient Godot projects scanned.
     const dir = makeTmpEmptyDir();
     const result = await handleListProjects({ directory: dir });
     expect(hasError(result)).toBe(false);

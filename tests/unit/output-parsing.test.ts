@@ -6,7 +6,7 @@ import {
 } from '../../src/utils/output-parsing.js';
 
 // Observed in production: headless operations emit Godot RID-leak warnings on
-// stdout, both AFTER a JSON payload (benign — handled) and INSTEAD of one,
+// stdout, both AFTER a JSON payload (benign: handled) and INSTEAD of one,
 // when the operation quit(1)s before emitting JSON (masks the real error).
 describe('stdout JSON extraction with interleaved engine noise', () => {
   it('strips trailing RID-leak warnings after a JSON payload', () => {

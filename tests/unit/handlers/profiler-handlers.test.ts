@@ -78,7 +78,7 @@ function createProfilerFake(
   return { asRunner: runner as unknown as GodotRunner, calls };
 }
 
-describe('profiler handlers — session requirements', () => {
+describe('profiler handlers: session requirements', () => {
   it.each([
     ['profile_project', handleProfileProject],
     ['start_profiler', handleStartProfiler],

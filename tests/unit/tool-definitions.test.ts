@@ -18,7 +18,7 @@ const allDefinitions: ToolDefinition[] = [
   ...validateToolDefinitions,
 ];
 
-describe('tool definitions — per-tool shape contract', () => {
+describe('tool definitions: per-tool shape contract', () => {
   it.each(allDefinitions.map((t) => [t.name, t] as [string, ToolDefinition]))(
     '%s has a non-empty name',
     (name) => {
@@ -70,7 +70,7 @@ describe('tool definitions — per-tool shape contract', () => {
   );
 });
 
-describe('tool definitions — no duplicate names', () => {
+describe('tool definitions: no duplicate names', () => {
   it('all tool names are unique across all definition arrays', () => {
     const names = allDefinitions.map((t) => t.name);
     const unique = new Set(names);

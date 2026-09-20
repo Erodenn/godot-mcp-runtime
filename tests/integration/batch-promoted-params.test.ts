@@ -2,10 +2,10 @@
  * Integration test: promoted spatial params in batch_scene_operations.
  *
  * Regression: batch add_node silently dropped top-level `position` (and the
- * other promoted spatial params — rotation, scale, visible, modulate).
+ * other promoted spatial params: rotation, scale, visible, modulate).
  * The standalone add_node handler merges those keys into `properties`
  * (handleAddNode), but the batch path forwards operations raw to the
- * GDScript layer, whose _apply_add_node only read `properties` — so
+ * GDScript layer, whose _apply_add_node only read `properties`: so
  * a batch like:
  *
  *   { operation: 'add_node', nodeType: 'StaticBody2D',
@@ -19,7 +19,8 @@
  * _apply_add_node, with `properties` winning on key conflicts (matching
  * handleAddNode's documented precedence).
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';

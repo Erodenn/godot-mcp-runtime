@@ -71,6 +71,23 @@ describe('normalizeParameters', () => {
     });
   });
 
+  it('converts a sibling structural key while leaving the value subtree alone', () => {
+    // The shape a set_node_properties update actually arrives in: the keys the
+    // user authored inside `value` are a shader uniform name and must reach
+    // Godot byte for byte, while `node_path` beside it is ours to rename.
+    const input = {
+      node_path: 'root/Sprite',
+      property: 'material',
+      value: { type: 'ShaderMaterial', 'shader_parameter/glowAmount': 2.5 },
+    };
+    expect(normalizeParameters(input)).toEqual({
+      nodePath: 'root/Sprite',
+      property: 'material',
+      value: { type: 'ShaderMaterial', 'shader_parameter/glowAmount': 2.5 },
+    });
+    expect(convertCamelToSnakeCase(normalizeParameters(input))).toEqual(input);
+  });
+
   it('round-trips a properties dict with mixed key styles unchanged', () => {
     const input = {
       project_path: '/p',
@@ -429,7 +446,7 @@ describe('cleanStdout', () => {
   });
 
   it('routes plain non-JSON output through cleanOutput (drops banner)', () => {
-    // No `{` or `[` anywhere — takes the cleanOutput branch.
+    // No `{` or `[` anywhere: takes the cleanOutput branch.
     const out = 'Godot Engine v4.5.stable\nplain success';
     expect(cleanStdout(out)).toBe('plain success');
   });

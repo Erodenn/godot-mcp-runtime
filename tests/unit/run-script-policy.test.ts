@@ -12,7 +12,7 @@ function evalLine(line: string): ReturnType<typeof evaluateScript> {
   return evaluateScript(VALID_PREFIX + line + '\n');
 }
 
-describe('evaluateScript — Tier 1 hard_block', () => {
+describe('evaluateScript: Tier 1 hard_block', () => {
   it('blocks OS.execute(...)', () => {
     const d = evalLine('OS.execute("rm", ["-rf", "/"])');
     expect(d.decision).toBe('hard_block');
@@ -76,7 +76,7 @@ describe('evaluateScript — Tier 1 hard_block', () => {
   });
 });
 
-describe('evaluateScript — Tier 2 elicit_required', () => {
+describe('evaluateScript: Tier 2 elicit_required', () => {
   it('elicits on FileAccess.open(...)', () => {
     const d = evalLine('var f = FileAccess.open("res://x.txt", FileAccess.WRITE)');
     expect(d.decision).toBe('elicit_required');
@@ -100,7 +100,7 @@ describe('evaluateScript — Tier 2 elicit_required', () => {
   });
 });
 
-describe('evaluateScript — Tier 3 warn', () => {
+describe('evaluateScript: Tier 3 warn', () => {
   it('warns on literal load() but executes', () => {
     const d = evalLine('var r = load("res://main.tscn")');
     expect(d.decision).toBe('warn');
@@ -112,7 +112,7 @@ describe('evaluateScript — Tier 3 warn', () => {
   });
 });
 
-describe('evaluateScript — clean scripts', () => {
+describe('evaluateScript: clean scripts', () => {
   it('returns ok for a script that touches only scene_tree', () => {
     const d = evaluateScript(
       'extends RefCounted\nfunc execute(scene_tree):\n\treturn scene_tree.get_root().get_child_count()\n',
@@ -150,7 +150,7 @@ describe('evaluateScript — clean scripts', () => {
   });
 });
 
-describe('evaluateScript — strict mode promotion', () => {
+describe('evaluateScript: strict mode promotion', () => {
   it('promotes Tier 2 to Tier 1 when strict:true', () => {
     const source = VALID_PREFIX + 'var h = HTTPRequest.new()\n';
     const lax = evaluateScript(source, false);
@@ -181,7 +181,7 @@ describe('evaluateScript — strict mode promotion', () => {
   });
 });
 
-describe('evaluateScript — highest tier wins', () => {
+describe('evaluateScript: highest tier wins', () => {
   it('reports hard_block when Tier 1 and Tier 2 both fire', () => {
     const source =
       VALID_PREFIX + 'OS.execute("x")\n' + '\tvar h = HTTPRequest.new()\n' + '\treturn 1\n';
@@ -197,7 +197,7 @@ describe('evaluateScript — highest tier wins', () => {
   });
 });
 
-describe('evaluateScript — finding line numbers', () => {
+describe('evaluateScript: finding line numbers', () => {
   it('records the line number of each match', () => {
     const source =
       'extends RefCounted\n' +
@@ -215,7 +215,7 @@ describe('evaluateScript — finding line numbers', () => {
 // Negative coverage lives in the "clean scripts" block.
 // ---------------------------------------------------------------------------
 
-describe('evaluateScript — Tier 1 OS family (smoke)', () => {
+describe('evaluateScript: Tier 1 OS family (smoke)', () => {
   it('blocks OS.kill(...)', () => {
     expect(evalLine('OS.kill(1234)').effectiveTier).toBe(1);
   });
@@ -233,7 +233,7 @@ describe('evaluateScript — Tier 1 OS family (smoke)', () => {
   });
 });
 
-describe('evaluateScript — Tier 1 ProjectSettings/Engine/ClassDB (smoke)', () => {
+describe('evaluateScript: Tier 1 ProjectSettings/Engine/ClassDB (smoke)', () => {
   it('blocks ProjectSettings.save(...)', () => {
     expect(evalLine('ProjectSettings.save()').effectiveTier).toBe(1);
   });
@@ -251,7 +251,7 @@ describe('evaluateScript — Tier 1 ProjectSettings/Engine/ClassDB (smoke)', () 
   });
 });
 
-describe('evaluateScript — Tier 1 reflection + dynamic (smoke)', () => {
+describe('evaluateScript: Tier 1 reflection + dynamic (smoke)', () => {
   it('blocks Node.set_script(...) literal receiver', () => {
     expect(evalLine('Node.set_script(some_node, my_script)').effectiveTier).toBe(1);
   });
@@ -260,7 +260,7 @@ describe('evaluateScript — Tier 1 reflection + dynamic (smoke)', () => {
   });
 });
 
-describe('evaluateScript — Tier 1 ConfigFile family (smoke)', () => {
+describe('evaluateScript: Tier 1 ConfigFile family (smoke)', () => {
   it('blocks ConfigFile.load(...)', () => {
     expect(evalLine('var r = ConfigFile.load("res://x.cfg")').effectiveTier).toBe(1);
   });
@@ -272,13 +272,13 @@ describe('evaluateScript — Tier 1 ConfigFile family (smoke)', () => {
   });
 });
 
-describe('evaluateScript — Tier 1 Object.callv non-literal (smoke)', () => {
+describe('evaluateScript: Tier 1 Object.callv non-literal (smoke)', () => {
   it('blocks Object.callv with non-literal method name', () => {
     expect(evalLine('Object.callv(method_var, args)').effectiveTier).toBe(1);
   });
 });
 
-describe('evaluateScript — Tier 2 DirAccess writes (smoke)', () => {
+describe('evaluateScript: Tier 2 DirAccess writes (smoke)', () => {
   it('elicits on DirAccess.copy(...)', () => {
     expect(evalLine('DirAccess.copy("a", "b")').effectiveTier).toBe(2);
   });
@@ -290,7 +290,7 @@ describe('evaluateScript — Tier 2 DirAccess writes (smoke)', () => {
   });
 });
 
-describe('evaluateScript — Tier 2 network (smoke)', () => {
+describe('evaluateScript: Tier 2 network (smoke)', () => {
   it('elicits on HTTPClient', () => {
     expect(evalLine('var c = HTTPClient.new()').effectiveTier).toBe(2);
   });
@@ -315,7 +315,7 @@ describe('evaluateScript — Tier 2 network (smoke)', () => {
 // Bypass closure: Callable, OS/Engine/ClassDB/ProjectSettings.call, set_script
 // ---------------------------------------------------------------------------
 
-describe('evaluateScript — Tier 1 Callable bypass closure', () => {
+describe('evaluateScript: Tier 1 Callable bypass closure', () => {
   it('blocks Callable(target, "method") as bare identifier', () => {
     const d = evalLine('var c = Callable(self, "run")');
     expect(d.decision).toBe('hard_block');
@@ -323,7 +323,7 @@ describe('evaluateScript — Tier 1 Callable bypass closure', () => {
   });
 });
 
-describe('evaluateScript — Tier 1 per-singleton .call non-literal bypass closure', () => {
+describe('evaluateScript: Tier 1 per-singleton .call non-literal bypass closure', () => {
   it('blocks OS.call with non-literal first arg', () => {
     const d = evalLine('OS.call(method_var, "bash")');
     expect(d.decision).toBe('hard_block');
@@ -340,7 +340,7 @@ describe('evaluateScript — Tier 1 per-singleton .call non-literal bypass closu
   });
 });
 
-describe('evaluateScript — Tier 3 per-singleton .call literal arg', () => {
+describe('evaluateScript: Tier 3 per-singleton .call literal arg', () => {
   it('warns on OS.call with literal first arg', () => {
     const d = evalLine('OS.call("get_name")');
     expect(d.decision).toBe('warn');
@@ -357,10 +357,10 @@ describe('evaluateScript — Tier 3 per-singleton .call literal arg', () => {
   });
 });
 
-describe('evaluateScript — member chain whitespace/newline skeleton key', () => {
+describe('evaluateScript: member chain whitespace/newline skeleton key', () => {
   // Regression coverage: the tokenizer used to require the dot to sit
   // immediately against both identifiers, so whitespace or a newline around
-  // the `.` dropped `execute` to a bare, unmatched identifier — silently
+  // the `.` dropped `execute` to a bare, unmatched identifier: silently
   // defeating every OS.execute-style rule at once.
   it('blocks OS .execute (space before the dot)', () => {
     const d = evalLine('OS .execute("rm", ["-rf", "/"])');
@@ -387,7 +387,7 @@ describe('evaluateScript — member chain whitespace/newline skeleton key', () =
   });
 });
 
-describe('evaluateScript — whole-first-argument classification', () => {
+describe('evaluateScript: whole-first-argument classification', () => {
   // Regression coverage: classification used to look only at the first
   // token after `(`, so `load("res://" + evil)` saw the leading string
   // literal and dropped from Tier 1 (non-literal) to Tier 3 (warn).
@@ -424,20 +424,20 @@ describe('evaluateScript — whole-first-argument classification', () => {
   });
 });
 
-describe('evaluateScript — generic non-literal .call/.callv on any receiver', () => {
-  it('elicits on some_node.call(method_var) — arbitrary receiver, non-literal', () => {
+describe('evaluateScript: generic non-literal .call/.callv on any receiver', () => {
+  it('elicits on some_node.call(method_var): arbitrary receiver, non-literal', () => {
     const d = evalLine('some_node.call(method_var)');
     expect(d.decision).toBe('elicit_required');
     expect(d.matches.some((m) => m.ruleId === 'tier2.generic.call.nonliteral')).toBe(true);
   });
 
-  it('elicits on some_node.callv(method_var, args) — arbitrary receiver, non-literal', () => {
+  it('elicits on some_node.callv(method_var, args): arbitrary receiver, non-literal', () => {
     const d = evalLine('some_node.callv(method_var, args)');
     expect(d.decision).toBe('elicit_required');
     expect(d.matches.some((m) => m.ruleId === 'tier2.generic.callv.nonliteral')).toBe(true);
   });
 
-  it('does not match some_node.call("ready") — literal argument', () => {
+  it('does not match some_node.call("ready"): literal argument', () => {
     const d = evalLine('some_node.call("ready")');
     expect(d.matches.some((m) => m.ruleId === 'tier2.generic.call.nonliteral')).toBe(false);
     expect(d.decision).toBe('ok');
@@ -451,7 +451,7 @@ describe('evaluateScript — generic non-literal .call/.callv on any receiver', 
   });
 });
 
-describe('evaluateScript — Tier 2 set_script bare identifier', () => {
+describe('evaluateScript: Tier 2 set_script bare identifier', () => {
   it('elicits on set_script(...) called as bare identifier', () => {
     const d = evalLine('set_script(some_node, my_script)');
     expect(d.decision).toBe('elicit_required');
@@ -465,7 +465,7 @@ describe('evaluateScript — Tier 2 set_script bare identifier', () => {
 // Resource and filesystem write primitives.
 // ---------------------------------------------------------------------------
 
-describe('evaluateScript — write primitives', () => {
+describe('evaluateScript: write primitives', () => {
   it('elicits on ResourceSaver.save(res, path)', () => {
     const d = evalLine('ResourceSaver.save(res, path)');
     expect(d.effectiveTier).toBe(2);
@@ -659,7 +659,7 @@ describe('evaluateScript — write primitives', () => {
   });
 });
 
-describe('evaluateScript — write-primitive negatives', () => {
+describe('evaluateScript: write-primitive negatives', () => {
   it('does not flag some_manager.save() - bare "save" stays unmatched', () => {
     expect(evalLine('some_manager.save()').decision).toBe('ok');
   });
@@ -677,14 +677,14 @@ describe('evaluateScript — write-primitive negatives', () => {
   });
 });
 
-describe('evaluateScript — ConfigFile instance usage', () => {
+describe('evaluateScript: ConfigFile instance usage', () => {
   it('elicits on cf.load(path) when ConfigFile.new() appears in the same script', () => {
     const d = evalLine('var cf := ConfigFile.new()\n\tcf.load(path)');
     expect(d.decision).toBe('elicit_required');
     expect(d.matches.some((m) => m.ruleId === 'tier2.config.ConfigFile')).toBe(true);
   });
 
-  it('does not block a bare receiver.load(x) call — `load` is too generic to key on', () => {
+  it('does not block a bare receiver.load(x) call: `load` is too generic to key on', () => {
     // `save_manager.load(slot)` is ordinary game code. A last-segment rule on
     // `load` would hard-block it, with a ConfigFile-flavoured reason string.
     expect(evalLine('save_manager.load(slot)').decision).toBe('ok');
@@ -719,7 +719,7 @@ describe('evaluateScript — ConfigFile instance usage', () => {
   });
 });
 
-describe('evaluateScript — strict mode promotes the write primitives', () => {
+describe('evaluateScript: strict mode promotes the write primitives', () => {
   it('promotes ResourceSaver.save to hard_block under strict mode', () => {
     const source = VALID_PREFIX + 'ResourceSaver.save(res, path)\n';
     const strict = evaluateScript(source, true);

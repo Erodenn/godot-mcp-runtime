@@ -19,9 +19,9 @@ A lightweight [MCP](https://modelcontextprotocol.io/) server that pairs comprehe
 <h3 align="center">The AI doesn't just write your game, it can check its work.</h3>
 <br>
 
-- **Headless editing** — scenes, nodes, scripts, signals, validation, no editor window
-- **Runtime control** — screenshots, input simulation, UI discovery, live GDScript, and function profiling against the running game
-- **Zero footprint** — no Godot addon, no project commits, auto-cleanup on shutdown
+- **Headless editing**: scenes, nodes, scripts, signals, validation, no editor window
+- **Runtime control**: screenshots, input simulation, UI discovery, live GDScript, and function profiling against the running game
+- **Zero footprint**: no Godot addon, no project commits, auto-cleanup on shutdown
 
 **No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon, something you install into your project, commit to version control, and manage as a dependency. Use npx and there's no install or setup needed.
 
@@ -47,7 +47,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 **Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
-- **Screenshots:** Capture the viewport — by default returns a 960x540 preview inline plus the full PNG on disk; use `responseMode: 'full'` for pixel-perfect or `'path_only'` to skip the inline image
+- **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk; use `responseMode: 'full'` for pixel-perfect or `'path_only'` to skip the inline image
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
@@ -208,10 +208,10 @@ Ask your AI assistant to call `check_project`. If it returns a Godot version str
 
 ## Docs
 
-- [`docs/tools.md`](docs/tools.md) — full tool reference, grouped by category
-- [`docs/tool-authoring.md`](docs/tool-authoring.md) — standards for adding or modifying tools
-- [`docs/architecture.md`](docs/architecture.md) — source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
-- [`docs/security.md`](docs/security.md) — `run_script` / `run_project` security model, full rule catalogue, strict-mode behavior
+- [`docs/tools.md`](docs/tools.md): full tool reference, grouped by category
+- [`docs/tool-authoring.md`](docs/tool-authoring.md): standards for adding or modifying tools
+- [`docs/architecture.md`](docs/architecture.md): source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
+- [`docs/security.md`](docs/security.md): `run_script` / `run_project` security model, full rule catalogue, strict-mode behavior
 
 ## Acknowledgments
 

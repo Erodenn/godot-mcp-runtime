@@ -64,7 +64,17 @@ const MAX_WATCH_ENTRIES = 16;
 // server-side timeout load-bearing, so every term is a named multiplier and the
 // caps above are what keep the total bounded.
 const INPUT_TIMEOUT_BUFFER_MS = 10000;
-const INPUT_PESSIMISTIC_FRAME_MS = 50;
+/**
+ * Wall-clock charged per engine frame a batch waits on. It is a floor on the
+ * frame rate, not an estimate of it: a batch that outruns this budget times out
+ * on the Node side while the game is running correctly. 100 ms covers 10 fps,
+ * which is the practical floor for a game under load or one whose window is
+ * minimized (some platforms throttle `process_frame` there). At the
+ * MAX_WAIT_FRAMES cap the computed budget exceeds the 60 s default per-request
+ * timeout most MCP clients use, so a batch that waits hundreds of frames is
+ * documented as a call the client may cut off first.
+ */
+const INPUT_PESSIMISTIC_FRAME_MS = 100;
 const INPUT_SETTLE_FRAMES_PER_ACTION = 1;
 // One process frame plus one physics frame, the tap hold for key and action.
 const INPUT_TAP_HOLD_FRAMES = 2;
@@ -141,7 +151,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'attach_project',
     description:
-      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 60s total once it has, so a large project\'s cold start is absorbed. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
+      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 45s total once it has, so a large project\'s cold start is absorbed; a port that listens but answers no ping gives up sooner. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -375,7 +385,7 @@ export const runtimeToolDefinitions = [
               },
               strength: {
                 type: 'number',
-                description: '[action] Action strength (0–1, default 1.0)',
+                description: '[action] Action strength (0 to 1, default 1.0)',
               },
               text: {
                 type: 'string',
@@ -384,11 +394,11 @@ export const runtimeToolDefinitions = [
               ms: {
                 type: 'number',
                 description:
-                  '[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required.',
+                  '[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required. Uncapped, but a batch whose total wait approaches 60s may be cut off by your client before the server answers: split it across calls.',
               },
               frames: {
                 type: 'number',
-                description: `[wait] Deterministic pause of N engine process frames, for stepping game logic rather than waiting on the clock. Exactly one of ms or frames is required. Max ${MAX_WAIT_FRAMES}.`,
+                description: `[wait] Deterministic pause of N engine process frames, for stepping game logic rather than waiting on the clock. Exactly one of ms or frames is required. Max ${MAX_WAIT_FRAMES}, budgeted at a 10fps floor, so a wait of several hundred frames may be cut off by your client before the server answers.`,
               },
             },
             required: ['type'],
@@ -441,7 +451,12 @@ export const runtimeToolDefinitions = [
                 type: 'boolean',
                 description: 'Whether the input action is still held after this entry.',
               },
-              signals: { type: 'array', items: { type: 'string' } },
+              signals: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Which of pressed, toggled, item_selected, text_submitted the target emitted within the settle frame. A signal emitted later (call_deferred, a tween, a timer) is not observed, so an absent entry means "not within one frame", not "never".',
+              },
               errors: { type: 'array', items: { type: 'string' } },
               changes: {
                 type: 'object',

@@ -254,11 +254,11 @@ describe('detectGodotPath', () => {
     }
   });
 
-  // Regression: issue #15 — a misconfigured GODOT_PATH used to be silently
+  // Regression: issue #15: a misconfigured GODOT_PATH used to be silently
   // swallowed and the runner fell back to platform defaults (e.g. on Windows
   // `C:\Program Files\Godot\Godot.exe`). Users who installed Godot elsewhere
   // got "file not found" errors against a path they never chose. An explicit
-  // GODOT_PATH must now be authoritative — if it doesn't resolve, leave
+  // GODOT_PATH must now be authoritative: if it doesn't resolve, leave
   // godotPath null so the caller can produce an actionable error instead.
   it('leaves godotPath null when GODOT_PATH points to a non-existent file', async () => {
     process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
@@ -269,7 +269,7 @@ describe('detectGodotPath', () => {
 
   it('leaves godotPath null when GODOT_PATH is set but invalid, even if auto-detect would succeed', async () => {
     // Even on a developer machine where `godot` is on PATH, an explicit
-    // (broken) GODOT_PATH must not silently fall through to the PATH binary —
+    // (broken) GODOT_PATH must not silently fall through to the PATH binary -
     // doing so masks the user's intent. We stub isValidGodotPath so auto-detect
     // would unambiguously succeed for `godot`; the assertion proves the
     // explicit-invalid branch short-circuits before auto-detect runs.
@@ -283,7 +283,7 @@ describe('detectGodotPath', () => {
       .mockImplementation(async (p: string) => p === 'godot');
     await runner.detectGodotPath();
     expect(runner.getGodotPath()).toBeNull();
-    // Sanity: the auto-detect candidates were never probed — the explicit
+    // Sanity: the auto-detect candidates were never probed: the explicit
     // GODOT_PATH branch short-circuited before reaching auto-detect.
     const probed = spy.mock.calls.map((c) => c[0]);
     expect(probed).not.toContain('godot');
@@ -295,7 +295,7 @@ describe('detectGodotPath', () => {
     // (Windows) / `/usr/bin/godot` (Linux) / `/Applications/Godot.app/...`
     // (macOS) when nothing was found, then later spawn calls failed against
     // that fabricated path. The runner must leave godotPath null instead OR
-    // resolve a real path — never the fabricated default.
+    // resolve a real path: never the fabricated default.
     delete process.env.GODOT_PATH;
     const runner = new GodotRunner({ godotPath: '/nonexistent/godot-mcp-test-bogus-binary' });
     // Constructor sync-validation rejects the bogus path, so godotPath starts null.
@@ -309,7 +309,7 @@ describe('detectGodotPath', () => {
 
   itGodot('resolves a real Godot binary when GODOT_PATH points at one', async () => {
     // Gated on GODOT_PATH presence (itGodot skips otherwise). With a valid
-    // GODOT_PATH, the runner must resolve to that exact path — never silently
+    // GODOT_PATH, the runner must resolve to that exact path: never silently
     // substitute the historical platform-default fabrication.
     const runner = new GodotRunner();
     await runner.detectGodotPath();

@@ -1,8 +1,8 @@
 /**
  * Profiler receiver tests, driven by a fake Godot on the other end of the
- * debugger socket. Everything worth verifying here is protocol behavior —
+ * debugger socket. Everything worth verifying here is protocol behavior -
  * which commands we send, which frames we fold into the totals, and what a
- * dropped or silent debugger turns into — none of which needs a real engine.
+ * dropped or silent debugger turns into: none of which needs a real engine.
  *
  * The frame layout mirrors what Godot 4.6/4.7 actually sends: a frame number,
  * five timing fields, a server count with that many `name, entryCount,
@@ -161,7 +161,7 @@ describe('DebuggerProfiler capture', () => {
         ],
         [['audio_thread', ['audio_driver_process', 0.002, 'audio_server_process', 0.001]]],
       ),
-      // Frame 12 never arrives — one transport gap.
+      // Frame 12 never arrives: one transport gap.
       frame(13, 0.01, [[0, 1, 0.002, 0.003]]),
     ]);
 
@@ -200,7 +200,7 @@ describe('DebuggerProfiler capture', () => {
     expect(burn!.msPerCall).toBeCloseTo(3, 6);
     expect(burn!.peak).toMatchObject({ frame: 11 });
     expect(other!.function).toBe('_other');
-    // 4.5 ms of a 15 ms average frame — the editor's "Frame %" measure.
+    // 4.5 ms of a 15 ms average frame: the editor's "Frame %" measure.
     expect(burn!.percentOfFrame).toBeCloseTo(30, 6);
     expect(result.worstFrame).toMatchObject({ frame: 11 });
     expect(result.worstFrame!.frameMs).toBeCloseTo(20, 6);
@@ -367,7 +367,7 @@ describe('DebuggerProfiler capture quality signals', () => {
     const { profiler: p, peer: fake } = await connectedProfiler();
     const running = p.start(5, 16);
     // 16 raw rows is the cap the engine was given, but half report no calls and
-    // get filtered — the truncation is real even though `rows` comes back short.
+    // get filtered: the truncation is real even though `rows` comes back short.
     const rows: Row[] = [];
     for (let i = 0; i < 16; i++) rows.push([i, i % 2 === 0 ? 0 : 3, 0.001, 0.002]);
     await feedStart(fake, running, [

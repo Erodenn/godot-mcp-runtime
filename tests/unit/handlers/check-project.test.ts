@@ -31,7 +31,25 @@ describe('handleCheckProject runtime block', () => {
     expect(fake.bridgeCalls[0]!.command).toBe('ping');
   });
 
-  it('reports activeSession:false and processExited:true with a diagnostic when the spawned process has exited', async () => {
+  it('reports processExited:true after a spawned game exited on its own', async () => {
+    // The state the real runner lands in: handleSpawnedProcessExit nulls the
+    // session fields and keeps the process, so a report gated on the session
+    // fields alone would call this "no session" and withhold the one thing
+    // worth saying about it.
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: null, projectPath: null, hasExited: true });
+    const result = await handleCheckProject(fake.asRunner, {});
+    expect(hasError(result)).toBe(false);
+    const data = JSON.parse(unwrap(result).content[0]!.text!);
+    expect(data.runtime.activeSession).toBe(false);
+    expect(data.runtime.processExited).toBe(true);
+    expect(data.runtime.diagnostics.join('; ')).toContain('stop_project');
+    expect(data.runtime.diagnostics.join('; ')).toContain('get_debug_output');
+    // No bridge ping on a dead process.
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('reports activeSession:false and processExited:true when a spawn never produced a live process', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: true });
     const result = await handleCheckProject(fake.asRunner, {});

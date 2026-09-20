@@ -16,7 +16,7 @@ const toolsWithOutputSchema: Array<[string, ToolDefinition]> = allToolDefinition
   )
   .map((t) => [t.name, t] as [string, ToolDefinition]);
 
-describe('outputSchema — every declared schema is valid', () => {
+describe('outputSchema: every declared schema is valid', () => {
   it.each(toolsWithOutputSchema)('%s outputSchema compiles under ajv', (_name, tool) => {
     const compile = () => ajv.compile(tool.outputSchema as object);
     expect(compile).not.toThrow();
@@ -29,7 +29,7 @@ describe('outputSchema — every declared schema is valid', () => {
 
 describe('outputSchema and Returns: prose are complementary, not exclusive', () => {
   // Per docs/tool-authoring.md §3, when a tool has an outputSchema it must also
-  // carry a Returns: sentence in its description — the schema is invisible to
+  // carry a Returns: sentence in its description: the schema is invisible to
   // the agent, so the prose is the only return-shape signal the LLM ever sees.
   it.each(toolsWithOutputSchema)(
     '%s description has a Returns: sentence alongside its outputSchema',
@@ -39,7 +39,7 @@ describe('outputSchema and Returns: prose are complementary, not exclusive', () 
   );
 });
 
-describe('outputSchema — expected coverage', () => {
+describe('outputSchema: expected coverage', () => {
   // Exact allowlist so adding/removing a tool from the structuredContent
   // contract is a deliberate one-line edit, not a silent drift. Update this
   // list whenever a tool grows or loses an outputSchema.
@@ -73,7 +73,7 @@ describe('outputSchema — expected coverage', () => {
   });
 });
 
-describe('simulate_input — every declared entry shape validates', () => {
+describe('simulate_input: every declared entry shape validates', () => {
   // The per-action entry is the widest shape this server returns: keys differ by
   // action type, a skipped entry carries almost nothing, and a failed batch
   // still comes back success-shaped. Validate the payloads directly, since the
@@ -177,7 +177,7 @@ describe('simulate_input — every declared entry shape validates', () => {
   });
 });
 
-describe('check_project — every declared response shape validates and carries structuredContent', () => {
+describe('check_project: every declared response shape validates and carries structuredContent', () => {
   const checkProjectDef = toolsWithOutputSchema.find(([name]) => name === 'check_project')?.[1];
   if (!checkProjectDef) throw new Error('check_project outputSchema not found');
   const validate = ajv.compile(checkProjectDef.outputSchema as object);
@@ -227,5 +227,13 @@ describe('check_project — every declared response shape validates and carries 
     fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: true });
     const payload = await checkAndValidate(fake, {});
     expect(payload.runtime).toMatchObject({ activeSession: false, processExited: true });
+  });
+
+  it('validates the retained-process runtime shape after a self-exit (no sessionMode)', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: null, projectPath: null, hasExited: true });
+    const payload = await checkAndValidate(fake, {});
+    expect(payload.runtime).toMatchObject({ activeSession: false, processExited: true });
+    expect(payload.runtime).not.toHaveProperty('sessionMode');
   });
 });

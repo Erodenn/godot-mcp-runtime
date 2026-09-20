@@ -5,7 +5,7 @@ import { allToolDefinitions, serverInstructions } from '../../src/index.js';
 import { toolDispatch, dispatchToolCall } from '../../src/dispatch.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
 
-// Dummy runner — never invoked. Parity tests don't call handlers, and the
+// Dummy runner: never invoked. Parity tests don't call handlers, and the
 // unknown-tool dispatch path throws before reaching any handler.
 const dummyRunner = {} as GodotRunner;
 
@@ -53,7 +53,7 @@ describe('unknown tool dispatch', () => {
 //
 // For each category named in the docstring, assert that at least one
 // representative tool mentioned in that section also exists in toolDispatch.
-// This catches silent docstring rot — a category line removed from instructions
+// This catches silent docstring rot: a category line removed from instructions
 // while the tools still live in the dispatch table.
 // ---------------------------------------------------------------------------
 

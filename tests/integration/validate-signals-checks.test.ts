@@ -76,7 +76,7 @@ beforeAll(async () => {
   await runner.detectGodotPath();
 });
 
-describe('validate — signals checks', () => {
+describe('validate: signals checks', () => {
   const tmpDirs: string[] = [];
   let tmpProject: string;
 

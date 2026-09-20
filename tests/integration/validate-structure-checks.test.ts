@@ -49,7 +49,7 @@ afterAll(() => {
   }
 });
 
-describe('validate — structure checks', () => {
+describe('validate: structure checks', () => {
   itGodot(
     'validates a simple scene with correct root type',
     async () => {

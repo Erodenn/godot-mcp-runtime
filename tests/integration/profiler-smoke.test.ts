@@ -6,7 +6,8 @@
  * The frame layout the receiver parses is the engine's, not ours, so this is
  * the only test that can catch a layout change in a future Godot release.
  *
- * Requires GODOT_PATH and a display server. Skipped in CI.
+ * Requires GODOT_PATH and a display server. CI supplies both in the
+ * godot-integration job (xvfb) and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';

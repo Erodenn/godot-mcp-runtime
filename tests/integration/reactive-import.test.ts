@@ -2,7 +2,7 @@
  * Integration tests for the reactive import-on-demand behavior.
  *
  * Context: on a fresh project, `.godot/imported` does not exist and headless
- * Godot runs no import step — `ResourceLoader.load` fails on real files
+ * Godot runs no import step: `ResourceLoader.load` fails on real files
  * sitting on disk (`res://assets/paddle.svg`, even `icon.svg`). Worse, a scene
  * that references an unimported texture loads with `null` and auto-save
  * silently strips the reference from the .tscn.
@@ -30,9 +30,10 @@
  * - a warm project still catches a first-time reference to a brand new,
  *   never-imported asset (load_sprite naming a texture with no prior deps)
  * - GodotRunner.importAssets() throws on individual import failures
- *   (Godot exits 0 even when assets fail — stderr is the only signal)
+ *   (Godot exits 0 even when assets fail: stderr is the only signal)
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, expect } from 'vitest';
@@ -71,13 +72,13 @@ describe('reactive import on demand (integration)', () => {
       // The committed fixture ships an intentionally-invalid placeholder.png
       // (see the "Error importing" control case). importAssets() treats any
       // individual import failure as an error, so give the temp copy a valid
-      // one — this test is about the cold-import flow, not broken assets.
+      // one: this test is about the cold-import flow, not broken assets.
       writeFileSync(join(project, 'placeholder.png'), minimalPng());
 
       // Fresh copy: strip any committed .godot/imported so the project starts cold.
       rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
 
-      // Reference the unimported texture from the scene — the cold-state bug
+      // Reference the unimported texture from the scene: the cold-state bug
       // shape: file on disk, no import artifacts, scene ops would silently
       // strip the reference on save.
       writeFileSync(
@@ -201,7 +202,7 @@ describe('reactive import on demand (integration)', () => {
       cpSync(fixtureProjectPath, project, { recursive: true });
       writeFileSync(join(project, 'placeholder.png'), minimalPng());
 
-      // Warm the project up first — no texture refs in main.tscn yet.
+      // Warm the project up first: no texture refs in main.tscn yet.
       await runner.importAssets(project);
       expect(existsSync(join(project, '.godot', 'imported'))).toBe(true);
 

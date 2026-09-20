@@ -176,8 +176,8 @@ The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-f
 
 Token delivery differs by session mode, because the channel available differs:
 
-- **Spawned (`run_project`)** — Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode: the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
-- **Attached (`attach_project`)** — Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
+- **Spawned (`run_project`)**: Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode: the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
+- **Attached (`attach_project`)**: Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
 
 A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all - the standalone script run outside the MCP server (manual debugging, `validate`).
 
@@ -220,7 +220,7 @@ When enabled, the interactive confirmation is skipped and treated as accepted (*
 
 - `run_project`'s session-confirmation gate is bypassed; the project launches with a `warnings` entry recording the bypass.
 - Tier 2 `run_script` findings proceed without a prompt, with the finding surfaced in `warnings` and audited as `elicit_bypassed`.
-- **Tier 1 hard-block primitives are unaffected** — they never elicit and always block. This flag only disables the "ask the user" prompts, not the static-analysis gate.
+- **Tier 1 hard-block primitives are unaffected**: they never elicit and always block. This flag only disables the "ask the user" prompts, not the static-analysis gate.
 
 **Strict mode takes precedence.** `GODOT_MCP_STRICT` mandates explicit confirmation, so when both are set, `GODOT_MCP_DISABLE_ELICITATION` is ignored (a startup log records the override). The three states form one axis: default = ask, `DISABLE_ELICITATION` = proceed unprompted, `STRICT` = hard-reject anything that would ask.
 
@@ -234,19 +234,19 @@ Only enable this when you trust the project and the agent driving it - it remove
 
 Specifically, this flag skips:
 
-- `run_script`'s static-analysis gate entirely. **Tier 1 hard blocks are included** — unlike `GODOT_MCP_DISABLE_ELICITATION`, which leaves Tier 1 untouched, this flag removes it too. A sandboxed user who opted in explicitly still could not run `OS.execute`, which is precisely what they opted in for; leaving Tier 1 in place would make the flag dishonest about what it does.
+- `run_script`'s static-analysis gate entirely. **Tier 1 hard blocks are included**: unlike `GODOT_MCP_DISABLE_ELICITATION`, which leaves Tier 1 untouched, this flag removes it too. A sandboxed user who opted in explicitly still could not run `OS.execute`, which is precisely what they opted in for; leaving Tier 1 in place would make the flag dishonest about what it does.
 - `run_project`'s pre-flight scan of `[autoload]` scripts and the launched scene's attached scripts.
 - `run_project`'s session-confirmation elicitation (the "Launching a Godot project executes arbitrary code..." prompt).
-- The `.policy.json` audit sidecar write for `run_script` — a record of a gate that isn't running is just a file write, so it is skipped along with everything else.
+- The `.policy.json` audit sidecar write for `run_script`: a record of a gate that isn't running is just a file write, so it is skipped along with everything else.
 
 This exists for experienced users who do not need the gate: developers who accept the risk, sandboxed environments, CI.
 
 **Resolution order (three flags on one axis).** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` all govern the same gate. Resolved once, in this order:
 
-1. **`GODOT_MCP_DISABLE_SECURITY=true`** — wins outright. Security is off regardless of the other two flags. A startup log records that strict mode was ignored when both it and strict are set. This is the _opposite_ precedence from the strict/disable-elicitation pair below: disable-security has to be the weakest possible setting a human can opt into, so it wins when set, rather than deferring to strict.
-2. **`GODOT_MCP_STRICT=true`** (when disable-security is not set) — every Tier 2 match promotes to Tier 1, and `GODOT_MCP_DISABLE_ELICITATION` is ignored if also set.
-3. **`GODOT_MCP_DISABLE_ELICITATION=true`** (when neither of the above overrides it) — confirmation prompts are skipped fail-open; Tier 1 still blocks.
-4. Default — ask, per the elicitation and scan behavior described above.
+1. **`GODOT_MCP_DISABLE_SECURITY=true`**: wins outright. Security is off regardless of the other two flags. A startup log records that strict mode was ignored when both it and strict are set. This is the _opposite_ precedence from the strict/disable-elicitation pair below: disable-security has to be the weakest possible setting a human can opt into, so it wins when set, rather than deferring to strict.
+2. **`GODOT_MCP_STRICT=true`** (when disable-security is not set): every Tier 2 match promotes to Tier 1, and `GODOT_MCP_DISABLE_ELICITATION` is ignored if also set.
+3. **`GODOT_MCP_DISABLE_ELICITATION=true`** (when neither of the above overrides it): confirmation prompts are skipped fail-open; Tier 1 still blocks.
+4. Default: ask, per the elicitation and scan behavior described above.
 
 **Enabling this is a human decision.** An agent asked to set `GODOT_MCP_DISABLE_SECURITY` on a user's behalf should decline and explain that this is an operator-level trust decision, not something to be flipped to route around a gate that's in the way.
 
@@ -278,8 +278,8 @@ The first `run_project` call against a given `projectPath` in a session prompts 
 
 Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
-- `{timestamp}-{uuid}.gd` — the raw script source.
-- `{timestamp}-{uuid}.policy.json` — the policy decision:
+- `{timestamp}-{uuid}.gd`: the raw script source.
+- `{timestamp}-{uuid}.policy.json`, the policy decision:
 
 ```json
 {
@@ -301,12 +301,12 @@ Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
 `decision` values map to handler outcomes:
 
-- `hard_block` — Tier 1 finding; script refused before reaching the bridge.
-- `elicit_denied` — Tier 2 finding; user declined the elicitation OR the client does not support elicitation.
-- `elicit_accepted` — Tier 2 finding; user accepted the elicitation. Script executed.
-- `elicit_bypassed` — Tier 2 finding; elicitation was disabled (`GODOT_MCP_DISABLE_ELICITATION`), so the finding ran unprompted. Script executed; the finding is in `warnings`.
-- `warn` — Tier 3 finding only (no Tier 1 or Tier 2). Script executed; warnings surfaced in the response.
-- `ok` — No findings. Script executed unconditionally.
+- `hard_block`: Tier 1 finding; script refused before reaching the bridge.
+- `elicit_denied`: Tier 2 finding; user declined the elicitation OR the client does not support elicitation.
+- `elicit_accepted`: Tier 2 finding; user accepted the elicitation. Script executed.
+- `elicit_bypassed`: Tier 2 finding; elicitation was disabled (`GODOT_MCP_DISABLE_ELICITATION`), so the finding ran unprompted. Script executed; the finding is in `warnings`.
+- `warn`: Tier 3 finding only (no Tier 1 or Tier 2). Script executed; warnings surfaced in the response.
+- `ok`: No findings. Script executed unconditionally.
 
 Audit failure (disk full, permission denied) is logged via `logDebug` and never blocks the call.
 
@@ -322,16 +322,16 @@ This section exists because the doctrine at the top of this document demands it:
 
 - **No runtime sandbox.** The gate is static-analysis only. Bridge authentication is a per-session token, not process isolation.
 - **Tier 2 stops being a user decision whenever the client cannot service elicitation, and the two ways that happens do not fail the same direction.** Elicitation is a real MCP capability, not every client implements it, and some that advertise it auto-cancel every prompt (see "Disabling elicitation"). A client that cannot elicit at all fails _closed_ for `run_script`: the Tier 2 call is refused with an "elicitation unavailable" error and audited `elicit_denied`, so nobody ever approved it and it never ran. `run_project`'s session-confirmation gate fails _open_ on the same client: it launches with a warning, because that gate is UX around a scan that already happened. With `GODOT_MCP_DISABLE_ELICITATION` set, both fail open by design: the Tier 2 finding becomes advisory, running unprompted with the finding in `warnings` and audited `elicit_bypassed`. Only Tier 1 behaves identically regardless. `GODOT_MCP_STRICT` is the way to keep Tier 2 load-bearing without depending on any of it: it promotes every Tier 2 match to Tier 1 before elicitation would otherwise be attempted.
-- **The profiler debug channel is unauthenticated.** Godot defines the remote-debugger protocol and it has no place for a token, so the listener accepts the first connection that reaches it. A same-user process that wins that race can feed the server fabricated profiling data. See "The profiler debug channel" — it cannot reach anything beyond the profiler, and it is a strictly weaker position than reading the bridge token from the engine's environment.
+- **The profiler debug channel is unauthenticated.** Godot defines the remote-debugger protocol and it has no place for a token, so the listener accepts the first connection that reaches it. A same-user process that wins that race can feed the server fabricated profiling data. See "The profiler debug channel": it cannot reach anything beyond the profiler, and it is a strictly weaker position than reading the bridge token from the engine's environment.
 - **Loopback is not a boundary in every host configuration.** Both listeners bind `127.0.0.1` and are unreachable from the network, but a Linux process under WSL2 in mirrored networking mode shares the Windows host's loopback. The bridge is token-protected there; the profiler channel is not.
 - **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.
 - **Identifier aliasing / dataflow is invisible.** `var f = FileAccess; f.open(...)`, or any indirection through a local variable, defeats every chain-based rule, because the scanner is token-level, not a dataflow analysis. This is a structural limit of tokenizer-level matching, not something the next rule addition can close.
 - **Inline scene scripts and instance overrides are not scanned by `run_project`'s pre-flight.** `[sub_resource type="GDScript"]` embeds GDScript source directly inside a `.tscn`; `[instance]` property overrides can also carry code-bearing values. Neither is chased. (Subscene _ext_resource_ recursion, meaning scripts attached to a referenced PackedScene, IS scanned as of this release; see "`run_project` pre-flight".)
 - **Bypassable by anyone who reads the open-source rule table and obfuscates.** This is the central, load-bearing limitation: the catalogue above is deliberately auditable, which means an adversary who wants to bypass it can read exactly what triggers each tier and construct GDScript that doesn't. That's accepted as inherent to a best-effort filter aimed at unobfuscated primitives, not a defect to be patched away.
 - **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
-- No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch — mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
+- No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch: mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
 - No telemetry / centralized reporting of blocks.
 - No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` (all process-global, read once at start).
-- **`GODOT_MCP_DISABLE_SECURITY` removes Tier 1 too.** Every other escape hatch in this document (`GODOT_MCP_DISABLE_ELICITATION`, `GODOT_MCP_STRICT`'s absence) leaves Tier 1 hard blocks standing. This one does not — see "Disabling the entire gate." Enabling it is a full opt-out, not a UX convenience.
-- No retroactive scanning of scripts already in the project — `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
+- **`GODOT_MCP_DISABLE_SECURITY` removes Tier 1 too.** Every other escape hatch in this document (`GODOT_MCP_DISABLE_ELICITATION`, `GODOT_MCP_STRICT`'s absence) leaves Tier 1 hard blocks standing. This one does not: see "Disabling the entire gate." Enabling it is a full opt-out, not a UX convenience.
+- No retroactive scanning of scripts already in the project: `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
 - `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.

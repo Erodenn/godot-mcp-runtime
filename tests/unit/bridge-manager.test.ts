@@ -94,7 +94,7 @@ describe('BridgeManager.inject', () => {
     expect(matches.length).toBe(1);
   });
 
-  it('is idempotent within a session — second inject does not duplicate the autoload entry', () => {
+  it('is idempotent within a session: second inject does not duplicate the autoload entry', () => {
     const { projectPath, manager } = setupProject();
     manager.inject(projectPath, TEST_PORT);
     manager.inject(projectPath, TEST_PORT);
@@ -464,7 +464,7 @@ describe('BridgeManager guards a user-registered McpBridge autoload', () => {
     try {
       manager.inject(projectPath, TEST_PORT);
     } catch {
-      // expected — assertions are about what survived
+      // expected: assertions are about what survived
     }
     const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     expect(projectGodot).toContain(USER_AUTOLOAD_LINE);

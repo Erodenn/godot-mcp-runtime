@@ -2,7 +2,7 @@
  * Integration test for the progress-heartbeat fix.
  *
  * Context: MCP clients may impose a per-request timeout (SDK default 60s;
- * opencode uses 30s-60s) and honor `resetTimeoutOnProgress` — resetting the
+ * opencode uses 30s-60s) and honor `resetTimeoutOnProgress`: resetting the
  * timer each time the server sends a `notifications/progress` for the
  * request's progress token. Without server-side heartbeats, long-running
  * tools (run_script playtest simulations routinely run 60s+) die with
@@ -92,7 +92,7 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
   it('still times out when the client supplied no progress token (control case)', async () => {
     // Control case for the reset mechanics: without an onprogress handler the
     // SDK attaches no progress token, so no heartbeats are ever sent and the
-    // client's own timeout fires untouched — the pre-fix behavior for
+    // client's own timeout fires untouched: the pre-fix behavior for
     // non-opting clients, preserved bit-for-bit.
     const server = makeServer(async () => {
       await sleep(TICK * 6);
@@ -162,7 +162,7 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
   });
 });
 
-// Minimal RequestHandlerExtra stub for direct stopper tests — sendNotification
+// Minimal RequestHandlerExtra stub for direct stopper tests: sendNotification
 // must never be reached here (throws if called).
 const fakeExtra = (): Parameters<typeof startProgressHeartbeat>[0] =>
   ({

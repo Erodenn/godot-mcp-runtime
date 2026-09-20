@@ -104,10 +104,15 @@ func _init():
 	quit()
 	return
 
-# Logging functions
+# Logging functions.
+# Every one of these writes to stderr. stdout is the JSON channel for a headless
+# operation and the handlers strict-parse it, so a debug line there is not noise
+# the parser skips: it puts a '[' at column 0, extractJson latches onto it, and
+# the whole payload comes back as an unparseable string. DEBUG=true must never
+# change what a tool returns.
 func log_debug(message):
 	if debug_mode:
-		print("[DEBUG] " + message)
+		printerr("[DEBUG] " + message)
 
 func log_info(message):
 	printerr("[INFO] " + message)
@@ -1025,10 +1030,18 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 				# PackedScene restores every [connection] line with it, and
 				# connect_signal sets it for the same reason (see the note at its
 				# own connect() call). A connection the engine makes for itself
-				# while instantiating carries no such flag. That flag is the only
-				# reliable way to tell "someone wrote this and could have got it
-				# wrong" from "the engine wired its own internals", so a missing
-				# handler is only a user mistake on a persisted connection.
+				# while instantiating carries no such flag, so the flag tells
+				# "someone wrote this and could have got it wrong" apart from
+				# "the engine wired its own internals".
+				#
+				# SCOPE: it gates the missing-handler check below and nothing
+				# else. The target-not-in-scene and naming-convention checks run
+				# on every connection the walk sees. They are not gated because
+				# they have no engine-connection false positive to guard against:
+				# an engine-made callable reports false from has_method and takes
+				# the gated branch before either of them is reached. Gating them
+				# too on reasoning alone could only remove findings, and a lost
+				# finding is invisible.
 				var is_persisted := (int(conn.get("flags", 0)) & CONNECT_PERSIST) != 0
 
 				# Resolve the target path through _relative_path, which checks
@@ -1491,7 +1504,13 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 func _coerce_property_value(value):
 	if typeof(value) == TYPE_DICTIONARY:
 		if value.has("x") and value.has("y"):
+			# Widest form first: every Vector4 dict is also a valid Vector3 dict
+			# and a valid Vector2 dict, so testing w before z before neither is
+			# what keeps {x, y, z, w} from collapsing to Vector3 and dropping w.
+			# An {x, y, w} dict with no z is a Vector2; Vector4 needs all four.
 			if value.has("z"):
+				if value.has("w"):
+					return Vector4(value.x, value.y, value.z, value.w)
 				return Vector3(value.x, value.y, value.z)
 			else:
 				return Vector2(value.x, value.y)
@@ -1574,6 +1593,8 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_VECTOR2I: [TYPE_VECTOR2, TYPE_VECTOR2I],
 	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
 	TYPE_VECTOR3I: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR4: [TYPE_VECTOR4, TYPE_VECTOR4I],
+	TYPE_VECTOR4I: [TYPE_VECTOR4, TYPE_VECTOR4I],
 	TYPE_COLOR: [TYPE_COLOR],
 	TYPE_DICTIONARY: [TYPE_DICTIONARY],
 	TYPE_PACKED_BYTE_ARRAY: [TYPE_ARRAY, TYPE_PACKED_BYTE_ARRAY],
@@ -1604,19 +1625,31 @@ const _PACKED_ARRAY_ELEMENT_TYPE: Dictionary = {
 	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
 }
 
-# Element Variant type -> raw element Variant types accepted for it. Mirrors the
-# scalar rows of _PROPERTY_TYPE_COMPAT above; kept as its own table so scalar
-# compat widening and element widening stay independently editable, and so the
-# typed-Array[T] path can share it. An element type reached from the packed path
-# that is absent from this table is an internal inconsistency and is REJECTED,
-# never accepted.
+# Element Variant type -> raw element Variant types accepted for it. Covers every
+# scalar row of _PROPERTY_TYPE_COMPAT above except TYPE_DICTIONARY, plus the
+# Vector4 pair the packed path needs. Dictionary is left out on purpose: elements
+# run through _coerce_property_value first, which turns an {x, y} or {r, g, b}
+# dict into a Vector2/Color, so a Dictionary element type could never be honoured
+# here and claiming a row for it would be a lie. Kept as its own
+# table so scalar compat widening and element widening stay independently
+# editable, and so the typed-Array[T] path can share it. An element type absent
+# from this table is REJECTED by both element paths, never accepted: the packed
+# path treats the miss as an internal inconsistency, and the typed-Array[T] path
+# cannot build the typed container it would need, so passing the raw untyped
+# Array to set() would store an empty array while reporting success.
 const _ELEMENT_TYPE_COMPAT: Dictionary = {
+	TYPE_BOOL: [TYPE_BOOL, TYPE_INT, TYPE_FLOAT],
 	TYPE_INT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
 	TYPE_FLOAT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
 	TYPE_STRING: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_STRING_NAME: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_NODE_PATH: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
 	TYPE_VECTOR2: [TYPE_VECTOR2, TYPE_VECTOR2I],
+	TYPE_VECTOR2I: [TYPE_VECTOR2, TYPE_VECTOR2I],
 	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR3I: [TYPE_VECTOR3, TYPE_VECTOR3I],
 	TYPE_VECTOR4: [TYPE_VECTOR4, TYPE_VECTOR4I],
+	TYPE_VECTOR4I: [TYPE_VECTOR4, TYPE_VECTOR4I],
 	TYPE_COLOR: [TYPE_COLOR],
 }
 
@@ -1753,8 +1786,9 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 # hint_string is a fallback for the case where the current value is not a typed
 # Array (e.g. a null default). Only the leading integer of hint_string is read:
 # the composite forms ("24/17:Texture2D", "28:2:") therefore resolve to
-# TYPE_OBJECT / TYPE_ARRAY, which are both absent from _ELEMENT_TYPE_COMPAT and
-# so pass through unvalidated rather than being guessed at.
+# TYPE_OBJECT / TYPE_ARRAY. Both are absent from _ELEMENT_TYPE_COMPAT, and the
+# caller rejects those rather than guessing at the element class. TYPE_NIL means
+# the property is an untyped Array, which is the only pass-through case.
 func _typed_array_element_type(node: Object, property: String) -> int:
 	var current = node.get(property)
 	if typeof(current) == TYPE_ARRAY and current.is_typed():
@@ -1798,7 +1832,7 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 		out.append(element)
 	# Builtin element type, so no class name and no script: Array[Node] and
 	# friends never reach here, since their element types have no
-	# _ELEMENT_TYPE_COMPAT row and pass through unwrapped.
+	# _ELEMENT_TYPE_COMPAT row and the caller rejects them before this runs.
 	var typed: Array = Array(out, elem_type, &"", null)
 	if typed.size() != out.size():
 		return {
@@ -1858,14 +1892,26 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	# Same element pass for a script-declared typed Array[T]. Its declared type
 	# is plain TYPE_ARRAY, so the element type has to be recovered from the value
-	# or the descriptor. Deliberately asymmetric with the packed path above: an
-	# element type with no rule here passes through unvalidated instead of being
-	# rejected, because the key space is every Variant type plus every class in
-	# the project, so a miss is normal rather than a bug in our own table. Godot
-	# still refuses those assignments loudly instead of zero-filling them.
+	# or the descriptor. TYPE_NIL means the property is an untyped Array, which
+	# accepts the raw value as-is. Any other element type MUST be built through
+	# the typed-Array constructor: set() does not convert an untyped Array element
+	# by element, it refuses the assignment, leaves an empty typed array behind
+	# and reports nothing, so an element type with no rule in
+	# _ELEMENT_TYPE_COMPAT is rejected here rather than passed through. Object
+	# element types (Array[PackedScene], Array[Texture2D]) land in that arm: they
+	# would need per-element res:// loading and the element class name, which this
+	# path does not do, and silently dropping them is exactly what the rejection
+	# exists to prevent.
 	if declared == TYPE_ARRAY and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
 		var elem_type := _typed_array_element_type(node, property)
-		if _ELEMENT_TYPE_COMPAT.has(elem_type):
+		if elem_type != TYPE_NIL:
+			if not _ELEMENT_TYPE_COMPAT.has(elem_type):
+				return {
+					"ok": false,
+					"value": null,
+					"error": "Cannot set property '%s' on node of type '%s': it is a typed Array of %s, and element values of that type cannot be built from JSON. Assign it with run_script instead." % [
+						property, node.get_class(), type_string(elem_type)],
+				}
 			var typed_prep = _prepare_typed_array_elements(property, node.get_class(), elem_type, coerced)
 			if not typed_prep.ok:
 				return {"ok": false, "value": null, "error": typed_prep.error}
@@ -2014,6 +2060,24 @@ func validate_batch(params: Dictionary) -> void:
 		results.append(result)
 	print(JSON.stringify({"results": results}))
 
+# Recursively collect every res:// string inside a JSON-sourced property value.
+# A value can be a bare path, an inline resource spec that nests one ("shader"
+# on a ShaderMaterial, a texture on one of its uniforms), an array of either, or
+# a whole properties dict of them. Callers use this to probe assets before a
+# mutation rather than at assignment time. JSON cannot produce a cycle, so the
+# recursion is bounded by the parsed document.
+func _collect_res_paths(value, out: Array) -> void:
+	match typeof(value):
+		TYPE_STRING:
+			if (value as String).begins_with("res://"):
+				out.append(value)
+		TYPE_DICTIONARY:
+			for key in value:
+				_collect_res_paths(value[key], out)
+		TYPE_ARRAY:
+			for item in value:
+				_collect_res_paths(item, out)
+
 # Execute multiple scene operations in a single headless process
 # Scenes are loaded once and cached in memory; mutations accumulate until a save op
 func batch_scene_operations(params: Dictionary) -> void:
@@ -2022,9 +2086,10 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var scene_cache: Dictionary = {}
 
 	# Pre-pass: probe every referenced scene, plus every first-time asset
-	# reference (load_sprite's texture_path, and any res:// string inside a
-	# set_node_properties update), for the cold-import state and for missing
-	# files -- BEFORE any mutation is applied. Missing files are checked
+	# reference (load_sprite's texture_path, and every res:// string at any
+	# depth inside an add_node properties dict or a set_node_properties update
+	# value, inline resource specs included), for the cold-import state and for
+	# missing files -- BEFORE any mutation is applied. Missing files are checked
 	# first, across the whole batch: a batch that would otherwise import and
 	# then refuse mid-way is worse than refusing up front. The probe re-runs
 	# against the marker exit below, so the TS layer imports and re-runs the
@@ -2048,26 +2113,32 @@ func batch_scene_operations(params: Dictionary) -> void:
 				prepass_missing.append_array(probe.missing)
 				prepass_needs_import.append_array(probe.needs_import)
 
+		# Every JSON-sourced value an operation can assign, walked for res://
+		# strings at any depth. add_node's whole properties dict and the inline
+		# resource specs nested under a set_node_properties value both carry
+		# them, and a reference found only at assignment time would emit its
+		# [IMPORT_NEEDED] mid-batch, after earlier operations had already
+		# mutated and auto-saved.
 		var op_name = op.get("operation", "")
+		var value_roots: Array = []
 		if op_name == "load_sprite" and op.get("texture_path", "") != "":
-			var asset_path = normalize_scene_path(op.texture_path)
-			if not asset_path.is_empty() and asset_path not in seen_paths:
-				seen_paths[asset_path] = true
-				if _classify_dep_path(asset_path) == "needs_import":
-					prepass_needs_import.append(asset_path)
+			value_roots.append(op.texture_path)
+		elif op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
+			value_roots.append(op.properties)
 		elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
 			for update in op.updates:
-				if typeof(update) != TYPE_DICTIONARY or not update.has("value"):
-					continue
-				var raw_value = update.value
-				if typeof(raw_value) != TYPE_STRING or not raw_value.begins_with("res://"):
-					continue
-				var prop_path = normalize_scene_path(raw_value)
-				if prop_path.is_empty() or prop_path in seen_paths:
-					continue
-				seen_paths[prop_path] = true
-				if _classify_dep_path(prop_path) == "needs_import":
-					prepass_needs_import.append(prop_path)
+				if typeof(update) == TYPE_DICTIONARY and update.has("value"):
+					value_roots.append(update.value)
+		var res_paths: Array = []
+		for value_root in value_roots:
+			_collect_res_paths(value_root, res_paths)
+		for raw_path in res_paths:
+			var asset_path = normalize_scene_path(raw_path)
+			if asset_path.is_empty() or asset_path in seen_paths:
+				continue
+			seen_paths[asset_path] = true
+			if _classify_dep_path(asset_path) == "needs_import":
+				prepass_needs_import.append(asset_path)
 
 	if prepass_missing.size() > 0:
 		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(prepass_missing))

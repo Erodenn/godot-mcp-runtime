@@ -33,7 +33,7 @@ function isResult(value: unknown): value is { ok: boolean; value?: unknown; erro
 /**
  * Return the wire-shaped envelope from either a Result-wrapped handler return
  * or a raw `ToolResponse`. Use in tests that need to read `content[i].text`
- * directly — `unwrap(result).content[0].text` works regardless of which side
+ * directly: `unwrap(result).content[0].text` works regardless of which side
  * of the Phase-3 boundary the handler under test is on.
  */
 export function unwrap(result: unknown): EnvelopeShape {
@@ -65,7 +65,7 @@ export function errorText(result: unknown): string | null {
 /**
  * Assert the handler returned an error envelope AND its rendered text matches
  * `pattern`. Use this in rejection tests so distinct branches stay
- * distinguishable — a refactor that misroutes an error path will fail loudly
+ * distinguishable: a refactor that misroutes an error path will fail loudly
  * instead of silently passing because both branches end in `isError: true`.
  */
 export function expectErrorMatching(result: unknown, pattern: RegExp): void {
