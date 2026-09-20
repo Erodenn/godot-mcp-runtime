@@ -90,7 +90,7 @@ Tool handlers return `Result<HandlerResult, ToolResponse>`, not a raw `ToolRespo
 
 ### TypeScript camelCase, GDScript snake_case
 
-Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/parameter-conversion.ts`.
+Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/parameter-conversion.ts`. Keys under `properties` and `value` are opaque and are never converted, in either direction.
 
 ### `run_script` and `run_project` security gate
 
