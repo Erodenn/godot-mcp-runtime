@@ -83,13 +83,30 @@ var tcp_server: TCPServer
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
 var _shutting_down: bool = false  # One-shot: set true in shutdown(); never reset (autoload is recreated on next session)
-# Monotonic id for input batches, and half of the batch cancellation token.
+# Monotonic id for input batches, and the batch cancellation token.
 # _handle_input parks on awaits that can outlive the client waiting on it: a
 # command that times out on the Node side destroys the socket, and the next
 # command arrives on a brand new peer. A parked coroutine that resumed anyway
 # would keep injecting into a game the client believes is idle, and would keep
 # printing ACTION_BOUNDARY_SENTINEL lines into the NEXT batch's attribution
 # window, where the Node side cannot tell them from that batch's own marks.
+#
+# WHAT CANCELLATION GUARANTEES, and what it does not. The generation is bumped
+# by two events, both of them the client itself acting: a new connection being
+# accepted, and a new input batch starting. The Node client holds one socket and
+# MCP serializes tool calls, so either event proves the batch owning an older
+# generation has nobody left to report to. Both are observed inside this
+# process, with no dependence on when the OS reports the old peer gone --
+# StreamPeerTCP.poll() surfaces a destroyed peer promptly on some platforms and
+# not at all on others until a write is attempted, so the peer status checked
+# below is a best-effort extra and never the guarantee.
+#
+# The guarantee is therefore: once the client has reconnected or started another
+# batch, an abandoned batch injects nothing further and prints no further
+# boundary. NOT guaranteed: a batch parked in a long wait while the client does
+# nothing at all may still run to completion on a platform whose poll() stays
+# CONNECTED. Its boundaries then land between capture windows, where
+# beginActionErrorCapture clears them before the next batch reads any.
 var _input_batch_generation: int = 0
 
 func _ready() -> void:
@@ -123,6 +140,12 @@ func _process(_delta: float) -> void:
 		var peer := PeerState.new()
 		peer.stream = stream
 		_peers.append(peer)
+		# A new connection is the client telling us the old one is gone: it holds
+		# one socket and only reconnects after destroying it. Any batch still
+		# parked on an earlier connection is cancelled here, at the moment of the
+		# reconnect, rather than whenever the OS gets around to reporting the old
+		# peer as closed.
+		_input_batch_generation += 1
 
 	# Backwards iteration so remove_at() doesn't shift entries we haven't seen
 	# yet, and avoids the O(n) cost of Array.erase() per removal.
@@ -388,11 +411,16 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	# finally block GDScript does not have.
 	_send_response(peer, response)
 
-# True when the batch that started at `generation` has nobody left to report to:
-# its peer went away (the client destroyed the socket after a timeout) or a newer
-# batch has started. Reads state only, so it is cheap enough to run between every
-# action. The peer's status is already refreshed by _poll_peer every frame, and a
-# batch only resumes on a frame boundary, so no extra poll() is needed here.
+# True when the batch that started at `generation` has nobody left to report to.
+# Two independent signals, in order of trustworthiness:
+#   1. The generation moved on: the client reconnected or started another batch.
+#      This is the guarantee (see _input_batch_generation) and it is observed
+#      here, not inferred from the socket.
+#   2. The peer is no longer connected. Best-effort only: whether a destroyed
+#      peer shows up as disconnected, and how soon, is the platform's business.
+# Reads state only, so it is cheap enough to run between every action. The peer's
+# status is already refreshed by _poll_peer every frame, and a batch only resumes
+# on a frame boundary, so no extra poll() is needed here.
 func _input_batch_abandoned(peer: PeerState, generation: int) -> bool:
 	if generation != _input_batch_generation:
 		return true

@@ -54,12 +54,16 @@ const TEST_TIMEOUT_MS = 60000;
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
 /** Enough stderr lines to cover a whole batch's worth of engine output. */
 const RECENT_ERROR_LINES = 200;
-/** Long enough that the batch is still parked when its client gives up. */
-const STALE_BATCH_WAIT_FRAMES = 180;
+/**
+ * How long the abandoned batch parks. Wall clock, not frames: a frame count
+ * makes the whole test frame-rate dependent, and the window it has to outlast
+ * is measured in seconds.
+ */
+const STALE_BATCH_WAIT_MS = 6000;
 /** Client patience for the batch above: it times out almost immediately. */
 const STALE_CLIENT_TIMEOUT_MS = 300;
 /** Comfortably past the point where the abandoned batch would have resumed. */
-const STALE_RESUME_MARGIN_MS = 8000;
+const STALE_RESUME_MARGIN_MS = STALE_BATCH_WAIT_MS + 3000;
 /** Drain window for the boundary poll; longer than the default for headroom. */
 const STALE_DRAIN_TIMEOUT_MS = 1000;
 
@@ -689,19 +693,19 @@ describe('simulate_input observed results (live bridge)', () => {
   );
 
   itGodot(
-    'a batch abandoned by a client timeout stops instead of marking a later window',
+    'an abandoned batch contributes no boundary to a later batch window',
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());
 
-      // Give the batch a wait far longer than the timeout the client allows it,
-      // so the command times out - which destroys the socket - while the batch
-      // is still parked inside the wait.
+      // Park a batch in a wall-clock wait far longer than the patience its
+      // client allows, so the command times out - destroying the socket - while
+      // the batch is still parked.
       await expect(
         runner.sendCommand(
           'input',
           {
             actions: [
-              { type: 'wait', frames: STALE_BATCH_WAIT_FRAMES },
+              { type: 'wait', ms: STALE_BATCH_WAIT_MS },
               { type: 'key', key: 'W' },
             ],
           },
@@ -709,17 +713,34 @@ describe('simulate_input observed results (live bridge)', () => {
         ),
       ).rejects.toThrow(/timed out/);
 
-      // What the next simulate_input would do: open a fresh attribution window.
-      // A resumed stale batch prints its own MCP_ACTION_BOUNDARY marks, and the
-      // ingestion site cannot tell them from this window's own.
+      // What an agent does next: retry. That reconnects and starts another
+      // batch, and either event is what tells the bridge the parked batch has
+      // nobody left to report to. Everything after this point is the guarantee
+      // under test - not whether the platform reports the destroyed peer, which
+      // it may never do while the client is idle.
       const capture = runner.beginActionErrorCapture();
+      const raw = await runner.sendCommand(
+        'input',
+        { actions: [{ type: 'wait', frames: 1 }] },
+        BRIDGE_CMD_TIMEOUT_MS,
+      );
+      expect((JSON.parse(raw) as { success?: boolean }).success).toBe(true);
+
+      // Wait past the point where the abandoned batch would have resumed and
+      // printed its own boundaries into this window.
       await new Promise((resolve) => setTimeout(resolve, STALE_RESUME_MARGIN_MS));
       const collected = await runner.collectActionErrors(capture, 1, STALE_DRAIN_TIMEOUT_MS);
+      expect(collected.sentinelTimedOut, 'this batch marked its own boundary').toBe(false);
 
+      // The decisive assertion: exactly one boundary in this window, index 0,
+      // belonging to the batch that opened it. An abandoned batch that kept
+      // running would have added its own action 0 and action 1 marks here, and
+      // the ingestion site cannot tell those from this batch's own.
+      const boundaries = runner.activeProcess?.actionBoundaries ?? [];
       expect(
-        collected.sentinelTimedOut,
-        'no action boundary may arrive from a batch whose client is gone',
-      ).toBe(true);
+        boundaries.map((mark) => mark.index),
+        `only this batch's own boundary may appear; boundaries=${JSON.stringify(boundaries)}`,
+      ).toEqual([0]);
     },
     TEST_TIMEOUT_MS,
   );
