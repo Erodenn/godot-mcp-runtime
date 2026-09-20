@@ -14,11 +14,11 @@
  *
  * The feature: keys of the form `shader_parameter/<name>` (and, after a
  * shader is assigned, any slash-key the instance can actually resolve)
- * skip the `in instance` existence gate and are assigned via set() with
- * a read-back verification, so the typed-dict form covers ShaderMaterial
- * end to end.
+ * skip the `in instance` existence gate and are assigned via set(), so
+ * the typed-dict form covers ShaderMaterial end to end.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH locally. CI runs this file on Godot 4.5.1 and 4.6.2
+ * in the godot-integration job regardless of a local GODOT_PATH.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
@@ -100,8 +100,8 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toContain('[sub_resource type="ShaderMaterial"');
       expect(sceneText).toContain('shader = ExtResource(');
-      expect(sceneText).toMatch(/shader_parameter\/glow = 2.5/);
-      expect(sceneText).toMatch(/shader_parameter\/tint = Color\(0.2, 0.9, 1/);
+      expect(sceneText).toMatch(/shader_parameter\/glow = 2\.5/);
+      expect(sceneText).toMatch(/shader_parameter\/tint = Color\(0\.2, 0\.9, 1/);
     },
     60000,
   );
@@ -157,7 +157,83 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
   );
 
   itGodot(
-    'set_node_properties constructs ShaderMaterial on an existing node and read-back verifies',
+    'a spec with shader_parameter/* ordered before shader in the JSON still resolves',
+    async () => {
+      // The PR's headline fix is the plain-before-virtual reorder inside
+      // _construct_inline_resource. addWith above always spreads `shader`
+      // first via `{ type, shader, ...params }`, so no existing test sends
+      // a virtual key ahead of its dependency in spec order. Build the
+      // dict by hand here so `shader_parameter/glow` precedes `shader`.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Sprite2D',
+          nodeName: 'ReorderedSprite',
+          parentNodePath: '.',
+          properties: {
+            material: {
+              type: 'ShaderMaterial',
+              'shader_parameter/glow': 2.5,
+              shader: 'res://shaders/test_neon.gdshader',
+            },
+          },
+        },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain('added successfully');
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).toMatch(/shader_parameter\/glow = 2\.5/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'a shader that fails to compile is attributed as such, not as an unknown uniform',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      writeFileSync(
+        join(tmpProject, 'shaders', 'broken.gdshader'),
+        'shader_type canvas_item;\nuniform float glow = ;\n',
+      );
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'Sprite2D',
+          nodeName: 'BrokenShaderSprite',
+          parentNodePath: '.',
+          properties: {
+            material: {
+              type: 'ShaderMaterial',
+              shader: 'res://shaders/broken.gdshader',
+              'shader_parameter/glow': 2.5,
+            },
+          },
+        },
+        tmpProject,
+        30000,
+      );
+
+      const combined = `${stdout}\n${stderr}`;
+      expect(combined).toContain('failed to compile or declares none');
+      // Nothing may be persisted for the failed construct: the node itself
+      // was never added (BrokenShaderSprite is freed before add_node returns).
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).not.toContain('BrokenShaderSprite');
+    },
+    60000,
+  );
+
+  itGodot(
+    'set_node_properties constructs ShaderMaterial on an existing node and the parameter persists',
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
@@ -198,7 +274,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
 
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toContain('[sub_resource type="ShaderMaterial"');
-      expect(sceneText).toMatch(/shader_parameter\/glow = 4.0/);
+      expect(sceneText).toMatch(/shader_parameter\/glow = 4\.0/);
     },
     60000,
   );
@@ -228,11 +304,13 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
       );
 
       const combined = `${stdout}\n${stderr}`;
-      expect(combined).toContain('shader_parameter');
-      expect(combined.toLowerCase()).toContain('error');
-      // Nothing may be persisted for the failed construct.
+      expect(combined).toContain(
+        "Property 'shader_parameter/glow' does not resolve on resource of type 'ShaderMaterial'",
+      );
+      // Nothing may be persisted for the failed construct: the node itself
+      // was never added (OrphanSprite is freed before add_node returns).
       const sceneText = readFileSync(scenePath, 'utf-8');
-      expect(sceneText).not.toContain('ShaderMaterial');
+      expect(sceneText).not.toContain('OrphanSprite');
     },
     60000,
   );
@@ -263,10 +341,13 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
       );
 
       const combined = `${stdout}\n${stderr}`;
-      expect(combined).toContain('undeclared_uniform');
-      expect(combined.toLowerCase()).toContain('error');
+      expect(combined).toContain(
+        "Property 'shader_parameter/undeclared_uniform' does not resolve on resource of type 'ShaderMaterial'",
+      );
+      // Nothing may be persisted for the failed construct: the node itself
+      // was never added (TypoSprite is freed before add_node returns).
       const sceneText = readFileSync(scenePath, 'utf-8');
-      expect(sceneText).not.toContain('ShaderMaterial');
+      expect(sceneText).not.toContain('TypoSprite');
     },
     60000,
   );
