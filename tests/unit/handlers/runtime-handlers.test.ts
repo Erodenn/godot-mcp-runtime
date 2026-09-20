@@ -21,6 +21,7 @@ import {
   handleStopProject,
   handleTakeScreenshot,
   handleSimulateInput,
+  computeInputTimeoutMs,
   handleGetUiElements,
   handleRunScript,
   handleRunProject,
@@ -114,6 +115,10 @@ interface RuntimeFake {
   /** Runs inside sendCommandWithErrors, before it returns — models session
    *  state changing while a bridge command is in flight. */
   setBridgeHook(hook: (() => void) | null): void;
+  /** Stands in for the boundary-sentinel attribution the real runner derives
+   *  from stderr, so the handler's attachment logic is testable without a
+   *  process. Defaults to no errors and no drain timeout. */
+  setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -133,6 +138,9 @@ function createRuntimeFake(): RuntimeFake {
   let runProjectAfterHook: ((projectPath: string) => void) | null = null;
   let bridgeHook: (() => void) | null = null;
   let stopCallCount = 0;
+  let actionErrorBuckets: string[][] = [];
+  let actionErrorTrailing: string[] = [];
+  let actionSentinelTimedOut = false;
 
   const state: {
     activeSessionMode: RuntimeSessionMode | null;
@@ -221,6 +229,19 @@ function createRuntimeFake(): RuntimeFake {
     readBakedBridgePort(_projectPath: string): number | null {
       return null;
     },
+    beginActionErrorCapture() {
+      return { marker: 0 };
+    },
+    async collectActionErrors(_capture: unknown, expectedSentinels: number) {
+      return {
+        buckets: Array.from(
+          { length: Math.max(0, expectedSentinels) },
+          (_unused, i) => actionErrorBuckets[i] ?? [],
+        ),
+        trailing: actionErrorTrailing,
+        sentinelTimedOut: actionSentinelTimedOut,
+      };
+    },
   };
 
   return {
@@ -264,6 +285,11 @@ function createRuntimeFake(): RuntimeFake {
     },
     setBridgeHook(hook) {
       bridgeHook = hook;
+    },
+    setActionErrorBuckets(buckets, trailing = [], timedOut = false) {
+      actionErrorBuckets = buckets;
+      actionErrorTrailing = trailing;
+      actionSentinelTimedOut = timedOut;
     },
   };
 }
@@ -837,8 +863,56 @@ describe('handleDetachProject', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleSimulateInput — totalWaitMs calculation
+// computeInputTimeoutMs + handleSimulateInput
+//
+// The handler's whole job is shaping: caps before the bridge call, a derived
+// timeout, and per-action error attribution onto the bridge's results[]. The
+// bridge response is a fixture string here, so none of this needs Godot.
 // ---------------------------------------------------------------------------
+
+const TIMEOUT_BUFFER_MS = 10000;
+const PESSIMISTIC_FRAME_MS = 50;
+
+describe('computeInputTimeoutMs', () => {
+  it('charges the buffer plus one settle frame per action when there are no waits', () => {
+    const ms = computeInputTimeoutMs([{ type: 'key', key: 'Space', pressed: true }]);
+    expect(ms).toBe(TIMEOUT_BUFFER_MS + PESSIMISTIC_FRAME_MS);
+  });
+
+  it('sums wait.ms entries', () => {
+    const actions = [
+      { type: 'wait', ms: 5000 },
+      { type: 'wait', ms: 2500 },
+    ];
+    // 7500 waited + 2 settle-frame charges + buffer
+    expect(computeInputTimeoutMs(actions)).toBe(
+      7500 + 2 * PESSIMISTIC_FRAME_MS + TIMEOUT_BUFFER_MS,
+    );
+  });
+
+  it('charges wait.frames at the pessimistic per-frame cost', () => {
+    const actions = [{ type: 'wait', frames: 10 }];
+    expect(computeInputTimeoutMs(actions)).toBe(11 * PESSIMISTIC_FRAME_MS + TIMEOUT_BUFFER_MS);
+  });
+
+  it('sums hold_ms', () => {
+    const actions = [{ type: 'key', key: 'W', hold_ms: 400 }];
+    // hold_ms suppresses the tap-hold frame charge; one settle frame remains.
+    expect(computeInputTimeoutMs(actions)).toBe(400 + PESSIMISTIC_FRAME_MS + TIMEOUT_BUFFER_MS);
+  });
+
+  it('charges text per character', () => {
+    const actions = [{ type: 'text', text: 'hello' }];
+    expect(computeInputTimeoutMs(actions)).toBe(5 + PESSIMISTIC_FRAME_MS + TIMEOUT_BUFFER_MS);
+  });
+
+  it('counts a tap but not an explicit press', () => {
+    const tap = computeInputTimeoutMs([{ type: 'key', key: 'A' }]);
+    const hold = computeInputTimeoutMs([{ type: 'key', key: 'A', pressed: true }]);
+    // The tap pays its two tap-hold frames on top of the shared settle frame.
+    expect(tap - hold).toBe(2 * PESSIMISTIC_FRAME_MS);
+  });
+});
 
 describe('handleSimulateInput', () => {
   function setupActive(): RuntimeFake {
@@ -848,7 +922,12 @@ describe('handleSimulateInput', () => {
       projectPath: '/p',
       process: makeRunningProcess(),
     });
-    fake.setBridgeResponse(JSON.stringify({ success: true, actions_processed: 1 }));
+    fake.setBridgeResponse(
+      JSON.stringify({
+        success: true,
+        results: [{ index: 0, type: 'key', ok: true, frame: 1, elapsed_ms: 7 }],
+      }),
+    );
     return fake;
   }
 
@@ -864,60 +943,197 @@ describe('handleSimulateInput', () => {
     );
   });
 
-  it('passes a 10s buffer timeout when there are no wait actions', async () => {
+  it('passes the computed timeout to the bridge', async () => {
     const fake = setupActive();
-    await handleSimulateInput(fake.asRunner, {
-      actions: [{ type: 'key', key: 'Space', pressed: true }],
-    });
+    const actions = [
+      { type: 'wait', ms: 5000 },
+      { type: 'key', key: 'A', pressed: true },
+    ];
+    await handleSimulateInput(fake.asRunner, { actions });
     expect(fake.bridgeCalls).toHaveLength(1);
-    expect(fake.bridgeCalls[0].timeoutMs).toBe(10000);
+    expect(fake.bridgeCalls[0].timeoutMs).toBe(computeInputTimeoutMs(actions));
   });
 
-  it('sums all wait.ms entries into totalWaitMs and adds the 10s buffer', async () => {
-    const fake = setupActive();
-    await handleSimulateInput(fake.asRunner, {
-      actions: [
-        { type: 'wait', ms: 5000 },
-        { type: 'key', key: 'A', pressed: true },
-        { type: 'wait', ms: 7500 },
-        { type: 'wait', ms: 2500 },
+  describe('Node-side caps reject before any bridge call', () => {
+    const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+      [
+        'wait.frames over the cap',
+        { actions: [{ type: 'wait', frames: 601 }] },
+        /frames must be a number no greater than 600/i,
       ],
-    });
-    // 5000 + 7500 + 2500 + 10000 buffer = 25000
-    expect(fake.bridgeCalls[0].timeoutMs).toBe(25000);
-  });
-
-  it('ignores non-wait actions and wait actions with non-numeric ms', async () => {
-    const fake = setupActive();
-    await handleSimulateInput(fake.asRunner, {
-      actions: [
-        { type: 'wait' }, // missing ms — ignored
-        { type: 'wait', ms: '500' }, // wrong type — ignored
-        { type: 'wait', ms: 1000 },
+      [
+        'hold_ms over the cap',
+        { actions: [{ type: 'key', key: 'A', hold_ms: 10001 }] },
+        /hold_ms must be a number no greater than 10000/i,
       ],
+      [
+        'hold_ms combined with pressed',
+        { actions: [{ type: 'key', key: 'A', hold_ms: 100, pressed: true }] },
+        /hold_ms cannot be combined with pressed/i,
+      ],
+      [
+        'text over the cap',
+        { actions: [{ type: 'text', text: 'x'.repeat(1001) }] },
+        /text exceeds 1000 characters/i,
+      ],
+      [
+        'watch over the cap',
+        {
+          actions: [{ type: 'key', key: 'A' }],
+          watch: Array.from({ length: 17 }, (_unused, i) => `/root/N${i}:visible`),
+        },
+        /watch accepts at most 16 entries/i,
+      ],
+      [
+        'wait with both ms and frames',
+        { actions: [{ type: 'wait', ms: 10, frames: 1 }] },
+        /set exactly one of ms or frames/i,
+      ],
+      [
+        'wait with neither ms nor frames',
+        { actions: [{ type: 'wait' }] },
+        /set exactly one of ms or frames/i,
+      ],
+    ];
+
+    it.each(cases)('%s', async (_label, args, pattern) => {
+      const fake = setupActive();
+      expectErrorMatching(await handleSimulateInput(fake.asRunner, args), pattern);
+      expect(fake.bridgeCalls).toEqual([]);
     });
-    expect(fake.bridgeCalls[0].timeoutMs).toBe(11000);
   });
 
-  it('forwards actions to the bridge under the "input" command name', async () => {
+  it('forwards watch only when non-empty and passes actions through byte-identical', async () => {
+    // normalizeParameters does not recurse into arrays, so per-action
+    // snake_case fields (hold_ms, relative_x, double_click) must survive
+    // unrewritten all the way to the bridge frame.
     const fake = setupActive();
-    const actions = [{ type: 'key', key: 'X', pressed: true }];
+    const actions = [{ type: 'key', key: 'X', hold_ms: 50, double_click: false }];
     await handleSimulateInput(fake.asRunner, { actions });
     expect(fake.bridgeCalls[0].command).toBe('input');
     expect(fake.bridgeCalls[0].params).toEqual({ actions });
+
+    const withWatch = createRuntimeFake();
+    withWatch.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    withWatch.setBridgeResponse(JSON.stringify({ success: true, results: [] }));
+    await handleSimulateInput(withWatch.asRunner, {
+      actions,
+      watch: ['/root/Main/Player:position:x'],
+    });
+    expect(withWatch.bridgeCalls[0].params).toEqual({
+      actions,
+      watch: ['/root/Main/Player:position:x'],
+    });
   });
 
-  it('surfaces runtimeErrors as warnings without escalating to isError', async () => {
+  it('maps a bridge pre-validation error to an error response', async () => {
     const fake = setupActive();
-    fake.setBridgeResponse(JSON.stringify({ success: true, actions_processed: 2 }), [
+    fake.setBridgeResponse(
+      JSON.stringify({ error: "action 2 (key): unrecognized key name: 'Foo'" }),
+    );
+    expectErrorMatching(
+      await handleSimulateInput(fake.asRunner, { actions: [{ type: 'key', key: 'Foo' }] }),
+      /unrecognized key name/i,
+    );
+  });
+
+  it('returns a non-error structured response for a partially failed batch', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(
+      JSON.stringify({
+        success: false,
+        results: [
+          { index: 0, type: 'click_element', ok: true, hit: '/root/HUD/Btn', signals: ['pressed'] },
+          { index: 1, type: 'click_element', ok: false, error: 'occluded by /root/HUD/Modal' },
+          { index: 2, type: 'key', skipped: true },
+        ],
+        still_held: ['key:W'],
+      }),
+    );
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [
+        { type: 'click_element', element: 'Btn' },
+        { type: 'click_element', element: 'Other' },
+        { type: 'key', key: 'W', pressed: true },
+      ],
+    });
+    expect(hasError(result)).toBe(false);
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(payload.success).toBe(false);
+    expect(payload.still_held).toEqual(['key:W']);
+    const results = payload.results as Array<Record<string, unknown>>;
+    expect(results).toHaveLength(3);
+    expect(results[1]).toMatchObject({ index: 1, ok: false });
+    expect(results[2]).toMatchObject({ index: 2, skipped: true });
+  });
+
+  it('attaches bucketed errors to the matching entry only', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(
+      JSON.stringify({
+        success: true,
+        results: [
+          { index: 0, type: 'key', ok: true },
+          { index: 1, type: 'click_element', ok: true },
+          { index: 2, type: 'key', ok: true },
+        ],
+      }),
+    );
+    fake.setActionErrorBuckets([[], ['SCRIPT ERROR: in _on_pressed'], []]);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [
+        { type: 'key', key: 'A' },
+        { type: 'click_element', element: 'Btn' },
+        { type: 'key', key: 'B' },
+      ],
+    });
+    const results = (unwrap(result).structuredContent as Record<string, unknown>).results as Array<
+      Record<string, unknown>
+    >;
+    expect(results[1].errors).toEqual(['SCRIPT ERROR: in _on_pressed']);
+    expect(results[0]).not.toHaveProperty('errors');
+    expect(results[2]).not.toHaveProperty('errors');
+  });
+
+  it('appends trailing errors to the last executed entry', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(
+      JSON.stringify({
+        success: false,
+        results: [
+          { index: 0, type: 'key', ok: false, error: 'boom' },
+          { index: 1, type: 'key', skipped: true },
+        ],
+      }),
+    );
+    fake.setActionErrorBuckets([[]], ['SCRIPT ERROR: unattributed'], true);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [
+        { type: 'key', key: 'A' },
+        { type: 'key', key: 'B' },
+      ],
+    });
+    const results = (unwrap(result).structuredContent as Record<string, unknown>).results as Array<
+      Record<string, unknown>
+    >;
+    expect(results[0].errors).toEqual(['SCRIPT ERROR: unattributed']);
+    expect(results[1]).not.toHaveProperty('errors');
+  });
+
+  it('emits only success and results, dropping the retired count, warnings and tip fields', async () => {
+    // Exact key set rather than three absence assertions: it also catches any
+    // new top-level field arriving without a schema entry, and it keeps the
+    // retired field names out of the tree entirely.
+    const fake = setupActive();
+    fake.setBridgeResponse(JSON.stringify({ success: true, results: [] }), [
       'SCRIPT ERROR: in _process',
     ]);
     const result = await handleSimulateInput(fake.asRunner, {
-      actions: [{ type: 'key', key: 'A', pressed: true }],
+      actions: [{ type: 'key', key: 'A' }],
     });
     expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.warnings).toEqual(['SCRIPT ERROR: in _process']);
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(['results', 'success']);
   });
 });
 

@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  ACTION_BOUNDARY_SENTINEL,
   MAX_FRAME_BYTES,
+  bucketBySentinel,
   encodeFrame,
   findFreePort,
+  parseActionBoundary,
   parseFrames,
 } from '../../src/utils/bridge-protocol.js';
 
@@ -117,5 +120,122 @@ describe('findFreePort', () => {
     const a = await findFreePort();
     const b = await findFreePort();
     expect(a).not.toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Action-boundary sentinel parsing and bucketing
+//
+// These two helpers are the whole of the per-action error attribution used by
+// simulate_input: the bridge prints one sentinel per action on stderr and the
+// runner splits its stderr window on the recorded marks. Both are pure so the
+// attribution logic is testable without a Godot process.
+// ---------------------------------------------------------------------------
+
+describe('parseActionBoundary', () => {
+  it('accepts a zero index', () => {
+    expect(parseActionBoundary(`${ACTION_BOUNDARY_SENTINEL} 0`)).toBe(0);
+  });
+
+  it('accepts surrounding whitespace and a multi-digit index', () => {
+    expect(parseActionBoundary(`  ${ACTION_BOUNDARY_SENTINEL} 12 `)).toBe(12);
+  });
+
+  it('rejects the bare sentinel with no index', () => {
+    expect(parseActionBoundary(ACTION_BOUNDARY_SENTINEL)).toBeNull();
+  });
+
+  it('rejects a non-numeric index', () => {
+    expect(parseActionBoundary(`${ACTION_BOUNDARY_SENTINEL} x`)).toBeNull();
+  });
+
+  it('rejects an ordinary runtime-error line', () => {
+    expect(parseActionBoundary('SCRIPT ERROR: Invalid call to function "foo"')).toBeNull();
+  });
+
+  it('rejects an empty line', () => {
+    expect(parseActionBoundary('')).toBeNull();
+  });
+});
+
+describe('bucketBySentinel', () => {
+  it('attributes in-order lines to the action each sentinel closes', () => {
+    const result = bucketBySentinel({
+      lines: ['a', 'b', 'c', 'd'],
+      startSeq: 0,
+      boundaries: [
+        { index: 0, seq: 1 },
+        { index: 1, seq: 3 },
+        { index: 2, seq: 4 },
+      ],
+      executedCount: 3,
+    });
+    expect(result.buckets).toEqual([['a'], ['b', 'c'], ['d']]);
+    expect(result.trailing).toEqual([]);
+  });
+
+  it('puts lines after the last sentinel in trailing', () => {
+    const result = bucketBySentinel({
+      lines: ['a', 'b', 'c'],
+      startSeq: 0,
+      boundaries: [{ index: 0, seq: 1 }],
+      executedCount: 1,
+    });
+    expect(result.buckets).toEqual([['a']]);
+    expect(result.trailing).toEqual(['b', 'c']);
+  });
+
+  it('puts everything in trailing and leaves buckets empty when no sentinel arrived', () => {
+    // The drain-timeout shape: the response came back but stderr never carried
+    // a boundary, so nothing can be attributed to a specific action.
+    const result = bucketBySentinel({
+      lines: ['a', 'b'],
+      startSeq: 0,
+      boundaries: [],
+      executedCount: 2,
+    });
+    expect(result.buckets).toEqual([[], []]);
+    expect(result.trailing).toEqual(['a', 'b']);
+  });
+
+  it('honours a non-zero startSeq (window after a ring trim)', () => {
+    const result = bucketBySentinel({
+      lines: ['a', 'b', 'c'],
+      startSeq: 10,
+      boundaries: [
+        { index: 0, seq: 11 },
+        { index: 1, seq: 13 },
+      ],
+      executedCount: 2,
+    });
+    expect(result.buckets).toEqual([['a'], ['b', 'c']]);
+    expect(result.trailing).toEqual([]);
+  });
+
+  it('leaves a bucket empty when its sentinel never arrived and still places the later ones', () => {
+    const result = bucketBySentinel({
+      lines: ['e0', 'e1', 'e2'],
+      startSeq: 0,
+      boundaries: [
+        { index: 0, seq: 1 },
+        { index: 2, seq: 3 },
+      ],
+      executedCount: 3,
+    });
+    expect(result.buckets[0]).toEqual(['e0']);
+    expect(result.buckets[1]).toEqual([]);
+    expect(result.buckets[2]).toEqual(['e1', 'e2']);
+    expect(result.trailing).toEqual([]);
+  });
+
+  it('ignores a boundary index outside the executed range', () => {
+    const result = bucketBySentinel({
+      lines: ['a', 'b'],
+      startSeq: 0,
+      boundaries: [{ index: 7, seq: 1 }],
+      executedCount: 2,
+    });
+    expect(result.buckets).toEqual([[], []]);
+    expect(result.trailing).toEqual(['a', 'b']);
   });
 });

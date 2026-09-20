@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import type { GodotProcess } from '../../src/utils/godot-runner.js';
+import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
 
 function makeFakeProcess(opts: { errors?: string[]; totalErrorsWritten?: number }): GodotProcess {
   const errors = opts.errors ?? [];
@@ -120,5 +121,107 @@ describe('GodotRunner.getErrorsSince', () => {
       totalErrorsWritten: 5,
     });
     expect(runner.getErrorsSince(0)).toEqual(['e1', 'e2', 'e3']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sentinel-aware stderr ingestion and per-action error attribution
+// ---------------------------------------------------------------------------
+
+describe('GodotRunner.ingestStderrChunk', () => {
+  let runner: GodotRunner;
+  beforeEach(() => {
+    runner = new GodotRunner();
+  });
+
+  it('keeps sentinel lines out of proc.errors and counts only retained lines', () => {
+    // proc.errors is the single buffer behind get_debug_output AND
+    // stop_project's finalErrors, so keeping sentinels out of it here is what
+    // keeps both of those clean - no per-read filter exists or is needed.
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(
+      proc,
+      ['SCRIPT ERROR: boom', `${ACTION_BOUNDARY_SENTINEL} 0`, 'after'].join('\n'),
+    );
+    expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'after']);
+    expect(proc.totalErrorsWritten).toBe(2);
+    expect(proc.errors.some((line) => line.includes(ACTION_BOUNDARY_SENTINEL))).toBe(false);
+  });
+
+  it('records boundary marks whose seq is the retained-line count before each sentinel', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(
+      proc,
+      [
+        'a',
+        `${ACTION_BOUNDARY_SENTINEL} 0`,
+        'b',
+        'c',
+        `${ACTION_BOUNDARY_SENTINEL} 1`,
+        `${ACTION_BOUNDARY_SENTINEL} 2`,
+      ].join('\n'),
+    );
+    expect(proc.actionBoundaries).toEqual([
+      { index: 0, seq: 1 },
+      { index: 1, seq: 3 },
+      { index: 2, seq: 3 },
+    ]);
+    expect(proc.totalErrorsWritten).toBe(3);
+  });
+});
+
+describe('GodotRunner.collectActionErrors', () => {
+  const FAST_DRAIN_MS = 5;
+  let runner: GodotRunner;
+  beforeEach(() => {
+    runner = new GodotRunner();
+  });
+
+  it('buckets SCRIPT ERROR lines onto the right entry and drops non-matching lines', async () => {
+    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    const capture = runner.beginActionErrorCapture();
+    runner.ingestStderrChunk(
+      runner.activeProcess,
+      [
+        'plain log line',
+        `${ACTION_BOUNDARY_SENTINEL} 0`,
+        'SCRIPT ERROR: from action 1',
+        'noise',
+        `${ACTION_BOUNDARY_SENTINEL} 1`,
+      ].join('\n'),
+    );
+    const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
+    expect(collected.buckets).toEqual([[], ['SCRIPT ERROR: from action 1']]);
+    expect(collected.trailing).toEqual([]);
+    expect(collected.sentinelTimedOut).toBe(false);
+  });
+
+  it('reports sentinelTimedOut and attributes what is present when a sentinel never arrives', async () => {
+    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    const capture = runner.beginActionErrorCapture();
+    runner.ingestStderrChunk(
+      runner.activeProcess,
+      [
+        'SCRIPT ERROR: from action 0',
+        `${ACTION_BOUNDARY_SENTINEL} 0`,
+        'SCRIPT ERROR: after the last mark',
+      ].join('\n'),
+    );
+    const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
+    expect(collected.sentinelTimedOut).toBe(true);
+    expect(collected.buckets[0]).toEqual(['SCRIPT ERROR: from action 0']);
+    expect(collected.buckets[1]).toEqual([]);
+    expect(collected.trailing).toEqual(['SCRIPT ERROR: after the last mark']);
+  });
+
+  it('returns empty buckets immediately when there is no active process (attached mode)', async () => {
+    const capture = runner.beginActionErrorCapture();
+    const started = Date.now();
+    const collected = await runner.collectActionErrors(capture, 3);
+    expect(collected.buckets).toEqual([[], [], []]);
+    expect(collected.trailing).toEqual([]);
+    expect(collected.sentinelTimedOut).toBe(false);
+    // No wait at all: it must not burn the default drain timeout.
+    expect(Date.now() - started).toBeLessThan(100);
   });
 });
