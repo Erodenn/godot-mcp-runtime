@@ -1,6 +1,7 @@
 import { join, basename } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
+import { BRIDGE_PING_TIMEOUT_MS } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, projectGodotPath } from '../utils/path-validation.js';
@@ -29,7 +30,7 @@ export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use get_project_info. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
+      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use check_project. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -47,9 +48,9 @@ export const projectToolDefinitions = [
     },
   },
   {
-    name: 'get_project_info',
+    name: 'check_project',
     description:
-      'Get metadata about a Godot project: name, path, Godot version, and a structure summary (counts of scenes/scripts/assets/other). Omit projectPath to get just the Godot version (useful for capability checks). Returns: { name, path, godotVersion, structure } or { godotVersion } when projectPath is omitted. Errors if projectPath is set but lacks project.godot.',
+      'Get project metadata (name, path, Godot version, structure summary) plus an always-present runtime block reporting whether a runtime session is active, its bridge is responsive, and its process is alive. Omit projectPath for just the Godot version and runtime status. Use as the first call before driving a running project. Never errors on the runtime probe itself. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath is set but lacks project.godot.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -57,10 +58,40 @@ export const projectToolDefinitions = [
         projectPath: {
           type: 'string',
           description:
-            'Path to the Godot project directory (optional - omit to get Godot version only)',
+            'Path to the Godot project directory (optional - omit to get Godot version and runtime status only)',
         },
       },
       required: [],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        path: { type: 'string' },
+        godotVersion: { type: 'string' },
+        structure: {
+          type: 'object',
+          properties: {
+            scenes: { type: 'number' },
+            scripts: { type: 'number' },
+            assets: { type: 'number' },
+            other: { type: 'number' },
+          },
+        },
+        runtime: {
+          type: 'object',
+          properties: {
+            activeSession: { type: 'boolean' },
+            sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+            projectPath: { type: 'string' },
+            processExited: { type: 'boolean' },
+            bridgeResponsive: { type: 'boolean' },
+            diagnostics: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['activeSession'],
+        },
+      },
+      required: ['godotVersion', 'runtime'],
     },
   },
   {
@@ -517,7 +548,67 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
   }
 }
 
-export async function handleGetProjectInfo(
+/**
+ * Build the always-present `runtime` block for check_project. Mirrors the
+ * `ensureRuntimeSession` liveness rule from runtime-tools.ts: a spawned
+ * session whose process has exited is not an active session. The bridge
+ * ping only runs when a session is nominally active, so the no-session path
+ * costs nothing extra and a failed/timed-out ping never turns the call into
+ * an error - it only downgrades bridgeResponsive and adds a diagnostic.
+ */
+async function buildRuntimeReport(runner: GodotRunner): Promise<Record<string, unknown>> {
+  const nominalSession = Boolean(runner.activeSessionMode && runner.activeProjectPath);
+  if (!nominalSession) {
+    return { activeSession: false };
+  }
+
+  const sessionMode = runner.activeSessionMode;
+  const processExited =
+    sessionMode === 'spawned' && (!runner.activeProcess || runner.activeProcess.hasExited);
+
+  if (processExited) {
+    return {
+      activeSession: false,
+      sessionMode,
+      processExited: true,
+      diagnostics: [
+        'The spawned Godot process has exited; call stop_project, then run_project again',
+      ],
+    };
+  }
+
+  const runtime: Record<string, unknown> = {
+    activeSession: true,
+    sessionMode,
+    projectPath: runner.activeProjectPath,
+  };
+  const diagnostics: string[] = [];
+
+  try {
+    // ping is exempt from the attached-mode disconnect probe (see
+    // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
+    // ping here reports bridgeResponsive:false without ending the session.
+    const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+    let parsed: { status?: string } | undefined;
+    try {
+      parsed = JSON.parse(response) as { status?: string };
+    } catch {
+      diagnostics.push('Bridge returned a non-JSON ping response');
+    }
+    runtime.bridgeResponsive = parsed?.status === 'pong';
+    if (parsed && parsed.status !== 'pong') {
+      diagnostics.push('Bridge responded to ping with an unexpected payload');
+    }
+  } catch (error: unknown) {
+    runtime.bridgeResponsive = false;
+    diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
+  }
+
+  if (diagnostics.length > 0) runtime.diagnostics = diagnostics;
+  return runtime;
+}
+
+export async function handleCheckProject(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
@@ -525,12 +616,11 @@ export async function handleGetProjectInfo(
 
   try {
     const version = await runner.getVersion();
+    const runtime = await buildRuntimeReport(runner);
 
-    // If no project path, return just the Godot version
+    // If no project path, return just the Godot version plus runtime status.
     if (!args.projectPath) {
-      return ok({
-        content: [{ type: 'text', text: JSON.stringify({ godotVersion: version }) }],
-      });
+      return createStructuredResponse({ godotVersion: version, runtime });
     }
 
     const parsed = parseProjectArgs(args);
@@ -551,22 +641,16 @@ export async function handleGetProjectInfo(
       logDebug(`Error reading project file: ${error}`);
     }
 
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            name: projectName,
-            path: parsed.value.projectPath,
-            godotVersion: version,
-            structure: projectStructure,
-          }),
-        },
-      ],
+    return createStructuredResponse({
+      name: projectName,
+      path: parsed.value.projectPath,
+      godotVersion: version,
+      structure: projectStructure,
+      runtime,
     });
   } catch (error: unknown) {
     return err(
-      createErrorResponse(`Failed to get project info: ${getErrorMessage(error)}`, [
+      createErrorResponse(`Failed to check project: ${getErrorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
       ]),

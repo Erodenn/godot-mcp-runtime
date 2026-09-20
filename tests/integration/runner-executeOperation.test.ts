@@ -17,7 +17,7 @@ import { unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
-import { handleGetProjectInfo } from '../../src/tools/project-tools.js';
+import { handleCheckProject } from '../../src/tools/project-tools.js';
 
 describe('GodotRunner.executeOperation', () => {
   let runner: GodotRunner;
@@ -74,11 +74,11 @@ describe('GodotRunner.executeOperation', () => {
     );
   });
 
-  describe('get_project_info handler', () => {
+  describe('check_project handler', () => {
     itGodot(
       'returns the project name and godotVersion from the fixture project',
       async () => {
-        const result = await handleGetProjectInfo(runner, { projectPath: fixtureProjectPath });
+        const result = await handleCheckProject(runner, { projectPath: fixtureProjectPath });
 
         expect(result).not.toHaveProperty('isError');
         const text = unwrap(result).content[0]?.text;
@@ -89,6 +89,9 @@ describe('GodotRunner.executeOperation', () => {
         expect(info).toHaveProperty('path', fixtureProjectPath);
         expect(info).toHaveProperty('godotVersion');
         expect(typeof info.godotVersion).toBe('string');
+        // No run_project/attach_project was called against this runner, so
+        // the always-present runtime block reports no active session.
+        expect(info.runtime).toEqual({ activeSession: false });
       },
       40000,
     );

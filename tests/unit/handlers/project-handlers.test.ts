@@ -6,7 +6,7 @@ import {
   handleSearchProject,
   handleGetSceneDependencies,
   handleGetProjectSettings,
-  handleGetProjectInfo,
+  handleCheckProject,
   handleListProjects,
 } from '../../../src/tools/project-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
@@ -316,23 +316,29 @@ describe('handleGetProjectSettings', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleGetProjectInfo
+// handleCheckProject
 // ---------------------------------------------------------------------------
 
-describe('handleGetProjectInfo', () => {
-  it('returns version-only payload when no projectPath is provided', async () => {
+describe('handleCheckProject', () => {
+  it('returns version-only payload plus an inactive runtime block when no projectPath is provided', async () => {
     const fake = createFakeRunner({ godotVersion: '4.4.1.stable.official' });
-    const result = await handleGetProjectInfo(fake.asRunner, {});
+    const result = await handleCheckProject(fake.asRunner, {});
     expect(hasError(result)).toBe(false);
-    const parsed = parseText<{ godotVersion: string; name?: string; structure?: unknown }>(result);
+    const parsed = parseText<{
+      godotVersion: string;
+      name?: string;
+      structure?: unknown;
+      runtime: { activeSession: boolean };
+    }>(result);
     expect(parsed.godotVersion).toBe('4.4.1.stable.official');
     expect(parsed.name).toBeUndefined();
     expect(parsed.structure).toBeUndefined();
+    expect(parsed.runtime).toEqual({ activeSession: false });
   });
 
   it('reads config/name from project.godot and reports it as the project name', async () => {
     const fake = createFakeRunner({ godotVersion: '4.4.stable' });
-    const result = await handleGetProjectInfo(fake.asRunner, {
+    const result = await handleCheckProject(fake.asRunner, {
       projectPath: fixtureProjectPath,
     });
     expect(hasError(result)).toBe(false);
@@ -341,6 +347,7 @@ describe('handleGetProjectInfo', () => {
       path: string;
       godotVersion: string;
       structure: { scenes: number; scripts: number; assets: number; other: number };
+      runtime: { activeSession: boolean };
     }>(result);
     expect(parsed.name).toBe('godot-mcp-runtime test fixture');
     expect(parsed.path).toBe(fixtureProjectPath);
@@ -349,12 +356,14 @@ describe('handleGetProjectInfo', () => {
     expect(parsed.structure.scenes).toBeGreaterThanOrEqual(1);
     expect(parsed.structure.scripts).toBeGreaterThanOrEqual(1);
     expect(parsed.structure.assets).toBeGreaterThanOrEqual(1);
+    // No runtime session was set on the fake runner.
+    expect(parsed.runtime).toEqual({ activeSession: false });
   });
 
   it('falls back to basename(projectPath) when project.godot has no config/name', async () => {
     const dir = tmp.makeProject('no-name-', 'config_version=5\n');
     const fake = createFakeRunner({ godotVersion: '4.3.stable' });
-    const result = await handleGetProjectInfo(fake.asRunner, { projectPath: dir });
+    const result = await handleCheckProject(fake.asRunner, { projectPath: dir });
     expect(hasError(result)).toBe(false);
     const parsed = parseText<{ name: string }>(result);
     expect(parsed.name).toBe(dir.split(sep).pop());
@@ -363,7 +372,7 @@ describe('handleGetProjectInfo', () => {
   it('rejects an invalid projectPath', async () => {
     const fake = createFakeRunner({ godotVersion: '4.3.stable' });
     expectErrorMatching(
-      await handleGetProjectInfo(fake.asRunner, { projectPath: '../escape' }),
+      await handleCheckProject(fake.asRunner, { projectPath: '../escape' }),
       /invalid project path/i,
     );
   });

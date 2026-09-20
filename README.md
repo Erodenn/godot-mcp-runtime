@@ -204,7 +204,7 @@ The three security-gate flags below share one axis (see [`docs/security.md`](doc
 
 ### Verify
 
-Ask your AI assistant to call `get_project_info`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
+Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
 ## Docs
 

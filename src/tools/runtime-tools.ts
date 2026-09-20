@@ -368,30 +368,6 @@ export const runtimeToolDefinitions = [
     },
   },
   {
-    name: 'check_health',
-    description:
-      'Check runtime health in one call: is a session active, is the bridge responsive, is the process alive, and what engine version is in use. Use as the first step before interacting with a running project (replaces ad-hoc get_project_info probes). Never errors, always returns a structured report so agents can branch on it. Returns: { healthy, active_session, session_mode, process_exited, bridge_responsive, engine_version, diagnostics, suggestions }.',
-    annotations: { readOnlyHint: true },
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-    outputSchema: {
-      type: 'object',
-      properties: {
-        healthy: { type: 'boolean' },
-        active_session: { type: 'boolean' },
-        session_mode: { type: 'string' },
-        process_exited: { type: 'boolean' },
-        bridge_responsive: { type: 'boolean' },
-        engine_version: { type: 'string' },
-        diagnostics: { type: 'array', items: { type: 'string' } },
-        suggestions: { type: 'array', items: { type: 'string' } },
-      },
-    },
-  },
-  {
     name: 'get_ui_elements',
     description:
       'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
@@ -1594,78 +1570,6 @@ export async function handleSimulateInput(
       ]),
     );
   }
-}
-
-export async function handleCheckHealth(
-  runner: GodotRunner,
-  _args: OperationParams,
-): Promise<HandlerResult> {
-  const diagnostics: string[] = [];
-  const suggestions: string[] = [];
-
-  const nominalSession = Boolean(runner.activeSessionMode && runner.activeProjectPath);
-  const sessionMode = runner.activeSessionMode ?? null;
-  const processExited =
-    runner.activeSessionMode === 'spawned' &&
-    (!runner.activeProcess || runner.activeProcess.hasExited);
-  // Mirror ensureRuntimeSession: a spawned session whose process died is not
-  // a usable session.
-  const hasSession = nominalSession && !processExited;
-
-  let bridgeResponsive = false;
-  let engineVersion: string | null = null;
-
-  // Engine version is session-independent, always try it.
-  try {
-    engineVersion = await runner.getVersion();
-  } catch {
-    diagnostics.push('Could not determine engine version (GODOT_PATH unreachable)');
-  }
-
-  if (!hasSession) {
-    diagnostics.push('No active runtime session');
-    suggestions.push(
-      'Use run_project to start a Godot project, or attach_project for a running one',
-    );
-    if (processExited) {
-      diagnostics.push('The spawned Godot process has exited');
-      suggestions.push('Call stop_project to clean up, then run_project again');
-    }
-  } else {
-    // Probe the bridge with ping, never throws past this point.
-    try {
-      const { response } = await runner.sendCommandWithErrors('ping', {});
-      const parsed = parseBridgeJson<{ status?: string }>(response, 'ping');
-      if (parsed.ok && parsed.value.status === 'pong') {
-        bridgeResponsive = true;
-      } else {
-        diagnostics.push('Bridge responded to ping with an unexpected payload');
-      }
-    } catch (error: unknown) {
-      diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
-      suggestions.push('The bridge may not have loaded, try stop_project then run_project');
-      if (sessionMode === 'attached') {
-        suggestions.push(
-          'Verify the Godot process is still running and was launched with the bridge',
-        );
-      }
-    }
-  }
-
-  const healthy = hasSession && !processExited && bridgeResponsive;
-
-  const result: Record<string, unknown> = {
-    healthy,
-    active_session: hasSession,
-    bridge_responsive: bridgeResponsive,
-    engine_version: engineVersion ?? 'unknown',
-    diagnostics,
-  };
-  if (sessionMode) result.session_mode = sessionMode;
-  if (runner.activeSessionMode === 'spawned') result.process_exited = processExited;
-  if (suggestions.length > 0) result.suggestions = suggestions;
-
-  return createStructuredResponse(result);
 }
 
 export async function handleGetUiElements(

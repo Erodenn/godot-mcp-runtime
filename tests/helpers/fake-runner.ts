@@ -9,7 +9,7 @@
  * Build a FakeRunner with `createFakeRunner({ stdout, stderr })` for the
  * happy path, or `createFakeRunner({ throws: new Error(...) })` to exercise
  * the catch branch. Pass `godotVersion` to control what `getVersion()`
- * returns for handlers that read it (e.g. handleGetProjectInfo). Pass
+ * returns for handlers that read it (e.g. handleCheckProject). Pass
  * `importThrows` to make `importAssets()` reject, for tests of the
  * cold-import retry's failure path in `executeSceneOp`.
  *
