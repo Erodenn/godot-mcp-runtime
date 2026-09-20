@@ -3,6 +3,7 @@ import { resolve, sep } from 'path';
 import {
   normalizeParameters,
   convertCamelToSnakeCase,
+  OPAQUE_VALUE_KEYS,
 } from '../../src/utils/parameter-conversion.js';
 import {
   validatePath,
@@ -46,6 +47,36 @@ describe('normalizeParameters', () => {
   it('returns non-objects as-is', () => {
     expect(normalizeParameters(null as never)).toBe(null);
     expect(normalizeParameters('x' as never)).toBe('x');
+  });
+
+  it('does not rename mapping keys inside a properties dict', () => {
+    const input = {
+      project_path: '/p',
+      properties: { scene_path: 'data.tscn', node_path: 'root/X' },
+    };
+    expect(normalizeParameters(input)).toEqual({
+      projectPath: '/p',
+      properties: { scene_path: 'data.tscn', node_path: 'root/X' },
+    });
+  });
+
+  it('does not rename mapping keys inside a value', () => {
+    const input = {
+      project_path: '/p',
+      value: { scene_path: 'data.tscn', node_path: 'root/X' },
+    };
+    expect(normalizeParameters(input)).toEqual({
+      projectPath: '/p',
+      value: { scene_path: 'data.tscn', node_path: 'root/X' },
+    });
+  });
+
+  it('round-trips a properties dict with mixed key styles unchanged', () => {
+    const input = {
+      project_path: '/p',
+      properties: { scene_path: 's', glowAmount: 1, 'metadata/myKey': 2 },
+    };
+    expect(convertCamelToSnakeCase(normalizeParameters(input))).toEqual(input);
   });
 });
 
@@ -131,6 +162,77 @@ describe('convertCamelToSnakeCase', () => {
     expect(convertCamelToSnakeCase({ meshItemNames: ['a', 'b'] })).toEqual({
       mesh_item_names: ['a', 'b'],
     });
+  });
+
+  it('leaves camelCase keys inside a properties dict untouched', () => {
+    const input = {
+      nodeType: 'Sprite2D',
+      properties: { 'shader_parameter/glowAmount': 2.5, myExportedVar: 1 },
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual({
+      node_type: 'Sprite2D',
+      properties: { 'shader_parameter/glowAmount': 2.5, myExportedVar: 1 },
+    });
+  });
+
+  it('leaves camelCase keys inside an update value untouched', () => {
+    const input = {
+      updates: [
+        {
+          nodePath: 'root/A',
+          property: 'material',
+          value: { type: 'ShaderMaterial', 'shader_parameter/glowAmount': 1 },
+        },
+      ],
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual({
+      updates: [
+        {
+          node_path: 'root/A',
+          property: 'material',
+          value: { type: 'ShaderMaterial', 'shader_parameter/glowAmount': 1 },
+        },
+      ],
+    });
+  });
+
+  it('does not recurse into a nested typed dict under properties', () => {
+    const input = {
+      properties: {
+        material: {
+          type: 'ShaderMaterial',
+          next_pass: { type: 'ShaderMaterial', 'shader_parameter/innerGlow': 1 },
+        },
+      },
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual(input);
+  });
+
+  it('still converts structural keys in a batch operations item alongside an opaque properties dict', () => {
+    const input = {
+      operations: [
+        {
+          nodeName: 'A',
+          parentNodePath: '.',
+          texturePath: 'res://a.png',
+          properties: { camelKey: 1 },
+        },
+      ],
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual({
+      operations: [
+        {
+          node_name: 'A',
+          parent_node_path: '.',
+          texture_path: 'res://a.png',
+          properties: { camelKey: 1 },
+        },
+      ],
+    });
+  });
+
+  it('exposes OPAQUE_VALUE_KEYS as exactly properties and value', () => {
+    expect(OPAQUE_VALUE_KEYS).toEqual(new Set(['properties', 'value']));
   });
 });
 

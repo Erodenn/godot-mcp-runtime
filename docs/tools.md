@@ -225,6 +225,10 @@ Construction errors are explicit and nothing is persisted when one fires:
 - an inner property does not exist on the constructed class, or its value fails the type check (the error names the inner property)
 - a slash-suffixed key does not resolve on the instance: for `shader_parameter/<name>`, either no shader was assigned before it, the assigned shader does not declare `<name>` as a uniform, or the assigned shader failed to compile (reported as such, distinct from the other two)
 
+#### Key names are preserved verbatim
+
+Property names, `metadata/<key>` entries, script-exported variable names, and `shader_parameter/<uniform>` names are passed to Godot exactly as written, including camelCase (`shader_parameter/glowAmount`). The snake_case/camelCase translation applies to tool parameter names only, never to keys inside `properties` or inside an update's `value`.
+
 ## Project Config (no Godot process required)
 
 These tools edit `project.godot` directly or read the filesystem. Safe to use even when autoloads are broken.

@@ -1,6 +1,7 @@
 import type { OperationParams } from '../mcp.types.js';
 
-// Parameter mappings between snake_case and camelCase
+// Parameter mappings between snake_case and camelCase. Covers schema keys
+// only — keys under OPAQUE_VALUE_KEYS never reach this table.
 // Add new entries whenever a tool surfaces a new compound parameter — the
 // strict converter throws in test env on unmapped keys to catch oversights.
 const parameterMappings = {
@@ -36,6 +37,22 @@ const parameterMappings = {
   has_property: 'hasProperty', // nested in validate checks[].schema; flows through strict converter
 } as const satisfies Record<string, string>;
 
+/**
+ * Keys whose VALUES are user-authored data, never schema. Both converters copy
+ * the value through untouched instead of recursing: a script-exported variable,
+ * a `metadata/<key>`, or a shader uniform (`shader_parameter/glowAmount`) is an
+ * identifier the user chose, and rewriting its case corrupts it. The keys
+ * themselves are still converted like any other key.
+ *
+ * `properties` - add_node property dict (standalone and batch).
+ * `value`      - set_node_properties update value (standalone and batch).
+ *
+ * Neither name is ever a structural key in the params a handler builds, so the
+ * match is safe position-independently. Adding a name here is a contract change:
+ * everything under it stops being case-converted in both directions.
+ */
+export const OPAQUE_VALUE_KEYS: ReadonlySet<string> = new Set(['properties', 'value']);
+
 type ForwardMap = typeof parameterMappings;
 type ReverseParameterMappings = { [K in keyof ForwardMap as ForwardMap[K]]: K & string };
 
@@ -64,7 +81,9 @@ export function normalizeParameters(params: OperationParams): OperationParams {
       }
 
       const value = params[key];
-      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      if (OPAQUE_VALUE_KEYS.has(key)) {
+        result[normalizedKey] = value;
+      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
         result[normalizedKey] = normalizeParameters(value as OperationParams);
       } else {
         result[normalizedKey] = value;
@@ -108,7 +127,9 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
       } else {
         snakeKey = key;
       }
-      result[snakeKey] = convertCamelToSnakeValue(params[key]) as OperationParams[string];
+      result[snakeKey] = (
+        OPAQUE_VALUE_KEYS.has(key) ? params[key] : convertCamelToSnakeValue(params[key])
+      ) as OperationParams[string];
     }
   }
 

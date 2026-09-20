@@ -77,7 +77,7 @@ When a tool is too complex to cover in the top-level description budget (~500 ch
 
 The `batch_` prefix is **not** a naming convention - it's the symptom of a missed consolidation (see §5). If you're tempted to add `batch_foo`, reconsider whether `foos` should take an array.
 
-Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/parameter-conversion.ts` bridge them.
+Use snake_case for tool names and the GDScript boundary; camelCase inside TypeScript. The `normalizeParameters` / `convertCamelToSnakeCase` helpers in `src/utils/parameter-conversion.ts` bridge them. Keys under `properties` and `value` are opaque and are never converted.
 
 ### Implementation helpers
 
