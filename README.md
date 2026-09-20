@@ -48,7 +48,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 **Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
 - **Screenshots:** Capture the viewport — by default returns a 960x540 preview inline plus the full PNG on disk; use `responseMode: 'full'` for pixel-perfect or `'path_only'` to skip the inline image
-- **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, and timed waits
+- **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
 - **Function profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages
