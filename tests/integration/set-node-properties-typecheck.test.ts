@@ -86,7 +86,7 @@ describe('set_node_properties type validation (silent-success gap)', () => {
       );
 
       // Attempt to set the `shape` property (Shape2D, a Resource) to a bare
-      // dictionary — the classic silent-drop case from agent-driven builds.
+      // dictionary: the classic silent-drop case from agent-driven builds.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -655,7 +655,7 @@ describe('packed-array element coercion', () => {
       const parsed = JSON.parse(extractJson(stdout));
       expect(parsed.results[0].success).toBe(true);
 
-      // Read back via get_node_properties — the zeroed-array tell.
+      // Read back via get_node_properties: the zeroed-array tell.
       // The read path stringifies Vector arrays ("[(10.0, 20.0), ...]"),
       // so assert on the serialized form.
       const { stdout: rb } = await runner.executeOperation(
@@ -860,7 +860,7 @@ describe('packed-array element coercion', () => {
         30000,
       );
 
-      // String elements cannot become Vector2s — must be an explicit
+      // String elements cannot become Vector2s: must be an explicit
       // error, never a zero write with success:true.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
@@ -956,6 +956,8 @@ describe('packed-array element coercion', () => {
 const TYPED_ARRAY_SCRIPT = [
   'extends Node2D',
   '@export var points: Array[Vector2] = []',
+  '@export var quad: Vector4 = Vector4()',
+  '@export var quads: PackedVector4Array = PackedVector4Array()',
   '@export var cells: Array[Vector2i] = []',
   '@export var blocks: Array[Vector3i] = []',
   '@export var ratios: Array[float] = []',
@@ -1063,6 +1065,101 @@ describe('typed Array[T] element coercion', () => {
         30000,
       );
       expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+    },
+    60000,
+  );
+
+  itGodot(
+    'stores an {x,y,z,w} dict as a Vector4, not a Vector3 with w dropped',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'quad', value: { x: 1, y: 2, z: 3, w: 4 } }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/quad\s*=\s*Vector4\(1, 2, 3, 4\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'round-trips a PackedVector4Array from array-of-dicts',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: '.',
+              property: 'quads',
+              value: [
+                { x: 1, y: 2, z: 3, w: 4 },
+                { x: 5, y: 6, z: 7, w: 8 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/quads\s*=\s*PackedVector4Array\(1, 2, 3, 4, 5, 6, 7, 8\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'keeps {x,y,z} a Vector3 and a color dict a Color after the Vector4 case',
+    async () => {
+      // Ordering guard: every Vector4 dict is also a valid Vector3 dict, so the
+      // w branch has to be tested before the z branch and neither may capture
+      // the {r,g,b} form.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'Node3D', nodeName: 'Spatial', parentNodePath: '.' },
+        tmpProject,
+        30000,
+      );
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            { nodePath: 'Spatial', property: 'position', value: { x: 1, y: 2, z: 3 } },
+            { nodePath: 'Label', property: 'modulate', value: { r: 1, g: 0, b: 0, a: 1 } },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+      const results = JSON.parse(extractJson(stdout)).results;
+      expect(results[0].success).toBe(true);
+      expect(results[1].success).toBe(true);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      // A Node3D saves its position as the origin column of `transform`, not as `position`.
+      expect(sceneText).toMatch(
+        /transform\s*=\s*Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3\)/,
+      );
+      expect(sceneText).toMatch(/modulate\s*=\s*Color\(1, 0, 0, 1\)/);
     },
     60000,
   );

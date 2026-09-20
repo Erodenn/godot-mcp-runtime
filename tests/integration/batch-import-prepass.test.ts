@@ -3,7 +3,7 @@
  *
  * Regression shape: in batch_scene_operations, scenes load lazily in
  * operation order. Without the pre-pass, op 1 mutates scene A (auto-saves),
- * then op 2's scene B is cold — [IMPORT_NEEDED] fires, TS imports and
+ * then op 2's scene B is cold: [IMPORT_NEEDED] fires, TS imports and
  * re-runs the whole batch, and scene A's mutation is duplicated.
  *
  * With the pre-pass, every referenced scene is probed before any mutation
@@ -131,6 +131,72 @@ describe('batch cold-import pre-pass (integration)', () => {
       // And the warm scene's mutation landed exactly once on disk.
       const after = readFileSync(join(project, 'warm.tscn'), 'utf8');
       expect(after.match(/WarmChild/g)?.length).toBe(1);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'probes an asset that only a later add_node properties dict references',
+    async () => {
+      // Same shape as above, but the cold asset is reachable only through a
+      // property value: a res:// path nested inside an inline resource spec.
+      // Found lazily, its [IMPORT_NEEDED] fires after the first operation has
+      // already mutated and auto-saved, and the retry duplicates that mutation.
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
+
+      const assetsDir = join(project, 'assets');
+      mkdirSync(assetsDir, { recursive: true });
+      writeFileSync(join(assetsDir, 'test_texture.png'), minimalPng());
+      writeFileSync(join(project, 'placeholder.png'), minimalPng());
+      rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
+
+      // Both scenes are warm: nothing in either .tscn references the texture.
+      writeFileSync(join(project, 'warm.tscn'), sceneWithNode('Warm'));
+      writeFileSync(join(project, 'second.tscn'), sceneWithNode('Second'));
+      const before = readFileSync(join(project, 'warm.tscn'), 'utf8');
+
+      const operations = [
+        {
+          operation: 'add_node',
+          scenePath: 'warm.tscn',
+          nodeName: 'WarmChild',
+          nodeType: 'Node2D',
+        },
+        {
+          operation: 'add_node',
+          scenePath: 'second.tscn',
+          nodeName: 'Textured',
+          nodeType: 'Sprite2D',
+          properties: {
+            material: {
+              type: 'CanvasItemMaterial',
+            },
+            texture: 'res://assets/test_texture.png',
+          },
+        },
+      ];
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'batch_scene_operations',
+        { operations },
+        project,
+      );
+
+      expect(stderr).toContain('[IMPORT_NEEDED]');
+      expect(stderr).toContain('res://assets/test_texture.png');
+      expect(stdout.trim()).toBe('');
+      // The decisive assertion: nothing was written before the refusal.
+      expect(readFileSync(join(project, 'warm.tscn'), 'utf8')).toBe(before);
+
+      await runner.importAssets(project);
+      const retry = await runner.executeOperation(
+        'batch_scene_operations',
+        { operations },
+        project,
+      );
+      expect(retry.stdout).toContain('"success":true');
+      expect(readFileSync(join(project, 'warm.tscn'), 'utf8').match(/WarmChild/g)?.length).toBe(1);
     },
     IMPORT_TEST_TIMEOUT_MS,
   );

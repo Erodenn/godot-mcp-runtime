@@ -1030,10 +1030,18 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 				# PackedScene restores every [connection] line with it, and
 				# connect_signal sets it for the same reason (see the note at its
 				# own connect() call). A connection the engine makes for itself
-				# while instantiating carries no such flag. That flag is the only
-				# reliable way to tell "someone wrote this and could have got it
-				# wrong" from "the engine wired its own internals", so a missing
-				# handler is only a user mistake on a persisted connection.
+				# while instantiating carries no such flag, so the flag tells
+				# "someone wrote this and could have got it wrong" apart from
+				# "the engine wired its own internals".
+				#
+				# SCOPE: it gates the missing-handler check below and nothing
+				# else. The target-not-in-scene and naming-convention checks run
+				# on every connection the walk sees. They are not gated because
+				# they have no engine-connection false positive to guard against:
+				# an engine-made callable reports false from has_method and takes
+				# the gated branch before either of them is reached. Gating them
+				# too on reasoning alone could only remove findings, and a lost
+				# finding is invisible.
 				var is_persisted := (int(conn.get("flags", 0)) & CONNECT_PERSIST) != 0
 
 				# Resolve the target path through _relative_path, which checks
@@ -1496,7 +1504,13 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 func _coerce_property_value(value):
 	if typeof(value) == TYPE_DICTIONARY:
 		if value.has("x") and value.has("y"):
+			# Widest form first: every Vector4 dict is also a valid Vector3 dict
+			# and a valid Vector2 dict, so testing w before z before neither is
+			# what keeps {x, y, z, w} from collapsing to Vector3 and dropping w.
+			# An {x, y, w} dict with no z is a Vector2; Vector4 needs all four.
 			if value.has("z"):
+				if value.has("w"):
+					return Vector4(value.x, value.y, value.z, value.w)
 				return Vector3(value.x, value.y, value.z)
 			else:
 				return Vector2(value.x, value.y)
@@ -1579,6 +1593,8 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_VECTOR2I: [TYPE_VECTOR2, TYPE_VECTOR2I],
 	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
 	TYPE_VECTOR3I: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR4: [TYPE_VECTOR4, TYPE_VECTOR4I],
+	TYPE_VECTOR4I: [TYPE_VECTOR4, TYPE_VECTOR4I],
 	TYPE_COLOR: [TYPE_COLOR],
 	TYPE_DICTIONARY: [TYPE_DICTIONARY],
 	TYPE_PACKED_BYTE_ARRAY: [TYPE_ARRAY, TYPE_PACKED_BYTE_ARRAY],
@@ -2044,6 +2060,24 @@ func validate_batch(params: Dictionary) -> void:
 		results.append(result)
 	print(JSON.stringify({"results": results}))
 
+# Recursively collect every res:// string inside a JSON-sourced property value.
+# A value can be a bare path, an inline resource spec that nests one ("shader"
+# on a ShaderMaterial, a texture on one of its uniforms), an array of either, or
+# a whole properties dict of them. Callers use this to probe assets before a
+# mutation rather than at assignment time. JSON cannot produce a cycle, so the
+# recursion is bounded by the parsed document.
+func _collect_res_paths(value, out: Array) -> void:
+	match typeof(value):
+		TYPE_STRING:
+			if (value as String).begins_with("res://"):
+				out.append(value)
+		TYPE_DICTIONARY:
+			for key in value:
+				_collect_res_paths(value[key], out)
+		TYPE_ARRAY:
+			for item in value:
+				_collect_res_paths(item, out)
+
 # Execute multiple scene operations in a single headless process
 # Scenes are loaded once and cached in memory; mutations accumulate until a save op
 func batch_scene_operations(params: Dictionary) -> void:
@@ -2052,9 +2086,10 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var scene_cache: Dictionary = {}
 
 	# Pre-pass: probe every referenced scene, plus every first-time asset
-	# reference (load_sprite's texture_path, and any res:// string inside a
-	# set_node_properties update), for the cold-import state and for missing
-	# files -- BEFORE any mutation is applied. Missing files are checked
+	# reference (load_sprite's texture_path, and every res:// string at any
+	# depth inside an add_node properties dict or a set_node_properties update
+	# value, inline resource specs included), for the cold-import state and for
+	# missing files -- BEFORE any mutation is applied. Missing files are checked
 	# first, across the whole batch: a batch that would otherwise import and
 	# then refuse mid-way is worse than refusing up front. The probe re-runs
 	# against the marker exit below, so the TS layer imports and re-runs the
@@ -2078,26 +2113,32 @@ func batch_scene_operations(params: Dictionary) -> void:
 				prepass_missing.append_array(probe.missing)
 				prepass_needs_import.append_array(probe.needs_import)
 
+		# Every JSON-sourced value an operation can assign, walked for res://
+		# strings at any depth. add_node's whole properties dict and the inline
+		# resource specs nested under a set_node_properties value both carry
+		# them, and a reference found only at assignment time would emit its
+		# [IMPORT_NEEDED] mid-batch, after earlier operations had already
+		# mutated and auto-saved.
 		var op_name = op.get("operation", "")
+		var value_roots: Array = []
 		if op_name == "load_sprite" and op.get("texture_path", "") != "":
-			var asset_path = normalize_scene_path(op.texture_path)
-			if not asset_path.is_empty() and asset_path not in seen_paths:
-				seen_paths[asset_path] = true
-				if _classify_dep_path(asset_path) == "needs_import":
-					prepass_needs_import.append(asset_path)
+			value_roots.append(op.texture_path)
+		elif op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
+			value_roots.append(op.properties)
 		elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
 			for update in op.updates:
-				if typeof(update) != TYPE_DICTIONARY or not update.has("value"):
-					continue
-				var raw_value = update.value
-				if typeof(raw_value) != TYPE_STRING or not raw_value.begins_with("res://"):
-					continue
-				var prop_path = normalize_scene_path(raw_value)
-				if prop_path.is_empty() or prop_path in seen_paths:
-					continue
-				seen_paths[prop_path] = true
-				if _classify_dep_path(prop_path) == "needs_import":
-					prepass_needs_import.append(prop_path)
+				if typeof(update) == TYPE_DICTIONARY and update.has("value"):
+					value_roots.append(update.value)
+		var res_paths: Array = []
+		for value_root in value_roots:
+			_collect_res_paths(value_root, res_paths)
+		for raw_path in res_paths:
+			var asset_path = normalize_scene_path(raw_path)
+			if asset_path.is_empty() or asset_path in seen_paths:
+				continue
+			seen_paths[asset_path] = true
+			if _classify_dep_path(asset_path) == "needs_import":
+				prepass_needs_import.append(asset_path)
 
 	if prepass_missing.size() > 0:
 		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(prepass_missing))
