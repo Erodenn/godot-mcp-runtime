@@ -9,7 +9,7 @@
  * nodePath subtree scope (issues outside the scope are not reported, and
  * handlers connected to targets outside the scope are not false orphans).
  *
- * Requires GODOT_PATH. Skipped in CI.
+ * Requires GODOT_PATH.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
@@ -260,6 +260,88 @@ describe('validate — signals checks', () => {
       expect(
         result.issues.find((i: { problem: string }) => i.problem === 'naming_convention'),
       ).toBeUndefined();
+    },
+    60000,
+  );
+
+  itGodot(
+    'reports method_missing_on_target for a misspelled private handler on a scripted node',
+    async () => {
+      // The handler is named without an _on_ prefix so it cannot register as an
+      // orphan: the misspelled connection below is then the only possible
+      // issue, and the whole issues array can be asserted.
+      mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(tmpProject, 'scripts', 'handlers.gd'),
+        'extends Label\n\n\nfunc handle_press() -> void:\n\ttext = "ok"\n',
+      );
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/Label', scriptPath: 'scripts/handlers.gd' },
+        tmpProject,
+        30000,
+      );
+      // connect_signal refuses a method the target lacks, so the misspelling
+      // is written straight into the .tscn - the state a hand-edited or
+      // code-generated scene ends up in.
+      const tscn = join(tmpProject, 'main.tscn');
+      writeFileSync(
+        tscn,
+        readFileSync(tscn, 'utf8') +
+          '\n[connection signal="ready" from="." to="Label" method="_hanlde_press"]\n',
+      );
+
+      const result = await verify(runner, tmpProject);
+      expect(result.verified).toBe(false);
+      expect(result.issues).toEqual([
+        {
+          check: 'signals',
+          node: 'root',
+          signal: 'ready',
+          target: 'root/Label',
+          method: '_hanlde_press',
+          problem: 'method_missing_on_target',
+          message: 'method_missing_on_target',
+        },
+      ]);
+    },
+    60000,
+  );
+
+  itGodot(
+    'reports no issues for a scripted node whose handlers are all wired',
+    async () => {
+      // False-positive guard for the predicate above: a scripted node with one
+      // declared, connected handler must produce an empty issues array. Any
+      // engine-internal connection that leaks through is printed by the
+      // whole-array comparison instead of being filtered away.
+      mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(tmpProject, 'scripts', 'all_wired.gd'),
+        'extends Label\n\n\nfunc _on_main_ready() -> void:\n\ttext = "ready"\n',
+      );
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/Label', scriptPath: 'scripts/all_wired.gd' },
+        tmpProject,
+        30000,
+      );
+      await runner.executeOperation(
+        'connect_signal',
+        {
+          scenePath: 'main.tscn',
+          nodePath: 'root',
+          signal: 'ready',
+          targetNodePath: 'root/Label',
+          method: '_on_main_ready',
+        },
+        tmpProject,
+        30000,
+      );
+
+      const result = await verify(runner, tmpProject);
+      expect(result.issues).toEqual([]);
+      expect(result.verified).toBe(true);
     },
     60000,
   );

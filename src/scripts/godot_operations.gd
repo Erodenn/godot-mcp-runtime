@@ -1021,6 +1021,15 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 				var callable: Callable = conn["callable"]
 				var target_object = callable.get_object()
 				var method = String(callable.get_method())
+				# CONNECT_PERSIST marks a connection authored in the scene file:
+				# PackedScene restores every [connection] line with it, and
+				# connect_signal sets it for the same reason (see the note at its
+				# own connect() call). A connection the engine makes for itself
+				# while instantiating carries no such flag. That flag is the only
+				# reliable way to tell "someone wrote this and could have got it
+				# wrong" from "the engine wired its own internals", so a missing
+				# handler is only a user mistake on a persisted connection.
+				var is_persisted := (int(conn.get("flags", 0)) & CONNECT_PERSIST) != 0
 
 				var target_str = "unknown"
 				if target_object == scene_root:
@@ -1040,8 +1049,9 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 					continue
 
 				# Issue 2: handler method does not exist on the target node
-				# Skip engine-internal methods (e.g. Label::_maximum_size_changed)
 				if not target_object.has_method(method):
+					if not is_persisted:
+						continue
 					if _is_engine_internal_connection(target_object, method):
 						continue
 					issues.append({
@@ -1129,20 +1139,27 @@ func _relative_path(scene_root: Node, node: Node) -> String:
 
 # A connection is engine-internal when its method resolves to no script
 # handler: engine code connects private slots (e.g. Label::_maximum_size_changed)
-# that are not visible to user scripts. Used both to skip false
-# method_missing_on_target issues and to keep internal connections from marking
-# a node as "wired" in orphaned-handler detection. The reported method name may
-# carry a "Class::" prefix; normalized before matching.
+# that are not visible to user scripts.
+#
+# Two callers, and the "::" branch below matters to the second one. The
+# method_missing_on_target check consults this only for persisted connections,
+# whose method name always comes from a [connection] line and is therefore
+# bare. Orphaned-handler detection consults it for every connection in the
+# scene, runtime ones included, to keep an internal connection from marking a
+# node as "wired" - that is where the prefixed form actually turns up.
 func _is_engine_internal_connection(target_object: Object, method: String) -> bool:
-	var m = method
-	var sep = m.rfind("::")
-	if sep != -1:
-		m = m.substr(sep + 2)
-	if _is_user_script_method(target_object, m):
-		return false
-	if target_object.has_method(m):
+	# A "Class::method" name (e.g. Label::_maximum_size_changed) is an engine
+	# callable bound to a private C++ slot. User connections, whether made in
+	# the editor, in a .tscn [connection] line, or through connect_signal,
+	# always report a bare method name, so the prefix alone settles it. This is
+	# the only place in the file that knows about the "::" form.
+	if method.contains("::"):
 		return true
-	return _is_engine_builtin_declared(target_object, m)
+	if _is_user_script_method(target_object, method):
+		return false
+	if target_object.has_method(method):
+		return true
+	return _is_engine_builtin_declared(target_object, method)
 
 # True when method is declared by the attached script (vs inherited engine class).
 func _is_user_script_method(target_object: Object, method: String) -> bool:
@@ -1154,17 +1171,23 @@ func _is_user_script_method(target_object: Object, method: String) -> bool:
 			return true
 	return false
 
-# True when method is an engine builtin even though has_method() reported false
-# (headless instances do not expose some private slots). Conservative: only
-# methods with the leading underscore typical of internal slots qualify. The
-# reported method name may carry a "Class::" prefix (e.g. Label::_changed),
-# so strip everything before the last "::" first.
+# True when a method that has_method() reported false is still a real method
+# of the target's engine class: ClassDB knows the whole declared surface,
+# including private slots and virtuals a headless instance does not expose.
+#
+# Nothing else earns a pass. A "_" prefix alone does not, which was the hole
+# that hid every typo in a private handler (_hanlde_press on a target that
+# does not define it), and neither does the absence of a script on the target:
+# a handler that exists in no script and in no engine class exists nowhere, so
+# the connection is broken whoever owns the node. Runtime connections made by
+# the engine are excluded by their caller instead, on CONNECT_PERSIST.
 func _is_engine_builtin_declared(target_object: Object, method: String) -> bool:
-	var m = method
-	var sep = m.rfind("::")
-	if sep != -1:
-		m = m.substr(sep + 2)
-	return m.begins_with("_") and not m.begins_with("_on_")
+	# A lambda Callable reports no method name, and an unnamed callable is not
+	# a missing handler.
+	if method.is_empty():
+		return true
+	var cls := target_object.get_class()
+	return ClassDB.class_exists(cls) and ClassDB.class_has_method(cls, method, false)
 
 # Extract user-defined method names from a node's attached script by parsing
 # the script source file. Returns an array of method names that are defined
