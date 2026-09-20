@@ -117,7 +117,7 @@ describe('handleValidate: structure checks', () => {
       {
         check: 'structure',
         path: 'root/CollisionShape2D',
-        message: 'Expected node of type CollisionShape2D at root/CollisionShape2D',
+        message: 'Expected node of type CollisionShape2D at root/CollisionShape2D, found Node2D',
       },
       {
         check: 'structure',
