@@ -22,11 +22,49 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `take_screenshot` | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
-| `simulate_input`  | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
+| `simulate_input`  | Send batched input and report what each action did: the Control it hit, the signals it fired, what changed on screen                    |
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
 | `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
+
+### `simulate_input`
+
+One call executes a batch of actions in order and returns one result entry per action, describing what the engine did rather than what was requested. Each action is injected, given one `process_frame` to settle, and only then read: `Input.parse_input_event` is buffered, so nothing has happened yet in the frame an event is submitted.
+
+**Action types.** `key`, `mouse_button`, `mouse_motion`, `click_element`, `action`, `text`, `wait`.
+
+**The press rule.** For `key`, `mouse_button` and `action`, omitting `pressed` taps: the input presses and releases itself inside the one action. `pressed: true` presses and holds across later actions in the batch and across later calls; `pressed: false` releases an earlier hold. This replaces the old behavior, where omitting `pressed` pressed without ever releasing and left the input stuck down.
+
+`hold_ms` replaces the default tap gap with a real-time hold, for game code that polls `is_action_pressed` over time. It applies to `key`, `mouse_button` and `action` only, and is rejected when `pressed` is set as well: a hold with an explicit press has no end to time. The default gap is one `process_frame` plus one `physics_frame` for `key` and `action` (so a `_physics_process` poll cannot miss the press) and zero gap for `mouse_button` and `click_element`, which is what a real click looks like.
+
+**`wait`** takes exactly one of `ms` (real time, for cooldowns and animations) or `frames` (deterministic engine process frames, for stepping game logic). Neither or both is a validation error. A `wait` injects nothing, so it adds no settle frame of its own and its reported `frame` is exactly the frames it waited. A `frames` wait is exact; an `ms` wait is a lower bound, resolving on the first frame at or past the requested wall-clock time, so `elapsed_ms` is never less than `ms` and may exceed it by up to a frame. Real time here means wall clock, not scaled engine time: a game that pauses the tree or drops `Engine.time_scale` to zero still sees the wait resolve.
+
+**`text`** types a string into whatever Control currently holds focus, expanded to one key press and release per character with the unicode codepoint set. It does not focus anything itself: click or focus the `LineEdit` first, or the action fails.
+
+**`watch`** is a top-level array, not a per-action field, and is sampled after every action in the batch. Each entry is a `NodePath:property` string, for example `"/root/Main/Player:position"`. Property subnames are allowed, so `"/root/Main/Player:position:x"` samples the scalar. Sampling is read-only and never fails a batch: an unresolvable node or property reports `null` for that key while the rest of the batch continues.
+
+**`results[]`.** Every entry carries `index`, `type`, `ok`, `frame` (process frames since the batch started) and `elapsed_ms`. A failing entry carries `error`. The rest are present only where they mean something:
+
+| Field      | On which types                                                                                        |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| `hit`      | `click_element`, `mouse_button` - path of the Control under the pointer after the settle frame        |
+| `signals`  | `click_element` - which of `pressed`, `toggled`, `item_selected`, `text_submitted` the target emitted |
+| `focus`    | `key`, `text` - path of the focus owner after the action                                              |
+| `value`    | `text` - resulting text of the focused `LineEdit` or `TextEdit`                                       |
+| `pressed`  | `action` - whether the input action is still held after this entry                                    |
+| `position` | `mouse_motion` - the resulting mouse position                                                         |
+| `errors`   | any action whose handlers raised a GDScript runtime error                                             |
+
+**`changes`** is the delta in visible Control nodes across the action, over the same walk `get_ui_elements` uses, with `appeared`, `disappeared`, `changed` (text and disabled state), plus `scene` and `focus` when those moved. `appeared` and `disappeared` collapse subtrees: an overlay opening reports the overlay's path once, not every Control beneath it. Each list is capped, and `truncated` counts how many entries were dropped when it was.
+
+**`still_held`** lists what this batch pressed and did not release, as `"key:W"`, `"action:jump"` or `"mouse_button:left"`. It is absent when the batch holds nothing. Nothing is auto-released at the end of a batch, so a held input stays held until a later action or call releases it.
+
+**Failure handling.** An invalid batch is rejected whole, before anything is injected, with an error response naming the offending action index. A runtime failure part-way through is different: the batch stops there, the remaining entries come back as `{index, type, skipped: true}`, `success` is `false`, and the response is still a normal success-shaped response carrying the partial timeline. Read `results[]` to see how far it got.
+
+`errors` is only available for sessions this server spawned with `run_project`. An `attach_project` session has no captured stderr, so handler errors cannot be attributed and the field is simply omitted.
+
+`hit` and the occlusion check behind it both read the viewport's hovered control, which older Godot 4.x builds do not expose. On those builds `hit` is omitted and an occluded click reports plain success, so treat `hit` as a bonus rather than a guarantee.
 
 ## Profiling (requires `run_project` with `profiling: true`)
 

@@ -11,7 +11,8 @@
  * the test is marked it.skip with a comment — do not remove the test, flag
  * it to the team lead instead.
  *
- * Requires GODOT_PATH. Skipped in CI.
+ * Requires GODOT_PATH; skipped only when it is unset. CI sets it in the
+ * dedicated `godot-integration` job, so these tests do run there.
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';

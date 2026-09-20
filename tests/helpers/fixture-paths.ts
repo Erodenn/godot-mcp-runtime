@@ -21,3 +21,9 @@ export const fixtureScenePath = 'main.tscn';
 
 /** Absolute path to the fixture's main.tscn. */
 export const fixtureSceneAbsPath = join(fixtureProjectPath, fixtureScenePath);
+
+/** Probe scene for the simulate_input integration tests (sibling of main.tscn). */
+export const inputProbeScenePath = 'input_probe.tscn';
+
+/** Absolute path to the fixture's input_probe.tscn. */
+export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePath);
