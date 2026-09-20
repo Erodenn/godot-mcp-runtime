@@ -654,6 +654,41 @@ describe('simulate_input observed results (live bridge)', () => {
   );
 
   itGodot(
+    'a wrongly typed per-action scalar is refused before anything is injected',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      // Every one of these is read straight into a typed event property or a
+      // numeric cast at injection time, where a wrong type raises mid-batch and
+      // the peer never gets a response.
+      const cases: Array<[Record<string, unknown>, RegExp]> = [
+        [{ type: 'mouse_motion', x: 'nope', y: 0 }, /x must be a number/],
+        [{ type: 'mouse_motion', x: 0, y: 0, relative_x: {} }, /relative_x must be a number/],
+        [{ type: 'action', action: 'probe_move', strength: 'full' }, /strength must be a number/],
+        [{ type: 'key', key: 'W', shift: 'yes' }, /shift must be a boolean/],
+        [{ type: 'key', key: 'W', unicode: [] }, /unicode must be a number/],
+      ];
+
+      for (const [bad, expected] of cases) {
+        const result = await simulateExpectingError({
+          actions: [{ type: 'wait', frames: 1 }, bad],
+        });
+        expect(result.ok, `${JSON.stringify(bad)} must be refused`).toBe(false);
+        const message = result.ok ? '' : (result.error.content[0]?.text ?? '');
+        expect(message).toMatch(expected);
+        // Whole-batch pre-validation: the index is named and the leading action
+        // never ran.
+        expect(message).toMatch(/action 1/);
+      }
+
+      // The session is untouched by a refusal, so a valid batch still runs.
+      const payload = await simulate({ actions: [{ type: 'wait', frames: 1 }] });
+      expect(payload.results).toHaveLength(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
     'a batch abandoned by a client timeout stops instead of marking a later window',
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());

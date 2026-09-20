@@ -50,6 +50,28 @@ const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_eleme
 # character and carries no "this control was activated" information.
 const OBSERVED_SIGNAL_ARITY := {"pressed": 0, "toggled": 1, "item_selected": 1, "text_submitted": 1}
 
+# Per-action scalar fields that are read straight into a typed event property or
+# a numeric cast at injection time (event.position, event.relative, event.unicode,
+# event.shift_pressed, the action strength). GDScript raises on a wrong type
+# there, mid-injection, which leaves the batch half-run and the peer waiting on a
+# response that never comes until the client's own timeout. Every one of them is
+# type-checked in whole-batch pre-validation instead, before anything is
+# injected. Values are the type name used in the error message; the check itself
+# is in _validate_action_fields.
+const ACTION_FIELD_NUMBER := "number"
+const ACTION_FIELD_BOOL := "boolean"
+const ACTION_SCALAR_FIELD_TYPES := {
+	"x": ACTION_FIELD_NUMBER,
+	"y": ACTION_FIELD_NUMBER,
+	"relative_x": ACTION_FIELD_NUMBER,
+	"relative_y": ACTION_FIELD_NUMBER,
+	"strength": ACTION_FIELD_NUMBER,
+	"unicode": ACTION_FIELD_NUMBER,
+	"shift": ACTION_FIELD_BOOL,
+	"ctrl": ACTION_FIELD_BOOL,
+	"alt": ACTION_FIELD_BOOL,
+}
+
 class PeerState:
 	extends RefCounted
 	var stream: StreamPeerTCP
@@ -421,6 +443,18 @@ func _validate_action_fields(index: int, type: String, action: Dictionary) -> St
 		var hold_ms := float(action.get("hold_ms"))
 		if hold_ms < 0.0 or hold_ms > float(MAX_HOLD_MS):
 			return "action %d (%s): hold_ms must be between 0 and %d" % [index, type, MAX_HOLD_MS]
+
+	# Type-only: a field is checked wherever it appears, not restricted to the
+	# action types that read it. Rejecting a harmlessly-ignored extra field would
+	# be a new refusal, while a wrong type is a raise waiting to happen.
+	for field in ACTION_SCALAR_FIELD_TYPES:
+		if not action.has(field):
+			continue
+		var expected: String = ACTION_SCALAR_FIELD_TYPES[field]
+		var value = action.get(field)
+		var field_ok := _is_number(value) if expected == ACTION_FIELD_NUMBER else typeof(value) == TYPE_BOOL
+		if not field_ok:
+			return "action %d (%s): %s must be a %s" % [index, type, field, expected]
 
 	match type:
 		"key":
