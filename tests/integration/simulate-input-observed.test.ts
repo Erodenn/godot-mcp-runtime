@@ -54,6 +54,14 @@ const TEST_TIMEOUT_MS = 60000;
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
 /** Enough stderr lines to cover a whole batch's worth of engine output. */
 const RECENT_ERROR_LINES = 200;
+/** Long enough that the batch is still parked when its client gives up. */
+const STALE_BATCH_WAIT_FRAMES = 180;
+/** Client patience for the batch above: it times out almost immediately. */
+const STALE_CLIENT_TIMEOUT_MS = 300;
+/** Comfortably past the point where the abandoned batch would have resumed. */
+const STALE_RESUME_MARGIN_MS = 8000;
+/** Drain window for the boundary poll; longer than the default for headroom. */
+const STALE_DRAIN_TIMEOUT_MS = 1000;
 
 type InputEntry = Record<string, unknown>;
 
@@ -640,6 +648,42 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(
         state?.gone,
         `the handler's queue_free must have landed; state=${JSON.stringify(state)}`,
+      ).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a batch abandoned by a client timeout stops instead of marking a later window',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      // Give the batch a wait far longer than the timeout the client allows it,
+      // so the command times out - which destroys the socket - while the batch
+      // is still parked inside the wait.
+      await expect(
+        runner.sendCommand(
+          'input',
+          {
+            actions: [
+              { type: 'wait', frames: STALE_BATCH_WAIT_FRAMES },
+              { type: 'key', key: 'W' },
+            ],
+          },
+          STALE_CLIENT_TIMEOUT_MS,
+        ),
+      ).rejects.toThrow(/timed out/);
+
+      // What the next simulate_input would do: open a fresh attribution window.
+      // A resumed stale batch prints its own MCP_ACTION_BOUNDARY marks, and the
+      // ingestion site cannot tell them from this window's own.
+      const capture = runner.beginActionErrorCapture();
+      await new Promise((resolve) => setTimeout(resolve, STALE_RESUME_MARGIN_MS));
+      const collected = await runner.collectActionErrors(capture, 1, STALE_DRAIN_TIMEOUT_MS);
+
+      expect(
+        collected.sentinelTimedOut,
+        'no action boundary may arrive from a batch whose client is gone',
       ).toBe(true);
     },
     TEST_TIMEOUT_MS,

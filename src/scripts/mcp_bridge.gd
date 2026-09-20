@@ -61,6 +61,14 @@ var tcp_server: TCPServer
 var session_token: String = ""
 var _peers: Array = []   # Array[PeerState]
 var _shutting_down: bool = false  # One-shot: set true in shutdown(); never reset (autoload is recreated on next session)
+# Monotonic id for input batches, and half of the batch cancellation token.
+# _handle_input parks on awaits that can outlive the client waiting on it: a
+# command that times out on the Node side destroys the socket, and the next
+# command arrives on a brand new peer. A parked coroutine that resumed anyway
+# would keep injecting into a game the client believes is idle, and would keep
+# printing ACTION_BOUNDARY_SENTINEL lines into the NEXT batch's attribution
+# window, where the Node side cannot tell them from that batch's own marks.
+var _input_batch_generation: int = 0
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -307,6 +315,8 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 		_send_response(peer, {"error": validation})
 		return
 
+	_input_batch_generation += 1
+	var generation := _input_batch_generation
 	var watch_list: Array = watch
 	var batch_start_frame := Engine.get_process_frames()
 	var batch_start_ms := Time.get_ticks_msec()
@@ -318,8 +328,16 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 
 	for i in actions.size():
 		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, held)
+		# Cancellation point. _run_action awaits at least one frame, and a wait
+		# action can park here for seconds, which is long enough for the client to
+		# give up and for a later batch to start. Checked BEFORE the sentinel
+		# print below: a mark emitted now would land in whatever attribution
+		# window is open, which is no longer this batch's.
+		if _input_batch_abandoned(peer, generation):
+			stopped = true
+			break
 		results.append(entry)
-		# The single sentinel site. It runs for every executed entry on every
+		# The single sentinel site. It runs for every reported entry on every
 		# path, success or failure, and always after that action's settle frame,
 		# so a handler's error lines precede it on stderr and the Node side can
 		# attribute them. printerr, never print: stdout and stderr are separate
@@ -329,8 +347,8 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 			stopped = true
 			break
 
-	# A runtime failure ends the batch: later actions depend on earlier ones, and
-	# continuing would inject into unknown state.
+	# A runtime failure or a cancellation ends the batch: later actions depend on
+	# earlier ones, and continuing would inject into unknown state.
 	if stopped:
 		for j in range(results.size(), actions.size()):
 			var skipped_type := ""
@@ -342,7 +360,23 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	var response := {"success": not stopped, "results": results}
 	if not held.is_empty():
 		response["still_held"] = held.keys()
+	# Reached on the cancelled path too, on purpose: _send_response skips the
+	# write when the peer is gone and clears peer.handling either way, which is
+	# what keeps the "every path reaches _send_response" invariant true without a
+	# finally block GDScript does not have.
 	_send_response(peer, response)
+
+# True when the batch that started at `generation` has nobody left to report to:
+# its peer went away (the client destroyed the socket after a timeout) or a newer
+# batch has started. Reads state only, so it is cheap enough to run between every
+# action. The peer's status is already refreshed by _poll_peer every frame, and a
+# batch only resumes on a frame boundary, so no extra poll() is needed here.
+func _input_batch_abandoned(peer: PeerState, generation: int) -> bool:
+	if generation != _input_batch_generation:
+		return true
+	if peer == null or peer.stream == null:
+		return true
+	return peer.stream.get_status() != StreamPeerTCP.STATUS_CONNECTED
 
 # Whole-batch validation. Returns "" when the batch may run, else a single flat
 # message naming the offending action index or watch entry. Watch and
