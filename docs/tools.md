@@ -289,9 +289,15 @@ Structural failures are returned in the `validate` output's `errors` array with 
 
 Walks every connection reachable from the scope (whole scene, or the subtree under `nodePath`) and reports one issue per problem found. Read-only. Issues appear in `errors` with `"check": "signals"` and `{ node, signal, target, method, problem }`; `node`, `target` are scene-root-relative paths. The problem codes:
 
-| Code                       | Meaning                                                                                                                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                                                                         |
-| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. Engine-internal connections (e.g. `Label::_maximum_size_changed`) are excluded. |
-| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                                                                             |
-| `orphaned_handler`         | A script-defined `_on_*` method on a node with no incoming connection pointing at it - dead code, or leftover after a disconnect.                                                        |
+| Code                       | Meaning                                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                         |
+| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. See the residual classes below. |
+| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                             |
+| `orphaned_handler`         | A script-defined `_on_*` method on a node with no incoming connection pointing at it - dead code, or leftover after a disconnect.        |
+
+What `method_missing_on_target` covers, stated precisely so a clean result is not read as proof:
+
+- **Reported:** a connection authored in the scene file (a `[connection]` line, which is what `connect_signal` writes) whose method is declared by neither the target's script chain nor the target's engine class. A private name is no exemption and neither is the absence of a script on the target: `_hanlde_press` is reported wherever it points, because a method that exists in no script and no engine class exists nowhere.
+- **Not reported (false negatives):** a typo that happens to collide with a method the target's engine class declares, and a handler wired only in code (`connect()` at runtime), which a headless check never sees connected in the first place.
+- **Excluded by design:** connections the engine makes for itself while instantiating the scene. Those are not persisted into the scene file, so they are skipped rather than guessed at. An unnamed callable such as a lambda also has no method name to check.
