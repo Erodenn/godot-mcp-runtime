@@ -541,9 +541,7 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 				for _n in frames:
 					await get_tree().process_frame
 			else:
-				var wait_ms := float(dict.get("ms"))
-				if wait_ms > 0.0:
-					await get_tree().create_timer(wait_ms / 1000.0).timeout
+				await _wait_wall_clock_ms(float(dict.get("ms")))
 
 	# One settle frame so the buffered events flush and their handlers run before
 	# anything is read. Unconditional for every injecting type, never skipped
@@ -627,20 +625,45 @@ func _update_held(held: Dictionary, key: String, pressed: bool) -> void:
 	else:
 		held.erase(key)
 
-# Tap hold. hold_ms wins when supplied. Otherwise key and action taps wait until
+# Tap hold. hold_ms wins when supplied and holds for at least that many
+# wall-clock milliseconds. Otherwise key and action taps wait until
 # one process frame AND one physics frame have both elapsed, because a render
 # frame at high fps can contain zero physics ticks and code polling
 # is_action_pressed in _physics_process would never see the press. Mouse taps
 # keep a zero gap, which is what a real click looks like.
 func _tap_hold(action: Dictionary, frame_gap: bool) -> void:
 	if action.has("hold_ms"):
-		var hold_ms := float(action.get("hold_ms"))
-		if hold_ms > 0.0:
-			await get_tree().create_timer(hold_ms / 1000.0).timeout
+		await _wait_wall_clock_ms(float(action.get("hold_ms")))
 		return
 	if frame_gap:
 		await get_tree().process_frame
 		await get_tree().physics_frame
+
+# Real-time pause of at least `requested_ms` wall-clock milliseconds, used by both
+# the wait action's ms form and hold_ms tap holds.
+#
+# A SceneTreeTimer is deliberately NOT used here. It counts down accumulated
+# process delta, which is not wall clock: frame-delta smoothing and clamping let
+# the accumulated total run ahead of Time.get_ticks_msec(), so the timer can fire
+# while less than the requested time has actually passed (observed: a 200 ms wait
+# reporting 194 ms). A timer is also scaled by Engine.time_scale, so at a time
+# scale of zero it never fires at all.
+#
+# Awaiting process_frame and comparing wall clock fixes both. process_frame is
+# emitted every main-loop iteration regardless of SceneTree.paused and regardless
+# of time_scale, and the comparison is against a monotonic clock nothing in the
+# game can slow, so the loop always terminates. Overshoot is at most one frame,
+# which the Node-side computed timeout already covers: computeInputTimeoutMs
+# charges every action a pessimistic settle frame, and a wait action spends none.
+func _wait_wall_clock_ms(requested_ms: float) -> void:
+	# Ceil, not truncate: elapsed_ms is whole milliseconds, so a fractional
+	# request has to clear the next whole millisecond to still read as >= itself.
+	var required_ms := int(ceil(requested_ms))
+	if required_ms <= 0:
+		return
+	var start_ms := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - start_ms < required_ms:
+		await get_tree().process_frame
 
 func _inject_key(action: Dictionary, pressed: bool) -> void:
 	var key_name := str(action.get("key", ""))
