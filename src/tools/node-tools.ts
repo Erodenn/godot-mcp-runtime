@@ -66,7 +66,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null to clear; a typed dict for a material may include shader_parameter/<uniform> keys (assigned after `shader`, so inline ShaderMaterial construction works). Full value rules: the Property Values section of docs/tools.md. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.",
+      'Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. {x,y} / {x,y,z} / {r,g,b,a} auto-convert to Vector2 / Vector3 / Color. Values are checked against the property\'s declared type and error instead of silently storing that type\'s zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a typed dict {type: ClassName, ...props} that constructs a Resource inline, or null to clear; a typed dict for a material may include shader_parameter/<uniform> keys (assigned after `shader`, so inline ShaderMaterial construction works). Packed*Array properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the packed element type errors with its index instead of silently storing zeros. Full value rules: the Property Values section of docs/tools.md. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -88,7 +88,10 @@ export const nodeToolDefinitions = [
                 description:
                   'GDScript property name in snake_case (e.g. "position", "modulate", "collision_layer")',
               },
-              value: { description: 'New property value' },
+              value: {
+                description:
+                  'New property value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. Packed*Array properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the packed element type errors with its index instead of silently storing zeros.',
+              },
             },
             required: ['nodePath', 'property', 'value'],
           },

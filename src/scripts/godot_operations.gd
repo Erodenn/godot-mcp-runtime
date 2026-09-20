@@ -1442,36 +1442,32 @@ func _coerce_property_value(value):
 # Element rules mirror what Godot's typed setters accept without zeroing
 # (e.g. ints for float arrays, Vector2i for Vector2 arrays); a bool or a
 # string on a Vector2 element, for example, is rejected up front.
+# The accepted set comes from _PACKED_ARRAY_ELEMENT_TYPE plus
+# _ELEMENT_TYPE_COMPAT rather than a local match, so the packed-type list
+# exists in exactly one place. A declared type or element type missing from
+# those tables fails CLOSED: accepting it unconditionally is what would
+# reinstate the silent zero-write for a packed type nobody wrote a rule for.
 func _prepare_packed_array_elements(property: String, node_class: String, declared: int, arr: Array) -> Dictionary:
+	var elem_type: int = _PACKED_ARRAY_ELEMENT_TYPE.get(declared, TYPE_NIL)
+	if elem_type == TYPE_NIL or not _ELEMENT_TYPE_COMPAT.has(elem_type):
+		return {
+			"ok": false,
+			"value": null,
+			"error": "Cannot set property '%s' on node of type '%s': element validation has no rule for %s, so the array was not assigned" % [
+				property, node_class, type_string(declared)],
+		}
+	var accepted: Array = _ELEMENT_TYPE_COMPAT[elem_type]
 	var out: Array = []
 	for i in range(arr.size()):
 		var element = _coerce_property_value(arr[i])
-		var ok := false
-		match declared:
-			TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY:
-				ok = typeof(element) in [TYPE_INT, TYPE_FLOAT, TYPE_BOOL]
-			TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY:
-				ok = typeof(element) in [TYPE_INT, TYPE_FLOAT, TYPE_BOOL]
-			TYPE_PACKED_STRING_ARRAY:
-				ok = typeof(element) in [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
-			TYPE_PACKED_VECTOR2_ARRAY:
-				ok = typeof(element) in [TYPE_VECTOR2, TYPE_VECTOR2I]
-			TYPE_PACKED_VECTOR3_ARRAY:
-				ok = typeof(element) in [TYPE_VECTOR3, TYPE_VECTOR3I]
-			TYPE_PACKED_COLOR_ARRAY:
-				ok = typeof(element) == TYPE_COLOR
-			TYPE_PACKED_VECTOR4_ARRAY:
-				ok = typeof(element) in [TYPE_VECTOR4, TYPE_VECTOR4I]
-			_:
-				ok = true
-		if not ok:
+		if not (typeof(element) in accepted):
 			return {
 				"ok": false,
 				"value": null,
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type of %s" % [
 					property, node_class, i, str(element), type_string(declared)],
 			}
-		out.push_back(element)
+		out.append(element)
 	return {"ok": true, "value": out, "error": ""}
 
 # Helper: find a property's full descriptor from get_property_list(), or null
@@ -1523,21 +1519,36 @@ const _PROPERTY_TYPE_COMPAT: Dictionary = {
 	TYPE_PACKED_VECTOR4_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR4_ARRAY],
 }
 
-# Packed-array declarations eligible for element-wise coercion in
-# _prepare_property_value (values are unused; the element rules live in
-# _prepare_packed_array_elements). Kept separate from _PROPERTY_TYPE_COMPAT
-# so scalar compat widening is unaffected.
-const _PACKED_ELEMENT_RULES: Dictionary = {
-	TYPE_PACKED_BYTE_ARRAY: true,
-	TYPE_PACKED_INT32_ARRAY: true,
-	TYPE_PACKED_INT64_ARRAY: true,
-	TYPE_PACKED_FLOAT32_ARRAY: true,
-	TYPE_PACKED_FLOAT64_ARRAY: true,
-	TYPE_PACKED_STRING_ARRAY: true,
-	TYPE_PACKED_VECTOR2_ARRAY: true,
-	TYPE_PACKED_VECTOR3_ARRAY: true,
-	TYPE_PACKED_COLOR_ARRAY: true,
-	TYPE_PACKED_VECTOR4_ARRAY: true,
+# Packed-array declared type -> the Variant type of one element. Membership in
+# this table is also the gate in _prepare_property_value: a declared type absent
+# from it skips element validation entirely.
+const _PACKED_ARRAY_ELEMENT_TYPE: Dictionary = {
+	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT32_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT64_ARRAY: TYPE_INT,
+	TYPE_PACKED_FLOAT32_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_FLOAT64_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_STRING_ARRAY: TYPE_STRING,
+	TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
+	TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
+	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
+	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
+}
+
+# Element Variant type -> raw element Variant types accepted for it. Mirrors the
+# scalar rows of _PROPERTY_TYPE_COMPAT above; kept as its own table so scalar
+# compat widening and element widening stay independently editable, and so the
+# typed-Array[T] path can share it. An element type reached from the packed path
+# that is absent from this table is an internal inconsistency and is REJECTED,
+# never accepted.
+const _ELEMENT_TYPE_COMPAT: Dictionary = {
+	TYPE_INT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
+	TYPE_FLOAT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
+	TYPE_STRING: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_VECTOR2: [TYPE_VECTOR2, TYPE_VECTOR2I],
+	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR4: [TYPE_VECTOR4, TYPE_VECTOR4I],
+	TYPE_COLOR: [TYPE_COLOR],
 }
 
 # Helper: enforce a property's PROPERTY_HINT_RESOURCE_TYPE class filter
@@ -1667,7 +1678,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 	# element to the zero value instead of failing. Coerce each element
 	# individually via _coerce_property_value and fail loudly on any
 	# element that cannot be represented.
-	if _PACKED_ELEMENT_RULES.has(declared) and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
+	if _PACKED_ARRAY_ELEMENT_TYPE.has(declared) and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
 		var element_prep = _prepare_packed_array_elements(property, node.get_class(), declared, coerced)
 		if not element_prep.ok:
 			return {"ok": false, "value": null, "error": element_prep.error}
