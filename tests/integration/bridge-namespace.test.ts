@@ -101,7 +101,7 @@ describe('bridge artifact namespace', () => {
       // 3. The importer-suppression marker stays at the .mcp/ level.
       expect(existsSync(join(mcpDir(tmpProject), '.gdignore'))).toBe(true);
 
-      // 4. No .uid sidecar anywhere — .gdignore keeps the importer out.
+      // 4. No .uid sidecar anywhere: .gdignore keeps the importer out.
       expect(findFilesNamed(tmpProject, 'mcp_bridge.gd.uid')).toEqual([]);
 
       // 5. The autoload actually loaded and is answering. waitForBridge

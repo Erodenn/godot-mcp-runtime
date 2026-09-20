@@ -3,7 +3,7 @@
  *
  * Tests that mutate disk state (writing project.godot, copying fixtures, etc.)
  * should create their dirs through this helper. Pair with `useTmpDirs()`
- * inside a `describe` block — the returned `track()` registers the dir for
+ * inside a `describe` block: the returned `track()` registers the dir for
  * `afterEach` cleanup so a failing test doesn't leak orphans into later runs.
  */
 

@@ -3,7 +3,7 @@
  *
  * End-to-end regression for a real-world failure class: run_script compile
  * failures returned only "Script compilation failed (error 43). Check
- * syntax." — the parser's
+ * syntax.": the parser's
  * actual message + line number sat on the engine process stderr. Agents
  * retried identical scripts and hunted get_debug_output for details.
  *
@@ -67,7 +67,7 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       await runProjectOrSkip(runner, ctx, tmpProject);
 
-      // Line 3 references an undeclared identifier — compile error 43 class.
+      // Line 3 references an undeclared identifier: compile error 43 class.
       const badScript =
         'extends RefCounted\n' +
         'func execute(scene_tree: SceneTree) -> Variant:\n' +

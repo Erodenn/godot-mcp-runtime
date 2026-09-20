@@ -2,7 +2,7 @@
  * Direct unit tests for executeSceneOp.
  *
  * Currently only covered transitively via the 15 scene/node mutation
- * handlers. A direct test localizes the failure when its contract drifts —
+ * handlers. A direct test localizes the failure when its contract drifts -
  * the empty-stdout branch and the catch branch are easy to break in a
  * refactor.
  */
@@ -381,7 +381,7 @@ describe('executeSceneOp cold-import retry', () => {
 
 // parseStdoutAsJson failure diagnosis: when a headless operation exits before
 // emitting its JSON payload (early quit(1) on error), stdout contains only
-// engine noise — RID-leak warnings are the canonical production shape (the
+// engine noise: RID-leak warnings are the canonical production shape (the
 // JSON-absent case). Blaming "GDScript returned invalid JSON" sends the
 // caller debugging the operation script instead of the actual failure; the
 // error must surface the offending stdout content and any stderr diagnostics.
@@ -497,8 +497,8 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
       { parseStdoutAsJson: true },
     );
     expectErrorMatching(result, /Identifier "Foo" not declared/);
-    // The continuation line carries the file+line — the single most useful
-    // part of a Godot diagnostic — and must survive into the error message.
+    // The continuation line carries the file+line: the single most useful
+    // part of a Godot diagnostic: and must survive into the error message.
     expectErrorMatching(result, /res:\/\/scripts\/bar\.gd/);
     expectErrorMatching(result, /:3/);
   });

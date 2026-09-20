@@ -5,7 +5,7 @@
  * `outputSchema` to return a matching `structuredContent` field on success.
  * The @modelcontextprotocol/sdk Client validator at
  * `node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js:500`
- * enforces this — strict clients (LM Studio, Open Code, AnythingLLM) reject
+ * enforces this: strict clients (LM Studio, Open Code, AnythingLLM) reject
  * responses that omit it.
  *
  * This test wires the real lower-level `Server` (matching production in

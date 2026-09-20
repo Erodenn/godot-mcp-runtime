@@ -1,11 +1,11 @@
 /**
- * Unit tests for parseScriptDiagnostics — the shared Godot stderr compiler-
+ * Unit tests for parseScriptDiagnostics: the shared Godot stderr compiler-
  * diagnostic parser.
  *
  * Context: GDScript compile
- * failures don't travel through the API call that triggers them — `load()`
+ * failures don't travel through the API call that triggers them: `load()`
  * returns a placeholder resource, `GDScript.reload()` returns a bare error
- * code (43) — the message and line live on stderr. Two consumers depend on
+ * code (43): the message and line live on stderr. Two consumers depend on
  * this parser:
  *
  *   - `validate` (headless): overlays stderr diagnostics onto the tool's
@@ -71,7 +71,7 @@ describe('parseScriptDiagnostics', () => {
     expect(result[0]?.line).toBe(7);
   });
 
-  it('handles runtime-compiled gdscript:// URIs — line but no filePath', () => {
+  it('handles runtime-compiled gdscript:// URIs: line but no filePath', () => {
     const stderr = [
       'SCRIPT ERROR: Parse Error: Identifier "some_missing_thing" not declared in the current scope.',
       '          at: GDScript::reload (gdscript://-9223372010447436344.gd:4)',

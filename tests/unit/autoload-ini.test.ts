@@ -2,7 +2,7 @@
  * Direct unit tests for the [autoload] INI primitives.
  *
  * Both autoload-tools.ts (CRUD handlers) and bridge-manager.ts (McpBridge
- * inject/cleanup) consume these — when the regex drifts, every consumer
+ * inject/cleanup) consume these: when the regex drifts, every consumer
  * silently breaks. Direct tests localize the failure to one function instead
  * of cascading through both call sites.
  */
@@ -155,7 +155,7 @@ describe('addAutoloadEntry', () => {
     expect(readProject(dir)).not.toContain('Plain="*');
   });
 
-  // The primitive itself is intentionally permissive about duplicates — handler
+  // The primitive itself is intentionally permissive about duplicates: handler
   // code (handleAddAutoload) guards via parseAutoloads first. This test pins
   // that contract so a future change to addAutoloadEntry that rejects duplicates
   // breaks loudly and prompts the reviewer to update both layers in lockstep.

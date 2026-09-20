@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'fs';
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = join(here, '..', 'fixtures', 'godot-project');
 
-describe('tests/fixtures/godot-project — fixture health', () => {
+describe('tests/fixtures/godot-project: fixture health', () => {
   it('project.godot exists', () => {
     expect(existsSync(join(fixturePath, 'project.godot'))).toBe(true);
   });

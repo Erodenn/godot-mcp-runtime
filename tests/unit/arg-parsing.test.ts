@@ -3,7 +3,7 @@
  *
  * These previously only had incidental coverage through handler tests, which
  * exercise the path-shaped parsers (parseProjectArgs/parseSceneArgs/parseNodePath
- * variants — covered in godot-runner-extended.test.ts) but not every generic
+ * variants: covered in godot-runner-extended.test.ts) but not every generic
  * primitive directly. One `ok` case, one wrong-type `err` case, and (for the
  * optionals) the `undefined -> ok(undefined)` case per helper.
  */

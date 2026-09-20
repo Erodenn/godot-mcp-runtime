@@ -32,7 +32,7 @@ describe('GodotRunner.executeOperation', () => {
     itGodot(
       'executeOperation returns valid:true for the committed fixture scene',
       async () => {
-        // Test executeOperation directly for the scene-validate path —
+        // Test executeOperation directly for the scene-validate path -
         // stdout JSON is the sole signal for scene files.
         const { stdout } = await runner.executeOperation(
           'validate_resource',
@@ -54,7 +54,7 @@ describe('GodotRunner.executeOperation', () => {
         // runs validate_resource, then merges stderr parse errors into the result.
         // Godot 4.x reports parse errors to stderr ("SCRIPT ERROR: Parse Error: ...").
         // Depending on whether load() returns non-null, `valid` may be true in some
-        // Godot versions — but the errors must always be surfaced in the errors array.
+        // Godot versions: but the errors must always be surfaced in the errors array.
         const result = await handleValidate(runner, {
           projectPath: fixtureProjectPath,
           source: 'extends Node\nfunc broken(\n  # unclosed paren\n',

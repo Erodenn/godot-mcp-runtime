@@ -4,7 +4,7 @@
  *
  * Context: `{"type": "ShaderMaterial", "shader": "res://x.gdshader",
  * "shader_parameter/name": value}` failed the inner-property existence
- * gate in `_construct_inline_resource` — shader_parameter/* are VIRTUAL
+ * gate in `_construct_inline_resource`: shader_parameter/* are VIRTUAL
  * properties that only exist on the instance after `shader` is assigned,
  * so `"prop" in instance` is false at check time even though `set()`
  * works and the persisted .tscn round-trips correctly (verified: pack()

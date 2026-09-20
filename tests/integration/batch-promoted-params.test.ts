@@ -2,10 +2,10 @@
  * Integration test: promoted spatial params in batch_scene_operations.
  *
  * Regression: batch add_node silently dropped top-level `position` (and the
- * other promoted spatial params — rotation, scale, visible, modulate).
+ * other promoted spatial params: rotation, scale, visible, modulate).
  * The standalone add_node handler merges those keys into `properties`
  * (handleAddNode), but the batch path forwards operations raw to the
- * GDScript layer, whose _apply_add_node only read `properties` — so
+ * GDScript layer, whose _apply_add_node only read `properties`: so
  * a batch like:
  *
  *   { operation: 'add_node', nodeType: 'StaticBody2D',

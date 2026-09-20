@@ -3,7 +3,7 @@
  *
  * Regression (observed in an agent-driven build session, 2026-09-11): an
  * operations[] item missing its `operation` key produced the bare error
- * "Unknown batch operation: " — empty operation name, no item index, no
+ * "Unknown batch operation: ": empty operation name, no item index, no
  * hint. The agent (which cannot see the GDScript source) then retried the
  * same malformed batch twice before noticing the missing key, burning
  * three tool calls on an error message with no diagnostic content.
@@ -14,10 +14,10 @@
  *
  * Reachability note: although the tool's JSON schema declares
  * `required: ['operation']`, the MCP SDK does not validate arguments
- * server-side on this path — dispatch hands args straight through
+ * server-side on this path: dispatch hands args straight through
  * conversion to the GDScript layer (a typo'd `Operation` key arrives as
  * `_operation`, `operation: null` as null). Non-schema-compliant callers
- * — the agent population this regression was observed on — reach the
+ *: the agent population this regression was observed on: reach the
  * guard, so the diagnostic is live code, not dead defense.
  *
  * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
@@ -86,7 +86,7 @@ describe('batch_scene_operations malformed-item error context', () => {
     'missing operation key reports the item index and an add_node hint',
     async () => {
       const results = await runBatch([
-        // Item 0: valid — proves later malformed items don't kill the run.
+        // Item 0: valid: proves later malformed items don't kill the run.
         { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Fine' },
         // Item 1: nodeName/nodeType present but `operation` omitted.
         {
@@ -111,7 +111,7 @@ describe('batch_scene_operations malformed-item error context', () => {
     'explicit null operation reports the item index and an add_node hint, without crashing the batch',
     async () => {
       const results = await runBatch([
-        // Item 0: valid — proves later malformed items don't kill the run.
+        // Item 0: valid: proves later malformed items don't kill the run.
         { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Fine' },
         // Item 1: nodeName/nodeType present but `operation` is explicitly null.
         {

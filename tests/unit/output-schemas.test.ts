@@ -29,7 +29,7 @@ describe('outputSchema: every declared schema is valid', () => {
 
 describe('outputSchema and Returns: prose are complementary, not exclusive', () => {
   // Per docs/tool-authoring.md §3, when a tool has an outputSchema it must also
-  // carry a Returns: sentence in its description — the schema is invisible to
+  // carry a Returns: sentence in its description: the schema is invisible to
   // the agent, so the prose is the only return-shape signal the LLM ever sees.
   it.each(toolsWithOutputSchema)(
     '%s description has a Returns: sentence alongside its outputSchema',

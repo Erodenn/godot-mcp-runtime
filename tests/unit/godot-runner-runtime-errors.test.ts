@@ -6,7 +6,7 @@
  * simulate_input, get_ui_elements, and the false-positive escalation in
  * run_script. If SCRIPT_ERROR_PATTERNS drifts (case mismatch with actual
  * Godot 4.x stderr lines) all four handlers silently lose their warning
- * channel — `runtimeErrors.length > 0` is then always false.
+ * channel: `runtimeErrors.length > 0` is then always false.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -60,7 +60,7 @@ describe('GodotRunner.extractRuntimeErrors', () => {
     ]);
   });
 
-  it('is case-sensitive — lowercase variants are filtered out', () => {
+  it('is case-sensitive: lowercase variants are filtered out', () => {
     // Documents current behavior. If Godot ever emits lowercase variants the
     // caller's warning channel will silently miss them; this test will need
     // updating alongside the patterns.

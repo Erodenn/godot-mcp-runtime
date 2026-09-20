@@ -3,7 +3,7 @@
  * stop after a self-exit, and attached-mode disconnect handling.
  *
  * `child_process.spawn` is mocked at the I/O boundary so `runProject` runs its
- * real body — including the `'exit'` registration under test — without a Godot
+ * real body: including the `'exit'` registration under test: without a Godot
  * binary. `BridgeManager` is replaced with a recorder so cleanup calls are
  * observable and nothing is written outside the tmp project.
  */
@@ -150,7 +150,7 @@ describe('spawned-process exit auto-clear', () => {
     // first statement, then kills the old process, injects a fresh bridge
     // script, and (under `profiling: true`) awaits DebuggerProfiler.create()
     // before assigning the new `activeProcess`. Throughout that window the old
-    // process is still `activeProcess`, so an identity guard does not fire —
+    // process is still `activeProcess`, so an identity guard does not fire -
     // only the epoch distinguishes the sessions.
     (runner as unknown as { beginSessionTransition(): number }).beginSessionTransition();
     expect(runner.activeProcess).toBe(captured);

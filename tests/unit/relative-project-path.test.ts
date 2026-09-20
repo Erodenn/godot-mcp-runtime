@@ -68,14 +68,14 @@ describe('runProject relative projectPath regression', () => {
   it('stores the absolute path so pollBridge can match the bridge-reported project_path', async () => {
     // Regression: with a relative path ('.'), waitForBridge's path guard
     // compared the bridge-reported absolute project_path against '.' and
-    // failed instantly — misreported as a generic 8s bridge timeout.
+    // failed instantly: misreported as a generic 8s bridge timeout.
     const cwdSave = process.cwd();
     process.chdir(projectDir);
     try {
       const runner = new GodotRunner({ godotPath: process.execPath });
       await runner.runProject('.', undefined, true);
       expect(runner.activeProjectPath).toBe(resolve('.'));
-      // spawn argv carries the resolved path — Godot loads the project from it
+      // spawn argv carries the resolved path: Godot loads the project from it
       const spawnArgs = spawnMock.mock.calls[0] as unknown[];
       expect(spawnArgs[1]).toContain('--path');
       expect(spawnArgs[1]).toContain(resolve('.'));

@@ -446,7 +446,7 @@ describe('cleanStdout', () => {
   });
 
   it('routes plain non-JSON output through cleanOutput (drops banner)', () => {
-    // No `{` or `[` anywhere — takes the cleanOutput branch.
+    // No `{` or `[` anywhere: takes the cleanOutput branch.
     const out = 'Godot Engine v4.5.stable\nplain success';
     expect(cleanStdout(out)).toBe('plain success');
   });

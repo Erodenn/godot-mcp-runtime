@@ -40,7 +40,7 @@ async function startMockBridge(): Promise<MockBridge> {
       }
     });
     socket.on('error', () => {
-      // mock peer error — ignored
+      // mock peer error: ignored
     });
   });
 
@@ -86,7 +86,7 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   beforeEach(async () => {
     bridge = await startMockBridge();
     runner = new GodotRunner({ godotPath: 'godot' });
-    // Direct assignment — port is now baked, not read from env at sendCommand time.
+    // Direct assignment: port is now baked, not read from env at sendCommand time.
     (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
   });
 
@@ -156,11 +156,11 @@ describe('GodotRunner.sendCommand (TCP)', () => {
 
     // Simulate the bridge eventually replying for the timed-out command on
     // the now-destroyed socket. The write either errors silently or hits a
-    // closed socket — either way, B must not see this payload.
+    // closed socket: either way, B must not see this payload.
     try {
       bridge.reply('{"this":"is the late slow reply"}');
     } catch {
-      // expected on some platforms — the peer may already be gone
+      // expected on some platforms: the peer may already be gone
     }
 
     const next = runner.sendCommand('fresh');
@@ -242,7 +242,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   }, 10000);
 
   it('does not retry retryable commands when no session is active', async () => {
-    // activeSessionMode is null — sendCommandWithReconnect must NOT retry
+    // activeSessionMode is null: sendCommandWithReconnect must NOT retry
     // even for normally-retryable commands like get_ui_elements.
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();

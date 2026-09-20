@@ -9,7 +9,7 @@ import { useTmpDirs } from '../../helpers/tmp.js';
 import { validateTempDir } from '../../../src/utils/artifact-paths.js';
 
 // ---------------------------------------------------------------------------
-// handleValidate — single-target mode
+// handleValidate: single-target mode
 // ---------------------------------------------------------------------------
 
 describe('handleValidate', () => {
@@ -109,7 +109,7 @@ describe('handleValidate', () => {
   });
 
   it('returns a result (not isError) when runner succeeds with invalid JSON stdout (treated as invalid script)', async () => {
-    // Non-JSON stdout is handled gracefully — valid=false but no isError
+    // Non-JSON stdout is handled gracefully: valid=false but no isError
     const fake = createFakeRunner({ stdout: 'not json at all' });
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
@@ -194,7 +194,7 @@ describe('handleValidate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleValidate — batch (targets[]) mode
+// handleValidate: batch (targets[]) mode
 // ---------------------------------------------------------------------------
 
 describe('handleValidate batch mode', () => {
@@ -273,7 +273,7 @@ describe('handleValidate batch mode', () => {
       targets: [{ scriptPath: '../escape.gd' }],
     });
     expect(hasError(result)).toBe(false);
-    expect(fake.calls).toHaveLength(0); // short-circuit — no runner spawn
+    expect(fake.calls).toHaveLength(0); // short-circuit: no runner spawn
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(1);
     expect(parsed.results[0].valid).toBe(false);
@@ -331,7 +331,7 @@ describe('handleValidate batch mode', () => {
   it('reports valid:false for parse-broken targets from real Godot 4.5 stderr', async () => {
     // Regression: real Godot 4.5 stderr formats the `at:` line as
     //   "   at: GDScript::reload (res://path/to/file.gd:LINE)"
-    // — the res:// path appears inside parentheses after a method name, not bare
+    //: the res:// path appears inside parentheses after a method name, not bare
     // after `at:`. The tolerant `at:` regex must capture that path. As a
     // belt-and-suspenders fallback, the secondary "Failed to load script: \"res://...\""
     // message lands several lines below after a GDScript backtrace, so the
@@ -377,7 +377,7 @@ describe('handleValidate batch mode', () => {
 });
 
 // ---------------------------------------------------------------------------
-// writeTempGdScript placement — observed through handleValidate, which
+// writeTempGdScript placement: observed through handleValidate, which
 // is the only caller. The fake runner records the script path it was handed;
 // the directory it was written into survives the per-call unlink, so its
 // presence plus the file's absence proves both halves.

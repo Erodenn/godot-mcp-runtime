@@ -2,7 +2,7 @@
  * Feature tests for inline Resource construction in property values.
  *
  * Context: `set_node_properties` / `add_node` coerce Vector2/3/Color dicts
- * but historically had no dict→Resource path — an agent wanting
+ * but historically had no dict→Resource path: an agent wanting
  * `CollisionShape2D.shape = RectangleShape2D(size=...)` had to load a
  * pre-existing res:// resource or hand-edit the .tscn (agent libraries carried
  * a scene-file-edit permission exception solely for this gap).
@@ -12,7 +12,7 @@
  * assignment through the same validated `_prepare_property_value`
  * machinery). Scenes are persisted via PackedScene.pack() +
  * ResourceSaver, so an assigned inline Resource is serialized as a proper
- * sub_resource block automatically — one implementation covers both the
+ * sub_resource block automatically: one implementation covers both the
  * scene-edit and runtime contexts.
  *
  * Rules preserved (v3.2.4 error contract):
