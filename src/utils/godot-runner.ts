@@ -12,10 +12,13 @@ import {
   encodeFrame,
   findFreePort,
   parseFrames,
+  parseActionBoundary,
+  bucketBySentinel,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from './bridge-protocol.js';
+import type { ActionBoundaryMark } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
 import { cleanStdout, normalizeForCompare, normalizeExitCode } from './output-parsing.js';
@@ -54,6 +57,14 @@ const BRIDGE_RECONNECT_DELAY_MS = 1000;
 // leaves headroom without hanging forever on a genuinely stuck import.
 const IMPORT_TIMEOUT_MS = 300000;
 
+// Retained-line cap on the session stderr ring buffer.
+const STDERR_RING_LIMIT_LINES = 500;
+// The bridge's TCP response can land before its stderr has drained, so the
+// final action boundary is waited for on a short bounded poll rather than
+// assumed present.
+const SENTINEL_DRAIN_TIMEOUT_MS = 250;
+const SENTINEL_DRAIN_POLL_MS = 10;
+
 export interface GodotProcess {
   process: ChildProcess;
   output: string[];
@@ -62,6 +73,26 @@ export interface GodotProcess {
   exitCode: number | null;
   hasExited: boolean;
   sessionToken: string;
+  /**
+   * Action boundaries recorded from stderr during the current input batch.
+   * Optional so a hand-built process literal (tests, fakes) stays valid;
+   * `beginActionErrorCapture` resets it at the start of each batch.
+   */
+  actionBoundaries?: ActionBoundaryMark[];
+}
+
+/** Opaque handle returned by `beginActionErrorCapture`. */
+export interface ActionErrorCapture {
+  marker: number;
+}
+
+export interface ActionErrorBuckets {
+  /** One entry per executed action, already filtered to runtime-error lines. */
+  buckets: string[][];
+  /** Runtime-error lines after the last boundary, for the last executed action. */
+  trailing: string[];
+  /** True when the expected boundary count never arrived before the deadline. */
+  sentinelTimedOut: boolean;
 }
 
 export type RuntimeSessionMode = 'spawned' | 'attached';
@@ -611,13 +642,7 @@ export class GodotRunner {
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      godotProcess.totalErrorsWritten += lines.length;
-      errors.push(...lines);
-      if (errors.length > 500) errors.splice(0, errors.length - 500);
-      lines.forEach((line: string) => {
-        if (line.trim()) logDebug(`[Godot stderr] ${line}`);
-      });
+      this.ingestStderrChunk(godotProcess, data.toString());
     });
 
     const exitProjectPath = projectPath;
@@ -1117,6 +1142,112 @@ export class GodotRunner {
     if (delta <= 0) return [];
     const window = delta >= errors.length ? errors.slice() : errors.slice(errors.length - delta);
     return window.filter((line) => line.trim() !== '');
+  }
+
+  /**
+   * Fold one raw stderr chunk into a spawned session's buffers. The only writer
+   * of `GodotProcess.errors` and `totalErrorsWritten`.
+   *
+   * Action-boundary sentinels are recorded as marks and never retained, so
+   * every reader of `errors` - `get_debug_output`, `stop_project`'s
+   * `finalErrors`, `getErrorsSince`, `getRecentErrors` - is clean without a
+   * per-read filter. `totalErrorsWritten` counts retained lines only, which
+   * keeps the delta arithmetic in `getErrorsSince` correct and makes each
+   * mark's `seq` survive the ring trim below.
+   *
+   * Public only so unit tests can drive ingestion without spawning Godot; the
+   * production caller is the session stderr handler in `runProject`.
+   */
+  ingestStderrChunk(proc: GodotProcess, text: string): void {
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const boundaryIndex = parseActionBoundary(line);
+      if (boundaryIndex !== null) {
+        if (!proc.actionBoundaries) proc.actionBoundaries = [];
+        proc.actionBoundaries.push({ index: boundaryIndex, seq: proc.totalErrorsWritten });
+        continue;
+      }
+      proc.errors.push(line);
+      proc.totalErrorsWritten += 1;
+    }
+    if (proc.errors.length > STDERR_RING_LIMIT_LINES) {
+      proc.errors.splice(0, proc.errors.length - STDERR_RING_LIMIT_LINES);
+    }
+    lines.forEach((line: string) => {
+      if (line.trim()) logDebug(`[Godot stderr] ${line}`);
+    });
+  }
+
+  /**
+   * The same delta window as {@link getErrorsSince}, without its blank-line
+   * filter and with the sequence number of the first line. Per-action error
+   * attribution needs line positions that line up with the recorded boundary
+   * marks, which dropping blanks would shift. `getErrorsSince` itself is
+   * deliberately untouched so every existing caller keeps its behavior.
+   */
+  stderrWindowSince(marker: number): { lines: string[]; startSeq: number } {
+    if (!this.activeProcess) return { lines: [], startSeq: marker };
+    const { errors, totalErrorsWritten } = this.activeProcess;
+    const delta = totalErrorsWritten - marker;
+    if (delta <= 0) return { lines: [], startSeq: totalErrorsWritten };
+    const lines = delta >= errors.length ? errors.slice() : errors.slice(errors.length - delta);
+    return { lines, startSeq: totalErrorsWritten - lines.length };
+  }
+
+  /**
+   * Open a per-action error capture ahead of an input batch. Clearing the
+   * boundary list here bounds it to one batch: only the input path consumes
+   * boundaries and MCP serializes tool calls, so no cap is needed.
+   */
+  beginActionErrorCapture(): ActionErrorCapture {
+    if (this.activeProcess) this.activeProcess.actionBoundaries = [];
+    return { marker: this.getErrorCount() };
+  }
+
+  /**
+   * Close a capture and attribute its runtime-error lines to the actions that
+   * produced them.
+   *
+   * Waits on a bounded poll for the expected boundary count, because the TCP
+   * response can arrive before stderr has drained. On timeout it attributes
+   * what is present and reports `sentinelTimedOut`; it never blocks
+   * indefinitely. `drainTimeoutMs` is a parameter so tests need not spend the
+   * full wait. Attached sessions have no captured stderr, so they get empty
+   * buckets immediately and the caller simply omits `errors`.
+   */
+  async collectActionErrors(
+    capture: ActionErrorCapture,
+    expectedSentinels: number,
+    drainTimeoutMs: number = SENTINEL_DRAIN_TIMEOUT_MS,
+  ): Promise<ActionErrorBuckets> {
+    const proc = this.activeProcess;
+    if (!proc) {
+      return {
+        buckets: Array.from({ length: Math.max(0, expectedSentinels) }, () => [] as string[]),
+        trailing: [],
+        sentinelTimedOut: false,
+      };
+    }
+
+    const deadline = Date.now() + drainTimeoutMs;
+    while ((proc.actionBoundaries?.length ?? 0) < expectedSentinels && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, SENTINEL_DRAIN_POLL_MS));
+    }
+
+    const boundaries = proc.actionBoundaries ?? [];
+    const sentinelTimedOut = boundaries.length < expectedSentinels;
+    const { lines, startSeq } = this.stderrWindowSince(capture.marker);
+    const { buckets, trailing } = bucketBySentinel({
+      lines,
+      startSeq,
+      boundaries,
+      executedCount: expectedSentinels,
+    });
+    return {
+      buckets: buckets.map((bucket) => this.extractRuntimeErrors(bucket)),
+      trailing: this.extractRuntimeErrors(trailing),
+      sentinelTimedOut,
+    };
   }
 
   // Only the explicit `SCRIPT ERROR:` / `USER SCRIPT ERROR:` markers belong here — the looser

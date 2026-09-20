@@ -73,6 +73,110 @@ describe('outputSchema — expected coverage', () => {
   });
 });
 
+describe('simulate_input — every declared entry shape validates', () => {
+  // The per-action entry is the widest shape this server returns: keys differ by
+  // action type, a skipped entry carries almost nothing, and a failed batch
+  // still comes back success-shaped. Validate the payloads directly, since the
+  // interesting variety lives in the bridge's output rather than the handler's.
+  const simulateInputDef = toolsWithOutputSchema.find(([name]) => name === 'simulate_input')?.[1];
+  if (!simulateInputDef) throw new Error('simulate_input outputSchema not found');
+  const validate = ajv.compile(simulateInputDef.outputSchema as object);
+
+  function expectValid(payload: Record<string, unknown>): void {
+    const valid = validate(payload);
+    expect(valid, JSON.stringify(validate.errors)).toBe(true);
+  }
+
+  it('validates a success: false payload carrying a failure and a skipped entry', () => {
+    expectValid({
+      success: false,
+      results: [
+        {
+          index: 0,
+          type: 'click_element',
+          ok: true,
+          frame: 1,
+          elapsed_ms: 7,
+          hit: '/root/HUD/SkillsBtn',
+          signals: ['pressed'],
+          changes: {
+            appeared: ['/root/HUD/SkillTree'],
+            focus: '/root/HUD/SkillTree/Close',
+          },
+          watch: { '/root/Main/Player:position': { x: 10, y: 4 } },
+        },
+        { index: 1, type: 'wait', ok: true, frame: 31, elapsed_ms: 510 },
+        {
+          index: 2,
+          type: 'click_element',
+          ok: false,
+          frame: 32,
+          elapsed_ms: 527,
+          hit: '/root/HUD/Modal',
+          error: 'occluded by /root/HUD/Modal',
+        },
+        { index: 3, type: 'key', skipped: true },
+      ],
+      still_held: ['key:W'],
+    });
+  });
+
+  it.each([
+    ['key', { index: 0, type: 'key', ok: true, frame: 1, elapsed_ms: 3, focus: '/root/HUD/Name' }],
+    [
+      'mouse_button',
+      { index: 0, type: 'mouse_button', ok: true, frame: 1, elapsed_ms: 3, hit: '/root/HUD/Btn' },
+    ],
+    [
+      'mouse_motion',
+      {
+        index: 0,
+        type: 'mouse_motion',
+        ok: true,
+        frame: 1,
+        elapsed_ms: 2,
+        position: { x: 4, y: 9 },
+      },
+    ],
+    ['action', { index: 0, type: 'action', ok: true, frame: 1, elapsed_ms: 2, pressed: false }],
+    [
+      'text',
+      {
+        index: 0,
+        type: 'text',
+        ok: true,
+        frame: 1,
+        elapsed_ms: 5,
+        focus: '/root/HUD/Name',
+        value: 'hello',
+      },
+    ],
+    [
+      'errors plus a truncated delta',
+      {
+        index: 0,
+        type: 'click_element',
+        ok: true,
+        frame: 1,
+        elapsed_ms: 4,
+        errors: ['SCRIPT ERROR: in _on_pressed'],
+        changes: {
+          changed: [{ path: '/root/HUD/Score', text: 'Score: 2' }],
+          disappeared: ['/root/HUD/Splash'],
+          scene: '/root/Level2',
+          truncated: 3,
+        },
+      },
+    ],
+    [
+      'watch sampling as null',
+      { index: 0, type: 'key', ok: true, watch: { '/root/Gone:x': null } },
+    ],
+  ])('validates a %s entry', (_label, entry) => {
+    expectValid({ success: true, results: [entry] });
+  });
+});
+
 describe('check_project — every declared response shape validates and carries structuredContent', () => {
   const checkProjectDef = toolsWithOutputSchema.find(([name]) => name === 'check_project')?.[1];
   if (!checkProjectDef) throw new Error('check_project outputSchema not found');

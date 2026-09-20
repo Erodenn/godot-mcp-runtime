@@ -17,6 +17,7 @@ import {
   optionalString,
   optionalNumber,
   optionalBoolean,
+  optionalStringArray,
   requireString,
   requireArray,
 } from '../utils/arg-parsing.js';
@@ -49,6 +50,25 @@ import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
 const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
+
+// Input batch caps, mirrored in src/scripts/mcp_bridge.gd. Enforced here so an
+// over-cap batch never reaches the bridge, and there so the bridge is safe on
+// its own. Declared above the tool definitions because the input schema
+// references MAX_WATCH_ENTRIES while that array is being built.
+const MAX_WAIT_FRAMES = 600;
+const MAX_HOLD_MS = 10000;
+const MAX_TEXT_LENGTH = 1000;
+const MAX_WATCH_ENTRIES = 16;
+
+// Timeout math for simulate_input. The progress-heartbeat invariant makes the
+// server-side timeout load-bearing, so every term is a named multiplier and the
+// caps above are what keep the total bounded.
+const INPUT_TIMEOUT_BUFFER_MS = 10000;
+const INPUT_PESSIMISTIC_FRAME_MS = 50;
+const INPUT_SETTLE_FRAMES_PER_ACTION = 1;
+// One process frame plus one physics frame, the tap hold for key and action.
+const INPUT_TAP_HOLD_FRAMES = 2;
+const INPUT_TEXT_PER_CHAR_MS = 1;
 
 type ScreenshotResponseMode = (typeof SCREENSHOT_RESPONSE_MODES)[number];
 
@@ -269,7 +289,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      "Simulate sequential input in a running project. Each action's `type` (key, mouse_button, mouse_motion, click_element, action, wait) gates which other fields apply - see per-property docs. For click_element use get_ui_elements first; resolution is by path/name, not visible text. Press/release require two actions; insert wait between for frame ticks. Returns: success, actions_processed, warnings for runtime errors fired by input handlers. Errors if no session or any action fails validation.",
+      'Simulate sequential input in a running project and report what each action did. Action `type`: key, mouse_button, mouse_motion, click_element, action, text, wait. For key/mouse_button/action, omit `pressed` to tap (press+release); set it to hold or release. click_element resolves by node path/name (see get_ui_elements), not visible text. Returns: results[] per action with ok, timing, signals fired, the Control hit, UI `changes` (appeared/disappeared/changed), `watch` samples, and `errors` from input handlers (spawned sessions only). Invalid batches inject nothing; a runtime failure stops the batch and skips the rest.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -283,7 +303,15 @@ export const runtimeToolDefinitions = [
             properties: {
               type: {
                 type: 'string',
-                enum: ['key', 'mouse_button', 'mouse_motion', 'click_element', 'action', 'wait'],
+                enum: [
+                  'key',
+                  'mouse_button',
+                  'mouse_motion',
+                  'click_element',
+                  'action',
+                  'text',
+                  'wait',
+                ],
                 description: 'The type of input action',
               },
               key: {
@@ -294,7 +322,11 @@ export const runtimeToolDefinitions = [
               pressed: {
                 type: 'boolean',
                 description:
-                  '[key, mouse_button, action] Whether the input is pressed (true) or released (false). For mouse_button: omit to auto-click (press+release in one action); set explicitly only for hold/release. For key: defaults to true and does NOT auto-release - emit a second action with pressed:false to release.',
+                  '[key, mouse_button, action] Omit to tap: the action presses, holds briefly, and releases by itself. Set true to press and hold across later actions (reported in still_held), false to release an earlier hold. Cannot be combined with hold_ms.',
+              },
+              hold_ms: {
+                type: 'number',
+                description: `[key, mouse_button, action] Tap hold duration in milliseconds, overriding the default (one process frame plus one physics frame for key/action, zero gap for mouse_button). Use it for code polling is_action_pressed over real time. Rejected when pressed is also set. Max ${MAX_HOLD_MS}.`,
               },
               shift: { type: 'boolean', description: '[key] Shift modifier' },
               ctrl: { type: 'boolean', description: '[key] Ctrl modifier' },
@@ -345,14 +377,29 @@ export const runtimeToolDefinitions = [
                 type: 'number',
                 description: '[action] Action strength (0–1, default 1.0)',
               },
+              text: {
+                type: 'string',
+                description: `[text] String to type into whatever Control currently holds focus, expanded to one key press+release per character. Fails when nothing holds focus - click or focus the LineEdit first. Max ${MAX_TEXT_LENGTH} characters.`,
+              },
               ms: {
                 type: 'number',
                 description:
-                  '[wait] Duration in milliseconds to pause before the next action (~16ms = one frame at 60fps).',
+                  '[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required.',
+              },
+              frames: {
+                type: 'number',
+                description: `[wait] Deterministic pause of N engine process frames, for stepping game logic rather than waiting on the clock. Exactly one of ms or frames is required. Max ${MAX_WAIT_FRAMES}.`,
               },
             },
             required: ['type'],
           },
+        },
+        watch: {
+          type: 'array',
+          items: { type: 'string' },
+          maxItems: MAX_WATCH_ENTRIES,
+          description:
+            'Godot NodePath:property strings sampled after every action and reported per result, e.g. "/root/Main/Player:position". Property subnames are allowed ("/root/Main/Player:position:x"). Read-only; an unresolvable path samples as null instead of failing the batch.',
         },
       },
       required: ['actions'],
@@ -360,10 +407,64 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        success: { type: 'boolean' },
-        actions_processed: { type: 'number' },
-        warnings: { type: 'array', items: { type: 'string' } },
-        tip: { type: 'string' },
+        success: {
+          type: 'boolean',
+          description: 'False when an action failed and the remaining actions were skipped.',
+        },
+        results: {
+          type: 'array',
+          description: 'One entry per requested action, in order.',
+          items: {
+            type: 'object',
+            properties: {
+              index: { type: 'number' },
+              type: { type: 'string' },
+              ok: { type: 'boolean' },
+              skipped: {
+                type: 'boolean',
+                description: 'Present when an earlier failure ended the batch before this action.',
+              },
+              frame: { type: 'number', description: 'Process frames elapsed since batch start.' },
+              elapsed_ms: { type: 'number', description: 'Milliseconds since batch start.' },
+              error: { type: 'string' },
+              hit: {
+                type: 'string',
+                description: 'Path of the Control under the pointer after the action settled.',
+              },
+              focus: { type: 'string', description: 'Path of the focus owner after the action.' },
+              value: { type: 'string', description: 'Resulting text of the focused text Control.' },
+              position: {
+                type: 'object',
+                properties: { x: { type: 'number' }, y: { type: 'number' } },
+              },
+              pressed: {
+                type: 'boolean',
+                description: 'Whether the input action is still held after this entry.',
+              },
+              signals: { type: 'array', items: { type: 'string' } },
+              errors: { type: 'array', items: { type: 'string' } },
+              changes: {
+                type: 'object',
+                properties: {
+                  appeared: { type: 'array', items: { type: 'string' } },
+                  disappeared: { type: 'array', items: { type: 'string' } },
+                  changed: { type: 'array', items: { type: 'object' } },
+                  scene: { type: 'string' },
+                  focus: { type: 'string' },
+                  truncated: { type: 'number' },
+                },
+              },
+              watch: { type: 'object', additionalProperties: true },
+            },
+            required: ['index', 'type'],
+          },
+        },
+        still_held: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Inputs this batch pressed and did not release, e.g. "key:W", "action:jump".',
+        },
       },
     },
   },
@@ -1502,6 +1603,119 @@ export async function handleTakeScreenshot(
   }
 }
 
+/**
+ * Server-side timeout for one input batch, derived from the batch itself.
+ *
+ * Exported for direct unit testing. A tap is a key/action/mouse_button action
+ * with neither `pressed` nor `hold_ms`, which is the only shape that spends the
+ * default tap-hold frames. The per-action settle term is charged for every
+ * action, including `wait`, which adds no settle frame of its own: erring high
+ * costs nothing, while erring low wedges the call.
+ */
+export function computeInputTimeoutMs(actions: unknown[]): number {
+  let waitMs = 0;
+  let holdMs = 0;
+  let waitFrames = 0;
+  let textChars = 0;
+  let tapCount = 0;
+
+  for (const action of actions) {
+    if (typeof action !== 'object' || action === null) continue;
+    const rec = action as Record<string, unknown>;
+    const type = rec.type;
+    if (type === 'wait') {
+      if (typeof rec.ms === 'number') waitMs += rec.ms;
+      if (typeof rec.frames === 'number') waitFrames += rec.frames;
+      continue;
+    }
+    if (typeof rec.hold_ms === 'number') holdMs += rec.hold_ms;
+    if (type === 'text' && typeof rec.text === 'string') textChars += rec.text.length;
+    if (
+      (type === 'key' || type === 'action' || type === 'mouse_button') &&
+      rec.pressed === undefined &&
+      rec.hold_ms === undefined
+    ) {
+      tapCount += 1;
+    }
+  }
+
+  const frames =
+    waitFrames + actions.length * INPUT_SETTLE_FRAMES_PER_ACTION + tapCount * INPUT_TAP_HOLD_FRAMES;
+  return (
+    waitMs +
+    holdMs +
+    INPUT_PESSIMISTIC_FRAME_MS * frames +
+    textChars * INPUT_TEXT_PER_CHAR_MS +
+    INPUT_TIMEOUT_BUFFER_MS
+  );
+}
+
+/**
+ * Node-side cap enforcement, returning a message naming the offending action
+ * index or null when the batch may go to the bridge. The bridge validates
+ * independently; this is what keeps the computed timeout bounded and gives the
+ * agent the error without a round trip.
+ */
+function findInputCapViolation(actions: unknown[], watch: string[]): string | null {
+  if (watch.length > MAX_WATCH_ENTRIES) {
+    return `watch accepts at most ${MAX_WATCH_ENTRIES} entries (got ${watch.length})`;
+  }
+  for (let i = 0; i < actions.length; i += 1) {
+    const action = actions[i];
+    if (typeof action !== 'object' || action === null) {
+      return `action ${i}: must be an object`;
+    }
+    const rec = action as Record<string, unknown>;
+    const type = rec.type;
+    if (type === 'wait') {
+      const hasMs = rec.ms !== undefined;
+      const hasFrames = rec.frames !== undefined;
+      if (hasMs === hasFrames) {
+        return `action ${i} (wait): set exactly one of ms or frames`;
+      }
+      if (hasFrames && (typeof rec.frames !== 'number' || rec.frames > MAX_WAIT_FRAMES)) {
+        return `action ${i} (wait): frames must be a number no greater than ${MAX_WAIT_FRAMES}`;
+      }
+      continue;
+    }
+    if (rec.hold_ms !== undefined) {
+      if (rec.pressed !== undefined) {
+        return `action ${i} (${String(type)}): hold_ms cannot be combined with pressed`;
+      }
+      if (typeof rec.hold_ms !== 'number' || rec.hold_ms > MAX_HOLD_MS) {
+        return `action ${i} (${String(type)}): hold_ms must be a number no greater than ${MAX_HOLD_MS}`;
+      }
+    }
+    if (typeof rec.text === 'string' && rec.text.length > MAX_TEXT_LENGTH) {
+      return `action ${i} (${String(type)}): text exceeds ${MAX_TEXT_LENGTH} characters`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Attach per-action runtime errors to the entries that produced them. Lines
+ * after the last boundary belong to the last executed entry. An entry with no
+ * errors keeps no `errors` key at all, so payloads stay small.
+ */
+function attachActionErrors(
+  results: Record<string, unknown>[],
+  buckets: string[][],
+  trailing: string[],
+): void {
+  let lastExecuted = -1;
+  for (let i = 0; i < results.length; i += 1) {
+    if (results[i]?.skipped !== true) lastExecuted = i;
+  }
+  for (let i = 0; i < results.length; i += 1) {
+    const entry = results[i];
+    if (!entry || entry.skipped === true) continue;
+    let lines = buckets[i] ?? [];
+    if (i === lastExecuted && trailing.length > 0) lines = [...lines, ...trailing];
+    if (lines.length > 0) entry.errors = lines.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+  }
+}
+
 export async function handleSimulateInput(
   runner: GodotRunner,
   args: OperationParams,
@@ -1517,49 +1731,82 @@ export async function handleSimulateInput(
   if (!actionsResult.ok) return actionsResult;
   const actions = actionsResult.value;
 
-  // Calculate timeout: sum of all wait durations + 10s buffer
-  let totalWaitMs = 0;
-  for (const action of actions) {
-    const rec = action as Record<string, unknown>;
-    if (typeof action === 'object' && action !== null && rec.type === 'wait') {
-      const ms = rec.ms;
-      if (typeof ms === 'number') {
-        totalWaitMs += ms;
-      }
-    }
+  const watchResult = optionalStringArray(args, 'watch');
+  if (!watchResult.ok) return watchResult;
+  const watch = watchResult.value ?? [];
+
+  const capViolation = findInputCapViolation(actions, watch);
+  if (capViolation) {
+    return err(
+      createErrorResponse(`Input simulation error: ${capViolation}`, [
+        'Fix the named action and resend the batch - nothing was injected',
+        'Check the per-property descriptions for the caps on frames, hold_ms, text and watch',
+      ]),
+    );
   }
-  const timeoutMs = totalWaitMs + 10000;
+
+  const timeoutMs = computeInputTimeoutMs(actions);
+  const params: Record<string, unknown> = watch.length > 0 ? { actions, watch } : { actions };
 
   try {
-    const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
+    // Opened before the bridge call so every boundary this batch prints is
+    // inside the capture window.
+    const capture = runner.beginActionErrorCapture();
+    const { response: responseStr } = await runner.sendCommandWithErrors(
       'input',
-      { actions },
+      params,
       timeoutMs,
     );
 
     const parsedResult = parseBridgeJson<{
       success?: boolean;
       error?: string;
-      actions_processed?: number;
+      results?: unknown[];
+      still_held?: string[];
     }>(responseStr, 'simulate_input');
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
 
+    // A flat `error` is a pre-validation refusal: nothing was injected.
     if (parsed.error) {
       return err(
         createErrorResponse(`Input simulation error: ${parsed.error}`, [
-          'Check action types and parameters',
-          'Ensure key names are valid Godot key names',
+          'Fix the named action and resend the batch - nothing was injected',
+          'Ensure key names are valid Godot key names and action names exist in the Input Map',
         ]),
       );
     }
 
+    const results: Record<string, unknown>[] = Array.isArray(parsed.results)
+      ? (parsed.results.filter((entry) => typeof entry === 'object' && entry !== null) as Record<
+          string,
+          unknown
+        >[])
+      : [];
+    const executed = results.filter((entry) => entry.skipped !== true).length;
+    const { buckets, trailing, sentinelTimedOut } = await runner.collectActionErrors(
+      capture,
+      executed,
+    );
+    if (sentinelTimedOut) {
+      // Attribution is partial, not wrong: the lines are still reported, just
+      // pooled onto the last executed entry. Not worth a payload field.
+      logDebug(
+        `[simulate_input] stderr drained without all ${executed} action boundaries; error attribution is partial`,
+      );
+    }
+    attachActionErrors(results, buckets, trailing);
+
+    // A partially failed batch still returns a success-shaped response so the
+    // timeline survives; createErrorResponse is reserved for session errors,
+    // pre-validation refusals, and transport failures.
     const payload: Record<string, unknown> = {
-      success: true,
-      actions_processed: parsed.actions_processed,
-      tip: 'Call take_screenshot to verify the input had the intended visual effect.',
+      success: parsed.success === true,
+      results,
     };
-    attachRuntimeWarnings(payload, runtimeErrors);
+    if (Array.isArray(parsed.still_held) && parsed.still_held.length > 0) {
+      payload.still_held = parsed.still_held;
+    }
 
     return createStructuredResponse(payload);
   } catch (error: unknown) {
@@ -1615,7 +1862,7 @@ export async function handleGetUiElements(
 
     const payload: Record<string, unknown> = {
       ...parsed,
-      tip: "Use simulate_input with type 'click_element' and a node_path or node name from this list to interact with these elements.",
+      tip: "Use simulate_input with type 'click_element' and a path or node name from this list to interact with these elements.",
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 

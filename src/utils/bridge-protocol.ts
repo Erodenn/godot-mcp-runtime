@@ -25,6 +25,96 @@ export const FRAME_HEADER_BYTES = 4;
 export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
 
 /**
+ * Marker the bridge prints on stderr after each simulated input action settles,
+ * as `<sentinel> <action index>`. stderr is a single ordered fd, so every
+ * runtime-error line an input handler wrote during an action lands before that
+ * action's marker and can be attributed to it.
+ *
+ * KEEP IN SYNC: `ACTION_BOUNDARY_SENTINEL` in src/scripts/mcp_bridge.gd is the
+ * twin of this constant. Any change here MUST be mirrored there (and vice
+ * versa) or error attribution silently degrades to unattributed lines.
+ */
+export const ACTION_BOUNDARY_SENTINEL = 'MCP_ACTION_BOUNDARY';
+
+const ACTION_BOUNDARY_PATTERN = new RegExp(`^${ACTION_BOUNDARY_SENTINEL} (\\d+)$`);
+
+/**
+ * One recorded sentinel. `seq` is the number of retained stderr lines that
+ * preceded it, which is why a mark stays meaningful after the stderr ring
+ * buffer drops older lines.
+ */
+export interface ActionBoundaryMark {
+  index: number;
+  seq: number;
+}
+
+/**
+ * Recognize an action-boundary line and return its action index, or null for
+ * any other stderr line.
+ */
+export function parseActionBoundary(line: string): number | null {
+  const match = ACTION_BOUNDARY_PATTERN.exec(line.trim());
+  const digits = match?.[1];
+  if (digits === undefined) return null;
+  return Number.parseInt(digits, 10);
+}
+
+export interface BucketBySentinelInput {
+  /** Contiguous stderr lines, oldest first. */
+  lines: string[];
+  /** Sequence number of `lines[0]`. */
+  startSeq: number;
+  /** Marks recorded during the same window, in arrival order. */
+  boundaries: ActionBoundaryMark[];
+  /** Number of actions that actually ran, which is the bucket count. */
+  executedCount: number;
+}
+
+export interface BucketBySentinelResult {
+  buckets: string[][];
+  trailing: string[];
+}
+
+/**
+ * Split a stderr window into one bucket per executed action.
+ *
+ * A mark closes its action, so the bucket for `index` gets the lines between
+ * the previous mark and this one. A mark whose index falls outside
+ * `[0, executedCount)` is ignored. Lines at or after the last mark, and every
+ * line when no mark arrived, become `trailing` for the caller to attach to the
+ * last executed action. No filtering happens here: the caller applies
+ * `extractRuntimeErrors` to each bucket.
+ *
+ * When an action's mark is missing (a partial stderr drain), its bucket stays
+ * empty and its lines fall into the next mark's bucket - the two are genuinely
+ * indistinguishable without the marker.
+ */
+export function bucketBySentinel({
+  lines,
+  startSeq,
+  boundaries,
+  executedCount,
+}: BucketBySentinelInput): BucketBySentinelResult {
+  const buckets: string[][] = Array.from({ length: Math.max(0, executedCount) }, () => []);
+  const endSeq = startSeq + lines.length;
+  const sliceBySeq = (fromSeq: number, toSeq: number): string[] => {
+    const lo = Math.max(0, fromSeq - startSeq);
+    const hi = Math.min(lines.length, toSeq - startSeq);
+    return hi > lo ? lines.slice(lo, hi) : [];
+  };
+
+  let prevSeq = startSeq;
+  for (const boundary of boundaries) {
+    if (boundary.index < 0 || boundary.index >= buckets.length) continue;
+    const seq = Math.max(prevSeq, boundary.seq);
+    buckets[boundary.index] = sliceBySeq(prevSeq, seq);
+    prevSeq = seq;
+  }
+
+  return { buckets, trailing: sliceBySeq(prevSeq, endSeq) };
+}
+
+/**
  * Find an available TCP port by binding to port 0 (OS-assigned ephemeral port),
  * reading the assigned port, and closing the listener. The brief TOCTOU window
  * between close and the consumer's listen is acceptable — if a collision occurs,

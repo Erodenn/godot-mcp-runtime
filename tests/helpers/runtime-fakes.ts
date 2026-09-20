@@ -1,6 +1,6 @@
 /**
- * Fakes for runtime-session handler tests (simulate_input, click_ui_element,
- * check_project's runtime probe, ...).
+ * Fakes for runtime-session handler tests (simulate_input, check_project's
+ * runtime probe, ...).
  *
  * Unlike the generic fake-runner.ts (headless executeOperation), these model
  * the live-bridge command path: sendCommandWithErrors + the public session
@@ -35,6 +35,12 @@ export interface RuntimeFake {
   setBridgeResponse(response: unknown, runtimeErrors?: string[]): void;
   setSendCommandError(error: Error | null): void;
   setBridgeHook(hook: (() => void) | null): void;
+  /**
+   * Stand in for the per-action stderr attribution the real runner derives from
+   * boundary sentinels, so handler tests can drive the attachment logic without
+   * a process. Defaults to no errors and no timeout.
+   */
+  setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
 }
 
 export function makeContext(
@@ -65,6 +71,9 @@ export function createRuntimeFake(): RuntimeFake {
   let bridgeRuntimeErrors: string[] = [];
   let sendCommandError: Error | null = null;
   let bridgeHook: (() => void) | null = null;
+  let actionErrorBuckets: string[][] = [];
+  let actionErrorTrailing: string[] = [];
+  let actionSentinelTimedOut = false;
 
   let state = {
     activeSessionMode: null as RuntimeSessionMode | null,
@@ -114,6 +123,15 @@ export function createRuntimeFake(): RuntimeFake {
       return { success: true };
     },
     getErrorCount: () => 0,
+    beginActionErrorCapture: () => ({ marker: 0 }),
+    collectActionErrors: async (_capture: unknown, expectedSentinels: number) => ({
+      buckets: Array.from(
+        { length: Math.max(0, expectedSentinels) },
+        (_unused, i) => actionErrorBuckets[i] ?? [],
+      ),
+      trailing: actionErrorTrailing,
+      sentinelTimedOut: actionSentinelTimedOut,
+    }),
   } as unknown as GodotRunner;
 
   return {
@@ -150,6 +168,11 @@ export function createRuntimeFake(): RuntimeFake {
     },
     setBridgeHook(hook: (() => void) | null) {
       bridgeHook = hook;
+    },
+    setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean) {
+      actionErrorBuckets = buckets;
+      actionErrorTrailing = trailing ?? [];
+      actionSentinelTimedOut = timedOut === true;
     },
   };
 }
