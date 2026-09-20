@@ -43,8 +43,30 @@ const __dirname = dirname(__filename);
 
 // Bridge readiness polling
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
-const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 15000;
-const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
+// Ceiling on how long attach_project waits with no evidence the bridge is
+// even listening yet. Exported so the readiness-budget tests can assert the
+// relationship to BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS below.
+export const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 20000;
+/**
+ * Ceiling applied once a TCP connect to the bridge port has succeeded but no
+ * pong has been validated yet. A successful connect is positive evidence the
+ * bridge autoload ran and is listening - at that point the remaining wait is
+ * the engine finishing its own startup on a large project, which is worth far
+ * more patience than "nothing is listening yet". Exported for the same
+ * reason as BRIDGE_WAIT_ATTACHED_TIMEOUT_MS above.
+ */
+export const BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS = 60000;
+// Exported so the readiness-budget tests can assert it stays well under the
+// attached ceilings above.
+export const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
+// After this much waiting, pollBridge backs off from the fast early cadence
+// to BRIDGE_WAIT_MAX_INTERVAL_MS - a flat interval across a 60s ceiling would
+// otherwise open a socket every intervalMs for the whole wait. Exported for
+// the same reason as BRIDGE_WAIT_ATTACHED_INTERVAL_MS above.
+export const BRIDGE_WAIT_BACKOFF_AFTER_MS = 5000;
+// Poll interval used once BRIDGE_WAIT_BACKOFF_AFTER_MS has elapsed. Exported
+// for the same reason as BRIDGE_WAIT_ATTACHED_INTERVAL_MS above.
+export const BRIDGE_WAIT_MAX_INTERVAL_MS = 2000;
 // Exported so other tool modules (e.g. check_project's runtime probe) reuse
 // the same bound instead of a bare-number timeout.
 export const BRIDGE_PING_TIMEOUT_MS = 1000;
@@ -210,6 +232,14 @@ export class GodotRunner {
   private sessionEpoch = 0;
 
   private socket: net.Socket | null = null;
+  /**
+   * True once a TCP connect to the bridge port has succeeded during the
+   * current session. Set in `sendCommand`'s `ensureSocket` `onConnect`
+   * callback, read by `pollBridge` to switch to the extended readiness
+   * budget, and reset in `beginSessionTransition` so it never leaks across
+   * sessions.
+   */
+  private bridgeConnectObserved = false;
   // Receive buffer kept as an array of chunks until at least one complete frame
   // is available. Avoids re-copying accumulated bytes on every TCP data event
   // (the old `Buffer.concat([rxBuffer, chunk])` pattern was O(n²) on large
@@ -676,6 +706,7 @@ export class GodotRunner {
    */
   private beginSessionTransition(): number {
     this.sessionEpoch += 1;
+    this.bridgeConnectObserved = false;
     return this.sessionEpoch;
   }
 
@@ -1007,6 +1038,7 @@ export class GodotRunner {
           sock.setNoDelay(true);
           sock.removeListener('error', onConnectError);
           this.socket = sock;
+          this.bridgeConnectObserved = true;
           this.resetRxBuffer();
 
           sock.on('data', (chunk: Buffer) => {
@@ -1423,10 +1455,24 @@ export class GodotRunner {
     pingPayload: Record<string, unknown>;
     validatePong: (parsed: { status?: string; [k: string]: unknown }) => boolean;
     shouldAbort?: () => { aborted: boolean; tail: string[] };
+    /**
+     * Extended ceiling applied once a TCP connect to the bridge port has
+     * succeeded. A connect proves the autoload ran and is listening, so the
+     * remaining wait is the engine finishing its own startup - worth far more
+     * patience than "nothing is listening yet". Omitted means the single
+     * `timeoutMs` ceiling applies throughout.
+     */
+    extendedTimeoutMs?: number;
   }): Promise<{ ready: boolean; error?: string }> {
-    const deadline = Date.now() + opts.timeoutMs;
+    const started = Date.now();
 
-    while (Date.now() < deadline) {
+    while (true) {
+      const budget =
+        opts.extendedTimeoutMs !== undefined && this.bridgeConnectObserved
+          ? opts.extendedTimeoutMs
+          : opts.timeoutMs;
+      if (Date.now() - started >= budget) break;
+
       if (opts.shouldAbort) {
         const abort = opts.shouldAbort();
         if (abort.aborted) {
@@ -1457,7 +1503,11 @@ export class GodotRunner {
         // Expected: ping will fail until bridge is listening
       }
 
-      await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
+      const interval =
+        Date.now() - started < BRIDGE_WAIT_BACKOFF_AFTER_MS
+          ? opts.intervalMs
+          : BRIDGE_WAIT_MAX_INTERVAL_MS;
+      await new Promise((resolve) => setTimeout(resolve, interval));
     }
 
     return { ready: false, error: opts.timeoutError };
@@ -1475,6 +1525,7 @@ export class GodotRunner {
         'Bridge did not respond within timeout - is Godot running with the McpBridge autoload?',
       pingPayload: {},
       validatePong: (parsed) => parsed.status === 'pong',
+      extendedTimeoutMs: BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS,
     });
   }
 
