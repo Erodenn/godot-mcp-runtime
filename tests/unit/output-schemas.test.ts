@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import Ajv from 'ajv';
 import { allToolDefinitions } from '../../src/index.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
+import { handleCheckProject } from '../../src/tools/project-tools.js';
+import { createRuntimeFake } from '../helpers/runtime-fakes.js';
+import { unwrap } from '../helpers/assertions.js';
+import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 
 const ajv = new Ajv({ strict: false });
 
@@ -42,7 +46,7 @@ describe('outputSchema — expected coverage', () => {
   const TOOLS_WITH_OUTPUT_SCHEMA: readonly string[] = [
     'attach_script',
     'batch_scene_operations',
-    'check_health',
+    'check_project',
     'create_scene',
     'delete_nodes',
     'detach_project',
@@ -66,5 +70,58 @@ describe('outputSchema — expected coverage', () => {
     expect(toolsWithOutputSchema.map(([name]) => name).sort()).toEqual(
       [...TOOLS_WITH_OUTPUT_SCHEMA].sort(),
     );
+  });
+});
+
+describe('check_project — every declared response shape validates and carries structuredContent', () => {
+  const checkProjectDef = toolsWithOutputSchema.find(([name]) => name === 'check_project')?.[1];
+  if (!checkProjectDef) throw new Error('check_project outputSchema not found');
+  const validate = ajv.compile(checkProjectDef.outputSchema as object);
+
+  async function checkAndValidate(
+    fake: ReturnType<typeof createRuntimeFake>,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const result = await handleCheckProject(fake.asRunner, args);
+    const envelope = unwrap(result);
+    expect(envelope.structuredContent).toBeDefined();
+    const payload = envelope.structuredContent as Record<string, unknown>;
+    const valid = validate(payload);
+    expect(valid, JSON.stringify(validate.errors)).toBe(true);
+    return payload;
+  }
+
+  it('validates { godotVersion, runtime: { activeSession: false } } with no projectPath and no session', async () => {
+    const fake = createRuntimeFake();
+    const payload = await checkAndValidate(fake, {});
+    expect(payload.runtime).toEqual({ activeSession: false });
+  });
+
+  it('validates the projectPath-present shape (name/path/structure/godotVersion/runtime)', async () => {
+    const fake = createRuntimeFake();
+    const payload = await checkAndValidate(fake, { projectPath: fixtureProjectPath });
+    expect(payload).toHaveProperty('name');
+    expect(payload).toHaveProperty('path', fixtureProjectPath);
+    expect(payload).toHaveProperty('structure');
+    expect(payload.runtime).toEqual({ activeSession: false });
+  });
+
+  it('validates the active-session, bridge-responsive runtime shape', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: false });
+    fake.setBridgeResponse({ status: 'pong' });
+    const payload = await checkAndValidate(fake, {});
+    expect(payload.runtime).toMatchObject({
+      activeSession: true,
+      sessionMode: 'spawned',
+      bridgeResponsive: true,
+    });
+  });
+
+  it('validates the exited-process runtime shape (activeSession:false, processExited:true, diagnostics)', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: true });
+    const payload = await checkAndValidate(fake, {});
+    expect(payload.runtime).toMatchObject({ activeSession: false, processExited: true });
   });
 });

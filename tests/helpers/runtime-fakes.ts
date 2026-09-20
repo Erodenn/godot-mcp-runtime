@@ -1,6 +1,6 @@
 /**
  * Fakes for runtime-session handler tests (simulate_input, click_ui_element,
- * check_health, ...).
+ * check_project's runtime probe, ...).
  *
  * Unlike the generic fake-runner.ts (headless executeOperation), these model
  * the live-bridge command path: sendCommandWithErrors + the public session

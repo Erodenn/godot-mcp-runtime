@@ -42,7 +42,9 @@ const __dirname = dirname(__filename);
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
 const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
-const BRIDGE_PING_TIMEOUT_MS = 1000;
+// Exported so other tool modules (e.g. check_project's runtime probe) reuse
+// the same bound instead of a bare-number timeout.
+export const BRIDGE_PING_TIMEOUT_MS = 1000;
 const BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS = 500;
 const BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS = 1500;
 const BRIDGE_PROCESS_EXIT_TIMEOUT_MS = 2000;

@@ -13,7 +13,7 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 | `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state). Call it even if you closed the Godot window yourself - it frees the retained process slot and reports `alreadyExited` with the logs captured then    |
 | `get_debug_output` | Read stdout/stderr from an MCP-spawned project, including after it exits or crashes (unavailable in attached mode)                                                                                                                       |
 | `list_projects`    | Find Godot projects in a directory                                                                                                                                                                                                       |
-| `get_project_info` | Get project metadata and Godot version                                                                                                                                                                                                   |
+| `check_project`    | Get project metadata and Godot version, plus an always-present runtime block (session/bridge/process status) - never errors on the runtime probe itself                                                                                  |
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
@@ -21,7 +21,6 @@ Both `run_project` and `attach_project` wait for the bridge before returning suc
 
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `check_health`    | One-call runtime diagnostics: session, bridge, process, engine version - never errors                                                   |
 | `take_screenshot` | Capture a PNG; defaults to a 960x540 inline preview. Use `responseMode: "full"` for pixel-perfect, `"path_only"` for path metadata only |
 | `simulate_input`  | Send batched input: key, mouse_button, mouse_motion, click_element, action, wait                                                        |
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |

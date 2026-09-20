@@ -286,7 +286,7 @@ function profilerFailure(error: unknown): ToolResponse {
     ],
     profile_bad_frame: [
       'This Godot version may lay out profiler frames differently than the server expects',
-      'Report the Godot version - get_project_info returns it',
+      'Report the Godot version - check_project returns it',
     ],
   };
   return createErrorResponse(message, solutions[error.code]);
