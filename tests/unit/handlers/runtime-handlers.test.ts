@@ -912,6 +912,31 @@ describe('computeInputTimeoutMs', () => {
     // The tap pays its two tap-hold frames on top of the shared settle frame.
     expect(tap - hold).toBe(2 * PESSIMISTIC_FRAME_MS);
   });
+
+  it('ignores negative wait and hold durations instead of subtracting them', () => {
+    // hold_ms stays explicit (never omitted) across all three variants below:
+    // an *omitted* hold_ms with no `pressed` field reclassifies the action as
+    // a tap and adds INPUT_TAP_HOLD_FRAMES, which is a different, correct code
+    // path and not what this test is about. Only wait.ms/wait.frames vary
+    // between explicit and absent, since a `wait` action never counts as a tap.
+    const withNegative = [
+      { type: 'wait', ms: -5000, frames: -10 },
+      { type: 'key', key: 'W', hold_ms: -400 },
+    ];
+    const withZero = [
+      { type: 'wait', ms: 0, frames: 0 },
+      { type: 'key', key: 'W', hold_ms: 0 },
+    ];
+    const withAbsent = [{ type: 'wait' }, { type: 'key', key: 'W', hold_ms: 0 }];
+
+    const negativeMs = computeInputTimeoutMs(withNegative);
+    expect(negativeMs).toBe(computeInputTimeoutMs(withZero));
+    expect(negativeMs).toBe(computeInputTimeoutMs(withAbsent));
+
+    // Never less than the base timeout: no positive wait/hold term survives
+    // to shrink the buffer below the buffer itself.
+    expect(negativeMs).toBeGreaterThanOrEqual(TIMEOUT_BUFFER_MS);
+  });
 });
 
 describe('handleSimulateInput', () => {
