@@ -54,8 +54,26 @@ export const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 20000;
  * the engine finishing its own startup on a large project, which is worth far
  * more patience than "nothing is listening yet". Exported for the same
  * reason as BRIDGE_WAIT_ATTACHED_TIMEOUT_MS above.
+ *
+ * Held under the MCP SDK's 60 s default per-request client timeout on purpose.
+ * A client that attached no progressToken gets no heartbeats, so a wait past
+ * that ceiling is aborted client-side and the server's own structured error -
+ * the port-race diagnostic and its solutions - never reaches the agent. The
+ * remaining headroom covers handleAttachProject's stopProject teardown.
  */
-export const BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS = 60000;
+export const BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS = 45000;
+/**
+ * How many consecutive ping failures end an attached wait that has already
+ * seen a TCP connect. The extended ceiling above exists for an engine still
+ * finishing its startup, not for a socket that accepts and never answers: a
+ * stale Godot from an earlier session holding the port, or an unrelated local
+ * service on a user-supplied bridgePort, both connect and then fail every
+ * ping. At the 1 s ping timeout plus the 2 s backed-off interval that is about
+ * 24 s before the call reports, instead of the full ceiling. One successful
+ * ping that simply is not a valid pong yet resets the count, so a bridge that
+ * is answering is never cut off.
+ */
+export const BRIDGE_CONNECTED_PING_FAILURE_LIMIT = 8;
 // Exported so the readiness-budget tests can assert it stays well under the
 // attached ceilings above.
 export const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
@@ -1469,13 +1487,24 @@ export class GodotRunner {
     extendedTimeoutMs?: number;
   }): Promise<{ ready: boolean; error?: string }> {
     const started = Date.now();
+    // Consecutive ping failures since the last connect, counted only while the
+    // extended budget is in force. See BRIDGE_CONNECTED_PING_FAILURE_LIMIT.
+    let connectedPingFailures = 0;
 
     while (true) {
-      const budget =
-        opts.extendedTimeoutMs !== undefined && this.bridgeConnectObserved
-          ? opts.extendedTimeoutMs
-          : opts.timeoutMs;
+      let budget = opts.timeoutMs;
+      let extended = false;
+      if (opts.extendedTimeoutMs !== undefined && this.bridgeConnectObserved) {
+        budget = opts.extendedTimeoutMs;
+        extended = true;
+      }
       if (Date.now() - started >= budget) break;
+      if (extended && connectedPingFailures >= BRIDGE_CONNECTED_PING_FAILURE_LIMIT) {
+        return {
+          ready: false,
+          error: `Something is listening on the bridge port but did not answer ${BRIDGE_CONNECTED_PING_FAILURE_LIMIT} consecutive pings - it is most likely not this bridge. Check for a Godot process left over from an earlier session, or pass a different bridgePort.`,
+        };
+      }
 
       if (opts.shouldAbort) {
         const abort = opts.shouldAbort();
@@ -1490,6 +1519,10 @@ export class GodotRunner {
 
       try {
         const response = await this.sendCommand('ping', opts.pingPayload, BRIDGE_PING_TIMEOUT_MS);
+        // Answered at all, so the peer is something that speaks the frame
+        // protocol. Reset before validating: a reply that is not a valid pong
+        // yet is a bridge mid-startup, not a wrong listener.
+        connectedPingFailures = 0;
         const parsed = JSON.parse(response);
         if (opts.validatePong(parsed)) {
           if (opts.expectedPath && typeof parsed.project_path === 'string') {
@@ -1504,7 +1537,10 @@ export class GodotRunner {
           return { ready: true };
         }
       } catch {
-        // Expected: ping will fail until bridge is listening
+        // Expected: ping will fail until bridge is listening. Once a connect
+        // has been observed it stops being expected, which is what the counter
+        // is for.
+        connectedPingFailures += 1;
       }
 
       const interval =
