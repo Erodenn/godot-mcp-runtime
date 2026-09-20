@@ -173,6 +173,10 @@ Godot performs these on store, so they are allowed: float to int, string to `Nod
 }
 ```
 
+### Typed arrays
+
+A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `int`, `float`, `String`, `Vector2`, `Vector3`, `Vector4` or `Color`. An element that cannot represent `T` errors and the error names its index. An untyped `Array` accepts anything, unchanged. An `Array[T]` whose `T` is a class, a Resource or an enum is passed through without element checks, so a wrong element there surfaces as a Godot engine error in the process output rather than as a tool error.
+
 ### Object-typed properties
 
 Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.shape`, `Sprite2D.texture`) reject plain values. They accept one of three forms:

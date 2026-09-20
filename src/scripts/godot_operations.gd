@@ -1637,6 +1637,68 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 
 	return {"ok": true, "value": instance, "error": ""}
 
+# Element Variant type of a typed Array property, or TYPE_NIL when it cannot be
+# determined or the array is untyped. Primary signal is the live value's own
+# Array.get_typed_builtin(); the property descriptor's PROPERTY_HINT_ARRAY_TYPE
+# hint_string is a fallback for the case where the current value is not a typed
+# Array (e.g. a null default). Only the leading integer of hint_string is read:
+# the composite forms ("24/17:Texture2D", "28:2:") therefore resolve to
+# TYPE_OBJECT / TYPE_ARRAY, which are both absent from _ELEMENT_TYPE_COMPAT and
+# so pass through unvalidated rather than being guessed at.
+func _typed_array_element_type(node: Object, property: String) -> int:
+	var current = node.get(property)
+	if typeof(current) == TYPE_ARRAY and current.is_typed():
+		return current.get_typed_builtin()
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_ARRAY_TYPE:
+		var hint: String = str(descriptor.get("hint_string", ""))
+		var digits := ""
+		for i in range(hint.length()):
+			var character := hint[i]
+			if not character.is_valid_int():
+				break
+			digits += character
+		if digits != "":
+			return int(digits)
+	return TYPE_NIL
+
+# Helper: element-wise coercion for a script-declared typed Array[T] property.
+# Same contract as _prepare_packed_array_elements, but the expected element type
+# is passed in (recovered by _typed_array_element_type) instead of derived from
+# the declared container type, and the caller has already confirmed the element
+# type has a rule. The result is a TYPED Array, built with the typed-Array
+# constructor: node.set() on an Array[T] property does NOT convert an untyped
+# Array element by element, it refuses the assignment and leaves an empty typed
+# array behind while only printing an engine error, so coercing the elements is
+# not by itself enough. The constructor converts each element the same way a
+# typed assign would, which is why the conversion is verified by size below
+# instead of by reading the property back after set().
+func _prepare_typed_array_elements(property: String, node_class: String, elem_type: int, arr: Array) -> Dictionary:
+	var accepted: Array = _ELEMENT_TYPE_COMPAT[elem_type]
+	var out: Array = []
+	for i in range(arr.size()):
+		var element = _coerce_property_value(arr[i])
+		if not (typeof(element) in accepted):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type %s" % [
+					property, node_class, i, str(element), type_string(elem_type)],
+			}
+		out.append(element)
+	# Builtin element type, so no class name and no script: Array[Node] and
+	# friends never reach here, since their element types have no
+	# _ELEMENT_TYPE_COMPAT row and pass through unwrapped.
+	var typed: Array = Array(out, elem_type, &"", null)
+	if typed.size() != out.size():
+		return {
+			"ok": false,
+			"value": null,
+			"error": "Cannot set property '%s' on node of type '%s': the array could not be converted to a typed array of %s" % [
+				property, node_class, type_string(elem_type)],
+		}
+	return {"ok": true, "value": typed, "error": ""}
+
 # Helper: coerce and validate a raw JSON value against a node's declared
 # property type before it is assigned via node.set(). Returns
 # {"ok": bool, "value": Variant, "error": String}.
@@ -1683,6 +1745,21 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 		if not element_prep.ok:
 			return {"ok": false, "value": null, "error": element_prep.error}
 		coerced = element_prep.value
+
+	# Same element pass for a script-declared typed Array[T]. Its declared type
+	# is plain TYPE_ARRAY, so the element type has to be recovered from the value
+	# or the descriptor. Deliberately asymmetric with the packed path above: an
+	# element type with no rule here passes through unvalidated instead of being
+	# rejected, because the key space is every Variant type plus every class in
+	# the project, so a miss is normal rather than a bug in our own table. Godot
+	# still refuses those assignments loudly instead of zero-filling them.
+	if declared == TYPE_ARRAY and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
+		var elem_type := _typed_array_element_type(node, property)
+		if _ELEMENT_TYPE_COMPAT.has(elem_type):
+			var typed_prep = _prepare_typed_array_elements(property, node.get_class(), elem_type, coerced)
+			if not typed_prep.ok:
+				return {"ok": false, "value": null, "error": typed_prep.error}
+			coerced = typed_prep.value
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
