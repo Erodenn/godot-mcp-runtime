@@ -38,6 +38,11 @@
           "name": "GODOT_MCP_STRICT",
           "description": "Set to 'true' to hard-reject anything that would otherwise prompt, for unattended operation. Takes precedence over GODOT_MCP_DISABLE_ELICITATION.",
           "isRequired": false
+        },
+        {
+          "name": "GODOT_MCP_DISABLE_SECURITY",
+          "description": "Set to 'true' to disable the run_script/run_project static gate entirely, Tier 1 hard blocks included. Overrides GODOT_MCP_STRICT. Operator opt-out, not a convenience.",
+          "isRequired": false
         }
       ]
     }
