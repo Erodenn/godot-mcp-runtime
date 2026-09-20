@@ -24,9 +24,10 @@ describe('handleValidate - nested structure schema validation', () => {
     });
 
     expectErrorMatching(result, /Invalid schema at schema\.children\[0\]/);
-    // The malformed entry is rejected before the checks operation is asked to
-    // run it; only the resource validation for scenePath reached the runner.
-    expect(fake.calls.map((c) => c.operation)).toEqual(['validate_resource']);
+    // The malformed entry is rejected before Godot is spawned at all: the
+    // parse validation and the checks share one process, and the schema is
+    // shape-checked before that process is asked for.
+    expect(fake.calls).toEqual([]);
   });
 
   it('rejects a nested child schema with no keys', async () => {
@@ -38,7 +39,7 @@ describe('handleValidate - nested structure schema validation', () => {
     });
 
     expectErrorMatching(result, /Invalid schema at schema\.children\[0\]/);
-    expect(fake.calls.map((c) => c.operation)).toEqual(['validate_resource']);
+    expect(fake.calls).toEqual([]);
   });
 
   it('accepts a two-level nested schema', async () => {
@@ -51,7 +52,11 @@ describe('handleValidate - nested structure schema validation', () => {
         },
       },
     ];
-    const fake = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: SCENE, valid: true, errors: [], checkErrors: [] }],
+      }),
+    });
 
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
@@ -60,7 +65,7 @@ describe('handleValidate - nested structure schema validation', () => {
     });
 
     expect(hasError(result)).toBe(false);
-    expect(fake.calls.map((c) => c.operation)).toEqual(['validate_resource', 'validate_checks']);
-    expect(fake.calls[1]!.params).toEqual({ scene_path: SCENE, checks });
+    expect(fake.calls.map((c) => c.operation)).toEqual(['validate_batch']);
+    expect(fake.calls[0]!.params).toEqual({ targets: [{ scene_path: SCENE, checks }] });
   });
 });

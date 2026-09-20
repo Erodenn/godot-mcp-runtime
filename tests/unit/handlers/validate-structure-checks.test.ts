@@ -6,12 +6,21 @@ import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 
 const validBase = { projectPath: fixtureProjectPath };
 
+/**
+ * A validate_batch payload carrying one target. Single mode with checks runs
+ * the parse validation and the checks against one instantiated scene in one
+ * Godot process, so its payload is the batch shape unwrapped by the handler.
+ */
+function batchStdout(target: Record<string, unknown>): string {
+  return JSON.stringify({ results: [{ target: 'main.tscn', errors: [], ...target }] });
+}
+
 function parseResult(result: unknown): { valid: boolean; errors: unknown[] } {
   const envelope = unwrap(result);
   return JSON.parse(envelope.content[0]!.text) as ReturnType<typeof parseResult>;
 }
 
-describe('handleValidate — structure checks', () => {
+describe('handleValidate: structure checks', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
@@ -71,9 +80,7 @@ describe('handleValidate — structure checks', () => {
   });
 
   it('forwards scenePath and schema to the GDScript operation', async () => {
-    const fake = createFakeRunner({
-      stdout: '{"valid":true,"missingNodes":[],"missingProperties":[],"errors":[]}',
-    });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: [] }) });
     const schema = {
       type: 'Node2D',
       children: [{ type: 'CollisionShape2D', hasProperty: 'shape' }],
@@ -83,16 +90,17 @@ describe('handleValidate — structure checks', () => {
       scenePath: 'main.tscn',
       checks: [{ type: 'structure', schema }],
     });
-    expect(fake.calls.some((c) => c.operation === 'validate_checks')).toBe(true);
-    const call = fake.calls.find((c) => c.operation === 'validate_checks')!;
-    expect(call.params.scene_path).toBe('main.tscn');
-    expect(call.params.checks).toEqual([{ type: 'structure', schema }]);
+    // One process for the parse check and the scene checks together.
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]!.operation).toBe('validate_batch');
+    const targets = fake.calls[0]!.params.targets as Record<string, unknown>[];
+    expect(targets).toHaveLength(1);
+    expect(targets[0]!.scene_path).toBe('main.tscn');
+    expect(targets[0]!.checks).toEqual([{ type: 'structure', schema }]);
   });
 
   it('parses valid:true response', async () => {
-    const fake = createFakeRunner({
-      stdout: '{"valid":true,"errors":[]}',
-    });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: [] }) });
     const result = await handleValidate(fake.asRunner, {
       ...validBase,
       scenePath: 'main.tscn',
@@ -117,9 +125,7 @@ describe('handleValidate — structure checks', () => {
         message: 'Property shape not set on root/CollisionShape2D',
       },
     ];
-    const fake = createFakeRunner({
-      stdout: JSON.stringify({ valid: false, errors }),
-    });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: errors }) });
     const result = await handleValidate(fake.asRunner, {
       ...validBase,
       scenePath: 'main.tscn',
@@ -128,9 +134,7 @@ describe('handleValidate — structure checks', () => {
     expect(hasError(result)).toBe(false);
     const data = parseResult(result);
     expect(data.valid).toBe(false);
-    // Fake runner returns same stdout for both ops, so errors appear twice.
-    for (const e of errors) {
-      expect(data.errors).toContainEqual(e);
-    }
+    // One process now, so the findings appear exactly once and in order.
+    expect(data.errors).toEqual(errors);
   });
 });

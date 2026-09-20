@@ -2,14 +2,13 @@ import { join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
-import type { Result } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
 
@@ -495,28 +494,88 @@ export async function handleValidate(
       resolvedScenePath = scenePathResult.value;
     }
 
-    const params: OperationParams = {};
-    if (resolvedScriptPath) params.scriptPath = resolvedScriptPath;
-    if (resolvedScenePath) params.scenePath = resolvedScenePath;
+    // A scenePath plus checks is one Godot process, not two. validate_batch
+    // with a single target does the parse validation and runs the checks
+    // against one instantiated scene; the plain scenePath spelling of the same
+    // call used to cost a second process that loaded the scene again. The
+    // response shape is unchanged: the batch payload is unwrapped back into
+    // { valid, errors } below.
+    const combined = hasChecks && resolvedScenePath !== undefined;
 
-    const { stdout, stderr } = await runner.executeOperation(
-      'validate_resource',
-      params,
-      projectPath,
-    );
+    let stdout: string;
+    let stderr: string;
+    if (combined) {
+      const checkFailure = validateCheckItems(checksRaw);
+      if (checkFailure) {
+        return err(createErrorResponse(checkFailure.message, checkFailure.solutions));
+      }
+      // Check items travel camelCase and untouched for the same reason the
+      // batch branch forwards them raw: the runner's convertCamelToSnakeCase
+      // rewrites nodePath and every nested hasProperty on the way out.
+      ({ stdout, stderr } = await executeValidateOp(
+        runner,
+        'validate_batch',
+        { targets: [{ scene_path: resolvedScenePath, checks: checksRaw }] },
+        projectPath,
+      ));
+    } else {
+      const params: OperationParams = {};
+      if (resolvedScriptPath) params.scriptPath = resolvedScriptPath;
+      if (resolvedScenePath) params.scenePath = resolvedScenePath;
+      ({ stdout, stderr } = await runner.executeOperation(
+        'validate_resource',
+        params,
+        projectPath,
+      ));
+    }
 
     // Parse stdout for the base valid/invalid signal from GDScript
     let valid = false;
     let gdErrors: ValidationError[] = [];
-    try {
-      const parsed = JSON.parse(stdout.trim());
-      valid = parsed.valid === true;
-      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-        gdErrors = parsed.errors;
+    let checkErrors: CheckError[] = [];
+    if (combined) {
+      if (!stdout.trim()) {
+        return err(
+          createErrorResponse(`Scene checks failed: ${extractGdError(stderr)}`, [
+            'Check if the scene path is correct',
+            'Ensure the schema follows the documented shape',
+          ]),
+        );
       }
-    } catch {
-      // stdout wasn't JSON — treat as invalid
-      valid = false;
+      let batchParsed: {
+        results?: Array<{
+          valid?: boolean;
+          errors?: ValidationError[];
+          checkErrors?: CheckError[];
+        }>;
+      };
+      try {
+        batchParsed = JSON.parse(stdout.trim());
+      } catch {
+        batchParsed = {};
+      }
+      const target = batchParsed.results?.[0];
+      if (!target) {
+        return err(
+          createErrorResponse(`Invalid response from validate_batch: ${stdout}`, [
+            'Ensure Godot is installed correctly',
+          ]),
+        );
+      }
+      valid = target.valid === true;
+      if (Array.isArray(target.errors) && target.errors.length > 0) gdErrors = target.errors;
+      if (Array.isArray(target.checkErrors)) checkErrors = target.checkErrors;
+    } else {
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        valid = parsed.valid === true;
+        if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+          gdErrors = parsed.errors;
+        }
+      } catch {
+        // stdout wasn't JSON - treat as invalid
+        valid = false;
+      }
     }
 
     // Parse stderr for detailed error messages from Godot's script compiler
@@ -536,15 +595,11 @@ export async function handleValidate(
 
     // checks[]: structural / signal verification against the scene, merged
     // into the same output shape with a `check` discriminator per error.
-    if (hasChecks && resolvedScenePath) {
-      const checkErrors = await runSceneChecks(runner, projectPath, resolvedScenePath, checksRaw);
-      if (!checkErrors.ok) return err(checkErrors.error);
-      if (checkErrors.value.length > 0) {
-        result = {
-          valid: false,
-          errors: [...result.errors, ...checkErrors.value],
-        };
-      }
+    if (checkErrors.length > 0) {
+      result = {
+        valid: false,
+        errors: [...result.errors, ...checkErrors],
+      };
     }
 
     return ok({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
@@ -651,58 +706,4 @@ function validateCheckItems(checks: unknown): CheckValidationFailure | null {
     }
   }
   return null;
-}
-
-/**
- * Run structural / signal-verification checks against one scene via the
- * validate_checks GDScript op. Used by handleValidate when the caller passes
- * a checks[] array alongside scenePath (single mode) or inside a targets[]
- * item (batch mode). Returns either check-attributed errors to merge into
- * the caller's error list, or a HandlerResult failure to return directly.
- */
-async function runSceneChecks(
-  runner: GodotRunner,
-  projectPath: string,
-  scenePath: string,
-  checks: unknown,
-): Promise<Result<CheckError[], ToolResponse>> {
-  const failure = validateCheckItems(checks);
-  if (failure) return err(createErrorResponse(failure.message, failure.solutions));
-
-  try {
-    const opParams: OperationParams = { scene_path: scenePath, checks };
-    const { stdout, stderr } = await executeValidateOp(
-      runner,
-      'validate_checks',
-      opParams,
-      projectPath,
-    );
-    if (!stdout.trim()) {
-      return err(
-        createErrorResponse(`Scene checks failed: ${extractGdError(stderr)}`, [
-          'Check if the scene path is correct',
-          'Ensure the schema follows the documented shape',
-        ]),
-      );
-    }
-    let parsed: { valid?: boolean; errors?: unknown[] };
-    try {
-      parsed = JSON.parse(stdout.trim());
-    } catch {
-      return err(
-        createErrorResponse(`Invalid response from validate_checks: ${stdout}`, [
-          'Ensure Godot is installed correctly',
-        ]),
-      );
-    }
-    const errors = Array.isArray(parsed.errors) ? (parsed.errors as CheckError[]) : [];
-    return ok(errors);
-  } catch (error: unknown) {
-    return err(
-      createErrorResponse(`Scene checks failed: ${getErrorMessage(error)}`, [
-        'Ensure Godot is installed correctly',
-        'Check if the GODOT_PATH environment variable is set correctly',
-      ]),
-    );
-  }
 }

@@ -11,13 +11,26 @@ function parseResult(result: unknown): { valid: boolean; errors: unknown[] } {
   return JSON.parse(envelope.content[0]!.text);
 }
 
-function validateChecksCall(fake: { calls: Array<{ operation: string; params: unknown }> }) {
-  const call = fake.calls.find((c) => c.operation === 'validate_checks');
-  expect(call).toBeDefined();
-  return call!;
+/**
+ * The single call a scenePath-plus-checks validate makes. Single mode runs the
+ * parse validation and the checks against one instantiated scene in one Godot
+ * process, so the target travels inside validate_batch's targets array.
+ */
+function checksTarget(fake: { calls: Array<{ operation: string; params: unknown }> }) {
+  expect(fake.calls).toHaveLength(1);
+  const call = fake.calls[0]!;
+  expect(call.operation).toBe('validate_batch');
+  const targets = (call.params as { targets?: unknown[] }).targets;
+  expect(Array.isArray(targets)).toBe(true);
+  return (targets as Record<string, unknown>[])[0]!;
 }
 
-describe('handleValidate — signals checks', () => {
+/** A validate_batch payload carrying one target. */
+function batchStdout(target: Record<string, unknown>): string {
+  return JSON.stringify({ results: [{ target: 'main.tscn', errors: [], ...target }] });
+}
+
+describe('handleValidate: signals checks', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
@@ -56,12 +69,13 @@ describe('handleValidate — signals checks', () => {
   });
 
   it('passes a valid signals check', async () => {
-    const fake = createFakeRunner({ stdout: '{"valid":true,"errors":[]}' });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: [] }) });
     const result = await handleValidate(fake.asRunner, {
       ...validBase,
       checks: [{ type: 'signals' }],
     });
     expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(1);
     const data = parseResult(result);
     expect(data.valid).toBe(true);
     expect(data.errors).toEqual([]);
@@ -88,7 +102,9 @@ describe('handleValidate — signals checks', () => {
         message: 'naming_convention',
       },
     ];
-    const fake = createFakeRunner({ stdout: JSON.stringify({ valid: false, errors }) });
+    const fake = createFakeRunner({
+      stdout: batchStdout({ valid: true, checkErrors: errors }),
+    });
     const result = await handleValidate(fake.asRunner, {
       ...validBase,
       checks: [{ type: 'signals' }],
@@ -96,32 +112,27 @@ describe('handleValidate — signals checks', () => {
     expect(hasError(result)).toBe(false);
     const data = parseResult(result);
     expect(data.valid).toBe(false);
-    // The fake runner returns the same stdout for both validate_resource and
-    // validate_checks, so the resource-parse branch also surfaces these
-    // errors — assert containment, not exact equality.
-    for (const e of errors) {
-      expect(data.errors).toContainEqual(e);
-    }
+    // One process now, so the findings appear exactly once and in order.
+    expect(data.errors).toEqual(errors);
   });
 
   it('forwards nodePath to the GDScript operation', async () => {
-    const fake = createFakeRunner({ stdout: '{"valid":true,"errors":[]}' });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: [] }) });
     await handleValidate(fake.asRunner, {
       ...validBase,
       checks: [{ type: 'signals', nodePath: 'root/SubViewport' }],
     });
-    const call = validateChecksCall(fake);
-    expect(call.params).toMatchObject({
+    expect(checksTarget(fake)).toMatchObject({
       scene_path: fixtureScenePath,
       checks: [{ type: 'signals', nodePath: 'root/SubViewport' }],
     });
   });
 
   it('omits nodePath when not provided', async () => {
-    const fake = createFakeRunner({ stdout: '{"valid":true,"errors":[]}' });
+    const fake = createFakeRunner({ stdout: batchStdout({ valid: true, checkErrors: [] }) });
     await handleValidate(fake.asRunner, { ...validBase, checks: [{ type: 'signals' }] });
-    const call = validateChecksCall(fake);
-    expect(call.params).toMatchObject({ checks: [{ type: 'signals' }] });
-    expect((call.params as Record<string, unknown>).checks[0]).not.toHaveProperty('nodePath');
+    const target = checksTarget(fake);
+    expect(target).toMatchObject({ checks: [{ type: 'signals' }] });
+    expect((target.checks as Record<string, unknown>[])[0]).not.toHaveProperty('nodePath');
   });
 });
