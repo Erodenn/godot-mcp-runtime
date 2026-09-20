@@ -230,6 +230,23 @@ describe('spawned-process exit auto-clear', () => {
     expect(await runner.stopProject()).toBeNull();
   });
 
+  // The spawn-failure path is a second writer of the stderr buffer. It has to
+  // go through the same ingestion as real stderr, or its line lands in `errors`
+  // uncounted and every later getErrorsSince / sentinel window is off by one.
+  it('counts a spawn failure line the same way a stderr line is counted', async () => {
+    await start();
+    const marker = runner.getErrorCount();
+
+    proc.emit('error', new Error('spawn godot ENOENT'));
+
+    expect(runner.getErrorsSince(marker).join('\n')).toContain('Process error: spawn godot ENOENT');
+    proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: after the failure\n'));
+    expect(runner.getErrorsSince(marker)).toEqual([
+      'Process error: spawn godot ENOENT',
+      'SCRIPT ERROR: after the failure',
+    ]);
+  });
+
   it('sendCommandWithErrors still classifies post-exit stderr as runtime errors, keyed on activeProcess', async () => {
     // Exercise sendCommandWithErrors itself rather than calling
     // extractRuntimeErrors directly: that call is unconditional, so a

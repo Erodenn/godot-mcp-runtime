@@ -688,7 +688,11 @@ export class GodotRunner {
 
     proc.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
-      errors.push(`Process error: ${err.message}`);
+      // Through ingestStderrChunk, not a bare errors.push: it is the only
+      // writer of `errors` and `totalErrorsWritten`, and every sentinel `seq`
+      // and `getErrorsSince` window is computed from the two staying in step.
+      // One uncounted push shifts every later window by a line.
+      this.ingestStderrChunk(godotProcess, `Process error: ${err.message}\n`);
       godotProcess.hasExited = true;
       // The engine will never dial back, so nothing can arrive on the debugger
       // listener. Holding the port open until the next run_project is pointless.
