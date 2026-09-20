@@ -1634,6 +1634,42 @@ func _check_resource_hint_class(descriptor, res, property: String, origin: Strin
 			return {"ok": true, "error": ""}
 	return {"ok": false, "error": "%s resource is a %s, but property '%s' expects %s" % [origin, res.get_class(), property, descriptor.hint_string]}
 
+# usage flags that mark a get_property_list() entry as a pseudo-entry (an
+# editor grouping label, not a settable property). Combined into a single
+# mask so the slash-key existence gate below can reject all three with one
+# check instead of three magic-number comparisons.
+const _NON_SETTABLE_PROPERTY_USAGE_MASK: int = (
+	PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP | PROPERTY_USAGE_CATEGORY
+)
+
+# Helper: is this get_property_list() descriptor a real, settable property?
+# Group/subgroup/category pseudo-entries are listed alongside real properties
+# (type TYPE_NIL, no PROPERTY_USAGE_STORAGE bit) so a slash key that only
+# matches one of those must not pass the existence gate: TYPE_NIL is the
+# "accept anything" declared type in _prepare_property_value, so accepting a
+# pseudo-entry there would make instance.set() no-op silently while the tool
+# reports success -- the exact silent-drop class this gate exists to close.
+func _is_settable_property_descriptor(descriptor) -> bool:
+	if descriptor == null:
+		return false
+	var usage: int = descriptor.get("usage", 0)
+	if usage & _NON_SETTABLE_PROPERTY_USAGE_MASK != 0:
+		return false
+	return usage & PROPERTY_USAGE_STORAGE != 0
+
+const _SHADER_PARAMETER_PREFIX: String = "shader_parameter/"
+
+# Helper: count of live shader_parameter/* entries on a ShaderMaterial (or
+# any instance with a "shader" property). Zero while a shader is assigned but
+# failed to compile or declares no uniforms -- used to attribute the
+# existence-gate error correctly instead of blaming the caller's key name.
+func _shader_parameter_count(instance: Object) -> int:
+	var count: int = 0
+	for p in instance.get_property_list():
+		if String(p.name).begins_with(_SHADER_PARAMETER_PREFIX):
+			count += 1
+	return count
+
 # Construct a Resource inline from a typed-dict spec like
 # {"type": "RectangleShape2D", "size": {"x": 80, "y": 16}}. Inner properties
 # are assigned through the same validated _prepare_property_value machinery
@@ -1688,15 +1724,20 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 		# properties: it misses shader_parameter/<uniform> keys even after
 		# the shader is assigned (and only starts returning true after an
 		# unrelated set() call refreshes its cache), so a slash-suffixed
-		# key is also accepted when it is listed in the instance's live
-		# property list -- which is where its declared type lives, so the
-		# normal validation below applies unchanged. set() alone must not
-		# be used as the gate: it accepts unknown names silently.
+		# key is also accepted when it resolves to a real, settable entry
+		# in the instance's live property list (_is_settable_property_descriptor)
+		# -- which is where its declared type lives, so the normal
+		# validation below applies unchanged. A pseudo-entry (group /
+		# subgroup / category label) is rejected even if its name contains
+		# a slash: see _is_settable_property_descriptor. set() alone must
+		# not be used as the gate: it accepts unknown names silently.
 		var exists: bool = inner_prop in instance
 		if not exists and "/" in String(inner_prop):
-			exists = _find_property_descriptor(instance, String(inner_prop)) != null
+			exists = _is_settable_property_descriptor(_find_property_descriptor(instance, String(inner_prop)))
 		if not exists:
 			if "/" in String(inner_prop):
+				if String(inner_prop).begins_with(_SHADER_PARAMETER_PREFIX) and _find_property_descriptor(instance, "shader") != null and instance.get("shader") != null and _shader_parameter_count(instance) == 0:
+					return {"ok": false, "value": null, "error": "Property '%s' does not resolve on resource of type '%s' (constructed for property '%s') -- a shader is assigned but exposes no shader_parameter/* uniforms, which usually means it failed to compile or declares none; check stderr, or run validate" % [inner_prop, class_name_str, property]}
 				return {"ok": false, "value": null, "error": "Property '%s' does not resolve on resource of type '%s' (constructed for property '%s') -- for shader_parameter/<name>, the shader must be assigned first and <name> must be a uniform it declares" % [inner_prop, class_name_str, property]}
 			return {"ok": false, "value": null, "error": "Property '%s' does not exist on resource of type '%s' (constructed for property '%s')" % [inner_prop, class_name_str, property]}
 		var prepared = _prepare_property_value(instance, inner_prop, spec[inner_prop])
