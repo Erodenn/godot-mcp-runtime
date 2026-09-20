@@ -362,6 +362,75 @@ describe('executeSceneOp cold-import retry', () => {
     expectErrorMatching(result, /active.*session|session.*active/i);
   });
 
+  it('refuses the import retry when the marked run already reported an applied step', async () => {
+    // The batch shape the refusal exists for: step 1 mutated and was saved,
+    // step 2 hit a cold asset. Re-running the batch would add step 1 twice.
+    const partialBatch = JSON.stringify({
+      results: [
+        { operation: 'add_node', scenePath: 'main.tscn', success: true },
+        {
+          operation: 'load_sprite',
+          scenePath: 'main.tscn',
+          error: 'asset not yet imported: res://assets/tex.png',
+        },
+      ],
+    });
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: partialBatch, stderr: '[IMPORT_NEEDED] load_sprite: res://assets/tex.png' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'batch_scene_operations',
+      { operations: [] },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /second time/i);
+    // The caller has to know what did land, or it cannot resume safely.
+    expectErrorMatching(result, /add_node/);
+  });
+
+  it('still imports and retries when the marked run reported no applied step', async () => {
+    const failedBatch = JSON.stringify({
+      results: [
+        {
+          operation: 'load_sprite',
+          scenePath: 'main.tscn',
+          error: 'asset not yet imported: res://assets/tex.png',
+        },
+      ],
+    });
+    const retried = JSON.stringify({
+      results: [{ operation: 'load_sprite', scenePath: 'main.tscn', success: true }],
+    });
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: failedBatch, stderr: '[IMPORT_NEEDED] load_sprite: res://assets/tex.png' },
+        { stdout: retried, stderr: '' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'batch_scene_operations',
+      { operations: [] },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    expect(hasError(result)).toBe(false);
+  });
+
   it('never calls importAssets when the marker is absent', async () => {
     const fake = createFakeRunner({ stdout: '{"ok":true}', stderr: '' });
     const result = await executeSceneOp(

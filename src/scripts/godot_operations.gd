@@ -4,6 +4,11 @@ extends SceneTree
 # Debug mode flag
 var debug_mode = false
 
+# Whether the [IMPORT_NEEDED] marker may still be printed. See
+# _report_import_needed: the marker asks the TS layer to import and re-run the
+# whole operation, which is only safe while nothing has been written yet.
+var import_marker_armed = true
+
 func _init():
 	var args = OS.get_cmdline_args()
 
@@ -254,6 +259,24 @@ func _classify_dep_path(path: String) -> String:
 		return "needs_import"
 	return "missing"
 
+# Single emission point for the [IMPORT_NEEDED] marker. The marker is a
+# request, not just a diagnostic: executeSceneOp reacts to it by importing the
+# project's assets and re-running the SAME operation from the start, which is
+# only correct while the operation has written nothing. batch_scene_operations
+# disarms the marker as soon as one of its operations has mutated a cached
+# scene, because every mutated scene is saved before the batch returns -- a
+# replay would then apply those mutations a second time and leave duplicate
+# nodes behind. Disarmed, the same condition still fails the operation, it just
+# fails loudly instead of asking for the replay.
+#
+# Returns the error string the caller reports for the failed operation.
+func _report_import_needed(context: String, paths: String) -> String:
+	if import_marker_armed:
+		log_error("[IMPORT_NEEDED] " + context + ": " + paths)
+		return "asset not yet imported: " + paths
+	log_error("Asset not yet imported, and an earlier operation in this batch has already mutated a scene: " + paths + " (" + context + "). Refusing the automatic import-and-retry, which would re-apply those mutations a second time.")
+	return "asset not yet imported, import-and-retry refused because an earlier operation in this batch already mutated a scene: " + paths
+
 # Cold-import + missing-file probe shared by load_scene_instance and the
 # batch pre-pass. Returns {"needs_import": [...], "missing": [...]} for the
 # ext_resources of `full_path`: "needs_import" are on disk but never
@@ -315,7 +338,7 @@ func load_scene_instance(scene_path: String):
 		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing))
 		return null
 	if probe.needs_import.size() > 0:
-		log_error("[IMPORT_NEEDED] " + scene_path + ": " + ", ".join(probe.needs_import))
+		_report_import_needed(scene_path, ", ".join(probe.needs_import))
 		return null
 
 	var scene = load(full_path)
@@ -526,8 +549,7 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	# texture just added to the project): check for the cold-import state
 	# before load() runs, same as the scene-dependency probe above.
 	if _classify_dep_path(full_texture_path) == "needs_import":
-		log_error("[IMPORT_NEEDED] load_sprite " + op.node_path + ": " + full_texture_path)
-		return {"ok": false, "error": "asset not yet imported: " + full_texture_path}
+		return {"ok": false, "error": _report_import_needed("load_sprite " + op.node_path, full_texture_path)}
 	var texture = load(full_texture_path)
 	if not texture:
 		return {"ok": false, "error": "Failed to load texture: " + full_texture_path}
@@ -1377,7 +1399,9 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 				var mn_path = str(mn.get("path", "?"))
 				# An unmatched child is a finding about the parent named in
 				# path, so it reads as "no child of type X under <parent>".
-				var mn_message = "Expected node of type %s at %s" % [mn_expected, mn_path]
+				# A type mismatch names the type that is actually there: without
+				# it the caller can see what was expected but not what to change.
+				var mn_message = "Expected node of type %s at %s, found %s" % [mn_expected, mn_path, str(mn.get("actual", "?"))]
 				if mn.get("unmatched_child", false):
 					mn_message = "No child of type %s under %s" % [mn_expected, mn_path]
 				errors.append({
@@ -1439,7 +1463,8 @@ func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: 
 		if node.get_class() != expected_type:
 			missing_nodes.append({
 				"path": _relative_path(scene_root, node),
-				"expected": expected_type
+				"expected": expected_type,
+				"actual": node.get_class()
 			})
 
 	# Check hasProperty if specified
@@ -1923,8 +1948,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			# (e.g. a res:// string assigned to an Object-typed property).
 			# Check for the cold-import state before load() runs.
 			if _classify_dep_path(coerced) == "needs_import":
-				log_error("[IMPORT_NEEDED] property " + property + ": " + coerced)
-				return {"ok": false, "value": null, "error": "asset not yet imported: " + coerced}
+				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, coerced)}
 			var res = load(coerced)
 			if not res:
 				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
@@ -2078,6 +2102,57 @@ func _collect_res_paths(value, out: Array) -> void:
 			for item in value:
 				_collect_res_paths(item, out)
 
+# Probe one path PARAMETER of a batch operation before any mutation runs.
+#
+# A path parameter follows this tool surface's path convention: project-relative
+# ("assets/tex.png") or res://-prefixed, the two spellings normalize_scene_path
+# accepts. It is normalized with that same helper here, the one the apply site
+# uses, so a bare relative path is recognized as the asset reference it is
+# rather than read as a plain string. This is the distinction _collect_res_paths
+# must NOT make: that function walks free-form property VALUES, where only a
+# res:// string is a resource reference and a bare string is just a string.
+#
+# `is_scene` picks the probe. A scene file is loaded whole by its apply site
+# (load_scene_instance for scene_path, _instantiate_node_type for an add_node
+# node_type naming a scene), so its own dependencies are what can be cold.
+# Any other asset is classified directly.
+#
+# A path that escapes the project root is not probed and not counted: the apply
+# site rejects it per operation, which keeps that rejection in the batch's own
+# results array instead of failing every other operation in the batch with it.
+func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionary, needs_import: Array, missing: Array) -> void:
+	if raw_path == "":
+		return
+	var full_path = normalize_scene_path(raw_path)
+	if full_path.is_empty() or full_path in seen_paths:
+		return
+	seen_paths[full_path] = true
+	if not is_scene:
+		if _classify_dep_path(full_path) == "needs_import":
+			needs_import.append(full_path)
+		return
+	if not FileAccess.file_exists(full_path):
+		return
+	var probe = _probe_scene_deps(full_path)
+	missing.append_array(probe.missing)
+	needs_import.append_array(probe.needs_import)
+
+# Collect the free-form property VALUES one batch operation can assign, for the
+# res://-string walk. add_node's properties dict and each set_node_properties
+# update value both reach _prepare_property_value, which loads a res:// string
+# on an Object-typed property -- a reference found only at assignment time
+# would emit its [IMPORT_NEEDED] mid-batch, after earlier operations had
+# already mutated.
+func _prepass_value_roots(op: Dictionary, op_name) -> Array:
+	var value_roots: Array = []
+	if op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
+		value_roots.append(op.properties)
+	elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
+		for update in op.updates:
+			if typeof(update) == TYPE_DICTIONARY and update.has("value"):
+				value_roots.append(update.value)
+	return value_roots
+
 # Execute multiple scene operations in a single headless process
 # Scenes are loaded once and cached in memory; mutations accumulate until a save op
 func batch_scene_operations(params: Dictionary) -> void:
@@ -2085,67 +2160,63 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var results: Array = []
 	var scene_cache: Dictionary = {}
 
-	# Pre-pass: probe every referenced scene, plus every first-time asset
-	# reference (load_sprite's texture_path, and every res:// string at any
-	# depth inside an add_node properties dict or a set_node_properties update
-	# value, inline resource specs included), for the cold-import state and for
-	# missing files -- BEFORE any mutation is applied. Missing files are checked
-	# first, across the whole batch: a batch that would otherwise import and
-	# then refuse mid-way is worse than refusing up front. The probe re-runs
-	# against the marker exit below, so the TS layer imports and re-runs the
-	# whole batch cleanly; letting the main loop discover a cold scene or
-	# asset lazily (after earlier ops already mutated and auto-saved other
-	# scenes) would duplicate those mutations on the retry. Plain scene load
-	# failures are NOT handled here — they stay lazy so per-operation error
-	# reporting keeps its existing shape. Dedup keys on the normalized path,
-	# not the raw string, so a scene referenced as both "a.tscn" and
-	# "./a.tscn" (or the same asset referenced from two ops) is probed once.
+	# Pre-pass: probe everything the batch will load, for the cold-import state
+	# and for missing files, BEFORE any mutation is applied. Two kinds of value
+	# are walked and they are not interchangeable:
+	#
+	#   1. Path PARAMETERS -- scene_path, load_sprite's texture_path, and an
+	#      add_node node_type that names a scene. Their convention is
+	#      project-relative or res://, so each is normalized through
+	#      normalize_scene_path (the helper its apply site uses) and then
+	#      classified. See _prepass_path_param.
+	#   2. Free-form property VALUES -- add_node's properties dict and each
+	#      set_node_properties update value, at any depth, inline resource specs
+	#      included. There only a res:// string is a resource reference, because
+	#      that is the only form _prepare_property_value loads; a bare string is
+	#      a string. See _collect_res_paths.
+	#
+	# Missing files are checked first, across the whole batch: a batch that
+	# would otherwise import and then refuse mid-way is worse than refusing up
+	# front. The probe re-runs against the marker exit below, so the TS layer
+	# imports and re-runs the whole batch cleanly; letting the main loop
+	# discover a cold scene or asset lazily (after earlier ops already mutated
+	# and auto-saved other scenes) would duplicate those mutations on the
+	# retry. The invariant this pre-pass owns: once it passes, no _apply_*
+	# in the batch can reach a cold asset. The disarm below is the backstop for
+	# the case where it does anyway. Plain scene load failures are NOT handled
+	# here -- they stay lazy so per-operation error reporting keeps its
+	# existing shape. Dedup keys on the normalized path, not the raw string, so
+	# a scene referenced as both "a.tscn" and "./a.tscn" (or the same asset
+	# referenced from two ops) is probed once.
 	var seen_paths: Dictionary = {}
 	var prepass_missing: Array = []
 	var prepass_needs_import: Array = []
 	for op in params.operations:
-		var preload_path = op.get("scene_path", "")
-		if preload_path != "":
-			var full_path = normalize_scene_path(preload_path)
-			if not full_path.is_empty() and full_path not in seen_paths and FileAccess.file_exists(full_path):
-				seen_paths[full_path] = true
-				var probe = _probe_scene_deps(full_path)
-				prepass_missing.append_array(probe.missing)
-				prepass_needs_import.append_array(probe.needs_import)
-
-		# Every JSON-sourced value an operation can assign, walked for res://
-		# strings at any depth. add_node's whole properties dict and the inline
-		# resource specs nested under a set_node_properties value both carry
-		# them, and a reference found only at assignment time would emit its
-		# [IMPORT_NEEDED] mid-batch, after earlier operations had already
-		# mutated and auto-saved.
 		var op_name = op.get("operation", "")
-		var value_roots: Array = []
-		if op_name == "load_sprite" and op.get("texture_path", "") != "":
-			value_roots.append(op.texture_path)
-		elif op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
-			value_roots.append(op.properties)
-		elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
-			for update in op.updates:
-				if typeof(update) == TYPE_DICTIONARY and update.has("value"):
-					value_roots.append(update.value)
+
+		_prepass_path_param(str(op.get("scene_path", "")), true, seen_paths, prepass_needs_import, prepass_missing)
+		if op_name == "load_sprite":
+			_prepass_path_param(str(op.get("texture_path", "")), false, seen_paths, prepass_needs_import, prepass_missing)
+		elif op_name == "add_node":
+			# node_type may name a scene to instance instead of a class.
+			# _instantiate_node_type loads it directly, bypassing
+			# load_scene_instance's own probe, so it is probed here.
+			var node_type = str(op.get("node_type", ""))
+			if _is_scene_path(node_type):
+				_prepass_path_param(node_type, true, seen_paths, prepass_needs_import, prepass_missing)
+
 		var res_paths: Array = []
-		for value_root in value_roots:
+		for value_root in _prepass_value_roots(op, op_name):
 			_collect_res_paths(value_root, res_paths)
 		for raw_path in res_paths:
-			var asset_path = normalize_scene_path(raw_path)
-			if asset_path.is_empty() or asset_path in seen_paths:
-				continue
-			seen_paths[asset_path] = true
-			if _classify_dep_path(asset_path) == "needs_import":
-				prepass_needs_import.append(asset_path)
+			_prepass_path_param(str(raw_path), false, seen_paths, prepass_needs_import, prepass_missing)
 
 	if prepass_missing.size() > 0:
 		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(prepass_missing))
 		quit(1)
 		return
 	if prepass_needs_import.size() > 0:
-		log_error("[IMPORT_NEEDED] batch: " + ", ".join(prepass_needs_import))
+		_report_import_needed("batch", ", ".join(prepass_needs_import))
 		quit(1)
 		return
 
@@ -2231,6 +2302,13 @@ func batch_scene_operations(params: Dictionary) -> void:
 				result["error"] = "Unknown batch operation: " + str(op_name) + hint
 
 		results.append(result)
+		if result.get("success", false):
+			# This operation mutated a cached scene, and every cached scene is
+			# saved before this function returns. From here on, a cold asset
+			# the pre-pass missed must fail the batch rather than ask the TS
+			# layer to import and replay it: the replay would re-apply what is
+			# about to be saved and leave duplicate nodes behind.
+			import_marker_armed = false
 		if abort_on_error and result.has("error"):
 			break
 

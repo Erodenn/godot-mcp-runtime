@@ -19,12 +19,26 @@ import { cpSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } fr
 import { join } from 'path';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
-import { useTmpDirs } from '../helpers/tmp.js';
+import { useTmpDirs, type TmpDirHandle } from '../helpers/tmp.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
+import { hasError, errorText, unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { handleBatchSceneOperations } from '../../src/tools/scene-tools.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 
 /** Integration tests spawn a real Godot process; give them room to run. */
 const IMPORT_TEST_TIMEOUT_MS = 180000;
+
+/** Read-only follow-up calls (tree, properties) get a shorter budget. */
+const READ_TIMEOUT_MS = 30000;
+
+/** The never-imported PNG, in both spellings a caller may pass. */
+const COLD_TEXTURE_REL_PATH = 'assets/test_texture.png';
+const COLD_TEXTURE_RES_PATH = `res://${COLD_TEXTURE_REL_PATH}`;
+
+/** Scene the batch tests mutate, and the one child it starts with. */
+const PROBE_SCENE = 'probe.tscn';
+const PROBE_SPRITE = 'Sprite2D';
 
 /** A scene with exactly one node of `name`, countable after the fact. */
 function sceneWithNode(name: string, textureExtResourceId?: string): string {
@@ -32,7 +46,7 @@ function sceneWithNode(name: string, textureExtResourceId?: string): string {
     ? `\ntexture = ExtResource("${textureExtResourceId}")`
     : '';
   const extResource = textureExtResourceId
-    ? `\n[ext_resource type="Texture2D" path="res://assets/test_texture.png" id="${textureExtResourceId}"]\n`
+    ? `\n[ext_resource type="Texture2D" path="${COLD_TEXTURE_RES_PATH}" id="${textureExtResourceId}"]\n`
     : '\n';
   return (
     `[gd_scene load_steps=${textureExtResourceId ? 2 : 1} format=3]` +
@@ -43,6 +57,99 @@ function sceneWithNode(name: string, textureExtResourceId?: string): string {
 }
 
 let runner: GodotRunner;
+
+interface BatchOperationResult {
+  operation?: string;
+  success?: boolean;
+  error?: string;
+}
+
+interface SceneTreeNode {
+  name: string;
+  type: string;
+  children: SceneTreeNode[];
+}
+
+/**
+ * A temp fixture copy carrying a texture that was never imported: the PNG is
+ * on disk with no .import sidecar and no .godot/imported entry, which is the
+ * exact state the cold-import probe exists for. The committed placeholder.png
+ * is deliberately invalid and would make the import step throw, so the copy
+ * gets a valid one.
+ */
+function makeColdProject(tmp: TmpDirHandle): string {
+  const project = tmp.make('godot-mcp-test-');
+  cpSync(fixtureProjectPath, project, { recursive: true });
+  mkdirSync(join(project, 'assets'), { recursive: true });
+  writeFileSync(join(project, COLD_TEXTURE_REL_PATH), minimalPng());
+  writeFileSync(join(project, 'placeholder.png'), minimalPng());
+  rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
+  writeFileSync(join(project, PROBE_SCENE), sceneWithNode(PROBE_SPRITE));
+  return project;
+}
+
+/**
+ * Run a batch through the handler, not through executeOperation: the
+ * import-and-retry lives in executeSceneOp, so a bare executeOperation call
+ * never exercises the replay these tests are about.
+ */
+async function runBatchThroughHandler(
+  project: string,
+  operations: object[],
+): Promise<BatchOperationResult[]> {
+  const result = await handleBatchSceneOperations(runner, { projectPath: project, operations });
+  if (hasError(result)) throw new Error(errorText(result) ?? 'batch returned an error response');
+  const payload = unwrap(result).structuredContent as { results: BatchOperationResult[] };
+  return payload.results;
+}
+
+/** Child node names of the scene root, read back out of the engine. */
+async function rootChildNames(project: string, scenePath: string): Promise<string[]> {
+  const { stdout } = await runner.executeOperation(
+    'get_scene_tree',
+    { scenePath },
+    project,
+    READ_TIMEOUT_MS,
+  );
+  const tree = JSON.parse(extractJson(stdout)) as SceneTreeNode;
+  return tree.children.map((child) => child.name);
+}
+
+/** Properties of one node, as the engine reports them after the batch. */
+async function changedProperties(
+  project: string,
+  scenePath: string,
+  nodePath: string,
+): Promise<Record<string, unknown>> {
+  const { stdout } = await runner.executeOperation(
+    'get_node_properties',
+    { scenePath, nodes: [{ nodePath, changedOnly: true }] },
+    project,
+    READ_TIMEOUT_MS,
+  );
+  const parsed = JSON.parse(extractJson(stdout)) as {
+    results: Array<{ properties?: Record<string, unknown> }>;
+  };
+  return parsed.results[0]?.properties ?? {};
+}
+
+/**
+ * The scene root holds exactly these children and nothing else. A batch that
+ * was replayed over its own saved output shows up here as an extra node named
+ * `@Node@2` or similar: Godot renames a colliding add_child instead of
+ * failing it, so the duplicate is silent everywhere except the node list.
+ */
+function expectExactChildren(actual: string[], expected: string[]): void {
+  expect(actual.filter((name) => name.startsWith('@'))).toEqual([]);
+  expect([...actual].sort()).toEqual([...expected].sort());
+  expect(actual).toHaveLength(expected.length);
+}
+
+/** Every operation in the batch reported success, none reported an error. */
+function expectAllSucceeded(results: BatchOperationResult[], expectedCount: number): void {
+  expect(results.map((r) => r.error ?? null)).toEqual(new Array(expectedCount).fill(null));
+  expect(results.map((r) => r.success)).toEqual(new Array(expectedCount).fill(true));
+}
 
 beforeAll(async () => {
   runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
@@ -197,6 +304,181 @@ describe('batch cold-import pre-pass (integration)', () => {
       );
       expect(retry.stdout).toContain('"success":true');
       expect(readFileSync(join(project, 'warm.tscn'), 'utf8').match(/WarmChild/g)?.length).toBe(1);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+});
+
+/**
+ * The caller's real shapes, through the handler so the import-and-retry in
+ * executeSceneOp actually runs. Each case pairs a mutating operation with a
+ * second operation that references a cold asset through one of the path
+ * parameters or property values the pre-pass has to cover. The assertion that
+ * matters is the node list afterwards: a pre-pass that misses the reference
+ * lets the first operation mutate and save, and the retry then applies it a
+ * second time under an engine-assigned name.
+ */
+describe('batch cold-import pre-pass, caller-shaped references (integration)', () => {
+  const tmp = useTmpDirs();
+
+  itGodot(
+    'covers a load_sprite texturePath spelled project-relative',
+    async () => {
+      const project = makeColdProject(tmp);
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Node',
+          nodeName: 'PrepassProbe',
+        },
+        {
+          operation: 'load_sprite',
+          scenePath: PROBE_SCENE,
+          nodePath: `root/${PROBE_SPRITE}`,
+          texturePath: COLD_TEXTURE_REL_PATH,
+        },
+      ]);
+
+      expectAllSucceeded(results, 2);
+      expectExactChildren(await rootChildNames(project, PROBE_SCENE), [
+        PROBE_SPRITE,
+        'PrepassProbe',
+      ]);
+      const props = await changedProperties(project, PROBE_SCENE, `root/${PROBE_SPRITE}`);
+      expect(String(props.texture)).toContain('Texture');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'covers a load_sprite texturePath spelled res://',
+    async () => {
+      const project = makeColdProject(tmp);
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Node',
+          nodeName: 'PrepassProbe',
+        },
+        {
+          operation: 'load_sprite',
+          scenePath: PROBE_SCENE,
+          nodePath: `root/${PROBE_SPRITE}`,
+          texturePath: COLD_TEXTURE_RES_PATH,
+        },
+      ]);
+
+      expectAllSucceeded(results, 2);
+      expectExactChildren(await rootChildNames(project, PROBE_SCENE), [
+        PROBE_SPRITE,
+        'PrepassProbe',
+      ]);
+      const props = await changedProperties(project, PROBE_SCENE, `root/${PROBE_SPRITE}`);
+      expect(String(props.texture)).toContain('Texture');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'covers a res:// path nested in an add_node properties dict',
+    async () => {
+      const project = makeColdProject(tmp);
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Node',
+          nodeName: 'FirstProbe',
+        },
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Sprite2D',
+          nodeName: 'Textured',
+          properties: { texture: COLD_TEXTURE_RES_PATH },
+        },
+      ]);
+
+      expectAllSucceeded(results, 2);
+      expectExactChildren(await rootChildNames(project, PROBE_SCENE), [
+        PROBE_SPRITE,
+        'FirstProbe',
+        'Textured',
+      ]);
+      const props = await changedProperties(project, PROBE_SCENE, 'root/Textured');
+      expect(String(props.texture)).toContain('Texture');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'covers a res:// path in a set_node_properties update value',
+    async () => {
+      const project = makeColdProject(tmp);
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Node',
+          nodeName: 'FirstProbe',
+        },
+        {
+          operation: 'set_node_properties',
+          scenePath: PROBE_SCENE,
+          updates: [
+            {
+              nodePath: `root/${PROBE_SPRITE}`,
+              property: 'texture',
+              value: COLD_TEXTURE_RES_PATH,
+            },
+          ],
+        },
+      ]);
+
+      expectAllSucceeded(results, 2);
+      expectExactChildren(await rootChildNames(project, PROBE_SCENE), [PROBE_SPRITE, 'FirstProbe']);
+      const props = await changedProperties(project, PROBE_SCENE, `root/${PROBE_SPRITE}`);
+      expect(String(props.texture)).toContain('Texture');
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'covers an add_node nodeType that names a scene with a cold dependency',
+    async () => {
+      // node_type may name a scene to instance, and _instantiate_node_type
+      // loads it directly instead of going through load_scene_instance, so
+      // that scene's own dependencies are only probed if the pre-pass does it.
+      const project = makeColdProject(tmp);
+      writeFileSync(join(project, 'sub.tscn'), sceneWithNode('SubSprite', '1'));
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'Node',
+          nodeName: 'FirstProbe',
+        },
+        {
+          operation: 'add_node',
+          scenePath: PROBE_SCENE,
+          nodeType: 'sub.tscn',
+          nodeName: 'SubInstance',
+        },
+      ]);
+
+      expectAllSucceeded(results, 2);
+      expectExactChildren(await rootChildNames(project, PROBE_SCENE), [
+        PROBE_SPRITE,
+        'FirstProbe',
+        'SubInstance',
+      ]);
     },
     IMPORT_TEST_TIMEOUT_MS,
   );

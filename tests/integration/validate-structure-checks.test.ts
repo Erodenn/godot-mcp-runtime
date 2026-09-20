@@ -208,7 +208,7 @@ describe('validate: structure checks', () => {
         {
           check: 'structure',
           path: 'root',
-          message: 'Expected node of type Control at root',
+          message: 'Expected node of type Control at root, found Node2D',
         },
       ]);
     },

@@ -104,6 +104,39 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
 }
 
 /**
+ * Did this run already report work it applied?
+ *
+ * The cold-import retry re-runs the operation from the start, which is only
+ * correct while the run wrote nothing. A multi-step operation
+ * (`batch_scene_operations`) reports each step in a `results` array and saves
+ * every scene it mutated before it returns, so a run that reports a successful
+ * step AND asks for an import has already written: replaying it would apply
+ * those steps a second time. `godot_operations.gd` stops printing the marker
+ * once that happens, so this is the second line of defense rather than the
+ * first, and it keys on the payload rather than the operation name so any
+ * future multi-step operation inherits it.
+ *
+ * Unparseable stdout answers false: an operation that never emitted a payload
+ * never reported applied work, and the retry is exactly what it needs.
+ */
+function reportsAppliedWork(stdout: string): boolean {
+  const trimmed = stdout.trim();
+  if (!trimmed) return false;
+  try {
+    const payload = JSON.parse(extractJson(trimmed)) as { results?: unknown };
+    if (!Array.isArray(payload.results)) return false;
+    return payload.results.some(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        (entry as { success?: unknown }).success === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Interprets a finished operation's {stdout, stderr} into a HandlerResult.
  * The single interpretation path used by `executeSceneOp` regardless of
  * whether an import retry ran first — the empty-stdout check and the
@@ -182,7 +215,9 @@ function interpretOperationResult(
  * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `IMPORT_NEEDED_MARKER`)
  * by running `runner.importAssets` and retrying the operation exactly once,
  * capped structurally rather than by a loop — a marker on the retried run
- * falls through to normal error handling instead of importing again.
+ * falls through to normal error handling instead of importing again. A run
+ * that already reported applied work is never retried at all (see
+ * `reportsAppliedWork`): the replay would redo what it already saved.
  */
 export async function executeSceneOp(
   runner: GodotRunner,
@@ -207,6 +242,17 @@ export async function executeSceneOp(
     // call, so a second marker on the retried run falls through to the
     // normal interpretation path below rather than importing again.
     if (stderr.includes(IMPORT_NEEDED_MARKER)) {
+      if (reportsAppliedWork(stdout)) {
+        return err(
+          createErrorResponse(
+            `${failurePrefix}: an asset still needed importing after part of this operation had already been applied and saved. Refusing the automatic import-and-retry, which would apply those steps a second time.\nreported by this run: ${stdout.trim()}`,
+            [
+              'The steps reported as successful above have been applied and saved - do not re-run them',
+              'Import the project assets (any tool call on this project once the asset is imported will do), then re-run only the steps that failed',
+            ],
+          ),
+        );
+      }
       // importAssets writes .godot/ under the project. A running session on
       // this same project is a second writer racing it, same as the
       // mutatesSceneFile guard above — check it here too since this branch
