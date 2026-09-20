@@ -944,3 +944,215 @@ describe('packed-array element coercion', () => {
     60000,
   );
 });
+
+// --- Script-declared typed arrays (Array[T]) ---
+// A typed array's declared type is plain TYPE_ARRAY, so it passes the
+// declared-type check untouched and the raw {x, y} dicts reach node.set().
+// Godot's typed assign refuses the whole array rather than zero-filling it,
+// so the symptom is a success:true with nothing written. The element type is
+// recovered from the live value (Array.get_typed_builtin()) or, failing that,
+// from the property descriptor's PROPERTY_HINT_ARRAY_TYPE hint.
+const TYPED_ARRAY_SCRIPT = [
+  'extends Node2D',
+  '@export var points: Array[Vector2] = []',
+  '@export var labels: Array[String] = []',
+  '@export var loose: Array = []',
+  '@export var textures: Array[Texture2D] = []',
+  'var no_initializer: Array[Vector2]',
+  '',
+].join('\n');
+
+const TYPED_ARRAY_SCRIPT_NAME = 'typed_arrays.gd';
+
+async function attachTypedArrayScript(tmpProject: string, scenePath: string): Promise<void> {
+  writeFileSync(join(tmpProject, TYPED_ARRAY_SCRIPT_NAME), TYPED_ARRAY_SCRIPT, 'utf-8');
+  const { stdout } = await runner.executeOperation(
+    'attach_script',
+    { scenePath, nodePath: '.', scriptPath: TYPED_ARRAY_SCRIPT_NAME },
+    tmpProject,
+    30000,
+  );
+  expect(JSON.parse(extractJson(stdout)).success).toBe(true);
+}
+
+describe('typed Array[T] element coercion', () => {
+  itGodot(
+    'coerces {x,y} dicts into a script-declared Array[Vector2] property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: '.',
+              property: 'points',
+              value: [
+                { x: 10, y: 20 },
+                { x: 30, y: 40 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+
+      const { stdout: rb } = await runner.executeOperation(
+        'get_node_properties',
+        { scenePath: 'main.tscn', nodes: [{ node_path: '.' }] },
+        tmpProject,
+        30000,
+      );
+      const points = JSON.parse(extractJson(rb)).results?.[0]?.properties?.points;
+      expect(points).toBeDefined();
+      expect(JSON.stringify(points)).not.toBe('[]');
+      expect(String(points)).toMatch(/\(10(\.0)?, 20(\.0)?\)/);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/points\s*=\s*Array\[Vector2\]\(/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'errors with the element index when a String is given for an Array[Vector2] element',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'points', value: [{ x: 1, y: 2 }, 'nope'] }],
+        },
+        tmpProject,
+        30000,
+      );
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBeUndefined();
+      expect(parsed.results[0].error).toMatch(/element 1/);
+      expect(parsed.results[0].error).toMatch(/Vector2/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'still accepts a plain array for an untyped Array property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'loose', value: [1, 'two', { x: 3, y: 4 }] }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+    },
+    60000,
+  );
+
+  itGodot(
+    'passes an Array[Texture2D] value through without element validation',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'textures', value: [] }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+    },
+    60000,
+  );
+
+  itGodot(
+    'resolves the element type for a typed array declared without an initializer',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout: goodStdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'no_initializer', value: [{ x: 5, y: 6 }] }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(goodStdout)).results[0].success).toBe(true);
+
+      // A non-exported script variable carries no storage usage, so
+      // get_node_properties cannot read it back. The element error on a
+      // rejected value is the observable proof that the element type
+      // resolved: had it stayed unresolved, this write would pass the
+      // declared-type check and report success with nothing stored.
+      const { stdout: badStdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'no_initializer', value: ['nope'] }],
+        },
+        tmpProject,
+        30000,
+      );
+      const bad = JSON.parse(extractJson(badStdout));
+      expect(bad.results[0].success).toBeUndefined();
+      expect(bad.results[0].error).toMatch(/element 0/);
+      expect(bad.results[0].error).toMatch(/Vector2/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'applies typed-array element coercion to initial properties in add_node',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout: createStdout } = await runner.executeOperation(
+        'create_scene',
+        { scenePath: 'typed_child.tscn', rootNodeType: 'Node2D' },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(createStdout)).success).toBe(true);
+      await attachTypedArrayScript(tmpProject, 'typed_child.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'typed_child.tscn',
+          nodeName: 'TypedChild',
+          parentNodePath: '.',
+          properties: { points: [{ x: 7, y: 8 }] },
+        },
+        tmpProject,
+        30000,
+      );
+      expect(stdout).toContain('added successfully');
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/points\s*=\s*Array\[Vector2\]\(\[Vector2\(7(\.0)?, 8(\.0)?\)\]\)/);
+    },
+    60000,
+  );
+});
