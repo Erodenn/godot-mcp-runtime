@@ -124,7 +124,7 @@ class GodotMcpServer {
     this.server = new Server(
       {
         name: 'godot-mcp',
-        version: '3.7.1',
+        version: '3.8.0',
       },
       {
         capabilities: {
