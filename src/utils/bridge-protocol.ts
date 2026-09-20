@@ -22,7 +22,19 @@ import * as net from 'net';
 export const DEFAULT_BRIDGE_PORT = 9900;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const FRAME_HEADER_BYTES = 4;
-export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 8000;
+/**
+ * Ceiling on how long a spawned Godot process is given to bring the bridge
+ * up before `run_project` reports a timeout. `pollBridge` returns on the
+ * first accepted pong, so raising this costs nothing in the healthy case -
+ * it only bounds how long a genuinely broken launch takes to be reported.
+ * Safe to raise furthest of the readiness budgets because `shouldAbort` in
+ * `waitForBridge` aborts the moment the child process exits, so a crashed
+ * launch is still reported early regardless of this ceiling.
+ * `tests/helpers/run-project-or-skip.ts` already overrides this at 20000 for
+ * every integration test, which is the evidence the previous 8000 was too
+ * tight for the fixture project on CI hardware.
+ */
+export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 30000;
 
 /**
  * Marker the bridge prints on stderr after each simulated input action settles,

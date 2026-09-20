@@ -141,7 +141,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'attach_project',
     description:
-      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 15s for the bridge to respond. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
+      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 60s total once it has, so a large project\'s cold start is absorbed. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
