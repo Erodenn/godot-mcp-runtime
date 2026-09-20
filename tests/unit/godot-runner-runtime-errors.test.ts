@@ -168,6 +168,39 @@ describe('GodotRunner.ingestStderrChunk', () => {
     ]);
     expect(proc.totalErrorsWritten).toBe(3);
   });
+
+  it('rejoins a stderr line split across two chunks into one retained line', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'SCRIPT ERROR: bo');
+    runner.ingestStderrChunk(proc, 'om on line 4\n');
+    expect(proc.errors).toEqual(['SCRIPT ERROR: boom on line 4', '']);
+    expect(proc.totalErrorsWritten).toBe(2);
+  });
+
+  it('recognizes an action-boundary sentinel split across two chunks', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} `);
+    runner.ingestStderrChunk(proc, '0\nb');
+    expect(proc.actionBoundaries).toEqual([{ index: 0, seq: 1 }]);
+    expect(proc.errors).toEqual(['a', 'b']);
+    expect(proc.errors.some((line) => line.includes(ACTION_BOUNDARY_SENTINEL))).toBe(false);
+  });
+
+  it('keeps a chunk that ends in a newline intact across the next chunk', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'a\n');
+    runner.ingestStderrChunk(proc, 'b\n');
+    expect(proc.errors).toEqual(['a', '', 'b', '']);
+    expect(proc.totalErrorsWritten).toBe(4);
+  });
+
+  it('ignores an empty chunk without marking the tail incomplete', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'a');
+    runner.ingestStderrChunk(proc, '');
+    runner.ingestStderrChunk(proc, 'bc\n');
+    expect(proc.errors).toEqual(['abc', '']);
+  });
 });
 
 describe('GodotRunner.collectActionErrors', () => {
@@ -223,5 +256,20 @@ describe('GodotRunner.collectActionErrors', () => {
     expect(collected.sentinelTimedOut).toBe(false);
     // No wait at all: it must not burn the default drain timeout.
     expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it('attributes errors to the right action when the sentinel is split', async () => {
+    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    const capture = runner.beginActionErrorCapture();
+    // Same scenario as 'buckets SCRIPT ERROR lines onto the right entry', cut
+    // into two chunks mid-sentinel.
+    runner.ingestStderrChunk(runner.activeProcess, `plain log line\n${ACTION_BOUNDARY_SENTINEL} `);
+    runner.ingestStderrChunk(
+      runner.activeProcess,
+      `0\nSCRIPT ERROR: from action 1\nnoise\n${ACTION_BOUNDARY_SENTINEL} 1`,
+    );
+    const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
+    expect(collected.buckets).toEqual([[], ['SCRIPT ERROR: from action 1']]);
+    expect(collected.sentinelTimedOut).toBe(false);
   });
 });

@@ -79,6 +79,12 @@ export interface GodotProcess {
    * `beginActionErrorCapture` resets it at the start of each batch.
    */
   actionBoundaries?: ActionBoundaryMark[];
+  /**
+   * True when the last line pushed to `errors` came from a chunk that did not
+   * end in a newline, and so may be the front half of a line the next chunk
+   * completes. `ingestStderrChunk` pops and rejoins it in that case.
+   */
+  stderrTailIncomplete?: boolean;
 }
 
 /** Opaque handle returned by `beginActionErrorCapture`. */
@@ -1157,10 +1163,56 @@ export class GodotRunner {
    *
    * Public only so unit tests can drive ingestion without spawning Godot; the
    * production caller is the session stderr handler in `runProject`.
+   *
+   * A `'data'` event boundary can land mid-line, splitting one Godot stderr
+   * line into two chunks. Every existing test here passes a chunk with no
+   * trailing newline and expects the final segment retained immediately, so
+   * this cannot withhold a trailing partial line the way a conventional carry
+   * buffer would - that would turn every one of those tests red. Instead it
+   * emits eagerly and coalesces retroactively: a chunk lacking a trailing
+   * newline marks `proc.stderrTailIncomplete`, and the next chunk pops that
+   * tail back off, prepends it to its own first segment, and re-runs
+   * `parseActionBoundary` on the rejoined text - which is the entire fix, since
+   * a sentinel split across the boundary is unrecognizable in either half.
+   *
+   * Why the bookkeeping stays correct:
+   * - `totalErrorsWritten`: the pop decrements before the rejoined line's push
+   *   increments, landing exactly where an unsplit chunk would have left it.
+   *   A reader sampling between the two chunks sees the truncated line and a
+   *   count including it (today's behavior); the pop-then-push realigns it
+   *   with no drift.
+   * - `actionBoundaries[].seq`: an incomplete tail is by definition the last
+   *   segment of its chunk, so no mark can have been recorded after it -
+   *   every existing mark's `seq` is <= the popped line's index and the pop
+   *   cannot invalidate one. A mark from the rejoined line itself gets its
+   *   `seq` from the already-decremented counter, which is correct.
+   * - `STDERR_RING_LIMIT_LINES`: the incomplete tail is the newest line and
+   *   the trim removes from the front, so it is never the line trimmed; the
+   *   `proc.errors.length > 0` guard below covers the degenerate case anyway.
+   * - Process exit with a dangling partial line: nothing to flush. The eager
+   *   emit already put it in `errors`, so `stop_project` and
+   *   `get_debug_output` see it exactly as they do today. No flush-on-close
+   *   handler is added; eager emission is what makes one unnecessary.
+   * - `\r\n` on Windows: unchanged on purpose. `parseActionBoundary` already
+   *   trims each line, so a sentinel with a trailing `\r` still parses. A
+   *   chunk boundary falling between `\r` and `\n` produces a tail ending in
+   *   `\r`, then a next chunk whose first segment is `''`; the rejoin yields
+   *   the same text and the following empty line lands as it would unsplit.
+   *   Retained lines are not stripped of `\r` here - that would change the
+   *   text every existing stderr assertion compares against.
+   * - Trailing empty segment: `'a\n'.split('\n')` is `['a', '']` and the `''`
+   *   is pushed and counted today. `endsWith('\n')` marks the tail complete in
+   *   that case, so the quirk is preserved byte for byte.
    */
   ingestStderrChunk(proc: GodotProcess, text: string): void {
-    const lines = text.split('\n');
-    for (const line of lines) {
+    if (text === '') return;
+    const segments = text.split('\n');
+    if (proc.stderrTailIncomplete && proc.errors.length > 0) {
+      const poppedTail = proc.errors.pop()!;
+      proc.totalErrorsWritten -= 1;
+      segments[0] = poppedTail + segments[0];
+    }
+    for (const line of segments) {
       const boundaryIndex = parseActionBoundary(line);
       if (boundaryIndex !== null) {
         if (!proc.actionBoundaries) proc.actionBoundaries = [];
@@ -1170,10 +1222,11 @@ export class GodotRunner {
       proc.errors.push(line);
       proc.totalErrorsWritten += 1;
     }
+    proc.stderrTailIncomplete = !text.endsWith('\n');
     if (proc.errors.length > STDERR_RING_LIMIT_LINES) {
       proc.errors.splice(0, proc.errors.length - STDERR_RING_LIMIT_LINES);
     }
-    lines.forEach((line: string) => {
+    segments.forEach((line: string) => {
       if (line.trim()) logDebug(`[Godot stderr] ${line}`);
     });
   }
