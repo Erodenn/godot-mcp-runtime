@@ -604,13 +604,15 @@ describe('set_node_properties type validation against a scripted node', () => {
     },
     60000,
   );
+});
 
-  // --- Packed*Array properties (e.g. Polygon2D polygon) ---
-  // JSON sends a PackedVector2Array as an array of {x, y} dicts. node.set()
-  // casts each dict element to the zero Vector2, the compat table accepts
-  // TYPE_ARRAY, and the tool reported success:true while the array was
-  // silently zeroed (observed in agent-driven builds: Polygon2D geometry
-  // wiped by a later write, caught only on read-back).
+// --- Packed*Array properties (e.g. Polygon2D polygon) ---
+// JSON sends a PackedVector2Array as an array of {x, y} dicts. node.set()
+// casts each dict element to the zero Vector2, the compat table accepts
+// TYPE_ARRAY, and the tool reported success:true while the array was
+// silently zeroed (observed in agent-driven builds: Polygon2D geometry
+// wiped by a later write, caught only on read-back).
+describe('packed-array element coercion', () => {
   itGodot(
     'round-trips PackedVector2Array from array-of-dicts (was silent zero-write)',
     async () => {

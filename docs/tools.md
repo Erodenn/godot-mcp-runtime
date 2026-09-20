@@ -162,7 +162,7 @@ Godot performs these on store, so they are allowed: float to int, string to `Nod
 
 ### Packed arrays
 
-`Array` to a `Packed*Array` conversion also applies per element: each element is coerced with the scalar rules above (`{"x": 1, "y": 2}` becomes `Vector2(1, 2)`, ints widen to floats in `PackedFloat32Array`, and so on). An element that cannot represent the packed element type — a string in a `PackedVector2Array`, a bool in a `PackedColorArray` — errors instead of storing Godot's silent zero value, and the error names the offending element index. An empty array clears the property.
+`Array` to a `Packed*Array` conversion also applies per element: each element is coerced with the scalar rules above (`{"x": 1, "y": 2}` becomes `Vector2(1, 2)`, ints widen to floats in `PackedFloat32Array`, and so on). An element that cannot represent the packed element type (a string in a `PackedVector2Array`, a bool in a `PackedColorArray`) errors instead of storing Godot's silent zero value, and the error names the offending element index. An empty array clears the property.
 
 ```json
 {
