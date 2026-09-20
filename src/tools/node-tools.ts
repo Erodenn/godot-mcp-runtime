@@ -280,7 +280,6 @@ export const nodeToolDefinitions = [
       },
     },
   },
-
   {
     name: 'connect_signal',
     description:

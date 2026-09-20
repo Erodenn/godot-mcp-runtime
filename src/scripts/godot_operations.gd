@@ -1031,18 +1031,20 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 				# handler is only a user mistake on a persisted connection.
 				var is_persisted := (int(conn.get("flags", 0)) & CONNECT_PERSIST) != 0
 
-				var target_str = "unknown"
-				if target_object == scene_root:
-					target_str = "root"
-				elif target_object is Node:
-					target_str = "root/" + String(scene_root.get_path_to(target_object))
+				# Resolve the target path through _relative_path, which checks
+				# is_ancestor_of before calling get_path_to: calling it on a
+				# node outside the tree prints a Godot error to stderr, on
+				# exactly the target_not_in_scene case reported just below.
+				var target_rel := ""
+				if target_object is Node:
+					target_rel = _relative_path(scene_root, target_object)
 
 				# Issue 1: connection target is not a node reachable from this scene
-				if not (target_object is Node) or _relative_path(scene_root, target_object).is_empty():
+				if target_rel.is_empty():
 					issues.append({
 						"node": node_rel,
 						"signal": sig_name,
-						"target": target_str,
+						"target": "unknown",
 						"method": method,
 						"problem": "target_not_in_scene"
 					})
@@ -1057,7 +1059,7 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 					issues.append({
 						"node": node_rel,
 						"signal": sig_name,
-						"target": target_str,
+						"target": target_rel,
 						"method": method,
 						"problem": "method_missing_on_target"
 					})
@@ -1068,7 +1070,7 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 					issues.append({
 						"node": node_rel,
 						"signal": sig_name,
-						"target": target_str,
+						"target": target_rel,
 						"method": method,
 						"problem": "naming_convention"
 					})
@@ -1103,13 +1105,11 @@ func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) ->
 		if node_rel.is_empty():
 			continue
 		var script_methods = _get_script_user_defined_methods(node)
-		log_debug("Checking node " + node_rel + " for orphaned handlers, found " + str(script_methods.size()) + " methods: " + str(script_methods))
 		for method_name in script_methods:
 			if not method_name.begins_with("_on_"):
 				continue
 			var pair_key = node_rel + "::" + method_name
 			if not wired_pairs.has(pair_key):
-				log_debug("Found orphaned handler: " + method_name + " on " + node_rel)
 				issues.append({
 					"node": node_rel,
 					"signal": "",
@@ -1118,15 +1118,15 @@ func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) ->
 					"problem": "orphaned_handler"
 				})
 
-# Yield node and every descendant (depth-first, preorder).
+# Every node in the subtree rooted at `root`, root first, breadth-first.
+# Order only affects the sequence issues are reported in.
 func _iter_subtree(root: Node) -> Array:
-	var out := []
-	var stack := [root]
-	while not stack.is_empty():
-		var node = stack.pop_back()
-		out.append(node)
-		for child in node.get_children():
-			stack.push_front(child)
+	var out := [root]
+	var cursor := 0
+	while cursor < out.size():
+		for child in out[cursor].get_children():
+			out.append(child)
+		cursor += 1
 	return out
 
 # Scene-root-relative path in the "root/..." form, "" when node is outside the tree.
@@ -1189,9 +1189,10 @@ func _is_engine_builtin_declared(target_object: Object, method: String) -> bool:
 	var cls := target_object.get_class()
 	return ClassDB.class_exists(cls) and ClassDB.class_has_method(cls, method, false)
 
-# Extract user-defined method names from a node's attached script by parsing
-# the script source file. Returns an array of method names that are defined
-# in the script (excluding inherited methods). Used to detect orphaned handlers.
+# Handler method names declared by a node's attached script, via
+# get_script_method_list(): that covers the script's own methods plus those of
+# any GDScript it extends, and no engine-class methods. Only _on_* names are
+# kept, which is all orphaned-handler detection looks at.
 func _get_script_user_defined_methods(node: Node) -> Array:
 	var script = node.get_script()
 	if script == null:
@@ -1359,10 +1360,17 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 			var issues: Array = []
 			_validate_schema_node(scene_root, scene_root, schema, missing_nodes, missing_properties, issues)
 			for mn in missing_nodes:
+				var mn_expected = str(mn.get("expected", "?"))
+				var mn_path = str(mn.get("path", "?"))
+				# An unmatched child is a finding about the parent named in
+				# path, so it reads as "no child of type X under <parent>".
+				var mn_message = "Expected node of type %s at %s" % [mn_expected, mn_path]
+				if mn.get("unmatched_child", false):
+					mn_message = "No child of type %s under %s" % [mn_expected, mn_path]
 				errors.append({
 					"check": "structure",
 					"path": str(mn.get("path", "")),
-					"message": "Expected node of type %s at %s" % [str(mn.get("expected", "?")), str(mn.get("path", "?"))],
+					"message": mn_message,
 				})
 			for mp in missing_properties:
 				errors.append({
@@ -1404,25 +1412,32 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 
 	return errors
 
-func _validate_schema_node(node: Node, scene_root: Node, schema: Dictionary, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
+func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
+	# A malformed entry is reported, not fatal: the recursion below and the
+	# batch path both reach this function with values that never passed through
+	# the Node-side validators. issues entries are stringified by the caller.
+	if not (schema is Dictionary):
+		issues.append("Invalid schema entry: expected an object, got " + type_string(typeof(schema)))
+		return
+
 	# Check type if specified
 	if schema.has("type"):
 		var expected_type = str(schema.type)
 		if node.get_class() != expected_type:
 			missing_nodes.append({
-				"path": "root/" + str(scene_root.get_path_to(node)),
+				"path": _relative_path(scene_root, node),
 				"expected": expected_type
 			})
-	
+
 	# Check hasProperty if specified
 	if schema.has("has_property"):
 		var prop_name = str(schema.has_property)
 		if not _node_has_property_set(node, prop_name):
 			missing_properties.append({
-				"path": "root/" + str(scene_root.get_path_to(node)),
+				"path": _relative_path(scene_root, node),
 				"property": prop_name
 			})
-	
+
 	# Recurse into children if children schema provided
 	if schema.has("children"):
 		var children_schema = schema.children
@@ -1436,10 +1451,14 @@ func _validate_schema_node(node: Node, scene_root: Node, schema: Dictionary, mis
 					available.erase(found)
 					_validate_schema_node(found, scene_root, child_schema, missing_nodes, missing_properties, issues)
 				else:
+					# The finding is about the parent: it has no child of the
+					# declared type. path and expected therefore both describe
+					# the same relationship, which is what the message says.
 					var expected_type = str(child_schema.get("type", "?")) if child_schema is Dictionary else "?"
 					missing_nodes.append({
-						"path": "root/" + str(scene_root.get_path_to(node)),
-						"expected": expected_type
+						"path": _relative_path(scene_root, node),
+						"expected": expected_type,
+						"unmatched_child": true
 					})
 
 # Find the first unconsumed child that satisfies child_schema's declared

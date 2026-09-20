@@ -104,6 +104,29 @@ describe('convertCamelToSnakeCase', () => {
     });
   });
 
+  it('rewrites hasProperty nested inside validate checks schema children', () => {
+    // The structure check depends on this: GDScript reads has_property, and
+    // the only converter that ever sees the nested key is this one.
+    const input = {
+      scenePath: 'main.tscn',
+      checks: [
+        {
+          type: 'structure',
+          schema: { type: 'Node2D', children: [{ type: 'Sprite2D', hasProperty: 'texture' }] },
+        },
+      ],
+    };
+    expect(convertCamelToSnakeCase(input)).toEqual({
+      scene_path: 'main.tscn',
+      checks: [
+        {
+          type: 'structure',
+          schema: { type: 'Node2D', children: [{ type: 'Sprite2D', has_property: 'texture' }] },
+        },
+      ],
+    });
+  });
+
   it('preserves arrays of primitives as-is', () => {
     expect(convertCamelToSnakeCase({ meshItemNames: ['a', 'b'] })).toEqual({
       mesh_item_names: ['a', 'b'],
