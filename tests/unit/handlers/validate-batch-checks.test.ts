@@ -141,6 +141,88 @@ describe('handleValidate batch mode - per-target checks', () => {
     });
   });
 
+  it('rejects a structure check with no schema as that target alone', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+      }),
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        { scenePath: 'broken.tscn', checks: [{ type: 'structure' }] },
+        { scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] },
+      ],
+    });
+
+    expect(hasError(result)).toBe(false);
+    // The malformed target never reaches Godot; the other one still runs.
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]!.params).toEqual({
+      targets: [{ scene_path: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+    const parsed = parseResults(result);
+    expect(parsed.results[0]).toEqual({
+      target: 'broken.tscn',
+      valid: false,
+      errors: [
+        {
+          message:
+            'Invalid schema at schema: must be an object like { type?, children?, hasProperty? }',
+        },
+      ],
+    });
+    expect(parsed.results[1]).toEqual({ target: 'main.tscn', valid: true, errors: [] });
+  });
+
+  it('rejects an unknown check type in a batch target the way single mode does', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [{ type: 'strcture', schema: {} }] }],
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(0);
+    expect(parseResults(result)).toEqual({
+      results: [
+        {
+          target: 'main.tscn',
+          valid: false,
+          errors: [{ message: 'Invalid check type: strcture (expected "structure" or "signals")' }],
+        },
+      ],
+    });
+  });
+
+  it('errors on a target naming two modes instead of silently dropping its checks', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+      }),
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        { scriptPath: 'placeholder.gd', scenePath: 'both.tscn', checks: [STRUCTURE_CHECK] },
+        { scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] },
+      ],
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls[0]!.params).toEqual({
+      targets: [{ scene_path: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+    expect(parseResults(result).results[0]).toEqual({
+      target: 'both.tscn',
+      valid: false,
+      errors: [{ message: 'Target must have exactly one of scriptPath, source, or scenePath' }],
+    });
+  });
+
   it('does not forward checks for a target that failed path pre-validation', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
