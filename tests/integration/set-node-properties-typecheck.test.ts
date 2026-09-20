@@ -21,7 +21,8 @@
  * or Node) is rejected outright; a `res://` string assigned to an
  * Object-typed property is auto-loaded instead.
  *
- * Requires GODOT_PATH. Skipped in CI without it.
+ * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
+ * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
@@ -955,6 +956,9 @@ describe('packed-array element coercion', () => {
 const TYPED_ARRAY_SCRIPT = [
   'extends Node2D',
   '@export var points: Array[Vector2] = []',
+  '@export var cells: Array[Vector2i] = []',
+  '@export var blocks: Array[Vector3i] = []',
+  '@export var ratios: Array[float] = []',
   '@export var labels: Array[String] = []',
   '@export var loose: Array = []',
   '@export var textures: Array[Texture2D] = []',
@@ -1064,7 +1068,116 @@ describe('typed Array[T] element coercion', () => {
   );
 
   itGodot(
-    'passes an Array[Texture2D] value through without element validation',
+    'stores {x,y} dicts as Vector2i for an Array[Vector2i] property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: '.',
+              property: 'cells',
+              value: [
+                { x: 1, y: 2 },
+                { x: 3, y: 4 },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+
+      // The persisted scene is the proof the elements survived: a refused
+      // assignment writes an empty typed array and reports nothing.
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/cells\s*=\s*Array\[Vector2i\]\(/);
+      expect(sceneText).toMatch(/Vector2i\(1,\s*2\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'stores {x,y,z} dicts as Vector3i for an Array[Vector3i] property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'blocks', value: [{ x: 5, y: 6, z: 7 }] }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/blocks\s*=\s*Array\[Vector3i\]\(/);
+      expect(sceneText).toMatch(/Vector3i\(5,\s*6,\s*7\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'widens JSON ints into an Array[float] property',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'ratios', value: [1, 2] }],
+        },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
+
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toMatch(/ratios\s*=\s*Array\[float\]\(/);
+      expect(sceneText).toMatch(/ratios\s*=\s*Array\[float\]\(\[1(\.0)?,\s*2(\.0)?\]\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'errors instead of silently dropping a non-empty Array[Texture2D] value',
+    async () => {
+      // The element type is TYPE_OBJECT, which has no element rule. Passing the
+      // raw untyped Array to set() would leave an empty Array[Texture2D] behind
+      // and still report success, so the refusal has to be explicit.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      await attachTypedArrayScript(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'textures', value: ['res://placeholder.png'] }],
+        },
+        tmpProject,
+        30000,
+      );
+      const entry = JSON.parse(extractJson(stdout)).results[0];
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/typed Array/);
+      expect(entry.error).toMatch(/Object/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'accepts an empty array for an Array[Texture2D] property',
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       await attachTypedArrayScript(tmpProject, 'main.tscn');

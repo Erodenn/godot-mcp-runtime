@@ -104,10 +104,15 @@ func _init():
 	quit()
 	return
 
-# Logging functions
+# Logging functions.
+# Every one of these writes to stderr. stdout is the JSON channel for a headless
+# operation and the handlers strict-parse it, so a debug line there is not noise
+# the parser skips: it puts a '[' at column 0, extractJson latches onto it, and
+# the whole payload comes back as an unparseable string. DEBUG=true must never
+# change what a tool returns.
 func log_debug(message):
 	if debug_mode:
-		print("[DEBUG] " + message)
+		printerr("[DEBUG] " + message)
 
 func log_info(message):
 	printerr("[INFO] " + message)
@@ -1604,19 +1609,31 @@ const _PACKED_ARRAY_ELEMENT_TYPE: Dictionary = {
 	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
 }
 
-# Element Variant type -> raw element Variant types accepted for it. Mirrors the
-# scalar rows of _PROPERTY_TYPE_COMPAT above; kept as its own table so scalar
-# compat widening and element widening stay independently editable, and so the
-# typed-Array[T] path can share it. An element type reached from the packed path
-# that is absent from this table is an internal inconsistency and is REJECTED,
-# never accepted.
+# Element Variant type -> raw element Variant types accepted for it. Covers every
+# scalar row of _PROPERTY_TYPE_COMPAT above except TYPE_DICTIONARY, plus the
+# Vector4 pair the packed path needs. Dictionary is left out on purpose: elements
+# run through _coerce_property_value first, which turns an {x, y} or {r, g, b}
+# dict into a Vector2/Color, so a Dictionary element type could never be honoured
+# here and claiming a row for it would be a lie. Kept as its own
+# table so scalar compat widening and element widening stay independently
+# editable, and so the typed-Array[T] path can share it. An element type absent
+# from this table is REJECTED by both element paths, never accepted: the packed
+# path treats the miss as an internal inconsistency, and the typed-Array[T] path
+# cannot build the typed container it would need, so passing the raw untyped
+# Array to set() would store an empty array while reporting success.
 const _ELEMENT_TYPE_COMPAT: Dictionary = {
+	TYPE_BOOL: [TYPE_BOOL, TYPE_INT, TYPE_FLOAT],
 	TYPE_INT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
 	TYPE_FLOAT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
 	TYPE_STRING: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_STRING_NAME: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_NODE_PATH: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
 	TYPE_VECTOR2: [TYPE_VECTOR2, TYPE_VECTOR2I],
+	TYPE_VECTOR2I: [TYPE_VECTOR2, TYPE_VECTOR2I],
 	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR3I: [TYPE_VECTOR3, TYPE_VECTOR3I],
 	TYPE_VECTOR4: [TYPE_VECTOR4, TYPE_VECTOR4I],
+	TYPE_VECTOR4I: [TYPE_VECTOR4, TYPE_VECTOR4I],
 	TYPE_COLOR: [TYPE_COLOR],
 }
 
@@ -1753,8 +1770,9 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 # hint_string is a fallback for the case where the current value is not a typed
 # Array (e.g. a null default). Only the leading integer of hint_string is read:
 # the composite forms ("24/17:Texture2D", "28:2:") therefore resolve to
-# TYPE_OBJECT / TYPE_ARRAY, which are both absent from _ELEMENT_TYPE_COMPAT and
-# so pass through unvalidated rather than being guessed at.
+# TYPE_OBJECT / TYPE_ARRAY. Both are absent from _ELEMENT_TYPE_COMPAT, and the
+# caller rejects those rather than guessing at the element class. TYPE_NIL means
+# the property is an untyped Array, which is the only pass-through case.
 func _typed_array_element_type(node: Object, property: String) -> int:
 	var current = node.get(property)
 	if typeof(current) == TYPE_ARRAY and current.is_typed():
@@ -1798,7 +1816,7 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 		out.append(element)
 	# Builtin element type, so no class name and no script: Array[Node] and
 	# friends never reach here, since their element types have no
-	# _ELEMENT_TYPE_COMPAT row and pass through unwrapped.
+	# _ELEMENT_TYPE_COMPAT row and the caller rejects them before this runs.
 	var typed: Array = Array(out, elem_type, &"", null)
 	if typed.size() != out.size():
 		return {
@@ -1858,14 +1876,26 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	# Same element pass for a script-declared typed Array[T]. Its declared type
 	# is plain TYPE_ARRAY, so the element type has to be recovered from the value
-	# or the descriptor. Deliberately asymmetric with the packed path above: an
-	# element type with no rule here passes through unvalidated instead of being
-	# rejected, because the key space is every Variant type plus every class in
-	# the project, so a miss is normal rather than a bug in our own table. Godot
-	# still refuses those assignments loudly instead of zero-filling them.
+	# or the descriptor. TYPE_NIL means the property is an untyped Array, which
+	# accepts the raw value as-is. Any other element type MUST be built through
+	# the typed-Array constructor: set() does not convert an untyped Array element
+	# by element, it refuses the assignment, leaves an empty typed array behind
+	# and reports nothing, so an element type with no rule in
+	# _ELEMENT_TYPE_COMPAT is rejected here rather than passed through. Object
+	# element types (Array[PackedScene], Array[Texture2D]) land in that arm: they
+	# would need per-element res:// loading and the element class name, which this
+	# path does not do, and silently dropping them is exactly what the rejection
+	# exists to prevent.
 	if declared == TYPE_ARRAY and typeof(coerced) == TYPE_ARRAY and coerced.size() > 0:
 		var elem_type := _typed_array_element_type(node, property)
-		if _ELEMENT_TYPE_COMPAT.has(elem_type):
+		if elem_type != TYPE_NIL:
+			if not _ELEMENT_TYPE_COMPAT.has(elem_type):
+				return {
+					"ok": false,
+					"value": null,
+					"error": "Cannot set property '%s' on node of type '%s': it is a typed Array of %s, and element values of that type cannot be built from JSON. Assign it with run_script instead." % [
+						property, node.get_class(), type_string(elem_type)],
+				}
 			var typed_prep = _prepare_typed_array_elements(property, node.get_class(), elem_type, coerced)
 			if not typed_prep.ok:
 				return {"ok": false, "value": null, "error": typed_prep.error}

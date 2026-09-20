@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
 import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
@@ -550,13 +551,14 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
 });
 
 // Captured verbatim from Godot 4.6.2.stable.mono on Windows: attach_script
-// against a missing node (log_error + quit(1)) with DEBUG=true. This is the
-// production shape that reaches the parseStdoutAsJson branch at all -- with
-// DEBUG off, stdout is the version banner alone, cleanStdout empties it, and
-// the empty-stdout branch above handles it. The [DEBUG] lines are what keep
-// stdout non-empty AND non-JSON, and they carry `{`/`[` from the echoed
-// params, so any classifier keying on bracket presence reads this as a
-// payload attempt and reports a JSON emission bug.
+// against a missing node (log_error + quit(1)) with DEBUG=true, back when
+// log_debug still wrote to stdout. It is kept as the fixture because it is the
+// worst stdout a headless op can produce: non-empty, non-JSON, and carrying
+// `{`/`[` from the echoed params, so any classifier keying on bracket presence
+// reads it as a payload attempt and reports a JSON emission bug. The debug
+// lines now go to stderr (see the logging invariant at the end of this file),
+// so this exact stdout is no longer producible -- the classifier still has to
+// handle it, and anything else that ever lands non-JSON on stdout.
 const CAPTURED_DEBUG_EARLY_EXIT_STDOUT = [
   'Godot Engine v4.6.2.stable.mono.official.71f334935 - https://godotengine.org',
   '',
@@ -599,5 +601,27 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
     // [ERROR] form the operation script emits, so this arrives via the raw
     // stderr tail -- which is exactly why that fallback has to exist.
     expect(message).toContain('Node not found: NoSuchNode');
+  });
+});
+
+/**
+ * stdout is the JSON channel for a headless operation and both validate check
+ * paths strict-parse it, so a debug line there is not noise the parser skips:
+ * it puts a `[` at column 0, extractJson latches onto it, and the whole payload
+ * comes back as an unparseable string. Asserted against the script source
+ * because only a real Godot run would otherwise catch it, and DEBUG=true is not
+ * a mode the suite runs in.
+ */
+describe('godot_operations.gd logging channel', () => {
+  const operationsSource = readFileSync(
+    new URL('../../src/scripts/godot_operations.gd', import.meta.url),
+    'utf8',
+  );
+
+  it('routes log_debug to stderr so DEBUG=true cannot corrupt a JSON payload', () => {
+    const afterDeclaration = operationsSource.split('func log_debug')[1] ?? '';
+    const logDebugBody = afterDeclaration.split('func ')[0] ?? '';
+    expect(logDebugBody).toContain('printerr("[DEBUG] "');
+    expect(logDebugBody).not.toMatch(/(^|[^r])print\("\[DEBUG\]/);
   });
 });
