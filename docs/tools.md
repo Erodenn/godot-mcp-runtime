@@ -89,11 +89,11 @@ A capture returns the same three things the editor's Profiler tab shows:
 
 Reading the numbers:
 
-- Times are elapsed wall clock, including waits — not CPU utilization. Inclusive rows overlap, so summing `totalMs` is meaningless.
+- Times are elapsed wall clock, including waits, not CPU utilization. Inclusive rows overlap, so summing `totalMs` is meaningless.
 - Totals sum the received frames after the first, which is discarded: enabling the profiler inside a running VM call gives that sample a zero start timestamp.
 - Godot picks the rows it sends by inclusive time and caps them at `captureLimit`. `limitReached`, `frameGaps` and `undecodablePackets` say when rows, whole frames, or packets are missing; a function that is absent is not a function that is free.
-- Totals are summed from the frame packets. The engine's own `servers:profile_total` is capped by the same `captureLimit` and carries nothing the frames did not, while top-N membership rotates between frames — so summing them covers strictly more functions than that packet does.
-- The injected `mcp_bridge.gd` polls its socket every frame, so it shows up in the rows like any other script. That is real observer overhead (well under 0.05 ms/frame in practice), not a measurement artifact. A `run_script` you execute during a capture is profiled the same way and appears under its own generated script name — discount it when reading a capture you drove yourself.
+- Totals are summed from the frame packets. The engine's own `servers:profile_total` is capped by the same `captureLimit` and carries nothing the frames did not, while top-N membership rotates between frames, so summing them covers strictly more functions than that packet does.
+- The injected `mcp_bridge.gd` polls its socket every frame, so it shows up in the rows like any other script. That is real observer overhead (well under 0.05 ms/frame in practice), not a measurement artifact. A `run_script` you execute during a capture is profiled the same way and appears under its own generated script name; discount it when reading a capture you drove yourself.
 - Native engine calls are not profiled as separate rows (the editor's "Display internal functions" toggle), so `selfMs` matches the editor's Self column in its default configuration.
 - A capture stops itself at its time limit, measured from the first frame folded rather than from the enable round trip. `stop_project` ends it along with the session.
 - A capture that folded no usable frames errors rather than returning zeroes: the first frame received is always discarded, so a window shorter than two rendered frames has nothing to average.
@@ -200,7 +200,8 @@ Inner properties are assigned through the same validation described above, so ne
 Keys containing `/` (most importantly `ShaderMaterial`'s `shader_parameter/<uniform>` entries) name _virtual_ properties that only exist on an instance after the property they depend on is assigned. They are handled specially:
 
 - Dependency-first ordering: plain keys are assigned before slash-suffixed keys, so `"shader": "res://neon.gdshader"` lands before `"shader_parameter/glow"`.
-- Validation is against the instance's live property list — `set()` alone accepts unknown names silently, so a `shader_parameter/<name>` that the assigned shader does not declare as a uniform is an explicit error, as is any slash-suffixed key when no shader is assigned.
+- Validation is against the instance's live property list (`set()` alone accepts unknown names silently), so a `shader_parameter/<name>` that the assigned shader does not declare as a uniform is an explicit error, as is any slash-suffixed key when no shader is assigned. A group/subgroup/category label that happens to contain `/` is rejected too, even when it is otherwise listed.
+- Settable from JSON: `float`, `int`, and `bool` uniforms; plain `vec2` and `vec3` uniforms (via `{x,y}` / `{x,y,z}` dicts); `source_color` uniforms declared `vec3` or `vec4` (via `{r,g,b,a}` dicts, coerced to `Color`); and `sampler2D`/`sampler3D` uniforms (via a `res://` path, like any Object-typed property). Not yet settable from JSON: a plain `vec4` uniform (one without `: source_color`) and `mat2`/`mat3`/`mat4` uniforms - these error explicitly rather than dropping silently.
 
 ```json
 {
@@ -213,7 +214,7 @@ Keys containing `/` (most importantly `ShaderMaterial`'s `shader_parameter/<unif
 }
 ```
 
-The persisted scene references the shader as an `ext_resource` plus one line per explicitly set parameter (unset uniforms are serialized as `null` lines — that is stock `PackedScene.pack()` behavior, identical to any scene saved by the editor with a partially-configured material).
+The persisted scene references the shader as an `ext_resource` plus one line per explicitly set parameter (unset uniforms are serialized as `null` lines; that is stock `PackedScene.pack()` behavior, identical to any scene saved by the editor with a partially-configured material).
 
 Construction errors are explicit and nothing is persisted when one fires:
 
@@ -222,7 +223,7 @@ Construction errors are explicit and nothing is persisted when one fires:
 - `type` names an abstract or native-only class that cannot be instantiated
 - the constructed class does not satisfy the property's declared resource hint (for example a `RectangleShape2D` assigned to `Sprite2D.texture`)
 - an inner property does not exist on the constructed class, or its value fails the type check (the error names the inner property)
-- a slash-suffixed key does not resolve on the instance — for `shader_parameter/<name>`, either no shader was assigned before it, or the assigned shader does not declare `<name>` as a uniform
+- a slash-suffixed key does not resolve on the instance: for `shader_parameter/<name>`, either no shader was assigned before it, the assigned shader does not declare `<name>` as a uniform, or the assigned shader failed to compile (reported as such, distinct from the other two)
 
 ## Project Config (no Godot process required)
 
@@ -283,9 +284,9 @@ The schema is a recursive object:
 }
 ```
 
-- `type` — the node's Godot class name, matched as an exact class name with no subclass matching. A schema declaring `Node2D` fails against a `CharacterBody2D` root even though a `CharacterBody2D` is one.
-- `children` — schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
-- `hasProperty` — the property is present and its value is neither `null` nor an empty string. Integer `0` and boolean `false` count as set.
+- `type`: the node's Godot class name, matched as an exact class name with no subclass matching. A schema declaring `Node2D` fails against a `CharacterBody2D` root even though a `CharacterBody2D` is one.
+- `children`: schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
+- `hasProperty`: the property is present and its value is neither `null` nor an empty string. Integer `0` and boolean `false` count as set.
 
 Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked, so a schema cannot express "and nothing else".
 
