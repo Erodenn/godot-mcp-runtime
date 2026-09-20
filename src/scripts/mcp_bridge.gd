@@ -402,6 +402,12 @@ func _validate_action_fields(index: int, type: String, action: Dictionary) -> St
 			var resolved := _resolve_button_name(button_name)
 			if resolved[1] != "":
 				return "action %d (%s): %s" % [index, type, resolved[1]]
+			# Typed here, not at injection: assigning a non-bool to
+			# InputEventMouseButton.double_click raises, and for click_element
+			# that raise lands between the observer connects and their
+			# disconnect, where GDScript has no finally to unwind them.
+			if action.has("double_click") and typeof(action.get("double_click")) != TYPE_BOOL:
+				return "action %d (%s): double_click must be a boolean" % [index, type]
 			if type == "click_element":
 				var element = action.get("element", "")
 				if typeof(element) != TYPE_STRING or element == "":
@@ -886,7 +892,11 @@ func _hit_control() -> Variant:
 	if viewport == null or not viewport.has_method("gui_get_hovered_control"):
 		return null
 	var hovered = viewport.call("gui_get_hovered_control")
-	if hovered == null:
+	# is_instance_valid as well as a null test: the hovered control can itself be
+	# a node an input handler freed during this action, and a freed Object does
+	# not compare equal to null. Reading get_path() off one would take the whole
+	# coroutine down, so the field is omitted instead.
+	if hovered == null or not is_instance_valid(hovered):
 		return null
 	return hovered
 

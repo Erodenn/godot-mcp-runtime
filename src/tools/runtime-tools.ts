@@ -1623,12 +1623,15 @@ export function computeInputTimeoutMs(actions: unknown[]): number {
     if (typeof action !== 'object' || action === null) continue;
     const rec = action as Record<string, unknown>;
     const type = rec.type;
+    // Only positive terms are summed. A negative duration is a validation error
+    // the bridge reports, but subtracting it here would shrink the timeout below
+    // the buffer and time the call out before the refusal could come back.
     if (type === 'wait') {
-      if (typeof rec.ms === 'number') waitMs += rec.ms;
-      if (typeof rec.frames === 'number') waitFrames += rec.frames;
+      if (typeof rec.ms === 'number' && rec.ms > 0) waitMs += rec.ms;
+      if (typeof rec.frames === 'number' && rec.frames > 0) waitFrames += rec.frames;
       continue;
     }
-    if (typeof rec.hold_ms === 'number') holdMs += rec.hold_ms;
+    if (typeof rec.hold_ms === 'number' && rec.hold_ms > 0) holdMs += rec.hold_ms;
     if (type === 'text' && typeof rec.text === 'string') textChars += rec.text.length;
     if (
       (type === 'key' || type === 'action' || type === 'mouse_button') &&
