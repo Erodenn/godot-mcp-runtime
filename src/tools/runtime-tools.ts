@@ -375,7 +375,7 @@ export const runtimeToolDefinitions = [
               },
               strength: {
                 type: 'number',
-                description: '[action] Action strength (0–1, default 1.0)',
+                description: '[action] Action strength (0 to 1, default 1.0)',
               },
               text: {
                 type: 'string',
@@ -441,7 +441,12 @@ export const runtimeToolDefinitions = [
                 type: 'boolean',
                 description: 'Whether the input action is still held after this entry.',
               },
-              signals: { type: 'array', items: { type: 'string' } },
+              signals: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Which of pressed, toggled, item_selected, text_submitted the target emitted within the settle frame. A signal emitted later (call_deferred, a tween, a timer) is not observed, so an absent entry means "not within one frame", not "never".',
+              },
               errors: { type: 'array', items: { type: 'string' } },
               changes: {
                 type: 'object',
