@@ -189,6 +189,91 @@ describe('validate — structure checks', () => {
   );
 
   itGodot(
+    'names the root as root, not root/., on a root type mismatch',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout } = await runner.executeOperation(
+        'validate_checks',
+        {
+          scenePath: 'main.tscn',
+          checks: [{ type: 'structure', schema: { type: 'Control' } }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.errors).toEqual([
+        {
+          check: 'structure',
+          path: 'root',
+          message: 'Expected node of type Control at root',
+        },
+      ]);
+    },
+    60000,
+  );
+
+  itGodot(
+    'names the parent in an unmatched-child error',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout } = await runner.executeOperation(
+        'validate_checks',
+        {
+          scenePath: 'main.tscn',
+          checks: [
+            {
+              type: 'structure',
+              schema: { type: 'Node2D', children: [{ type: 'CollisionShape2D' }] },
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.errors).toEqual([
+        {
+          check: 'structure',
+          path: 'root',
+          message: 'No child of type CollisionShape2D under root',
+        },
+      ]);
+    },
+    60000,
+  );
+
+  itGodot(
+    'reports a malformed children entry instead of crashing',
+    async () => {
+      // Sent straight to the operation, bypassing the handler's own schema
+      // recursion on purpose: this is the state a batch sub-operation reaches
+      // the GDScript layer in.
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      const { stdout } = await runner.executeOperation(
+        'validate_checks',
+        {
+          scenePath: 'main.tscn',
+          checks: [{ type: 'structure', schema: { children: ['oops'] } }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const result = JSON.parse(stdout);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(String(result.errors[0].message)).toMatch(/^Invalid schema entry:/);
+    },
+    60000,
+  );
+
+  itGodot(
     'skips type check when type is omitted',
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];

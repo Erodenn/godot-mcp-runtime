@@ -245,6 +245,8 @@ Validate before attaching or running. Catches syntax errors and missing resource
 
 A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds structural and signal-verification checks in the same validation call. With `scenePath + checks`, both the resource-integrity validation and the checks run; their errors are merged into one `errors` array, each check-attributed error carrying a `check` discriminator.
 
+A parse error carries a `line` only when Godot's stderr includes one, which is not always.
+
 ```json
 {
   "projectPath": "/path/to/project",
@@ -262,11 +264,15 @@ A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds stru
 }
 ```
 
+**Instantiation.** A plain `scenePath` only loads the scene. `scenePath` plus `checks` instantiates it, which runs every attached script's `_init()` inside the headless process. Worth knowing, because `validate` is the tool to run before trusting a scene.
+
 **Batch cost.** `targets[].checks` run inside the same single Godot process as the rest of the batch, so adding checks to a batch costs no extra process launches. One target's failure (a bad schema, a missing scene, an unimported dependency) is reported on that target and the other targets still report, in input order.
 
-## Structural checks: `checks: [{ type: "structure" }]`
+**Why `checks[].type` is a discriminator.** It is a deliberate exception to the antipattern in [`tool-authoring.md` section 5](tool-authoring.md#5-consolidation-criteria): the two checks are heterogeneous operations over one instantiated scene tree in one process. Splitting them would cost a second Godot launch per scene and grow the tool surface.
 
-`validate` with a plain `scenePath` checks one scene's syntax and resource integrity; a `structure` check validates a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene has exactly one `CharacterBody2D` root", "a `CollisionShape2D` always has `shape` set".
+### Structural checks: `checks: [{ type: "structure" }]`
+
+`validate` with a plain `scenePath` checks one scene's syntax and resource integrity; a `structure` check validates a scene's _shape_ against a schema you declare. Use it to enforce architectural invariants a game loop depends on: "the Player scene's root is a `CharacterBody2D` and it has a `CollisionShape2D` child with `shape` set".
 
 The schema is a recursive object:
 
@@ -277,15 +283,15 @@ The schema is a recursive object:
 }
 ```
 
-- `type` — the node's Godot class name, checked against the instantiated node's class.
+- `type` — the node's Godot class name, matched as an exact class name with no subclass matching. A schema declaring `Node2D` fails against a `CharacterBody2D` root even though a `CharacterBody2D` is one.
 - `children` — schemas for direct children. Each entry matches the first not-yet-consumed child of its declared type, in schema order; two entries of the same type require two distinct matching children.
-- `hasProperty` — the node must have this property set to a non-null, non-empty value.
+- `hasProperty` — the property is present and its value is neither `null` nor an empty string. Integer `0` and boolean `false` count as set.
 
-Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked.
+Read-only: the scene is loaded into a headless process, never mutated, and no save happens. Unmatched children or extra siblings are not reported - only declared requirements are checked, so a schema cannot express "and nothing else".
 
 Structural failures are returned in the `validate` output's `errors` array with `"check": "structure"` and a human-readable `message` naming the expected type/property and path.
 
-## Signal checks: `checks: [{ type: "signals" }]`
+### Signal checks: `checks: [{ type: "signals" }]`
 
 Walks every connection reachable from the scope (whole scene, or the subtree under `nodePath`) and reports one issue per problem found. Read-only. Issues appear in `errors` with `"check": "signals"` and `{ node, signal, target, method, problem }`; `node`, `target` are scene-root-relative paths. The problem codes:
 

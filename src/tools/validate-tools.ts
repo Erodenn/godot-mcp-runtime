@@ -409,7 +409,7 @@ export async function handleValidate(
   }
   if (hasChecks && scenePathResult.value === undefined) {
     return err(
-      createErrorResponse('checks requires scenePath — checks run against a scene', [
+      createErrorResponse('checks requires scenePath - checks run against a scene', [
         'Pass scenePath alongside checks, e.g. { "scenePath": "main.tscn", "checks": [{ "type": "structure", "schema": {...} }] }',
       ]),
     );
@@ -540,6 +540,45 @@ export async function handleValidate(
   }
 }
 
+const SCHEMA_EXAMPLE_SOLUTION =
+  'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }';
+
+/**
+ * Validate one structure schema node and its children[] recursively, returning
+ * the error response to surface or null when the node is well formed. The
+ * GDScript side hedges too, but rejecting here keeps the diagnosis specific: a
+ * bad nested entry otherwise surfaces as a generic "Scene checks failed" with
+ * nothing naming the offending part. `path` is a caller-facing breadcrumb like
+ * "schema.children[0]".
+ */
+function validateSchemaNode(schema: unknown, path: string): ToolResponse | null {
+  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+    return createErrorResponse(
+      `Invalid schema at ${path}: must be an object like { type?, children?, hasProperty? }`,
+      [SCHEMA_EXAMPLE_SOLUTION],
+    );
+  }
+  const node = schema as { type?: unknown; children?: unknown; hasProperty?: unknown };
+  if (node.type === undefined && node.children === undefined && node.hasProperty === undefined) {
+    return createErrorResponse(
+      `Invalid schema at ${path}: at least one of type, children, or hasProperty is required`,
+      [SCHEMA_EXAMPLE_SOLUTION],
+    );
+  }
+  if (node.children !== undefined) {
+    if (!Array.isArray(node.children)) {
+      return createErrorResponse(`Invalid schema at ${path}: children must be an array`, [
+        SCHEMA_EXAMPLE_SOLUTION,
+      ]);
+    }
+    for (const [i, child] of node.children.entries()) {
+      const childError = validateSchemaNode(child, `${path}.children[${i}]`);
+      if (childError) return childError;
+    }
+  }
+  return null;
+}
+
 /**
  * Run structural / signal-verification checks against one scene via the
  * validate_checks GDScript op. Used by handleValidate when the caller passes
@@ -581,32 +620,8 @@ async function runSceneChecks(
       );
     }
     if (t === 'structure') {
-      const schema = (check as { schema?: unknown }).schema;
-      if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
-        return err(
-          createErrorResponse(
-            'Invalid schema: must be an object like { type?, children?, hasProperty? }',
-            [
-              'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }',
-            ],
-          ),
-        );
-      }
-      const schemaObj = schema as { type?: unknown; children?: unknown; hasProperty?: unknown };
-      if (
-        schemaObj.type === undefined &&
-        schemaObj.children === undefined &&
-        schemaObj.hasProperty === undefined
-      ) {
-        return err(
-          createErrorResponse(
-            'Invalid schema: at least one of type, children, or hasProperty is required',
-            [
-              'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }',
-            ],
-          ),
-        );
-      }
+      const schemaError = validateSchemaNode((check as { schema?: unknown }).schema, 'schema');
+      if (schemaError) return err(schemaError);
     }
   }
 
