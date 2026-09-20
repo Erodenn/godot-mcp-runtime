@@ -550,13 +550,31 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
 
 /**
  * Build the always-present `runtime` block for check_project. Mirrors the
- * `ensureRuntimeSession` liveness rule from runtime-tools.ts: a spawned
- * session whose process has exited is not an active session. The bridge
+ * `ensureRuntimeSession` liveness rule from runtime-tools.ts, in the same
+ * order: a spawned process that has exited is not an active session, whether
+ * or not the session fields survived it. The bridge
  * ping only runs when a session is nominally active, so the no-session path
  * costs nothing extra and a failed/timed-out ping never turns the call into
  * an error - it only downgrades bridgeResponsive and adds a diagnostic.
  */
 async function buildRuntimeReport(runner: GodotRunner): Promise<Record<string, unknown>> {
+  // A spawned game that exits on its own clears activeSessionMode and
+  // activeProjectPath while deliberately retaining activeProcess, so this state
+  // has to be diagnosed before the nominal-session gate below - which is the
+  // order ensureRuntimeSession uses for the same reason. Without it the state
+  // check_project exists to report reads as byte-identical to a server that has
+  // never run anything.
+  if (!runner.activeSessionMode && runner.activeProcess?.hasExited) {
+    return {
+      activeSession: false,
+      processExited: true,
+      diagnostics: [
+        'The spawned Godot process has exited; call stop_project, then run_project again',
+        'get_debug_output still returns the captured logs, and stop_project reports the exit code',
+      ],
+    };
+  }
+
   const nominalSession = Boolean(runner.activeSessionMode && runner.activeProjectPath);
   if (!nominalSession) {
     return { activeSession: false };
