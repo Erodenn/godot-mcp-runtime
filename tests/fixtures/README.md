@@ -5,9 +5,9 @@
 A minimal Godot 4.4 project used as a stable test surface for MCP tools. Committed to the repo (unlike `.test-project/`, which is gitignored for ad-hoc local testing) so contributors and CI share the same baseline.
 
 Contents:
-- `project.godot` — minimal config, references `main.tscn` as main scene
-- `main.tscn` — `Node2D` root with `Label` and `Sprite2D` children
-- `placeholder.gd`, `placeholder.png` — empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
+- `project.godot`: minimal config, references `main.tscn` as main scene
+- `main.tscn`: `Node2D` root with `Label` and `Sprite2D` children
+- `placeholder.gd`, `placeholder.png`: empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 - `input_probe.tscn`, `input_probe.gd` - sibling probe scene for the `simulate_input` integration tests: buttons that are plain, toggling, disabled, occluded, panel-opening, error-raising and self-freeing, plus a `LineEdit` and a `Node2D` moved by an `is_action_pressed` poll
 
 `project.godot` also carries one InputMap action, `probe_move`, bound to W by `physical_keycode` (the Godot editor's default binding style). `tests/integration/simulate-input-observed.test.ts` launches the probe scene by rewriting `run/main_scene` in its own temp copy of the project, so `main.tscn` stays the main scene for everything else.
@@ -28,4 +28,4 @@ import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 
 Tests that exercise headless Godot (validate, scene operations) skip themselves when `GODOT_PATH` is not set, so this fixture is also safe to leave in place when Godot is not installed.
 
-When you change a tool's contract, update this fixture or add a sibling fixture under `tests/fixtures/` rather than mutating `main.tscn` in place — old tests may depend on the existing shape.
+When you change a tool's contract, update this fixture or add a sibling fixture under `tests/fixtures/` rather than mutating `main.tscn` in place, since old tests may depend on the existing shape.

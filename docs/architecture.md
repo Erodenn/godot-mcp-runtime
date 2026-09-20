@@ -126,8 +126,8 @@ Files generated during runtime are stored under `.mcp/godot-runtime/` inside the
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
 
-- `responseMode: "full"` — return the full inline PNG when the agent needs to inspect exact pixels, small UI text, or texture detail.
-- `responseMode: "path_only"` — skip the inline image entirely when another tool or human will inspect the saved file.
-- `previewMaxWidth` / `previewMaxHeight` — override the default 960x540 preview bounds (e.g. `{ "responseMode": "preview", "previewMaxWidth": 480, "previewMaxHeight": 270 }`).
+- `responseMode: "full"`: return the full inline PNG when the agent needs to inspect exact pixels, small UI text, or texture detail.
+- `responseMode: "path_only"`: skip the inline image entirely when another tool or human will inspect the saved file.
+- `previewMaxWidth` / `previewMaxHeight`: override the default 960x540 preview bounds (e.g. `{ "responseMode": "preview", "previewMaxWidth": 480, "previewMaxHeight": 270 }`).
 
 The response is a JSON text entry (`{ responseMode, path, size, previewPath?, previewSize?, warnings? }`) plus an inline `image` entry for `full` and `preview`.

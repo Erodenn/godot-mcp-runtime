@@ -7,8 +7,8 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 | Tool               | Description                                                                                                                                                                                                                              |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `launch_editor`    | Open the Godot editor GUI for a project                                                                                                                                                                                                  |
-| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; `profiling: true` to enable the profiling tools; pass `bridgePort` (integer 1–65535) to pin the bridge port - auto-selects a free port when omitted |
-| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself. Pass `bridgePort` (integer 1–65535) to pin a specific port - auto-selects a free port when omitted                                                                           |
+| `run_project`      | Run a project and inject the MCP bridge. Pass `background: true` to hide the window; `profiling: true` to enable the profiling tools; pass `bridgePort` (integer 1-65535) to pin the bridge port - auto-selects a free port when omitted |
+| `attach_project`   | Inject the MCP bridge for a project you'll launch yourself. Pass `bridgePort` (integer 1-65535) to pin a specific port - auto-selects a free port when omitted                                                                           |
 | `detach_project`   | Remove the injected bridge after manual-launch use, leaving the external process alone. Mostly optional: a disconnected bridge ends the attached session on the next tool call, and calling this afterwards succeeds idempotently        |
 | `stop_project`     | Stop the running project and remove the bridge (also detaches attached-mode state). Call it even if you closed the Godot window yourself - it frees the retained process slot and reports `alreadyExited` with the logs captured then    |
 | `get_debug_output` | Read stdout/stderr from an MCP-spawned project, including after it exits or crashes (unavailable in attached mode)                                                                                                                       |
@@ -17,7 +17,7 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 
 ## Runtime (requires `run_project` or `attach_project` first)
 
-Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 20 s for the externally launched Godot process to start listening, and up to 60 s total once a connection has been observed, so a large project's cold start is absorbed. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup - don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent). Both `run_project` and `attach_project` auto-select a free bridge port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. A first cold launch on a large project (hundreds of scripts) is the case the longer budget exists for.
+Both `run_project` and `attach_project` wait for the bridge before returning success, so runtime tools are usable immediately after the call returns. `attach_project` waits up to 20 s for the externally launched Godot process to start listening, and up to 60 s total once a connection has been observed, so a large project's cold start is absorbed. If you (the agent) are launching Godot yourself, kick the launch off in parallel with `attach_project` so the wait absorbs Godot's startup - don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `attach_project` (`bridge.inject` is idempotent). Both `run_project` and `attach_project` auto-select a free bridge port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. A first cold launch on a large project (hundreds of scripts) is the case the longer budget exists for. A spawned `run_project` session waits up to 30 s for the same readiness signal, and aborts immediately if the child process exits first.
 
 | Tool              | Description                                                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -38,7 +38,7 @@ One call executes a batch of actions in order and returns one result entry per a
 
 `hold_ms` replaces the default tap gap with a real-time hold, for game code that polls `is_action_pressed` over time. It applies to `key`, `mouse_button` and `action` only, and is rejected when `pressed` is set as well: a hold with an explicit press has no end to time. The default gap is one `process_frame` plus one `physics_frame` for `key` and `action` (so a `_physics_process` poll cannot miss the press) and zero gap for `mouse_button` and `click_element`, which is what a real click looks like.
 
-**`wait`** takes exactly one of `ms` (real time, for cooldowns and animations) or `frames` (deterministic engine process frames, for stepping game logic). Neither or both is a validation error. A `wait` injects nothing, so it adds no settle frame of its own and its reported `frame` is exactly the frames it waited. A `frames` wait is exact; an `ms` wait is a lower bound, resolving on the first frame at or past the requested wall-clock time, so `elapsed_ms` is never less than `ms` and may exceed it by up to a frame. Real time here means wall clock, not scaled engine time: a game that pauses the tree or drops `Engine.time_scale` to zero still sees the wait resolve.
+**`wait`** takes exactly one of `ms` (real time, for cooldowns and animations) or `frames` (deterministic engine process frames, for stepping game logic). Neither or both is a validation error. A `wait` injects nothing, so it adds no settle frame of its own and its reported `frame` is exactly the frames it waited. A `frames` wait is exact; an `ms` wait is a lower bound, resolving on the first frame at or past the requested wall-clock time, so it may overshoot by up to a frame. Note that `elapsed_ms` on every entry is measured from the start of the batch, not from the start of that action: subtract the previous entry's `elapsed_ms` to get one action's own cost. Real time here means wall clock, not scaled engine time: a game that pauses the tree or drops `Engine.time_scale` to zero still sees the wait resolve.
 
 **`text`** types a string into whatever Control currently holds focus, expanded to one key press and release per character with the unicode codepoint set. It does not focus anything itself: click or focus the `LineEdit` first, or the action fails.
 
@@ -46,15 +46,15 @@ One call executes a batch of actions in order and returns one result entry per a
 
 **`results[]`.** Every entry carries `index`, `type`, `ok`, `frame` (process frames since the batch started) and `elapsed_ms`. A failing entry carries `error`. The rest are present only where they mean something:
 
-| Field      | On which types                                                                                        |
-| ---------- | ----------------------------------------------------------------------------------------------------- |
-| `hit`      | `click_element`, `mouse_button` - path of the Control under the pointer after the settle frame        |
-| `signals`  | `click_element` - which of `pressed`, `toggled`, `item_selected`, `text_submitted` the target emitted |
-| `focus`    | `key`, `text` - path of the focus owner after the action                                              |
-| `value`    | `text` - resulting text of the focused `LineEdit` or `TextEdit`                                       |
-| `pressed`  | `action` - whether the input action is still held after this entry                                    |
-| `position` | `mouse_motion` - the resulting mouse position                                                         |
-| `errors`   | any action whose handlers raised a GDScript runtime error                                             |
+| Field      | On which types                                                                                                                |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `hit`      | `click_element`, `mouse_button` - path of the Control under the pointer after the settle frame                                |
+| `signals`  | `click_element` - which of `pressed`, `toggled`, `item_selected`, `text_submitted` the target emitted within the settle frame |
+| `focus`    | `key`, `text` - path of the focus owner after the action                                                                      |
+| `value`    | `text` - resulting text of the focused `LineEdit` or `TextEdit`                                                               |
+| `pressed`  | `action` - whether the input action is still held after this entry                                                            |
+| `position` | `mouse_motion` - the resulting mouse position                                                                                 |
+| `errors`   | any action whose handlers raised a GDScript runtime error                                                                     |
 
 **`changes`** is the delta in visible Control nodes across the action, over the same walk `get_ui_elements` uses, with `appeared`, `disappeared`, `changed` (text and disabled state), plus `scene` and `focus` when those moved. `appeared` and `disappeared` collapse subtrees: an overlay opening reports the overlay's path once, not every Control beneath it. Each list is capped, and `truncated` counts how many entries were dropped when it was.
 
@@ -65,6 +65,8 @@ One call executes a batch of actions in order and returns one result entry per a
 `errors` is only available for sessions this server spawned with `run_project`. An `attach_project` session has no captured stderr, so handler errors cannot be attributed and the field is simply omitted.
 
 `hit` and the occlusion check behind it both read the viewport's hovered control, which older Godot 4.x builds do not expose. On those builds `hit` is omitted and an occluded click reports plain success, so treat `hit` as a bonus rather than a guarantee.
+
+Signal observers are connected before injection and disconnected after the one settle frame, so `signals` reports what the target emitted inside that frame. A handler that emits later (via `call_deferred`, a tween, an animation callback or a timer) is not observed: an absent entry means "not within one frame", not "never".
 
 ## Profiling (requires `run_project` with `profiling: true`)
 
@@ -175,7 +177,9 @@ Godot performs these on store, so they are allowed: float to int, string to `Nod
 
 ### Typed arrays
 
-A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `int`, `float`, `String`, `Vector2`, `Vector3`, `Vector4` or `Color`. An element that cannot represent `T` errors and the error names its index. An untyped `Array` accepts anything, unchanged. An `Array[T]` whose `T` is a class, a Resource or an enum is passed through without element checks, so a wrong element there surfaces as a Godot engine error in the process output rather than as a tool error.
+A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, `Vector2`, `Vector2i`, `Vector3`, `Vector3i`, `Vector4`, `Vector4i` or `Color`. Widening applies within that set the way it does for scalars, so JSON ints land in an `Array[float]` and `{ "x": 1, "y": 2 }` lands in an `Array[Vector2i]`. An element that cannot represent `T` errors and the error names its index. An untyped `Array` accepts anything, unchanged.
+
+Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is rejected with an explicit error naming the element type. That is deliberate: `set()` does not convert an untyped array element by element for a typed property, it refuses the assignment and leaves an empty array behind while reporting nothing, so passing one through would be a silent drop reported as success. Use `run_script` for those.
 
 ### Object-typed properties
 

@@ -54,7 +54,7 @@ CI runs typecheck → lint → format:check → test → build on Node 20, 22, 2
 
 - `main` is the published branch; all work goes through PRs
 - Conventional-commits prefixes are encouraged but not enforced: `chore:`, `fix:`, `feat:`, `docs:`, `style:`, `ci:`, `refactor:`, `test:`
-- Keep commits scoped — formatting sweeps and behavior changes are separate commits
+- Keep commits scoped: formatting sweeps and behavior changes are separate commits
 
 ## Testing
 
@@ -98,9 +98,9 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 
 The gate emits a three-tier decision:
 
-- **Tier 1 — hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
-- **Tier 2 — elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
-- **Tier 3 — warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
+- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
+- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
+- **Tier 3: warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
 
 `GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch - MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
 
@@ -139,7 +139,7 @@ Tool descriptions ship on every handshake - they are the entire UI an agent sees
 1. Bump version in `package.json` and `src/index.ts`
 2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
 3. Commit and push to `main`
-4. Push a `vX.Y.Z` tag — `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
+4. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
 Docker CI runs automatically on push and PR to `main`.
 
