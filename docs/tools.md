@@ -139,7 +139,7 @@ All mutation operations save automatically. Property and delete tools take alway
 | `get_scene_tree`      | Get the full scene tree hierarchy (use `maxDepth: 1` for shallow listing) |
 | `get_node_properties` | Read properties from one or more nodes (always-array `nodes`)             |
 | `set_node_properties` | Set properties on one or more nodes (always-array `updates`)              |
-| `attach_script`       | Attach a GDScript to a node                                               |
+| `attach_script`       | Attach a GDScript or C# script to a node                                  |
 | `duplicate_node`      | Duplicate a node within the scene                                         |
 | `delete_nodes`        | Remove one or more nodes from the scene (always-array `nodePaths`)        |
 | `get_node_signals`    | List all signals on a node with their connections                         |
@@ -193,6 +193,8 @@ Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.sha
 | `"res://path/to/file.tres"`         | Loads the saved resource. An asset that exists on disk but has never been imported triggers an automatic headless import and one retry, transparent to the caller. A path that does not exist on disk is an error, and a mutation on a scene that references a missing file is refused outright so the reference is not stripped on save. |
 | `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.                                                                                                                                                                                                                                               |
 | `null`                              | Clears the property.                                                                                                                                                                                                                                                                                                                      |
+
+The `script` property gets one more check beyond the table above: a loaded Script is rejected unless `can_instantiate()` is true, since `set_script()` on an unusable one fails silently and would otherwise leave the node without a script while reporting success. This is the same check `attach_script` runs - see its error disclosure below for the GDScript-parse-error/`@abstract`/unbuilt-C#-class cases.
 
 Inline construction example:
 

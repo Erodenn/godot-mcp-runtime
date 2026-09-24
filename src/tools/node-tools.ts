@@ -156,7 +156,7 @@ export const nodeToolDefinitions = [
   {
     name: 'attach_script',
     description:
-      'Attach an existing GDScript file to a node in a scene. Use after writing the script with the standard file tools and validating it via the validate tool. Replaces any previously attached script. Saves automatically. Returns: success with the resolved nodePath and scriptPath that were attached. Errors if scriptPath does not exist or nodePath is not found. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      "Attach a GDScript or C# script to a node in a scene. Use after writing and validating it via the validate tool. C# needs the Godot .NET build with the class compiled into the project assembly. Replaces any previous script. Saves automatically. Returns: success with nodePath and scriptPath. Errors if the script can't be instantiated (parse errors, @abstract, or an unbuilt C# class), scriptPath doesn't exist, or nodePath isn't found. Errors while a Godot runtime session is active; stop_project (or detach_project) clears it.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -167,7 +167,7 @@ export const nodeToolDefinitions = [
         scriptPath: {
           type: 'string',
           description:
-            'Path to the GDScript file relative to the project (e.g. "scripts/player.gd")',
+            'Path to the script file relative to the project (e.g. "scripts/player.gd" or "scripts/Player.cs"). A .cs file needs the Godot .NET build and its class compiled into the project assembly (dotnet build).',
         },
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'scriptPath'],
@@ -451,7 +451,11 @@ export async function handleAttachScript(
     params,
     parsed.value.projectPath,
     'Failed to attach script',
-    ['Ensure the script is valid for this node type'],
+    [
+      'Ensure the script is valid for this node type',
+      'If the script has parse errors or is declared @abstract, run validate with scriptPath to see them',
+      'For a C# script, build the project (dotnet build, or Build in the Godot editor) so the class is in the compiled assembly, and make sure GODOT_PATH points at the Godot .NET build',
+    ],
     undefined,
     { parseStdoutAsJson: true, mutatesSceneFile: true },
   );

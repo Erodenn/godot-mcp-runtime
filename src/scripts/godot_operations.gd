@@ -526,6 +526,15 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 			new_node.free()
 			return {"ok": false, "error": prepared.error}
 		new_node.set(property, prepared.value)
+		# "script" already passed _check_script_attachable inside
+		# _prepare_property_value, but verify the assignment actually landed --
+		# same backstop attach_script and _apply_updates apply, see
+		# _verify_script_attached.
+		if property == "script":
+			var verify = _verify_script_attached(new_node, prepared.value)
+			if not verify.ok:
+				new_node.free()
+				return {"ok": false, "error": verify.error}
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	return {"ok": true, "error": ""}
@@ -771,8 +780,20 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 			else:
 				_claim_for_serialization(scene_root, node)
 				node.set(update.property, prepared.value)
-				result["success"] = true
-				any_set = true
+				# "script" already passed _check_script_attachable inside
+				# _prepare_property_value, but verify the assignment actually
+				# landed -- see _verify_script_attached. A failed backstop is a
+				# per-update error, not a successful set: any_set must stay
+				# false for this update so it isn't counted as applied work.
+				var backstop_ok := true
+				if update.property == "script":
+					var verify = _verify_script_attached(node, prepared.value)
+					if not verify.ok:
+						result["error"] = verify.error
+						backstop_ok = false
+				if backstop_ok:
+					result["success"] = true
+					any_set = true
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
@@ -868,6 +889,77 @@ func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: i
 		"children": children
 	}
 
+# True when `path` (a res:// path, normalized or not) names a C# script by
+# its extension. Shared by the no-C#-support check and _check_script_attachable's
+# message selection -- the latter also accepts script.get_class() == "CSharpScript"
+# for a script that loaded under some other extension, but the extension is
+# the only signal available before load() has run.
+func _is_csharp_script_path(path: String) -> bool:
+	return path.to_lower().ends_with(".cs")
+
+# Friendly error for a .cs script on a Godot build with no C# module built in.
+# On that build ClassDB never registers "CSharpScript" at all, so load() on a
+# .cs file fails generically ("Failed to load script: res://x.cs") with no clue
+# that the real problem is the binary, not the script. Checked before load()
+# runs so this message pre-empts that generic one. A true either way for any
+# non-.cs path, so callers can call this unconditionally.
+func _check_csharp_support(path: String) -> Dictionary:
+	if _is_csharp_script_path(path) and not ClassDB.class_exists("CSharpScript"):
+		return {"ok": false, "error": "Cannot attach '%s': this Godot build has no C# support. Point GODOT_PATH at the Godot .NET build." % path}
+	return {"ok": true, "error": ""}
+
+# Whether a successfully loaded Script can actually be attached to a node.
+# load() returns a Script resource even when the script is unusable, and
+# Object.set_script() then fails SILENTLY on an unusable one: it prints an
+# ERROR to stderr and leaves get_script() null, with no error return for the
+# caller to check. Checked before set_script() ever runs:
+#   - can_instantiate() catches a GDScript with parse errors, and a C# whose
+#     class is not (or no longer, after an edit) present in the compiled game
+#     assembly -- e.g. the project was never built, or the .cs file was
+#     added/renamed after the last build.
+#   - can_instantiate() does NOT catch a GDScript declared `@abstract`
+#     (verified against Godot 4.7.2: it stays true for an abstract script) --
+#     that needs the separate is_abstract() check. Script declares
+#     is_abstract() itself, so every subtype (GDScript, CSharpScript) answers
+#     it; has_method() guards a hypothetical Script subtype that does not.
+# Returns {"ok": bool, "error": String}.
+func _check_script_attachable(script: Script, path: String) -> Dictionary:
+	var is_abstract: bool = script.has_method("is_abstract") and script.is_abstract()
+	if script.can_instantiate() and not is_abstract:
+		return {"ok": true, "error": ""}
+	if script.get_class() == "CSharpScript" or _is_csharp_script_path(path):
+		return {
+			"ok": false,
+			"error": "Script '%s' cannot be instantiated: its C# class is not present in the compiled game assembly. Build the project (`dotnet build` in the project directory, or Build in the Godot editor) and retry. The class name must match the file name exactly (case-sensitive)." % path
+		}
+	if path.to_lower().ends_with(".gd"):
+		if is_abstract:
+			return {
+				"ok": false,
+				"error": "Script '%s' cannot be instantiated: it is declared @abstract. Remove @abstract (or the @abstract methods forcing it) to attach it directly." % path
+			}
+		return {
+			"ok": false,
+			"error": "Script '%s' cannot be instantiated: it has parse errors. Run the validate tool with scriptPath set to this file to see them." % path
+		}
+	return {"ok": false, "error": "Script '%s' cannot be instantiated." % path}
+
+# Backstop after node.set_script() / node.set(<node's "script" property>, ...):
+# even past the _check_script_attachable gate above, verify the assignment
+# actually landed rather than trust it. `expected` is the Script that was just
+# assigned (or null, when the caller is clearing the script) -- get_script()
+# must reflect exactly that, or the assignment silently failed and reporting
+# success would be the same lie this whole change exists to close.
+# Returns {"ok": bool, "error": String}.
+func _verify_script_attached(node: Object, expected) -> Dictionary:
+	if node.get_script() == expected:
+		return {"ok": true, "error": ""}
+	var desc = expected.resource_path if (expected is Script and expected.resource_path != "") else str(expected)
+	return {
+		"ok": false,
+		"error": "Script was loaded but Godot did not attach it to the node (get_script() does not reflect it after the assignment): " + desc
+	}
+
 # Attach or change a script on a node
 func attach_script(params):
 	printerr("Attaching script to node in scene: " + params.scene_path)
@@ -894,13 +986,31 @@ func attach_script(params):
 		quit(1)
 		return
 
+	var csharp_support = _check_csharp_support(full_script_path)
+	if not csharp_support.ok:
+		log_error(csharp_support.error)
+		quit(1)
+		return
+
 	var script = load(full_script_path)
 	if not script:
 		log_error("Failed to load script: " + full_script_path)
 		quit(1)
 		return
 
+	var attach_check = _check_script_attachable(script, full_script_path)
+	if not attach_check.ok:
+		log_error(attach_check.error)
+		quit(1)
+		return
+
 	node.set_script(script)
+
+	var verify = _verify_script_attached(node, script)
+	if not verify.ok:
+		log_error(verify.error)
+		quit(1)
+		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		print(JSON.stringify({
@@ -1949,6 +2059,13 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			# Check for the cold-import state before load() runs.
 			if _classify_dep_path(coerced) == "needs_import":
 				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, coerced)}
+			# "script" gets the same pre-load C#-support check attach_script runs,
+			# for the same reason: on a build with no C# module, load() on a .cs
+			# file fails with a generic message that doesn't say why.
+			if property == "script":
+				var csharp_support = _check_csharp_support(coerced)
+				if not csharp_support.ok:
+					return {"ok": false, "value": null, "error": csharp_support.error}
 			var res = load(coerced)
 			if not res:
 				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
@@ -1957,6 +2074,18 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
 			if not hint_check.ok:
 				return {"ok": false, "value": null, "error": hint_check.error}
+			# "script" also needs the can_instantiate() gate: load() succeeds and
+			# returns a Script even when it cannot actually be attached (parse
+			# errors, @abstract, or an unbuilt C# class) -- see
+			# _check_script_attachable. Gated on the *property name* rather than
+			# `res is Script`: a non-"script" Object-typed property could in
+			# principle accept a Script value (e.g. a custom Resource field typed
+			# as Script) and that is not this bug -- only the node's own script
+			# slot silently drops an unattachable value.
+			if property == "script" and res is Script:
+				var attach_check = _check_script_attachable(res, coerced)
+				if not attach_check.ok:
+					return {"ok": false, "value": null, "error": attach_check.error}
 			return {"ok": true, "value": res, "error": ""}
 
 		if typeof(coerced) == TYPE_DICTIONARY and coerced.has("type") and typeof(coerced.type) == TYPE_STRING:
