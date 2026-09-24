@@ -191,7 +191,12 @@ describe('handleValidate batch mode - per-target checks', () => {
         {
           target: 'main.tscn',
           valid: false,
-          errors: [{ message: 'Invalid check type: strcture (expected "structure" or "signals")' }],
+          errors: [
+            {
+              message:
+                'Invalid check type: strcture (expected "structure", "signals", or "render")',
+            },
+          ],
         },
       ],
     });

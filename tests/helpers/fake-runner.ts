@@ -43,6 +43,12 @@ export interface FakeRunnerOptions {
    * Default: "4.3.stable".
    */
   godotVersion?: string;
+  /**
+   * Path returned by getGodotPath() for handlers that need the executable
+   * (e.g. server-side render checks). Default: "/fake/godot". Set to null
+   * to simulate an undetected Godot.
+   */
+  godotPath?: string | null;
   /** If set, importAssets() rejects with this error instead of resolving. */
   importThrows?: Error;
 }
@@ -95,6 +101,9 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     },
     async getVersion(): Promise<string> {
       return godotVersion;
+    },
+    getGodotPath(): string | null {
+      return options.godotPath !== undefined ? options.godotPath : '/fake/godot';
     },
     // Mirrors the real GodotRunner.hasActiveRuntimeSession() predicate so
     // guard tests exercise the same liveness logic production code does.

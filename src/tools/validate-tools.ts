@@ -11,6 +11,7 @@ import { parseScriptDiagnostics } from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
+import { runRenderCheck } from '../utils/render-check.js';
 
 /**
  * Item schema for the checks[] array. Referenced by both the top-level
@@ -23,7 +24,7 @@ const CHECK_ITEM_SCHEMA = {
   properties: {
     type: {
       type: 'string',
-      enum: ['structure', 'signals'],
+      enum: ['structure', 'signals', 'render'],
       description: 'The kind of check to run',
     },
     schema: {
@@ -35,6 +36,22 @@ const CHECK_ITEM_SCHEMA = {
       type: 'string',
       description: '[signals] Optional node path to scope the check to a subtree (e.g. "root/HUD")',
     },
+    frames: {
+      type: 'integer',
+      description: '[render] Number of frames to capture before evaluating (default 15)',
+    },
+    minChromatic: {
+      type: 'number',
+      description: '[render] Minimum chromatic ratio to pass (default 0.01)',
+    },
+    maxDominant: {
+      type: 'number',
+      description: '[render] Maximum dominant-color share to pass (default 0.98)',
+    },
+    minDistinct: {
+      type: 'integer',
+      description: '[render] Minimum distinct colors to pass (default 3)',
+    },
   },
   required: ['type'],
 } as const;
@@ -43,7 +60,7 @@ export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. checks requires scenePath and instantiates the scene, running each attached script's _init(). Any parse error yields valid:false.",
+      "Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. checks requires scenePath and instantiates the scene, running each attached script's _init(). Any parse error yields valid:false. checks supports three types: 'structure' (validate node tree against a schema), 'signals' (verify signal connections and handler methods), and 'render' (mechanically verify the viewport shows rendered content, not a blank frame).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -70,7 +87,7 @@ export const validateToolDefinitions = [
         checks: {
           type: 'array',
           description:
-            '[single, requires scenePath] Structural and signal-verification checks to run against the scene. Types: "structure" (validate node tree against a schema) and "signals" (verify signal connections and handler methods, optional nodePath scope). Merged into the errors array with a "check" discriminator.',
+            '[single, requires scenePath] Structural, signal-verification, and render checks to run against the scene. Types: "structure" (validate node tree against a schema), "signals" (verify signal connections and handler methods, optional nodePath scope), and "render" (run the scene briefly and mechanically verify the viewport shows rendered content, not a blank frame). Merged into the errors array with a "check" discriminator.',
           items: CHECK_ITEM_SCHEMA,
         },
         targets: {
@@ -259,6 +276,23 @@ export async function handleValidate(
             preErrors.set(i, {
               target: t.scenePath ?? '',
               errors: [{ message: checkFailure.message }],
+            });
+            continue;
+          }
+          // Render checks execute server-side (separate movie-writer run), so
+          // they cannot be batched with structure/signals in one Godot process.
+          const hasRender =
+            Array.isArray(tChecks) &&
+            tChecks.some((c: unknown) => (c as { type?: string }).type === 'render');
+          if (hasRender) {
+            preErrors.set(i, {
+              target: t.scenePath ?? '',
+              errors: [
+                {
+                  message:
+                    'render checks are not supported in batch mode yet; use single mode (scenePath + checks) for render checks',
+                },
+              ],
             });
             continue;
           }
@@ -502,6 +536,10 @@ export async function handleValidate(
     // { valid, errors } below.
     const combined = hasChecks && resolvedScenePath !== undefined;
 
+    // Render findings computed server-side before/alongside the GDScript
+    // batch, merged into checkErrors after the batch payload is parsed.
+    let pendingRenderErrors: CheckError[] = [];
+
     let stdout: string;
     let stderr: string;
     if (combined) {
@@ -509,15 +547,48 @@ export async function handleValidate(
       if (checkFailure) {
         return err(createErrorResponse(checkFailure.message, checkFailure.solutions));
       }
+      // Render checks execute server-side (the headless validate process has
+      // no drawable surface), so they are split out before the GDScript batch
+      // runs. Structure/signals checks still travel to validate_batch.
+      const renderErrors = await executeRenderChecks(
+        runner,
+        projectPath,
+        Array.isArray(checksRaw) ? checksRaw : [],
+        resolvedScenePath,
+      );
+      const gdChecks = Array.isArray(checksRaw)
+        ? (checksRaw as Array<{ type?: string }>).filter((c) => c.type !== 'render')
+        : [];
+      if (gdChecks.length === 0 && renderErrors.length === 0) {
+        // Only render checks, and all passed — no GDScript process needed.
+        return ok({
+          content: [{ type: 'text', text: JSON.stringify({ valid: true, errors: [] }, null, 2) }],
+        });
+      }
+      if (gdChecks.length === 0) {
+        // Only render checks, at least one failed — report without spawning Godot.
+        return ok({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ valid: false, errors: renderErrors }, null, 2),
+            },
+          ],
+        });
+      }
       // Check items travel camelCase and untouched for the same reason the
       // batch branch forwards them raw: the runner's convertCamelToSnakeCase
       // rewrites nodePath and every nested hasProperty on the way out.
       ({ stdout, stderr } = await executeValidateOp(
         runner,
         'validate_batch',
-        { targets: [{ scene_path: resolvedScenePath, checks: checksRaw }] },
+        { targets: [{ scene_path: resolvedScenePath, checks: gdChecks }] },
         projectPath,
       ));
+      if (renderErrors.length > 0) {
+        // Deferred merge below handles the combined result; stash for it.
+        pendingRenderErrors = renderErrors;
+      }
     } else {
       const params: OperationParams = {};
       if (resolvedScriptPath) params.scriptPath = resolvedScriptPath;
@@ -595,10 +666,12 @@ export async function handleValidate(
 
     // checks[]: structural / signal verification against the scene, merged
     // into the same output shape with a `check` discriminator per error.
-    if (checkErrors.length > 0) {
+    // Render findings computed server-side merge through the same channel.
+    const allCheckErrors = [...checkErrors, ...pendingRenderErrors];
+    if (allCheckErrors.length > 0) {
       result = {
         valid: false,
-        errors: [...result.errors, ...checkErrors],
+        errors: [...result.errors, ...allCheckErrors],
       };
     }
 
@@ -694,11 +767,34 @@ function validateCheckItems(checks: unknown): CheckValidationFailure | null {
       };
     }
     const t = (check as { type?: unknown }).type;
-    if (t !== 'structure' && t !== 'signals') {
+    if (t !== 'structure' && t !== 'signals' && t !== 'render') {
       return {
-        message: `Invalid check type: ${String(t)} (expected "structure" or "signals")`,
-        solutions: ['Supported types: "structure" (with schema) and "signals" (optional nodePath)'],
+        message: `Invalid check type: ${String(t)} (expected "structure", "signals", or "render")`,
+        solutions: [
+          'Supported types: "structure" (with schema), "signals" (optional nodePath), and "render" (mechanical viewport-content verification)',
+        ],
       };
+    }
+    if (t === 'render') {
+      const item = check as { frames?: unknown; minChromatic?: unknown; maxDominant?: unknown };
+      if (
+        item.frames !== undefined &&
+        (!Number.isInteger(item.frames) || (item.frames as number) < 1)
+      ) {
+        return {
+          message: 'Invalid render check: frames must be a positive integer',
+          solutions: ['Example: { "type": "render", "frames": 20 }'],
+        };
+      }
+      if (
+        (item.minChromatic !== undefined && !(typeof item.minChromatic === 'number')) ||
+        (item.maxDominant !== undefined && !(typeof item.maxDominant === 'number'))
+      ) {
+        return {
+          message: 'Invalid render check: minChromatic and maxDominant must be numbers',
+          solutions: ['Example: { "type": "render", "minChromatic": 0.005 }'],
+        };
+      }
     }
     if (t === 'structure') {
       const schemaError = validateSchemaNode((check as { schema?: unknown }).schema, 'schema');
@@ -706,4 +802,55 @@ function validateCheckItems(checks: unknown): CheckValidationFailure | null {
     }
   }
   return null;
+}
+
+/**
+ * Execute render checks for one target server-side. Returns an array of
+ * CheckError entries (empty when all pass). The render check runs the
+ * project briefly under the movie writer with the real renderer and
+ * evaluates pixel statistics, so it cannot ride the headless
+ * validate_batch process.
+ */
+async function executeRenderChecks(
+  runner: GodotRunner,
+  projectPath: string,
+  checks: Array<{ type?: string; frames?: number; minChromatic?: number; maxDominant?: number }>,
+  scenePath: string | undefined,
+): Promise<CheckError[]> {
+  const errors: CheckError[] = [];
+  const godotPath = runner.getGodotPath();
+  if (!godotPath) {
+    errors.push({
+      check: 'render',
+      message: 'Cannot run render check: Godot executable path not found',
+    });
+    return errors;
+  }
+
+  for (const check of checks) {
+    if (check.type !== 'render') continue;
+
+    try {
+      const opts: { frames?: number; minChromatic?: number; maxDominant?: number } = {};
+      if (check.frames !== undefined) opts.frames = check.frames;
+      if (check.minChromatic !== undefined) opts.minChromatic = check.minChromatic;
+      if (check.maxDominant !== undefined) opts.maxDominant = check.maxDominant;
+      const result = await runRenderCheck(godotPath, projectPath, scenePath, opts);
+      if (!result.ok) {
+        errors.push({
+          check: 'render',
+          message: result.message,
+          chromatic: result.stats?.chromatic,
+          dominant: result.stats?.dominant,
+          distinct: result.stats?.distinct,
+        });
+      }
+    } catch (e: unknown) {
+      errors.push({
+        check: 'render',
+        message: `Render check failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+  return errors;
 }
