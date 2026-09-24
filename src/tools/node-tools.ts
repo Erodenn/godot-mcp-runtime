@@ -453,7 +453,7 @@ export async function handleAttachScript(
     'Failed to attach script',
     [
       'Ensure the script is valid for this node type',
-      'If the script has parse errors or is declared @abstract, run validate with scriptPath to see them',
+      'If the script has parse errors, run validate with scriptPath to see them; a script declared @abstract cannot be attached directly',
       'For a C# script, build the project (dotnet build, or Build in the Godot editor) so the class is in the compiled assembly, and make sure GODOT_PATH points at the Godot .NET build',
     ],
     undefined,
