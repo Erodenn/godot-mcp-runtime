@@ -9,7 +9,7 @@ npm install
 npm run build
 ```
 
-Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exercises.
+Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exercises. Optionally set `GODOT_MONO_PATH` to a Godot .NET build to also run the opt-in C# attach-script test (see `tests/README.md`).
 
 ### Local MCP client wiring
 
