@@ -8,7 +8,10 @@ import { join } from 'path';
  * Layout:
  *
  *     <project>/.mcp/.gdignore                              (importer suppression, never deleted)
- *     <project>/.mcp/godot-runtime/bridge/mcp_bridge.gd     (session-scoped, removed on cleanup)
+ *     <project>/.mcp/godot-runtime/bridge/mcp_bridge.gd     (session-scoped, removed by the last leaver)
+ *     <project>/.mcp/godot-runtime/bridge/owners/<pid>-<instanceId>.json
+ *                                                            (one file per live session on this project,
+ *                                                             removed on that session's own cleanup)
  *     <project>/.mcp/godot-runtime/screenshots/             (persists across sessions)
  *     <project>/.mcp/godot-runtime/scripts/                 (run_script audit pairs, persists)
  *     <project>/.mcp/godot-runtime/validate/                (temp files, deleted per call)
@@ -28,6 +31,7 @@ const MCP_DIR_NAME = '.mcp' as const;
 const ARTIFACT_NAMESPACE_DIR_NAME = 'godot-runtime' as const;
 
 const BRIDGE_DIR_NAME = 'bridge' as const;
+const BRIDGE_OWNERS_DIR_NAME = 'owners' as const;
 const SCREENSHOTS_DIR_NAME = 'screenshots' as const;
 const AUDIT_SCRIPTS_DIR_NAME = 'scripts' as const;
 const VALIDATE_DIR_NAME = 'validate' as const;
@@ -69,6 +73,17 @@ export function bridgeDir(projectPath: string): string {
 /** Absolute path of the injected bridge autoload script. */
 export function bridgeScriptAbsPath(projectPath: string): string {
   return join(bridgeDir(projectPath), BRIDGE_SCRIPT_FILENAME);
+}
+
+/**
+ * `<project>/.mcp/godot-runtime/bridge/owners` — one JSON file per live
+ * session on this project (registered by `BridgeManager.inject`, removed by
+ * that session's own `BridgeManager.cleanup`). Read by every session to
+ * decide whether it is the last leaver before removing the shared script and
+ * autoload entry.
+ */
+export function bridgeOwnersDir(projectPath: string): string {
+  return join(bridgeDir(projectPath), BRIDGE_OWNERS_DIR_NAME);
 }
 
 /**

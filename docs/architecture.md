@@ -105,10 +105,22 @@ When `run_project` or `attach_project` is called:
 
 1. `mcp_bridge.gd` is copied to `.mcp/godot-runtime/bridge/` inside the project
 2. It's registered as an autoload in `project.godot` as `res://.mcp/godot-runtime/bridge/mcp_bridge.gd`
-3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. The resolved port is baked into the per-project bridge script at inject time, so the listener and the Node-side socket always agree.
+3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. `run_project` delivers the resolved port to the spawned process via the `MCP_BRIDGE_PORT` environment variable, so the on-disk script stays identical for every spawned session regardless of which one wrote it. `attach_project` has no env-var channel into a Godot process the user launched themselves, so it bakes the port (and the auth token) into the per-project bridge script at inject time instead.
 4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
-5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes the bridge script and autoload entry
+5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes this session's registry entry. The shared bridge script and autoload entry are removed only when no other live session remains on the project (see "Multiple sessions on one project" below).
 6. The same removal runs without a tool call when the session ends on its own: a spawned process that exits, an attached bridge that disconnects, or the server itself shutting down (signal, stdin close, or process exit). `stop_project` remains worth calling (it frees the retained process slot and returns the captured logs), but forgetting it does not strand artifacts in the project
+
+### Multiple sessions on one project
+
+N server processes can share one project at once. Every entry point reads disk state rather than trusting in-memory bookkeeping, because a sibling process's inject or cleanup can change that state at any moment. Ownership is tracked with a small on-disk registry: `.mcp/godot-runtime/bridge/owners/<pid>-<instanceId>.json`, one file per live session, written by `inject` before `project.godot` is touched and removed by that same session's `cleanup`. An owner is considered live when its hostname does not match this host (unknowable, so treated conservatively as live) or its pid answers a liveness probe; dead owner files are pruned opportunistically whenever the registry is read.
+
+The shared script and autoload entry are created on the first live session's inject and removed only by the last live session's cleanup. A same-project restart (`run_project` called again without an intervening `stop_project`, the scenario reported in issue #61) always re-reads disk rather than trusting a per-process "already injected" flag, so a missing autoload entry gets restored even when the script itself was already present.
+
+Attach mode allows at most one live attach owner per project, because it bakes its port and token into the one shared script: a second `attach_project` on a project another session has already attached to is refused before any write, naming the other session's pid. Spawned sessions carry no such limit, since they deliver their port through the environment and never bake anything.
+
+A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own.
+
+Accepted gaps: two servers racing a read-modify-write on `project.godot` in the same instant can still lose one edit (writing the owner file first keeps the window tiny, and the next inject from either side restores the entry); and an older server version sharing a project writes no owner file, so it is invisible to this registry.
 
 ## Input Batches
 

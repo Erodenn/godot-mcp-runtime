@@ -60,7 +60,8 @@ function stubBridge(runner: Runner): BridgeRecorder {
     cleanup: (projectPath: string) => {
       rec.cleanupCalls.push(projectPath);
     },
-    readBakedPort: () => null,
+    isBridgeAutoloadRegistered: () => false,
+    listOtherLiveOwners: () => [],
     repairOrphaned: () => {},
   };
   return rec;

@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
 import { BridgeAutoloadCollisionError, BridgeManager } from './bridge-manager.js';
+import type { BridgeOwnerInfo } from './bridge-manager.js';
 import { DebuggerProfiler } from './profiler.js';
 import {
   DEFAULT_BRIDGE_PORT,
@@ -442,12 +443,27 @@ export class GodotRunner {
   }
 
   /**
-   * Read the port currently baked into the project's bridge script. Returns
-   * null if the file is missing or malformed. Thin pass-through to
-   * BridgeManager — used by bridge-wait-timeout race detection.
+   * True when `project.godot` currently registers the `McpBridge` autoload
+   * pointing at this server's script. Thin pass-through to BridgeManager —
+   * used by the bridge-not-ready timeout diagnostic to tell "the game started
+   * with no bridge autoload at all" from "the bridge is registered but never
+   * became ready".
    */
-  readBakedBridgePort(projectPath: string): number | null {
-    return this.bridge.readBakedPort(projectPath);
+  isBridgeAutoloadRegistered(projectPath: string): boolean {
+    return this.bridge.isBridgeAutoloadRegistered(projectPath);
+  }
+
+  /**
+   * Other live MCP sessions (different server process, or a different
+   * `BridgeManager` instance in this same process) currently registered on
+   * this project, excluding this runner's own session. Thin pass-through to
+   * `BridgeManager.listOtherLiveOwners`, resolving the path the same way
+   * `runProject`/`attachProject` do so the lookup matches their own owner
+   * file's directory. Powers the cross-server edit guard in
+   * `rejectIfLiveSessionOnProject` (src/utils/headless-op.ts).
+   */
+  otherLiveSessionsOnProject(projectPath: string): BridgeOwnerInfo[] {
+    return this.bridge.listOtherLiveOwners(resolve(projectPath));
   }
 
   async getVersion(): Promise<string> {
@@ -660,6 +676,11 @@ export class GodotRunner {
       env: {
         ...process.env,
         MCP_SESSION_TOKEN: sessionToken,
+        // Delivers this session's resolved port without baking it into the
+        // shared script — see BridgeManager: spawned sessions never bake,
+        // so the on-disk script stays identical for every spawned session
+        // regardless of who wrote it.
+        MCP_BRIDGE_PORT: String(port),
       },
     };
     if (background) {

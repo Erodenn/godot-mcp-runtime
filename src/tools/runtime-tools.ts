@@ -44,7 +44,11 @@ import {
   isServerOwnedBridgePath,
   screenshotsDir,
 } from '../utils/artifact-paths.js';
-import { BRIDGE_AUTOLOAD_NAME, BridgeAutoloadCollisionError } from '../utils/bridge-manager.js';
+import {
+  BRIDGE_AUTOLOAD_NAME,
+  BridgeAttachConflictError,
+  BridgeAutoloadCollisionError,
+} from '../utils/bridge-manager.js';
 import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
@@ -137,7 +141,7 @@ export const runtimeToolDefinitions = [
           minimum: 1,
           maximum: 65535,
           description:
-            "TCP port for the MCP bridge. Omit to auto-select a free port (recommended). The chosen port is baked into the project's `mcp_bridge.gd` at inject time, so the running Godot listens on exactly this port.",
+            'TCP port for the MCP bridge. Omit to auto-select a free port (recommended). Delivered to the spawned process via an environment variable, so the bridge script on disk is unaffected by which port this session uses - safe for multiple sessions on the same project.',
         },
         profiling: {
           type: 'boolean',
@@ -151,7 +155,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'attach_project',
     description:
-      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 45s total once it has, so a large project\'s cold start is absorbed; a port that listens but answers no ping gives up sooner. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
+      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 45s total once it has, so a large project\'s cold start is absorbed; a port that listens but answers no ping gives up sooner. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Only one attach session is supported per project at a time (attach mode has no env-var channel, so port and token must be baked into the one shared script); a second attach_project on a project another session already attached to is refused, naming that session. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -1103,18 +1107,15 @@ export async function handleRunProject(
 
       const recentErrors = runner.getRecentErrors(20);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
-      const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(projectPath);
-      const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
-      const racePrefix = raceDetected
-        ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
-        : '';
+      const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
       const lines = [
-        `${racePrefix}Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
+        `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
         // Surface the precise poll failure (token/path mismatch, abort reason)
         // instead of burying it behind the generic timeout narrative.
         ...(bridgeResult.error ? [`- Actual reason: ${bridgeResult.error}`] : []),
-        '- The bridge listener never came up - likely an early _ready error or a stuck process holding the port',
+        bridgeRegistered
+          ? '- The bridge listener never came up - likely an early _ready error or a stuck process holding the port'
+          : '- project.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project)',
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
       ];
@@ -1129,11 +1130,6 @@ export async function handleRunProject(
         `Check that the assigned bridge port (${runner.activeBridgePort}) is not occupied by another Godot process`,
         'Retry run_project',
       ];
-      if (raceDetected) {
-        solutions.push(
-          'Concurrent MCP clients in the same project are not supported - run them in separate projects or sequence the calls',
-        );
-      }
       return err(createErrorResponse(lines.join('\n'), solutions));
     }
 
@@ -1231,12 +1227,7 @@ export async function handleAttachProject(
     const bridgeResult = await runner.waitForBridgeAttached();
 
     if (!bridgeResult.ready) {
-      const expected = runner.activeBridgePort;
-      const onDisk = runner.readBakedBridgePort(projectPath);
-      const raceDetected = onDisk !== null && expected !== null && onDisk !== expected;
-      const racePrefix = raceDetected
-        ? `Bridge timeout: expected port ${expected}, but on-disk script now has ${onDisk}. Another MCP client likely re-injected concurrently in the same project.\n`
-        : '';
+      const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
       // Tear down the attached-mode session state so retrying with
       // attach_project (or run_project) works without a manual detach first.
       await runner.stopProject();
@@ -1246,14 +1237,12 @@ export async function handleAttachProject(
         'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
         `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
       ];
-      if (raceDetected) {
-        solutions.push(
-          'Concurrent MCP clients in the same project are not supported - run them in separate projects or sequence the calls',
-        );
-      }
+      const registeredLine = bridgeRegistered
+        ? ''
+        : '\nproject.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project).';
       return err(
         createErrorResponse(
-          `${racePrefix}Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}`,
+          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}${registeredLine}`,
           solutions,
         ),
       );
@@ -1274,6 +1263,14 @@ export async function handleAttachProject(
       ],
     });
   } catch (error: unknown) {
+    if (error instanceof BridgeAttachConflictError) {
+      return err(
+        createErrorResponse(`Failed to attach project: ${error.message}`, [
+          `Detach the other session first (server pid ${error.conflictingOwner.pid}), then retry attach_project`,
+          'Only one attach session per project is supported',
+        ]),
+      );
+    }
     const solutions =
       error instanceof BridgeAutoloadCollisionError
         ? [

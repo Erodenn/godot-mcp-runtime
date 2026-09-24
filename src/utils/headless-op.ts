@@ -305,20 +305,47 @@ function rejectIfLiveSessionOnProject(
   projectPath: string,
   extraSolutions: string[] = [],
 ): HandlerResult | null {
-  if (!runner.hasActiveRuntimeSession()) return null;
-  const activeProject = runner.activeProjectPath;
-  const isSameProject =
-    activeProject !== null &&
-    normalizeForCompare(activeProject).toLowerCase() ===
-      normalizeForCompare(projectPath).toLowerCase();
-  if (!isSameProject) return null;
-  return err(
-    createErrorResponse(
-      "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
-      [
-        'Call stop_project (or detach_project for attached sessions), then retry the scene edit',
-        ...extraSolutions,
-      ],
-    ),
-  );
+  if (runner.hasActiveRuntimeSession()) {
+    const activeProject = runner.activeProjectPath;
+    const isSameProject =
+      activeProject !== null &&
+      normalizeForCompare(activeProject).toLowerCase() ===
+        normalizeForCompare(projectPath).toLowerCase();
+    if (isSameProject) {
+      return err(
+        createErrorResponse(
+          "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
+          [
+            'Call stop_project (or detach_project for attached sessions), then retry the scene edit',
+            ...extraSolutions,
+          ],
+        ),
+      );
+    }
+  }
+
+  // Own-session check above covers this server. A sibling server process (or
+  // a second BridgeManager instance in this one) can also be running the
+  // game on this project, and this runner has no way to stop that session —
+  // it isn't its own.
+  const otherOwners = runner.otherLiveSessionsOnProject(projectPath);
+  const other = otherOwners[0];
+  if (other) {
+    return err(
+      createErrorResponse(
+        `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
+          "project's game. That game belongs to the other session, not this one, and only it can " +
+          "stop it. A running game can write this project's scene files at any time, so a " +
+          'headless edit now would race it. Wait for the other session to finish (stop_project / ' +
+          'detach_project there), then retry.',
+        [
+          'Wait and retry once the other MCP session has stopped or detached its game',
+          "check_project on this project shows this session's own state, not the other session's",
+          ...extraSolutions,
+        ],
+      ),
+    );
+  }
+
+  return null;
 }

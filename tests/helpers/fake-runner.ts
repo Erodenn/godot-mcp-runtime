@@ -21,6 +21,7 @@
 
 import type { GodotRunner, OperationResult } from '../../src/utils/godot-runner.js';
 import type { OperationParams } from '../../src/mcp.types.js';
+import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 
 export interface FakeRunnerCall {
   operation: string;
@@ -76,6 +77,12 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     activeSessionMode: null as 'spawned' | 'attached' | null,
     activeProjectPath: null as string | null,
     activeProcess: null as { hasExited: boolean } | null,
+    // No other MCP session on this project by default -- the cross-server
+    // edit guard test sets this directly on `asRunner`.
+    otherLiveSessions: [] as BridgeOwnerInfo[],
+    otherLiveSessionsOnProject(_projectPath: string): BridgeOwnerInfo[] {
+      return fake.otherLiveSessions;
+    },
     async executeOperation(
       operation: string,
       params: OperationParams,

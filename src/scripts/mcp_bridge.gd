@@ -6,10 +6,14 @@ extends Node
 # Wire format: 4-byte big-endian length prefix + UTF-8 JSON payload.
 # Max frame size 16 MiB; oversize frames close the offending peer.
 
-# Port is baked into this script at inject time by BridgeManager.inject — the
-# integer literal below is rewritten in the project copy. The 9900 here is the
-# source-of-truth default that ships with the script so it remains runnable
-# standalone (e.g. validate, manual debugging).
+# Spawned sessions deliver their port via the MCP_BRIDGE_PORT env var (read in
+# _ready below), so the on-disk script is identical for every spawned session
+# regardless of who wrote it. Attach mode has no env-var channel to a Godot
+# process the user launched themselves, so BridgeManager.inject bakes the
+# port into the integer literal below instead for that case. The 9900 here is
+# the source-of-truth default that ships with the script so it remains
+# runnable standalone (e.g. validate, manual debugging) with neither the env
+# var nor a bake applied.
 const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
 # Session token is baked into this script at inject time by BridgeManager.inject
 # for attach-mode sessions (there is no env-var channel to a Godot process the
@@ -114,12 +118,18 @@ func _ready() -> void:
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
 	if session_token == "":
 		session_token = SESSION_TOKEN_BAKED
+	var port := PORT
+	var env_port := OS.get_environment("MCP_BRIDGE_PORT")
+	if env_port != "" and env_port.is_valid_int():
+		var parsed_port := int(env_port)
+		if parsed_port >= 1 and parsed_port <= 65535:
+			port = parsed_port
 	tcp_server = TCPServer.new()
-	var err = tcp_server.listen(PORT, "127.0.0.1")
+	var err = tcp_server.listen(port, "127.0.0.1")
 	if err != OK:
-		push_error("McpBridge: Failed to listen on port %d (error %d)" % [PORT, err])
+		push_error("McpBridge: Failed to listen on port %d (error %d)" % [port, err])
 	else:
-		print("McpBridge: Listening on TCP port %d" % PORT)
+		print("McpBridge: Listening on TCP port %d" % port)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)

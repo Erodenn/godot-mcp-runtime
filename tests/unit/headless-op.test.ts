@@ -250,6 +250,51 @@ describe('executeSceneOp', () => {
       expect(fake.calls.length).toBe(1);
     });
 
+    it('errors with a distinct cross-server message when another MCP session owns the game on this project', async () => {
+      const fake = runnerWithLiveSession(null);
+      (fake.asRunner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [
+        {
+          pid: 4242,
+          instanceId: 'abc123',
+          hostname: 'some-host',
+          mode: 'spawned',
+          startedAt: new Date().toISOString(),
+          port: 9900,
+        },
+      ];
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /Another MCP session/);
+      expectErrorMatching(result, /pid 4242/);
+      expectErrorMatching(result, /wait/i);
+      expect(fake.calls.length).toBe(0);
+    });
+
+    it('allows scene mutations when the other live session it can see is on a different project', async () => {
+      const fake = runnerWithLiveSession(null);
+      (fake.asRunner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [];
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expect(hasError(result)).toBe(false);
+      expect(fake.calls.length).toBe(1);
+    });
+
     it('tolerates a trailing slash and a "." segment when comparing project paths', async () => {
       const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj/' });
       const result = await executeSceneOp(

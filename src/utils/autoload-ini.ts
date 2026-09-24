@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
+import { writeFileAtomicSync } from './atomic-write.js';
 
 /**
  * Parsing and editing primitives for the `[autoload]` section of project.godot.
@@ -104,7 +105,7 @@ export function addAutoloadEntry(
 
   const sectionIdx = lines.findIndex((l) => l.trim() === '[autoload]');
   if (sectionIdx === -1) {
-    writeFileSync(projectFilePath, content.trimEnd() + '\n\n[autoload]\n' + entry + '\n', 'utf8');
+    writeFileAtomicSync(projectFilePath, content.trimEnd() + '\n\n[autoload]\n' + entry + '\n');
     return;
   }
 
@@ -113,7 +114,7 @@ export function addAutoloadEntry(
     insertIdx++;
   }
   lines.splice(insertIdx, 0, entry);
-  writeFileSync(projectFilePath, lines.join('\n'), 'utf8');
+  writeFileAtomicSync(projectFilePath, lines.join('\n'));
 }
 
 /**
@@ -148,7 +149,7 @@ export function removeAutoloadEntry(projectFilePath: string, name: string): bool
   let newContent = filtered.join('\n');
   newContent = newContent.replace(EMPTY_AUTOLOAD_SECTION_REGEX, '');
   newContent = newContent.trimEnd() + '\n';
-  writeFileSync(projectFilePath, newContent, 'utf8');
+  writeFileAtomicSync(projectFilePath, newContent);
   return true;
 }
 
@@ -185,6 +186,6 @@ export function updateAutoloadEntry(
     return line;
   });
 
-  if (updated) writeFileSync(projectFilePath, newLines.join('\n'), 'utf8');
+  if (updated) writeFileAtomicSync(projectFilePath, newLines.join('\n'));
   return updated;
 }

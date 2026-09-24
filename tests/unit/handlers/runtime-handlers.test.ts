@@ -119,6 +119,21 @@ interface RuntimeFake {
    *  from stderr, so the handler's attachment logic is testable without a
    *  process. Defaults to no errors and no drain timeout. */
   setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
+  /** Models BridgeManager.isBridgeAutoloadRegistered for the bridge-not-ready
+   *  timeout diagnostic. Defaults to true (autoload present). */
+  setBridgeAutoloadRegistered(registered: boolean): void;
+  /** Models GodotRunner.otherLiveSessionsOnProject for the cross-server edit
+   *  guard. Defaults to none. */
+  setOtherLiveOwners(
+    owners: Array<{
+      pid: number;
+      instanceId: string;
+      hostname: string;
+      mode: 'spawned' | 'attached';
+      startedAt: string;
+      port: number;
+    }>,
+  ): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -141,6 +156,18 @@ function createRuntimeFake(): RuntimeFake {
   let actionErrorBuckets: string[][] = [];
   let actionErrorTrailing: string[] = [];
   let actionSentinelTimedOut = false;
+  // Defaults model a healthy inject: the autoload is registered and no other
+  // server session is on this project. Tests override via
+  // setBridgeAutoloadRegistered / setOtherLiveOwners.
+  let bridgeAutoloadRegistered = true;
+  let otherLiveOwners: Array<{
+    pid: number;
+    instanceId: string;
+    hostname: string;
+    mode: 'spawned' | 'attached';
+    startedAt: string;
+    port: number;
+  }> = [];
 
   const state: {
     activeSessionMode: RuntimeSessionMode | null;
@@ -226,8 +253,11 @@ function createRuntimeFake(): RuntimeFake {
     getRecentErrors(_n: number): string[] {
       return [];
     },
-    readBakedBridgePort(_projectPath: string): number | null {
-      return null;
+    isBridgeAutoloadRegistered(_projectPath: string): boolean {
+      return bridgeAutoloadRegistered;
+    },
+    otherLiveSessionsOnProject(_projectPath: string) {
+      return otherLiveOwners;
     },
     beginActionErrorCapture() {
       return { marker: 0 };
@@ -290,6 +320,12 @@ function createRuntimeFake(): RuntimeFake {
       actionErrorBuckets = buckets;
       actionErrorTrailing = trailing;
       actionSentinelTimedOut = timedOut;
+    },
+    setBridgeAutoloadRegistered(registered) {
+      bridgeAutoloadRegistered = registered;
+    },
+    setOtherLiveOwners(owners) {
+      otherLiveOwners = owners;
     },
   };
 }
@@ -462,6 +498,22 @@ describe('handleRunProject bridge failure paths', () => {
     expectErrorMatching(result, /bridge did not respond/);
     expect(fake.stopCalls()).toBe(1);
   });
+
+  it('reports the missing-autoload diagnosis instead of the stuck-process line when the entry never made it in', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'timeout after 5s');
+    fake.setBridgeAutoloadRegistered(false);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /project\.godot has no McpBridge autoload entry/);
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).not.toContain('early _ready error');
+    expect(fake.stopCalls()).toBe(1);
+  });
 });
 
 describe('handleAttachProject bridge failure paths', () => {
@@ -470,6 +522,15 @@ describe('handleAttachProject bridge failure paths', () => {
     fake.setBridgeReady(false, 'attach timeout');
     const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
     expectErrorMatching(result, /bridge is not ready/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('reports the missing-autoload diagnosis when the entry never made it in', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    fake.setBridgeAutoloadRegistered(false);
+    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /project\.godot has no McpBridge autoload entry/);
     expect(fake.stopCalls()).toBe(1);
   });
 });
