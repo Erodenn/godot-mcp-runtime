@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        godot-version: ['4.5.1', '4.6.2']
+        godot-version: ['4.5.1', '4.6.2', '4.7.2']
     steps:
       - uses: actions/checkout@v4
 
