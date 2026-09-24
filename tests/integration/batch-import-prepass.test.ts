@@ -21,6 +21,7 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { useTmpDirs, type TmpDirHandle } from '../helpers/tmp.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
+import { stripExitLeakNoise } from '../helpers/engine-noise.js';
 import { hasError, errorText, unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleBatchSceneOperations } from '../../src/tools/scene-tools.js';
@@ -207,7 +208,7 @@ describe('batch cold-import pre-pass (integration)', () => {
       // The cold probe must have exited the whole batch before any mutation.
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/test_texture.png');
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       expect(readFileSync(join(project, 'warm.tscn'), 'utf8')).toBe(before);
 
       // Import and replay: both scenes mutate exactly once now.
@@ -292,7 +293,7 @@ describe('batch cold-import pre-pass (integration)', () => {
 
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/test_texture.png');
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       // The decisive assertion: nothing was written before the refusal.
       expect(readFileSync(join(project, 'warm.tscn'), 'utf8')).toBe(before);
 

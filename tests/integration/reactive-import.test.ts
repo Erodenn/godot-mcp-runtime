@@ -43,6 +43,7 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { minimalPng, invalidPng } from '../helpers/png-fixtures.js';
+import { stripExitLeakNoise } from '../helpers/engine-noise.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 
 /** Integration tests spawn a real Godot process; give them room to run. */
@@ -102,7 +103,7 @@ describe('reactive import on demand (integration)', () => {
         { scenePath: 'main.tscn' },
         project,
       );
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/test_texture.png');
 
@@ -154,7 +155,7 @@ describe('reactive import on demand (integration)', () => {
         { scenePath: 'main.tscn' },
         project,
       );
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/test_texture.png');
     },
@@ -188,7 +189,7 @@ describe('reactive import on demand (integration)', () => {
         { scenePath: 'main.tscn', nodeName: 'Extra', nodeType: 'Node2D' },
         project,
       );
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       expect(stderr).toContain('do not exist on disk');
       expect(readFileSync(join(project, 'main.tscn'), 'utf8')).toBe(before);
     },
@@ -221,7 +222,7 @@ describe('reactive import on demand (integration)', () => {
         },
         project,
       );
-      expect(stdout.trim()).toBe('');
+      expect(stripExitLeakNoise(stdout)).toBe('');
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/new_texture.png');
     },
