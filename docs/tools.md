@@ -194,7 +194,7 @@ Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.sha
 | `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.                                                                                                                                                                                                                                               |
 | `null`                              | Clears the property.                                                                                                                                                                                                                                                                                                                      |
 
-The `script` property gets one more check beyond the table above: a loaded Script is rejected unless `can_instantiate()` is true, since `set_script()` on an unusable one fails silently and would otherwise leave the node without a script while reporting success. This is the same check `attach_script` runs - see its error disclosure below for the GDScript-parse-error/`@abstract`/unbuilt-C#-class cases.
+The `script` property gets one more check beyond the table above: a loaded Script is rejected when it cannot be instantiated (a GDScript with parse errors or declared `@abstract`, or a C# class not yet compiled into the project assembly), since `set_script()` on one fails silently and would otherwise leave the node without a script while reporting success. `attach_script` runs the same check.
 
 Inline construction example:
 
