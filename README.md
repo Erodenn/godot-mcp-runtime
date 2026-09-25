@@ -41,13 +41,15 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 ## What It Does
 
+This server is the perfect tool kit for AI assisted game development with the Godot game engine. It provides a comprehensive suite of tools that allows agents to create scenes, nodes, scripts, and more. The runtime tool set provides the capabilities to check work by running the game and interacting with it in real time, all without becoming a cumbersome dependency on your project.
+
 **Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along.
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 
 **Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
-- **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk; use `responseMode: 'full'` for pixel-perfect or `'path_only'` to skip the inline image
+- **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
@@ -75,7 +77,7 @@ The Godot MCP space splits on two axes: whether a server can drive a _running_ g
 | GDAI MCP                  | Editor-mediated                                            | Committed editor addon               | Proprietary                    | $19                   |
 | Coding-Solo/godot-mcp     | No (launch + debug output)                                 | Zero (`npx`)                         | MIT                            | Free                  |
 
-Among servers with full live-game control, Godot MCP Runtime pairs a zero-footprint install (no addon committed to version control, no custom engine, no account) with a single `npx` command, and it has shipped this transient-autoload runtime bridge since February 2026. One other project, [Vollkorn-Games/godot-mcp](https://github.com/Vollkorn-Games/godot-mcp), independently arrived at the same design at the same time and is the only other server in this niche; it's earlier-stage and installs from source rather than npm. For the full field of ~20 servers with a source for every claim, see [docs/comparison.md](docs/comparison.md).
+Among servers with full live-game control, Godot MCP Runtime pairs a zero-footprint install (no addon committed to version control, no custom engine, no account) with a single `npx` command, and it has shipped this transient-autoload runtime bridge since February 2026. For the full field of ~20 servers with a source for every claim, see [docs/comparison.md](docs/comparison.md).
 
 ## Quick Start
 
@@ -150,15 +152,6 @@ npm run build
 
 > [!TIP]
 > **Prefer pnpm?** All three install paths work with pnpm. Substitute `pnpm dlx godot-mcp-runtime` for `npx -y godot-mcp-runtime`, `pnpm add -g godot-mcp-runtime` for the global install, or `pnpm install && pnpm run build` for the source build. pnpm ships stronger defaults against npm supply-chain attacks; see [pnpm's supply chain security guide](https://pnpm.io/supply-chain-security).
-
-**Or install a specific branch/commit** (e.g. to test an unreleased fix or a PR branch):
-
-```bash
-npx -y github:Erodenn/godot-mcp-runtime#<branch-or-commit>
-```
-
-> [!WARNING]
-> Installing from a git ref (not the npm registry) pulls devDependencies and runs `tsc` on your machine as part of the install. If you don't want a local build step, use the registry install (`npx -y godot-mcp-runtime`) instead.
 
 If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it.
 
