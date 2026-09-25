@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/node/v/godot-mcp-runtime" alt="Node.js"></a>
 </p>
 
-A lightweight [MCP](https://modelcontextprotocol.io/) server that pairs comprehensive headless editing with full runtime control over a [Godot](https://godotengine.org/) 4.x project. Scene, node, autoload, and validation ops cover everything short of the most niche corners of the engine; the runtime bridge adds screenshots, input simulation, UI discovery, and live GDScript against the running scene tree.
+A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI agents the tools to interact with the [Godot](https://godotengine.org/) game engine. Features comprehensive headless editing and full runtime control over a Godot 4.x project. Scene, node, autoload, and validation ops cover everything short of the most niche corners of the engine; the runtime bridge adds screenshots, input simulation, UI discovery, and live GDScript against the running scene tree.
 
 <p align="center"><img src="docs/assets/demo.gif" alt="Agent driving a Godot game via MCP runtime tools" width="1000"></p>
 
@@ -41,7 +41,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 ## What It Does
 
-This server is the perfect tool kit for AI assisted game development with the Godot game engine. It provides a comprehensive suite of tools that allows agents to create scenes, nodes, scripts, and more. The runtime tool set provides the capabilities to check work by running the game and interacting with it in real time, all without becoming a cumbersome dependency on your project.
+> This server is the perfect tool kit for AI assisted game development with Godot. It provides a comprehensive suite of tools that allows agents to create scenes, nodes, scripts, and more. The runtime tool set provides the capabilities to check work by running the game and interacting with it in real time, all without becoming a cumbersome dependency on your project.
 
 **Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along.
 
@@ -90,7 +90,8 @@ That's it. No Godot addon, no project modifications.
 
 ### Configure Your MCP Client
 
-Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
+Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client. 
+Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
 **Zero-install via npx (recommended):**
 
@@ -155,7 +156,7 @@ npm run build
 
 If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it.
 
-#### Optional environment variables
+### Optional environment variables
 
 All are set in the same `env` block as `GODOT_PATH`:
 
@@ -194,10 +195,6 @@ The three security-gate flags below share one axis (see [`docs/security.md`](doc
 > ```
 >
 > Setting the variable from a wrapper `.bat` does not propagate to the MCP server - the path must live in the client's `env` block above.
-
-### Verify
-
-Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
 ## Docs
 
