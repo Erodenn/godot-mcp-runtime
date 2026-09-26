@@ -20,7 +20,7 @@ A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI agent
 <br>
 
 - **Headless editing**: scenes, nodes, scripts, signals, validation, no editor window
-- **Runtime control**: screenshots, input simulation, UI discovery, live GDScript, and function profiling against the running game
+- **Runtime control**: screenshots, input simulation, UI discovery, live GDScript, and profiling (functions, FPS, monitors, render stages) against the running game
 - **Zero footprint**: no Godot addon, no project commits, auto-cleanup on shutdown
 
 **No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon, something you install into your project, commit to version control, and manage as a dependency. Use npx and there's no install or setup needed.
@@ -53,7 +53,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
-- **Function profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages
+- **Profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages. Every capture also reports FPS, frames over a target frame rate, and engine monitors (draw calls, memory, node counts); `visual: true` adds the Visual Profiler's CPU and GPU time per render stage, and `timeline: true` the same over time, with the player position (`track`) on each interval, to find where a walk through the level drops frames
 
 **Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen (positioned at `(-9999, -9999)`) with physical input blocked: borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
 
@@ -90,7 +90,7 @@ That's it. No Godot addon, no project modifications.
 
 ### Configure Your MCP Client
 
-Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client. 
+Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
 Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
 **Zero-install via npx (recommended):**

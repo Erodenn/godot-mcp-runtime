@@ -16,7 +16,8 @@ Contents:
 
 The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).
 `integration/profiler-smoke.test.ts` launches it with `profiling: true` and expects that
-function to come back at the top of the capture. Import it as `profilingFixtureProjectPath`.
+function to come back at the top of the capture, and uses it for the `visual: true` render-stage
+capture as well. Import it as `profilingFixtureProjectPath`.
 
 Use it from tests by importing the path helper:
 

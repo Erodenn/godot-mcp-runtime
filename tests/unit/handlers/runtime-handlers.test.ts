@@ -692,6 +692,35 @@ describe('handleGetDebugOutput', () => {
     expect(parsed.tip).toBeUndefined();
   });
 
+  it.each([
+    [
+      'Forward+/Mobile',
+      "ERROR: Tried capturing more timestamps than the configured maximum (256). You can increase this limit in the project settings under 'Debug/Settings' called 'Max Timestamp Query Elements'.",
+      '   at: capture_timestamp (servers/rendering/rendering_device.cpp:8705)',
+    ],
+    [
+      'Compatibility',
+      'ERROR: Condition "frames[frame].timestamp_count >= max_timestamp_query_elements" is true.',
+      '   at: capture_timestamp (drivers/gles3/storage/utilities.cpp:330)',
+    ],
+  ])(
+    'explains render timestamp overflow errors (%s) as a profiling side effect',
+    (_renderer, error, at) => {
+      const fake = createRuntimeFake();
+      fake.setSession({
+        mode: 'spawned',
+        projectPath: '/p',
+        process: makeRunningProcess({ errors: [error, at] }),
+      });
+
+      const parsed = JSON.parse(unwrap(handleGetDebugOutput(fake.asRunner, {})).content[0].text);
+      expect(parsed.tip).toMatch(/not from the game/);
+      expect(parsed.tip).toMatch(/earlier lines out of this log/);
+      expect(parsed.tip).toMatch(/max_timestamp_query_elements=4096/);
+      expect(parsed.tip).toMatch(/Compatibility/);
+    },
+  );
+
   it('defaults limit to 200 when no limit param is supplied', () => {
     const output = Array.from({ length: 250 }, (_, i) => `o${i}`);
     const fake = createRuntimeFake();

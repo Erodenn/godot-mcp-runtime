@@ -3,7 +3,9 @@
  *
  * Debugger packets are `[uint32 length][Variant]`, and every Variant the
  * profiler stream carries is a nil/bool/int/float/string/array or a packed
- * numeric array. Objects, dictionaries and vectors are deliberately *not*
+ * numeric array. A typed array (`TypedArray<StringName>` carries the custom
+ * monitor names) decodes to a plain array: its element type is read and
+ * dropped. Objects, dictionaries and vectors are deliberately *not*
  * decoded: an unrelated debugger packet must fail loudly instead of driving
  * allocation from an attacker-shaped length field. Callers treat a decode
  * failure as "not a message I care about" and move on.
@@ -34,6 +36,10 @@ const TYPE_PACKED_STRING_ARRAY = 34;
 
 // Bit 16 of the header word marks the 64-bit encoding of INT and FLOAT.
 const FLAG_WIDE = 1 << 16;
+// On an ARRAY, bits 16-17 instead say how the element type is declared.
+const TYPED_ARRAY_SHIFT = 16;
+const TYPED_ARRAY_MASK = 0b11 << TYPED_ARRAY_SHIFT;
+const TYPED_BUILTIN = 1;
 const MAX_NESTING = 64;
 
 const padding = (length: number): number => (4 - (length % 4)) % 4;
@@ -143,8 +149,16 @@ export function decodeVariant(raw: Buffer): Variant {
       }
       case TYPE_ARRAY:
       case TYPE_PACKED_STRING_ARRAY: {
-        // A typed (or shared) array sets flags we do not carry through.
-        if (header !== kind) throw new Error(`Unsupported debugger Variant ${header}`);
+        const typed = kind === TYPE_ARRAY ? header & TYPED_ARRAY_MASK : 0;
+        if ((header & ~typed) !== kind) throw new Error(`Unsupported debugger Variant ${header}`);
+        if (typed !== 0) {
+          // The element type precedes the count: a builtin type id, or the
+          // class name / script path of an object element type. The elements
+          // decode on their own, so the declaration is skipped.
+          if (typed >> TYPED_ARRAY_SHIFT === TYPED_BUILTIN) u32();
+          else readString();
+        }
+        // The top bit of the count is the engine's "shared" marker.
         const count = u32() & 0x7fffffff;
         if (count > (raw.length - offset) / 4) throw new Error('Invalid array length');
         const values: Variant[] = [];
