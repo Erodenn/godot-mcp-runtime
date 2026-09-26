@@ -148,3 +148,60 @@ describe('decodeVariant handles the encodings our encoder never emits', () => {
     expect(() => decodeVariant(Buffer.concat(parts))).toThrow(/nesting limit/);
   });
 });
+
+/**
+ * `performance:profile_names` carries a `TypedArray<StringName>`: the ARRAY
+ * header gains a type-kind in bits 16-17 and the element type sits between
+ * the header and the count (`_decode_container_type` in marshalls.cpp).
+ */
+describe('decodeVariant reads typed arrays as plain arrays', () => {
+  const TYPE_ARRAY = 28;
+  const TYPE_STRING_NAME = 21;
+  const TYPE_PACKED_STRING_ARRAY = 34;
+
+  const u32 = (value: number): Buffer => {
+    const buf = Buffer.alloc(4);
+    buf.writeUInt32LE(value, 0);
+    return buf;
+  };
+  const text = (value: string): Buffer => {
+    const raw = Buffer.from(value, 'utf8');
+    return Buffer.concat([u32(raw.length), raw, Buffer.alloc((4 - (raw.length % 4)) % 4)]);
+  };
+
+  it('decodes an array typed by a builtin element type', () => {
+    const raw = Buffer.concat([
+      u32(TYPE_ARRAY | (1 << 16)),
+      u32(TYPE_STRING_NAME),
+      u32(2),
+      u32(TYPE_STRING_NAME),
+      text('game/enemies'),
+      u32(TYPE_STRING_NAME),
+      text('game/bullets'),
+    ]);
+    expect(decodeVariant(raw)).toEqual(['game/enemies', 'game/bullets']);
+  });
+
+  it.each([
+    ['a class name', 2, 'Node'],
+    ['a script path', 3, 'res://enemy.gd'],
+  ])('decodes an array typed by %s', (_label, typeKind, declaration) => {
+    const raw = Buffer.concat([u32(TYPE_ARRAY | (typeKind << 16)), text(declaration), u32(0)]);
+    expect(decodeVariant(raw)).toEqual([]);
+  });
+
+  it('rejects a truncated element type declaration', () => {
+    expect(() => decodeVariant(u32(TYPE_ARRAY | (1 << 16)))).toThrow(/Truncated/);
+  });
+
+  it('still rejects array header flags outside the type-kind bits', () => {
+    expect(() => decodeVariant(Buffer.concat([u32(TYPE_ARRAY | (1 << 18)), u32(0)]))).toThrow(
+      /Unsupported debugger Variant/,
+    );
+  });
+
+  it('rejects type-kind bits on a packed string array', () => {
+    const raw = Buffer.concat([u32(TYPE_PACKED_STRING_ARRAY | (1 << 16)), u32(0)]);
+    expect(() => decodeVariant(raw)).toThrow(/Unsupported debugger Variant/);
+  });
+});

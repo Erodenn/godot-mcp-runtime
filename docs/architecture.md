@@ -11,7 +11,7 @@ src/
 │   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
-│   ├── profiler-tools.ts   # Function profiling (profile_project, start_profiler, stop_profiler)
+│   ├── profiler-tools.ts   # Profiling: functions, FPS, monitors, render stages (profile_project, start_profiler, stop_profiler)
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
