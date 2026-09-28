@@ -39,11 +39,11 @@ const DEFAULT_TOP = 20;
 const DEFAULT_SORT: ProfileSort = 'selfMs';
 const DEFAULT_TIMELINE_MS = 500;
 
-// Track caps, mirrored in src/scripts/mcp_bridge.gd (MAX_TRACK_ENTRIES and
-// MIN_TRACK_INTERVAL_MS), which enforces them independently.
-const TRACK_MAX_ENTRIES = 4;
+// KEEP IN SYNC: src/scripts/mcp_bridge.gd MAX_TRACK_ENTRIES and
+// MIN_TRACK_INTERVAL_MS, which the bridge enforces independently.
+export const TRACK_MAX_ENTRIES = 4;
+export const TRACK_MIN_INTERVAL_MS = 50;
 const TRACK_INTERVAL_MS = 250;
-const TRACK_MIN_INTERVAL_MS = 50;
 /** How long the bridge keeps sampling past the window if nobody stops it. */
 const TRACK_GRACE_MS = 10000;
 const TRACK_OWNER_NOT_CURRENT =
@@ -113,7 +113,9 @@ const monitorsSchema = {
   type: ['object', 'null'],
   properties: {
     samples: { type: 'number' },
-    ...Object.fromEntries(MONITOR_NAMES.map((name) => [name, monitorStatSchema])),
+    ...Object.fromEntries(
+      MONITOR_NAMES.map((name) => [name, { ...monitorStatSchema, type: ['object', 'null'] }]),
+    ),
     pipelineCompilations: {
       type: ['object', 'null'],
       properties: { duringCapture: { type: ['number', 'null'] }, total: { type: 'number' } },
@@ -628,10 +630,16 @@ async function startTrack(
       interval_ms: intervalMs,
       max_ms: Math.ceil(seconds * 1000) + TRACK_GRACE_MS,
     });
-    const reply = JSON.parse(raw) as { error?: unknown };
-    if (typeof reply.error !== 'string') return ok(undefined);
+    const reply = JSON.parse(raw) as { status?: unknown; error?: unknown };
+    if (reply.status === 'tracking') return ok(undefined);
+    // Anything but the bridge's own acknowledgement is a refusal: treating an
+    // unrecognized reply as success would profile with a track nobody runs.
+    const reason =
+      typeof reply.error === 'string'
+        ? reply.error
+        : `unexpected bridge reply ${raw.slice(0, 200)}`;
     return err(
-      createErrorResponse(`Could not start the track: ${reply.error}`, [
+      createErrorResponse(`Could not start the track: ${reason}`, [
         'Check each entry is NodePath:property',
       ]),
     );
@@ -639,11 +647,14 @@ async function startTrack(
     const message = getErrorMessage(error);
     // The runner takes one bridge command at a time and refuses the rest.
     const busy = message.includes('in flight');
+    const unreadable = error instanceof SyntaxError;
     return err(
       createErrorResponse(`Could not start the track: ${message}`, [
         busy
           ? 'Another bridge command (simulate_input, run_script, ...) was still running - start the capture before driving the game, or retry once it finished'
-          : 'The game bridge did not answer - check get_debug_output',
+          : unreadable
+            ? 'The game bridge answered with something that is not JSON - check get_debug_output'
+            : 'The game bridge did not answer - check get_debug_output',
         'Retry without track to profile without positions',
       ]),
     );
@@ -684,7 +695,17 @@ async function collectTrack(
     if (!Array.isArray(reply.samples)) {
       return { samples: null, error: 'The bridge returned no track samples' };
     }
-    return { samples: reply.samples.filter(isTrackSample), error: null };
+    // The bridge writes every sample in one shape, so a malformed one means
+    // the two sides disagree; dropping it quietly would thin the track with
+    // nothing saying why.
+    const malformed = reply.samples.filter((sample) => !isTrackSample(sample)).length;
+    if (malformed > 0) {
+      return {
+        samples: null,
+        error: `The bridge returned ${malformed} of ${reply.samples.length} track samples in an unrecognized shape`,
+      };
+    }
+    return { samples: reply.samples as TrackSample[], error: null };
   } catch (error: unknown) {
     return { samples: null, error: getErrorMessage(error) };
   }
@@ -706,6 +727,11 @@ function trackCollector(runner: GodotRunner, owner: DebuggerProfiler): TrackColl
 function captureWarnings(result: ProfileResult): string[] {
   const warnings: string[] = [];
   const visual = result.visual ?? null;
+  if (visual !== null && visual.frames === 0) {
+    warnings.push(
+      `visual: true recorded no usable render frames (${visual.framesReceived} received; the first few after the enable and any without a "Frame Begin" marker are skipped). Its zero timings mean nothing was measured, not that rendering is free. Capture for longer, and check the window is visible and not minimized.`,
+    );
+  }
   if (visual !== null && visual.truncatedFrames > 0) {
     const effect =
       visual.stoppedAt === null
@@ -715,7 +741,36 @@ function captureWarnings(result: ProfileResult): string[] {
       `${visual.truncatedFrames} of ${visual.frames} rendered frames ran out of render timestamp slots: their later render stages are missing, and the engine logged an error for every lost marker, which made those frames several times slower. ${effect} Those errors in get_debug_output come from this capture, not from the game, and they can push earlier lines out of it. ${TIMESTAMP_OVERFLOW_FIX}`,
     );
   }
+  warnings.push(...trackWarnings(result.timeline ?? null));
   return warnings;
+}
+
+/**
+ * Why a requested track shows nothing, said where a truncating client still
+ * sees it: `timeline.trackError` sits at the end of a long payload. A track
+ * that came back but never lands on an interval, or an entry that is null in
+ * every interval, is as empty as one that failed, and says nothing by itself.
+ */
+function trackWarnings(timeline: ProfileResult['timeline']): string[] {
+  if (timeline === null || timeline.track.length === 0) return [];
+  if (timeline.trackError !== null) {
+    return [`The tracked values are missing: ${timeline.trackError}.`];
+  }
+  const placed = timeline.buckets
+    .map((bucket) => bucket.track)
+    .filter((values): values is Record<string, unknown> => values !== null);
+  if (placed.length === 0) {
+    return [
+      'No track sample landed on a timeline interval, so every interval has track: null. Capture for longer than one sampling interval.',
+    ];
+  }
+  const unresolved = timeline.track.filter((spec) =>
+    placed.every((values) => values[spec] === null || values[spec] === undefined),
+  );
+  if (unresolved.length === 0) return [];
+  return [
+    `Track entries null in every interval: ${unresolved.join(', ')}. The node path or property probably does not resolve - use an absolute path from /root, e.g. "/root/Main/Player:global_position".`,
+  ];
 }
 
 /** Say so when a long window made the timeline coarser than the caller asked. */

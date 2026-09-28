@@ -20,6 +20,7 @@ import {
   MAX_FRAME_BYTES,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
+import { TRACK_MAX_ENTRIES, TRACK_MIN_INTERVAL_MS } from '../../src/tools/profiler-tools.js';
 import { normalizeForCompare, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import {
   SCREENSHOT_DEFAULT_TIMEOUT_MS,
@@ -51,6 +52,11 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
 
   it('declares the same action-boundary sentinel', () => {
     expect(gdConst('ACTION_BOUNDARY_SENTINEL')).toBe(`"${ACTION_BOUNDARY_SENTINEL}"`);
+  });
+
+  it('declares the same profiler track caps', () => {
+    expect(gdConst('MAX_TRACK_ENTRIES')).toBe(String(TRACK_MAX_ENTRIES));
+    expect(gdConst('MIN_TRACK_INTERVAL_MS')).toBe(String(TRACK_MIN_INTERVAL_MS));
   });
 
   it('writes screenshots where the containment check looks for them', () => {

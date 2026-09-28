@@ -1142,6 +1142,16 @@ describe('DebuggerProfiler monitors', () => {
     expect(result.monitors!.pipelineCompilations).toEqual({ duringCapture: null, total: 40 });
   });
 
+  it('reports a monitor no sample carried a finite value for as null, not 0', async () => {
+    const result = await monitorCapture([
+      monitorSample({ 9: 100, 13: Number.POSITIVE_INFINITY }),
+      monitorSample({ 9: 104, 13: Number.NaN }),
+    ]);
+
+    expect(result.monitors!.nodes).toEqual({ avg: 102, min: 100, max: 104 });
+    expect(result.monitors!.drawCallsInFrame).toBeNull();
+  });
+
   it('returns null monitors when no sample arrived during the capture', async () => {
     expect((await monitorCapture([])).monitors).toBeNull();
   });
@@ -1342,6 +1352,23 @@ describe('DebuggerProfiler timeline', () => {
     expect(buckets[2]).toMatchObject({ frames: 0, fps: 0, frameMs: null, top: [] });
     // The capture ended 100 ms into its last interval: too short to divide by.
     expect(buckets[3]!.fps).toBeNull();
+  });
+
+  it('folds a monitor sample arriving after the last frame into the last interval', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_000_000);
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512, { timelineMs: 500 });
+    await feedStart(fake, running, [frame(1, 0.004, []), frame(2, 0.004, [])]);
+    await sendAt(fake, 1_000_300, ['servers:profile_frame', THREAD, frame(3, 0.004, [])]);
+    // Past the interval boundary, but not a frame: it must not open a
+    // frameless trailing interval that reads as a freeze.
+    await sendAt(fake, 1_000_700, ['performance:profile_frame', THREAD, monitorSample({ 13: 9 })]);
+    const result = await stopCapture(p, fake);
+
+    const buckets = result.timeline!.buckets;
+    expect(buckets.map((b) => b.frames)).toEqual([2]);
+    expect(buckets[0]!.drawCalls).toBe(9);
   });
 
   it('puts render time and draw calls on the timeline', async () => {

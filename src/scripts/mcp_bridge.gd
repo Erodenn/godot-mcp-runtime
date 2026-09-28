@@ -51,7 +51,8 @@ const MAX_TEXT_LENGTH := 1000
 const MAX_WATCH_ENTRIES := 16
 const MAX_UI_DELTA_ENTRIES := 20
 
-# Profiler track caps. Mirrored Node-side in src/tools/profiler-tools.ts. A
+# Profiler track caps. KEEP IN SYNC: MAX_TRACK_ENTRIES and MIN_TRACK_INTERVAL_MS
+# with TRACK_MAX_ENTRIES and TRACK_MIN_INTERVAL_MS in src/tools/profiler-tools.ts. A
 # track samples NodePath:property values from _process on its own clock, so a
 # profiler timeline can place them by engine frame number while other commands
 # (a long input batch) hold this peer.

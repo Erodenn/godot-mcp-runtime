@@ -131,8 +131,6 @@ const MAX_CUSTOM_MONITORS = 64;
 const MAX_BUCKET_ITEMS = 512;
 /** Heaviest things reported per timeline bucket. */
 const BUCKET_TOP = 3;
-/** `Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME`, the one monitor a bucket carries. */
-const DRAW_CALLS_MONITOR = 13;
 /** Every engine row is `[signature id, calls, self, total, internal]`. */
 const ROW_STRIDE = 5;
 /** Milliseconds are reported to this many decimals; below it is float noise. */
@@ -348,11 +346,17 @@ const MONITORS = [
 
 export type MonitorName = (typeof MONITORS)[number][0];
 export const MONITOR_NAMES: readonly MonitorName[] = MONITORS.map(([name]) => name);
+/** `drawCallsInFrame`'s engine index, the one monitor a timeline bucket carries. */
+const DRAW_CALLS_MONITOR = MONITORS.find(([name]) => name === 'drawCallsInFrame')![1];
 
 /** `PIPELINE_COMPILATIONS_*` (4.4+): running totals since launch, not per frame. */
 const PIPELINE_COMPILATION_MONITORS = [34, 35, 36, 37, 38];
 
-export type MonitorsResult = { samples: number } & Record<MonitorName, MonitorStat> & {
+/**
+ * A named monitor is null when no sample carried a finite value for it: a 0
+ * would read as "no draw calls" or "no nodes" rather than "not measured".
+ */
+export type MonitorsResult = { samples: number } & Record<MonitorName, MonitorStat | null> & {
     /** `duringCapture` is null when a single sample left nothing to count from. */
     pipelineCompilations: { duringCapture: number | null; total: number } | null;
     custom: Array<{ name: string } & MonitorStat>;
@@ -990,12 +994,20 @@ function newTimeline(bucketMs: number, maxSeconds: number, track: string[]): Tim
 
 /**
  * The bucket for something that arrived `elapsedMs` after the capture's first
- * frame, grown up to it so an interval with no frames at all (a freeze) still
- * shows as an empty bucket. Null past the window's end.
+ * frame. A frame grows the timeline up to it, so an interval with no frames at
+ * all (a freeze) still shows as an empty bucket. Anything else (a monitor
+ * sample, a visual frame, which lags its draw by a few frames) never grows it
+ * and lands in the newest bucket instead: arriving after the last frame, it
+ * would otherwise open a frameless trailing bucket that reads as a freeze and
+ * leaves the real last interval measured over a full interval's time. Null
+ * past the window's end.
  */
-function bucketAt(timeline: TimelineCapture, elapsedMs: number): Bucket | null {
+function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): Bucket | null {
   const index = Math.max(0, Math.floor(elapsedMs / timeline.bucketMs));
   if (index >= timeline.maxBuckets) return null;
+  if (!grow && index >= timeline.buckets.length) {
+    return timeline.buckets[timeline.buckets.length - 1] ?? null;
+  }
   while (timeline.buckets.length <= index) {
     // Things are placed by arrival time, so once a later bucket exists
     // nothing more lands in the one before it: rank that one now.
@@ -1191,8 +1203,7 @@ function accumulate<K>(into: Map<K, Accumulator>, key: K, value: number): void {
   known.max = Math.max(known.max, value);
 }
 
-function monitorStat(accumulator: Accumulator | undefined): MonitorStat {
-  if (accumulator === undefined) return { avg: 0, min: 0, max: 0 };
+function monitorStat(accumulator: Accumulator): MonitorStat {
   return {
     avg: accumulator.sum / accumulator.count,
     min: accumulator.min,
@@ -1256,8 +1267,11 @@ function foldMonitorSample(
 
 function summarizeMonitors(monitors: MonitorCapture): MonitorsResult | null {
   if (monitors.samples === 0) return null;
-  const named = {} as Record<MonitorName, MonitorStat>;
-  for (const [name] of MONITORS) named[name] = monitorStat(monitors.named.get(name));
+  const named = {} as Record<MonitorName, MonitorStat | null>;
+  for (const [name] of MONITORS) {
+    const accumulator = monitors.named.get(name);
+    named[name] = accumulator === undefined ? null : monitorStat(accumulator);
+  }
 
   // Running totals since launch: what compiled is the growth from the last
   // sample before the capture (or its own first one) to its last one. With
@@ -1713,7 +1727,7 @@ export class DebuggerProfiler {
       if (capturing && this.capture !== null) {
         foldMonitorSample(this.capture.monitors, sample, this.customMonitorNames);
         const drawCalls = sample.builtin[DRAW_CALLS_MONITOR];
-        const bucket = this.timelineBucket(this.capture);
+        const bucket = this.timelineBucket(this.capture, false);
         if (bucket !== null && drawCalls !== null && drawCalls !== undefined) {
           bucket.drawCalls = drawCalls;
         }
@@ -1741,7 +1755,7 @@ export class DebuggerProfiler {
         visual.stoppedAt = capture.frames > 0 ? (Date.now() - capture.startedAt) / 1000 : 0;
         this.write(['profiler:visual', this.threadId, [false]]);
       }
-      const bucket = this.timelineBucket(capture);
+      const bucket = this.timelineBucket(capture, false);
       if (bucket !== null) foldTimelineRender(bucket, render);
       return;
     }
@@ -1789,7 +1803,7 @@ export class DebuggerProfiler {
     capture.lastFrame = frame;
     const slow = sample.timings.frameMs > 1000 / capture.targetFps;
     if (slow) capture.slowFrames += 1;
-    const bucket = this.timelineBucket(capture);
+    const bucket = this.timelineBucket(capture, true);
     if (bucket !== null) foldTimelineFrame(bucket, sample, slow);
 
     for (const key of Object.keys(capture.timingSums) as Array<keyof FrameTimings>) {
@@ -1929,10 +1943,11 @@ export class DebuggerProfiler {
   /**
    * The timeline bucket for something arriving now. Nothing is placed before
    * the first folded frame: that frame starts the clock the buckets count from.
+   * Only frames `grow` the timeline (see `bucketAt`).
    */
-  private timelineBucket(capture: Capture): Bucket | null {
+  private timelineBucket(capture: Capture, grow: boolean): Bucket | null {
     if (capture.timeline === null || capture.frames === 0) return null;
-    return bucketAt(capture.timeline, Date.now() - capture.startedAt);
+    return bucketAt(capture.timeline, Date.now() - capture.startedAt, grow);
   }
 
   /** Read behind a call so `start`'s own state assignment doesn't narrow it. */

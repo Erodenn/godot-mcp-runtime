@@ -143,7 +143,15 @@ function createProfilerFake(
       const result = record('captureWindow', args, {
         ...captureResult,
         sort: args[2],
-        timeline: timelineMs === null ? null : { bucketMs: timelineBucketMs(timelineMs, seconds) },
+        timeline:
+          timelineMs === null
+            ? null
+            : {
+                bucketMs: timelineBucketMs(timelineMs, seconds),
+                track: capture?.track ?? [],
+                trackError: null,
+                buckets: [],
+              },
       });
       await collect(args[5]);
       return result;
@@ -267,7 +275,7 @@ describe('handleProfileProject', () => {
     const samples = [{ frame: 12, values: { '/root/Main/Player:position': { x: 1, y: 2 } } }];
     const fake = createProfilerFake({
       trackPending: true,
-      replies: { track_stop: JSON.stringify({ samples: [...samples, { frame: 'bad' }] }) },
+      replies: { track_stop: JSON.stringify({ samples }) },
     });
     const result = await handleProfileProject(fake.asRunner, {
       seconds: 5,
@@ -283,8 +291,33 @@ describe('handleProfileProject', () => {
     });
     // A track implies a timeline.
     expect(fake.calls[0]?.args[4]).toMatchObject({ timelineMs: 500 });
-    // Malformed samples are dropped before they reach the capture.
     expect(fake.calls.find((c) => c.method === 'attachTrack')?.args).toEqual([samples, null]);
+  });
+
+  it('reports malformed track samples as a track error instead of dropping them', async () => {
+    const good = { frame: 12, values: { '/root/Main/Player:position': { x: 1, y: 2 } } };
+    const fake = createProfilerFake({
+      trackPending: true,
+      replies: { track_stop: JSON.stringify({ samples: [good, { frame: 'bad' }] }) },
+    });
+    await handleProfileProject(fake.asRunner, { track: ['/root/Main/Player:position'] });
+
+    expect(fake.calls.find((c) => c.method === 'attachTrack')?.args).toEqual([
+      null,
+      'The bridge returned 1 of 2 track samples in an unrecognized shape',
+    ]);
+  });
+
+  it.each([
+    ['an acknowledgement it does not recognize', '{"status":"ok"}', /unexpected bridge reply/],
+    ['something that is not JSON', 'not json', /not JSON/],
+  ])('refuses to profile when track_start answers with %s', async (_label, reply, message) => {
+    const fake = createProfilerFake({ replies: { track_start: reply } });
+    const result = await handleProfileProject(fake.asRunner, { track: ['/root/Main:position'] });
+
+    expectErrorMatching(result, /Could not start the track/);
+    expect(JSON.stringify(unwrap(result).content)).toMatch(message);
+    expect(fake.calls).toHaveLength(0);
   });
 
   it('refuses to profile when the bridge will not start the track', async () => {
@@ -501,6 +534,82 @@ describe('handleStopProfiler', () => {
       expect(content.warnings![0]).toMatch(/max_timestamp_query_elements=4096/);
     },
   );
+
+  it('says a visual section with no usable render frame measured nothing', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      visual: { framesReceived: 3, frames: 0, truncatedFrames: 0, stoppedAt: null },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toEqual([
+      expect.stringMatching(/no usable render frames \(3 received/),
+    ]);
+  });
+
+  const trackedTimeline = (overrides: Record<string, unknown>) => ({
+    bucketMs: 500,
+    track: ['/root/Main/Player:position', '/root/Main/Typo:position'],
+    trackError: null,
+    buckets: [],
+    ...overrides,
+  });
+
+  it.each([
+    [
+      'a collection error, repeated from the end of the payload',
+      trackedTimeline({ trackError: 'The game exited before its track was collected' }),
+      /tracked values are missing: The game exited/,
+    ],
+    [
+      'a track none of whose samples landed on an interval',
+      trackedTimeline({ buckets: [{ track: null }, { track: null }] }),
+      /No track sample landed/,
+    ],
+    [
+      'an entry that was null in every interval',
+      trackedTimeline({
+        buckets: [
+          { track: { '/root/Main/Player:position': { x: 1 }, '/root/Main/Typo:position': null } },
+          { track: null },
+          { track: { '/root/Main/Player:position': { x: 2 }, '/root/Main/Typo:position': null } },
+        ],
+      }),
+      /null in every interval: \/root\/Main\/Typo:position\./,
+    ],
+  ])('warns about %s', async (_label, timeline, message) => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({ ...captureResult, timeline });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toEqual([expect.stringMatching(message)]);
+  });
+
+  it('adds no track warning when every entry resolved somewhere', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      timeline: trackedTimeline({
+        track: ['/root/Main/Player:position'],
+        buckets: [{ track: null }, { track: { '/root/Main/Player:position': { x: 1 } } }],
+      }),
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    expect(unwrap(result).structuredContent).not.toHaveProperty('warnings');
+  });
 
   it('adds no warnings to a clean capture', async () => {
     const fake = createProfilerFake();
