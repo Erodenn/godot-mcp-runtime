@@ -90,7 +90,7 @@ That's it. No Godot addon, no project modifications.
 
 ### Configure Your MCP Client
 
-Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client. 
+Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
 Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
 **Zero-install via npx (recommended):**
