@@ -6,7 +6,38 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  # Formatting never fails CI. A pre-commit hook formats local commits, but a
+  # web-UI edit or a fork PR arrives unformatted, and failing the build over
+  # whitespace gates nothing. Unformatted files get a warning annotation.
+  format-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      - name: Annotate unformatted files
+        # --list-different exits 1 when files differ and 2 on a Prettier error;
+        # only the error is a failure.
+        run: |
+          set +e
+          files=$(npx prettier --list-different .)
+          status=$?
+          set -e
+          if [ "$status" -gt 1 ]; then exit "$status"; fi
+          for f in $files; do
+            echo "::warning file=$f::Not Prettier-formatted. Run npm run format, or commit through the pre-commit hook."
+          done
+
   verify:
     runs-on: ubuntu-latest
     strategy:
@@ -29,9 +60,6 @@ jobs:
 
       - name: Lint
         run: npm run lint
-
-      - name: Format check
-        run: npm run format:check
 
       - name: Test
         run: npm test

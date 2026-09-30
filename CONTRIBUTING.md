@@ -34,21 +34,23 @@ Dev loop: edit → `npm run build` → restart the MCP client (or reconnect the 
 
 ## Commands
 
-| Command                 | What it does                                                                                                                                              |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run build`         | Compile TypeScript and copy GDScript files into `dist/`                                                                                                   |
-| `npm run dev`           | Build and launch the MCP server on stdio (needs a connected MCP client; use `npm run build` alone for a compilation check)                                |
-| `npm run typecheck`     | `tsc --noEmit` - fast type pass, no output                                                                                                                |
-| `npm run lint`          | ESLint over the repo                                                                                                                                      |
-| `npm run lint:fix`      | ESLint with autofix                                                                                                                                       |
-| `npm run format`        | Prettier write                                                                                                                                            |
-| `npm run format:check`  | Prettier check (CI uses this)                                                                                                                             |
-| `npm test`              | Vitest run (only for isolated test runs - `verify` already runs the suite)                                                                                |
-| `npm run test:watch`    | Vitest watch mode                                                                                                                                         |
-| `npm run test:coverage` | Vitest with v8 coverage                                                                                                                                   |
-| `npm run verify`        | **Single entrypoint.** Runs typecheck → lint → format:check → test → build, stops on first failure. Set `GODOT_PATH` to also run Godot integration tests. |
+| Command                 | What it does                                                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run build`         | Compile TypeScript and copy GDScript files into `dist/`                                                                                             |
+| `npm run dev`           | Build and launch the MCP server on stdio (needs a connected MCP client; use `npm run build` alone for a compilation check)                          |
+| `npm run typecheck`     | `tsc --noEmit` - fast type pass, no output                                                                                                          |
+| `npm run lint`          | ESLint over the repo                                                                                                                                |
+| `npm run lint:fix`      | ESLint with autofix                                                                                                                                 |
+| `npm run format`        | Prettier write                                                                                                                                      |
+| `npm run format:check`  | Prettier check, no writes                                                                                                                           |
+| `npm test`              | Vitest run (only for isolated test runs - `verify` already runs the suite)                                                                          |
+| `npm run test:watch`    | Vitest watch mode                                                                                                                                   |
+| `npm run test:coverage` | Vitest with v8 coverage                                                                                                                             |
+| `npm run verify`        | **Single entrypoint.** Runs typecheck → lint → format → test → build, stops on first failure. Set `GODOT_PATH` to also run Godot integration tests. |
 
-CI runs typecheck → lint → format:check → test → build on Node 20, 22, 24 for every push and PR to `main`.
+CI runs typecheck → lint → test → build on Node 20, 22, 24 for every push and PR to `main`. Formatting never fails CI: every push and PR gets a warning annotation per unformatted file.
+
+Run `npm run install-hooks` once per clone. The pre-commit hook formats staged files with Prettier (via lint-staged, so partially staged files keep their unstaged hunks) and fails a commit whose `package-lock.json` is missing the Linux-only entries `npm install` prunes on Windows (use `npm run safe-install` there).
 
 ## Branch and commit conventions
 
@@ -58,7 +60,7 @@ CI runs typecheck → lint → format:check → test → build on Node 20, 22, 2
 
 ## Testing
 
-See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint - it runs the suite plus typecheck, lint, format:check, and build in the same order CI does. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
+See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint - it runs the suite plus typecheck, lint, format, and build in the same order CI does, applying formatting rather than checking it. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
 
 ## Architectural invariants
 
