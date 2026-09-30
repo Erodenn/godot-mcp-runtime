@@ -29,6 +29,29 @@ import { hasError, unwrap } from '../helpers/assertions.js';
 
 interface CaptureShape {
   frames: number;
+  fps: number | null;
+  monitors: {
+    samples: number;
+    nodes: { avg: number };
+    videoMemMiB: { avg: number };
+  } | null;
+  visual: {
+    frames: number;
+    framesReceived: number;
+    cpuMs: { avg: number; max: number };
+    areas: Array<{ path: string; group: boolean; cpuMs: { avg: number } }>;
+  } | null;
+  timeline: {
+    bucketMs: number;
+    trackError: string | null;
+    buckets: Array<{
+      t: number;
+      frames: number;
+      fps: number | null;
+      top: Array<{ kind: string; name: string }>;
+      track: Record<string, unknown> | null;
+    }>;
+  } | null;
   frame: Record<'frameMs' | 'processMs' | 'scriptMs', { avg: number; max: number }>;
   servers: Array<{ name: string; msPerFrame: number; functions: Array<{ name: string }> }>;
   worstFrame: { frame: number; frameMs: number; scriptMs: number };
@@ -109,6 +132,71 @@ describe('profiler smoke', () => {
         `no server categories in ${JSON.stringify(capture.servers)}`,
       ).toBeGreaterThan(0);
       expect(capture.servers[0]!.functions.length).toBeGreaterThan(0);
+      // A plain capture leaves the render-stage timestamps off.
+      expect(capture.visual).toBeNull();
+    },
+    90000,
+  );
+
+  itGodot(
+    'profile_project with visual: true adds render stages, fps and engine monitors',
+    async (ctx) => {
+      await launchProfilingSession(ctx);
+
+      // Monitors arrive once a second, so the window has to span a few.
+      const result = await handleProfileProject(runner, { seconds: 3, top: 50, visual: true });
+      expect(hasError(result)).toBe(false);
+      const capture = unwrap(result).structuredContent as unknown as CaptureShape;
+
+      expect(capture.fps).toBeGreaterThan(0);
+      expect(capture.monitors, 'no monitor sample in a 3 s window').not.toBeNull();
+      expect(capture.monitors!.samples).toBeGreaterThan(0);
+      // The fixture's scene tree: root, the autoloaded bridge, and Main.
+      expect(capture.monitors!.nodes.avg).toBeGreaterThan(0);
+
+      const visual = capture.visual;
+      expect(visual).not.toBeNull();
+      expect(visual!.frames).toBeGreaterThan(0);
+      expect(visual!.frames).toBeLessThanOrEqual(visual!.framesReceived);
+      expect(visual!.cpuMs.avg).toBeGreaterThan(0);
+      // Every renderer brackets its viewport pass in the same group.
+      const paths = visual!.areas.map((area) => area.path);
+      expect(paths, paths.join(', ')).toContain('Render Viewports');
+      expect(visual!.areas.find((area) => area.path === 'Render Viewports')!.group).toBe(true);
+    },
+    90000,
+  );
+
+  itGodot(
+    'a timeline with a track places what the game sampled on each interval',
+    async (ctx) => {
+      await launchProfilingSession(ctx);
+
+      const started = await handleStartProfiler(runner, {
+        seconds: 10,
+        timeline: true,
+        track: ['/root/Main:position'],
+      });
+      expect(hasError(started)).toBe(false);
+      // Another command holds the bridge while the game keeps sampling.
+      await runner.sendCommand('get_ui_elements', {});
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      const stopped = await handleStopProfiler(runner, {});
+      expect(hasError(stopped)).toBe(false);
+      const timeline = (unwrap(stopped).structuredContent as unknown as CaptureShape).timeline;
+      expect(timeline).not.toBeNull();
+      expect(timeline!.trackError).toBeNull();
+      expect(timeline!.bucketMs).toBe(500);
+      const buckets = timeline!.buckets;
+      expect(buckets.length).toBeGreaterThan(1);
+      expect(buckets[0]!.frames).toBeGreaterThan(0);
+      expect(buckets[0]!.fps).toBeGreaterThan(0);
+      expect(buckets[0]!.top.map((item) => item.name).join(', ')).toContain('burn');
+      const tracked = buckets.filter((bucket) => bucket.track !== null);
+      expect(tracked.length).toBeGreaterThan(0);
+      // Main is a Node2D at the origin.
+      expect(tracked[0]!.track!['/root/Main:position']).toEqual({ x: 0, y: 0 });
     },
     90000,
   );

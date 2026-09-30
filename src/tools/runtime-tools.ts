@@ -39,6 +39,7 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
+import { TIMESTAMP_OVERFLOW_ERRORS, TIMESTAMP_OVERFLOW_FIX } from '../utils/profiler.js';
 import {
   auditScriptsDir,
   isServerOwnedBridgePath,
@@ -1376,6 +1377,15 @@ export function handleGetDebugOutput(
     response.exitCode = proc.exitCode;
     response.tip =
       'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
+  }
+  // A visual profiling capture of a heavy scene floods stderr with an engine
+  // error. Read cold, it looks like a game bug; say what it is where it shows.
+  const overflow = TIMESTAMP_OVERFLOW_ERRORS.find((error) =>
+    response.errors.some((line) => line.includes(error)),
+  );
+  if (overflow !== undefined) {
+    const advice = `The "${overflow}" errors come from a profiler capture with visual: true, not from the game: frames needed more render timestamps than the per-frame limit, so they lost render stages and ran slower while the engine logged every lost one. The flood can push earlier lines out of this log, so a game error from before it may be missing here. ${TIMESTAMP_OVERFLOW_FIX}`;
+    response.tip = response.tip === undefined ? advice : `${response.tip} ${advice}`;
   }
 
   return createStructuredResponse(response);

@@ -45,6 +45,15 @@ const MAX_TEXT_LENGTH := 1000
 const MAX_WATCH_ENTRIES := 16
 const MAX_UI_DELTA_ENTRIES := 20
 
+# Profiler track caps. Mirrored Node-side in src/tools/profiler-tools.ts. A
+# track samples NodePath:property values from _process on its own clock, so a
+# profiler timeline can place them by engine frame number while other commands
+# (a long input batch) hold this peer.
+const MAX_TRACK_ENTRIES := 4
+const MAX_TRACK_SAMPLES := 2000
+const MIN_TRACK_INTERVAL_MS := 50
+const MAX_TRACK_DURATION_MS := 180000
+
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
 # Signals observed on a click_element target for the duration of the action.
@@ -113,6 +122,17 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 # beginActionErrorCapture clears them before the next batch reads any.
 var _input_batch_generation: int = 0
 
+# Active profiler track: the specs to sample, the sampling clock, and the
+# samples taken so far. _track_active holds from track_start to track_stop;
+# _track_watch empties once sampling ends (max_ms or a full buffer), so
+# _process stops polling while the samples wait for track_stop.
+var _track_active: bool = false
+var _track_watch: Array = []
+var _track_interval_ms: int = 0
+var _track_next_ms: int = 0
+var _track_until_ms: int = 0
+var _track_samples: Array = []
+
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
@@ -139,6 +159,8 @@ func _ready() -> void:
 		print("McpBridge: Background mode active - window hidden, physical input blocked")
 
 func _process(_delta: float) -> void:
+	if not _track_watch.is_empty():
+		_poll_track()
 	if tcp_server == null or not tcp_server.is_listening():
 		return
 
@@ -267,6 +289,10 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			await _handle_screenshot(peer, payload)
 		"shutdown":
 			await _handle_shutdown(peer)
+		"track_start":
+			_handle_track_start(peer, payload)
+		"track_stop":
+			_handle_track_stop(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
 		_:
@@ -989,6 +1015,65 @@ func _sample_one_watch(spec: Variant) -> Variant:
 	if node == null:
 		return null
 	return _serialize_value(node.get_indexed(NodePath(str(parts[1]))))
+
+# --- Profiler track ---
+
+# Samples the given NodePath:property specs every interval_ms until track_stop
+# or max_ms, replacing any track already running. Each sample carries the engine
+# process frame, the same counter the profiler's frames are numbered by, so the
+# Node side can place it on a capture's timeline exactly. Sampling runs from
+# _process, so it keeps going while an input batch holds the peer.
+func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
+	var watch = payload.get("watch", [])
+	if typeof(watch) != TYPE_ARRAY or (watch as Array).is_empty():
+		_send_response(peer, {"error": "watch must be a non-empty array of NodePath:property strings"})
+		return
+	var watch_list: Array = watch
+	if watch_list.size() > MAX_TRACK_ENTRIES:
+		_send_response(peer, {"error": "track accepts at most %d entries (got %d)" % [MAX_TRACK_ENTRIES, watch_list.size()]})
+		return
+	for i in watch_list.size():
+		if _split_watch_spec(watch_list[i]).is_empty():
+			_send_response(peer, {"error": "track[%d]: expected NodePath:property (got '%s')" % [i, str(watch_list[i])]})
+			return
+	var interval = payload.get("interval_ms", 250)
+	var duration = payload.get("max_ms", 60000)
+	if not _is_number(interval) or not _is_number(duration):
+		_send_response(peer, {"error": "interval_ms and max_ms must be numbers"})
+		return
+	var now := Time.get_ticks_msec()
+	_track_active = true
+	_track_watch = watch_list.duplicate()
+	_track_interval_ms = maxi(int(interval), MIN_TRACK_INTERVAL_MS)
+	_track_next_ms = now
+	_track_until_ms = now + clampi(int(duration), MIN_TRACK_INTERVAL_MS, MAX_TRACK_DURATION_MS)
+	_track_samples = []
+	_send_response(peer, {"status": "tracking"})
+
+# Hands the samples over once. A second track_stop, or one after another call
+# replaced the track, is an error rather than an empty list, so a capture
+# whose track was lost says so instead of looking like nothing was sampled.
+func _handle_track_stop(peer: PeerState) -> void:
+	if not _track_active:
+		_send_response(peer, {"error": "No track is running: it was stopped or replaced by another profiler call before this capture collected it"})
+		return
+	var samples := _track_samples
+	_track_active = false
+	_track_watch = []
+	_track_samples = []
+	_send_response(peer, {"samples": samples})
+
+# Past max_ms, or once the buffer is full, the samples are kept for track_stop
+# and nothing new is taken: a track nobody stops cannot grow without bound.
+func _poll_track() -> void:
+	var now := Time.get_ticks_msec()
+	if now >= _track_until_ms or _track_samples.size() >= MAX_TRACK_SAMPLES:
+		_track_watch = []
+		return
+	if now < _track_next_ms:
+		return
+	_track_next_ms = now + _track_interval_ms
+	_track_samples.append({"frame": Engine.get_process_frames(), "values": _sample_watch(_track_watch)})
 
 # The Control under the mouse after the settle frame. Reached through call() so
 # this script still parses on 4.x builds that predate the method; has_method

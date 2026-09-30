@@ -34,6 +34,8 @@ const parameterMappings = {
   file_types: 'fileTypes',
   max_results: 'maxResults',
   capture_limit: 'captureLimit',
+  timeline_ms: 'timelineMs',
+  target_fps: 'targetFps',
   has_property: 'hasProperty', // nested in validate checks[].schema; flows through strict converter
 } as const satisfies Record<string, string>;
 
