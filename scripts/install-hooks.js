@@ -55,4 +55,6 @@ try {
   // file may not be tracked yet; harmless
 }
 
-console.log(`${LOG_PREFIX} core.hooksPath set to .githooks. Pre-commit lockfile guard active.`);
+console.log(
+  `${LOG_PREFIX} core.hooksPath set to .githooks. Pre-commit lockfile guard and staged-file formatting active.`,
+);

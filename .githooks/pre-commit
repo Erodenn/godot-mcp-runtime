@@ -1,2 +1,13 @@
 #!/bin/sh
-exec node "$(git rev-parse --show-toplevel)/.githooks/pre-commit-check.js"
+root="$(git rev-parse --show-toplevel)"
+
+node "$root/.githooks/pre-commit-check.js" || exit 1
+
+# Format staged files in place. lint-staged stashes unstaged hunks first, so a
+# partially staged file only has its staged content formatted and committed.
+lint_staged="$root/node_modules/.bin/lint-staged"
+if [ ! -x "$lint_staged" ]; then
+  echo "[pre-commit] lint-staged not installed; skipping formatting (run npm install)" >&2
+  exit 0
+fi
+exec "$lint_staged"
