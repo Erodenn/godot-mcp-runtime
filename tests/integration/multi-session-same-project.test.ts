@@ -6,8 +6,7 @@
  * last-leaver cleanup rule.
  *
  * Requires GODOT_PATH; skipped when it is unset, same as every other file
- * under tests/integration/. The main session runs this with Godot installed;
- * it is not run as part of this change.
+ * under tests/integration/.
  */
 
 import { describe, beforeEach, afterEach, expect } from 'vitest';
@@ -23,6 +22,11 @@ import { bridgeDir, bridgeOwnersDir } from '../../src/utils/artifact-paths.js';
 
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_MS = 20000;
+// Three sequential session launches, a headless op, three pings and two
+// stops. Vitest's 5 s default undercuts a single launch's own wait budget, so
+// a slow launch under full-suite load surfaced as a bare test timeout instead
+// of the bridge diagnostic. The case budget has to exceed the budgets inside it.
+const CASE_TIMEOUT_MS = 120000;
 
 const tmpDirs: string[] = [];
 let projectPath: string;
@@ -113,5 +117,6 @@ describe('two GodotRunner sessions sharing one project', () => {
       expect(projectGodotEntry()).not.toContain('McpBridge=');
       expect(existsSync(bridgeDir(projectPath))).toBe(false);
     },
+    CASE_TIMEOUT_MS,
   );
 });
