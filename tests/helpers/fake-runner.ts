@@ -19,7 +19,7 @@
  * actually invoked the batch operation rather than the single-target one.
  */
 
-import { GodotRunner, type OperationResult } from '../../src/utils/godot-runner.js';
+import { GodotRunner, sessionKey, type OperationResult } from '../../src/utils/godot-runner.js';
 import type { OperationParams } from '../../src/mcp.types.js';
 import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
@@ -103,6 +103,8 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     importCalls,
     // No live runtime session by default -- tests that need one (e.g. the
     // executeSceneOp guard tests) set these fields directly on `asRunner`.
+    // They model the current session; `extraLiveSessionPaths` below models
+    // live sessions on other projects.
     activeSessionMode: null as 'spawned' | 'attached' | null,
     activeProjectPath: null as string | null,
     activeProcess: null as { hasExited: boolean } | null,
@@ -149,6 +151,23 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
         return fake.activeProcess !== null && !fake.activeProcess.hasExited;
       }
       return true;
+    },
+    // Projects with a live session that is not the current one. The fields
+    // above model the current session only; a test of the per-project guard
+    // lists the others here.
+    extraLiveSessionPaths: [] as string[],
+    // Mirrors GodotRunner.hasLiveSessionOnProject(): any live session on the
+    // project counts, current or not, under the runner's own path key.
+    hasLiveSessionOnProject(projectPath: string): boolean {
+      const key = sessionKey(projectPath);
+      if (
+        fake.hasActiveRuntimeSession() &&
+        fake.activeProjectPath !== null &&
+        sessionKey(fake.activeProjectPath) === key
+      ) {
+        return true;
+      }
+      return fake.extraLiveSessionPaths.some((path) => sessionKey(path) === key);
     },
   };
 

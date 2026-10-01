@@ -46,6 +46,12 @@ function runnerWithLiveSession(session: LiveSession | null): FakeRunner {
   return fake;
 }
 
+/** Give the fake live sessions on projects other than its current one. */
+function withExtraLiveSessions(fake: FakeRunner, projectPaths: string[]): void {
+  (fake.asRunner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths =
+    projectPaths;
+}
+
 describe('executeSceneOp', () => {
   it('returns the runner stdout verbatim when non-empty (no isError)', async () => {
     const fake = createFakeRunner({ stdout: '{"node":"ok"}' });
@@ -197,6 +203,25 @@ describe('executeSceneOp', () => {
       );
       expect(hasError(result)).toBe(false);
       expect(fake.calls.length).toBe(1);
+    });
+
+    it('refuses a scene mutation on a project whose live session is not current', async () => {
+      // The current session is on another project; /proj is still being run
+      // by this server, so its engine is still a second writer.
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/current' });
+      withExtraLiveSessions(fake, ['/proj']);
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(fake.calls.length).toBe(0);
     });
 
     it('points the caller at stop_project as the remedy', async () => {
@@ -853,6 +878,13 @@ describe('findLiveSessionOnProject', () => {
   it('returns null for a live session on a different project', () => {
     const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/other' });
     expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
+  });
+
+  it('reports self for a live session on the project that is not the current session', () => {
+    const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/current' });
+    withExtraLiveSessions(fake, ['C:\\Games\\Proj\\']);
+    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/unrelated')).toBeNull();
   });
 
   it("reports the other owner's info", () => {

@@ -5,7 +5,6 @@ import { createStructuredResponse } from './structured-response.js';
 import type { BridgeOwnerInfo } from './bridge-manager.js';
 import {
   extractOperationPayload,
-  normalizeForCompare,
   parseScriptDiagnostics,
   stripOperationSentinel,
   type StderrDiagnostic,
@@ -257,22 +256,16 @@ export async function executeSceneOp(
 export type LiveSessionOnProject = { owner: 'self' } | { owner: 'other'; info: BridgeOwnerInfo };
 
 /**
- * The one live-session detector. Own session first (this runner has an active
- * runtime session and it is on this project), then any other MCP session
- * registered as an owner of the project. Null when nothing is running it.
+ * The one live-session detector. Own sessions first (this runner has a live
+ * session on this project, whether or not it is the current one), then any
+ * other MCP session registered as an owner of the project. Null when nothing
+ * is running it.
  */
 export function findLiveSessionOnProject(
   runner: GodotRunner,
   projectPath: string,
 ): LiveSessionOnProject | null {
-  if (runner.hasActiveRuntimeSession()) {
-    const activeProject = runner.activeProjectPath;
-    const isSameProject =
-      activeProject !== null &&
-      normalizeForCompare(activeProject).toLowerCase() ===
-        normalizeForCompare(projectPath).toLowerCase();
-    if (isSameProject) return { owner: 'self' };
-  }
+  if (runner.hasLiveSessionOnProject(projectPath)) return { owner: 'self' };
 
   // Own-session check above covers this server. A sibling server process (or
   // a second BridgeManager instance in this one) can also be running the

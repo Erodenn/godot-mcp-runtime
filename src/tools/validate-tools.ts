@@ -179,9 +179,11 @@ function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> 
  * validate branches need raw stdout plus stderr for the per-path diagnostic
  * overlay).
  *
- * The retry is skipped while any runtime session is live: importAssets writes
- * .godot/ under the project and a running engine is a second writer. Skipping
- * only costs the caller the existing unimported-dependency error.
+ * The retry is skipped while a runtime session is live on this project,
+ * whether or not it is the current one: importAssets writes .godot/ under the
+ * project and a running engine there is a second writer. A session on another
+ * project does not block it. Skipping only costs the caller the existing
+ * unimported-dependency error.
  *
  * An importAssets rejection propagates: both call sites sit inside a try whose
  * catch produces a structured error response.
@@ -193,7 +195,7 @@ async function executeValidateOp(
   projectPath: string,
 ): Promise<{ stdout: string; stderr: string }> {
   const first = await runner.executeOperation(operation, params, projectPath);
-  if (!first.stderr.includes(IMPORT_NEEDED_MARKER) || runner.hasActiveRuntimeSession()) {
+  if (!first.stderr.includes(IMPORT_NEEDED_MARKER) || runner.hasLiveSessionOnProject(projectPath)) {
     return first;
   }
   await runner.importAssets(projectPath);

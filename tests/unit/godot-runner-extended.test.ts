@@ -493,5 +493,8 @@ describe('fake runner liveness predicate matches GodotRunner', () => {
     fake.activeProcess = c.hasExited === null ? null : trackedProcess(c.hasExited);
 
     expect(fake.hasActiveRuntimeSession()).toBe(real.hasActiveRuntimeSession());
+    expect(fake.hasLiveSessionOnProject(TRACKED_PROJECT)).toBe(
+      real.hasLiveSessionOnProject(TRACKED_PROJECT),
+    );
   });
 });
