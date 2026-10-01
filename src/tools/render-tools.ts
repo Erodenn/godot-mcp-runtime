@@ -31,6 +31,7 @@ import {
   moviesDir,
 } from '../utils/artifact-paths.js';
 import {
+  MOVIE_KILL_GRACE_MS,
   runMovieProcess,
   type MovieProcessResult,
   type RunMovieProcess,
@@ -72,7 +73,12 @@ export const MOVIE_FRAME_PATHS_LISTED_MAX = 60;
 export const MOVIE_TIMEOUT_BASE_MS = 30000;
 export const MOVIE_TIMEOUT_PER_FRAME_MS = 250;
 const MOVIE_STDERR_TAIL_LINES = 20;
-export const MOVIE_WARNINGS_MAX = 30;
+/**
+ * Cap on the warning lines taken from the run's stderr. Measurement and
+ * launch-gate warnings are bounded by their own constants and are never cut,
+ * so a project that floods stderr cannot push a scan finding out of the payload.
+ */
+export const MOVIE_RUNTIME_WARNINGS_MAX = 30;
 const MOVIE_CLEANUP_MAX_RETRIES = 3;
 const MOVIE_CLEANUP_RETRY_DELAY_MS = 100;
 
@@ -88,7 +94,7 @@ export const renderToolDefinitions = [
   {
     name: 'render_movie',
     description:
-      'Render the project (or `scene`) for a fixed number of frames in a separate Godot movie-writer run: no bridge, no session, no input (for interaction use run_project + simulate_input + take_screenshot). mode check (default): pixel stats, likelyBlank, motion, downscaled inline frames; files deleted. frames: keeps the PNG sequence. video: .avi/.ogv, no stats. Returns: mode, frameCount, likelyBlank, anyMotion, samples, paths; warnings leads when something was not measured. Needs a display. Errors on timeout, failed run, or a live session on the project.',
+      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, no session, no input (to interact: run_project + simulate_input + take_screenshot). mode check (default): stats, likelyBlank, motion, inline frames; files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths; warnings leads if anything was unmeasured. Needs a display. Errors on timeout, failed run, or a live session on the project.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -164,7 +170,8 @@ export const renderToolDefinitions = [
         },
         anyMotion: {
           type: ['boolean', 'null'],
-          description: 'Null when a pair was not measured and no measured pair moved.',
+          description:
+            'Null when no measured pair moved and a pair was not measured, or fewer than two frames were sampled.',
         },
         motionPairs: {
           type: 'array',
@@ -219,7 +226,7 @@ export const renderToolDefinitions = [
         framePaths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Omitted above 60 frames; use framePattern and frameCount.',
+          description: `Omitted above ${MOVIE_FRAME_PATHS_LISTED_MAX} frames; use framePattern and frameCount.`,
         },
         audioPath: { type: 'string' },
         format: { type: 'string', enum: ['avi', 'ogv'] },
@@ -504,13 +511,6 @@ function removeRunDir(runDir: string): string | null {
   }
 }
 
-function capWarnings(warnings: string[]): string[] {
-  if (warnings.length <= MOVIE_WARNINGS_MAX) return warnings;
-  const kept = warnings.slice(0, MOVIE_WARNINGS_MAX);
-  kept.push(`+${warnings.length - MOVIE_WARNINGS_MAX} more`);
-  return kept;
-}
-
 interface SampleStats {
   width: number;
   height: number;
@@ -699,10 +699,14 @@ async function engineVersion(runner: GodotRunner): Promise<string> {
 }
 
 function runtimeErrorWarnings(runner: GodotRunner, stderr: string): string[] {
-  return runner
+  const lines = runner
     .extractRuntimeErrors(stderr.split('\n'))
     .map((line) => line.trim())
     .filter((line) => line !== '');
+  if (lines.length <= MOVIE_RUNTIME_WARNINGS_MAX) return lines;
+  const kept = lines.slice(0, MOVIE_RUNTIME_WARNINGS_MAX);
+  kept.push(`+${lines.length - MOVIE_RUNTIME_WARNINGS_MAX} more runtime error lines`);
+  return kept;
 }
 
 /** The error for a run that did not produce what the mode needs, or null. */
@@ -719,12 +723,20 @@ async function findRunFailure(
   }
   const tail = stderrTail(result.stderr);
   if (result.timedOut) {
+    const solutions = [
+      'Request fewer frames',
+      'A project that blocks at startup never reaches the frame limit: start it with run_project and read get_debug_output',
+    ];
+    // "Killed" is only said when the process reported closing after the kill.
+    if (result.killUnconfirmed === true) {
+      return createErrorResponse(
+        `render_movie timed out after ${rc.timeoutMs} ms. A kill was sent to the Godot process tree, but it did not report exiting within ${MOVIE_KILL_GRACE_MS} ms, so a Godot process may still be running.${tail}`,
+        ['Check for a leftover Godot process and end it before retrying', ...solutions],
+      );
+    }
     return createErrorResponse(
       `render_movie timed out after ${rc.timeoutMs} ms and the Godot process tree was killed.${tail}`,
-      [
-        'Request fewer frames',
-        'A project that blocks at startup never reaches the frame limit: start it with run_project and read get_debug_output',
-      ],
+      solutions,
     );
   }
 
@@ -743,7 +755,7 @@ async function findRunFailure(
     const ogvNote =
       format === 'ogv' ? ' This engine version may not support the ogv movie format.' : '';
     return createErrorResponse(
-      `render_movie: Godot ${version} did not write a ${format} movie (${reason}).${ogvNote}${tail}`,
+      `render_movie: Godot ${version} did not write an ${format} movie (${reason}).${ogvNote}${tail}`,
       [
         'Use format "avi"',
         'Use mode "frames" for a PNG sequence',
@@ -774,10 +786,7 @@ async function findRunFailure(
 }
 
 function buildVideoResponse(rc: RunContext, result: MovieProcessResult): HandlerResult {
-  const warnings = capWarnings([
-    ...runtimeErrorWarnings(rc.runner, result.stderr),
-    ...rc.gateWarnings,
-  ]);
+  const warnings = [...runtimeErrorWarnings(rc.runner, result.stderr), ...rc.gateWarnings];
   return createStructuredResponse({
     ...(warnings.length > 0 ? { warnings } : {}),
     mode: rc.options.mode,
@@ -822,8 +831,6 @@ function buildPngResponse(
       warnings.push(`Could not remove the run directory ${rc.runDir}: ${failure}`);
     }
   }
-  const cappedWarnings = capWarnings(warnings);
-
   const samples = measurement.samples.map((s) => ({
     index: s.index,
     ...(isCheck ? {} : { path: s.path }),
@@ -831,7 +838,7 @@ function buildPngResponse(
   }));
 
   const payload: Record<string, unknown> = {
-    ...(cappedWarnings.length > 0 ? { warnings: cappedWarnings } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
     mode: rc.options.mode,
     projectPath: rc.root,
     ...(rc.scene !== undefined ? { scene: rc.scene } : {}),
@@ -988,6 +995,12 @@ export function createRenderMovieHandler(
       const failure = removeRunDir(runDir);
       if (failure !== null) {
         logDebug(`render_movie could not remove ${runDir} after an error: ${failure}`);
+        // Said in the response too: a silent leak would leave frames in the
+        // project that the caller was told nothing about.
+        response.error.content.push({
+          type: 'text',
+          text: `The run directory could not be removed and may still hold files from this run: ${runDir} (${failure})`,
+        });
       }
     }
     return response;

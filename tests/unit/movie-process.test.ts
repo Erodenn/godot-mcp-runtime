@@ -121,9 +121,10 @@ describe('runMovieProcess', () => {
     child.emit('close', null);
     const result = await promise;
     expect(result.timedOut).toBe(true);
+    expect(result.killUnconfirmed).toBeUndefined();
   });
 
-  it('resolves after the kill grace even if close never arrives', async () => {
+  it('resolves after the kill grace even if close never arrives, marking the kill unconfirmed', async () => {
     vi.useFakeTimers();
     const child = createFakeChild();
     const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child));
@@ -131,6 +132,23 @@ describe('runMovieProcess', () => {
     const result = await promise;
     expect(result.timedOut).toBe(true);
     expect(result.exitCode).toBeNull();
+    expect(result.killUnconfirmed).toBe(true);
+    // Untrack the fake child, as a real one does when it finally closes.
+    child.emit('close', null);
+  });
+
+  it('does not report a start failure for an error raised after the timeout kill', async () => {
+    vi.useFakeTimers();
+    const child = createFakeChild();
+    const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child));
+    vi.advanceTimersByTime(TEST_TIMEOUT_MS);
+    child.emit('error', new Error('kill EPERM'));
+    vi.advanceTimersByTime(MOVIE_KILL_GRACE_MS);
+    const result = await promise;
+    expect(result.timedOut).toBe(true);
+    expect(result.spawnError).toBeUndefined();
+    expect(result.killUnconfirmed).toBe(true);
+    child.emit('close', null);
   });
 });
 

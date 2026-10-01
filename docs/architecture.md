@@ -12,6 +12,7 @@ src/
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
 │   ├── profiler-tools.ts   # Function profiling (profile_project, start_profiler, stop_profiler)
+│   ├── render-tools.ts     # Bridge-free movie-writer render check (render_movie)
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
@@ -36,6 +37,9 @@ src/
     ├── launch-gate.ts           # Pre-flight script scan + once-per-project launch confirmation, callable by any handler that launches a project
     ├── png-decoder.ts           # Zero-dependency PNG decoder (8-bit RGB/RGBA) for pixel statistics
     ├── pixel-stats.ts           # Pixel statistics and the likelyBlank verdict, measured from a decoded PNG
+    ├── png-encoder.ts           # Zero-dependency RGB PNG encoder for downscaled inline frame previews
+    ├── frame-preview.ts         # Box downscale and byte-capped PNG preview of a decoded frame
+    ├── movie-process.ts         # Bounded Godot spawn for render_movie: output tails, timeout, process-tree kill
     ├── scene-parsing.ts         # .tscn / project.godot parsing for the run_project pre-flight scan (launch-scene resolution, ext_resource script extraction)
     ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
     └── logger.ts                # logDebug / logError helpers

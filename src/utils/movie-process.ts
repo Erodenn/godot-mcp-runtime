@@ -30,6 +30,11 @@ export interface MovieProcessResult {
   timedOut: boolean;
   /** Set when the process could not be started at all. */
   spawnError?: string;
+  /**
+   * Set on a timeout whose kill was sent but whose process did not report
+   * closing within the grace period: it may still be running.
+   */
+  killUnconfirmed?: boolean;
 }
 
 export type RunMovieProcess = (
@@ -105,15 +110,25 @@ const defaultMovieProcessDeps: MovieProcessDeps = {
 /**
  * Children still running. A server that exits mid-run must not leave a Godot
  * window behind, so the first spawn registers one exit hook over this set.
+ * A child leaves the set only when it reports closing (or never started), not
+ * when its call resolves: one that outlived a timeout kill stays tracked, so
+ * the exit hook gets a second attempt at it. Each child is kept with the tree
+ * kill its own call was given, so the hook never reaches past an injected one.
  */
-const activeMovieChildren = new Set<ChildProcess>();
+const activeMovieChildren = new Map<ChildProcess, (proc: ChildProcess) => void>();
 let exitHookRegistered = false;
 
 function registerExitHook(): void {
   if (exitHookRegistered) return;
   exitHookRegistered = true;
   process.once('exit', () => {
-    for (const child of activeMovieChildren) killProcessTree(child);
+    for (const [child, killTree] of activeMovieChildren) {
+      try {
+        killTree(child);
+      } catch {
+        // Exit handlers must not throw.
+      }
+    }
   });
 }
 
@@ -124,8 +139,9 @@ function appendTail(current: string, chunk: unknown): string {
 /**
  * Run Godot with the given arguments and wait for it to exit, bounded by
  * `timeoutMs`. Never rejects: a start failure is `spawnError`, a timeout is
- * `timedOut` (after the process tree was killed), and anything else is the
- * exit code and the tail of each output stream.
+ * `timedOut` (after a tree kill was sent, with `killUnconfirmed` when the
+ * process did not report closing within the grace period), and anything else
+ * is the exit code and the tail of each output stream.
  */
 export function runMovieProcess(
   godotPath: string,
@@ -146,7 +162,6 @@ export function runMovieProcess(
       settled = true;
       clearTimeout(timers.timeout);
       clearTimeout(timers.grace);
-      if (proc !== undefined) activeMovieChildren.delete(proc);
       resolve(result);
     };
 
@@ -167,7 +182,7 @@ export function runMovieProcess(
     }
 
     const child = proc;
-    activeMovieChildren.add(child);
+    activeMovieChildren.set(child, deps.killTree);
     registerExitHook();
 
     child.stdout?.on('data', (chunk: unknown) => {
@@ -177,9 +192,17 @@ export function runMovieProcess(
       stderr = appendTail(stderr, chunk);
     });
     child.on('error', (error: Error) => {
+      // After the timeout kill, 'error' means the kill itself failed, not that
+      // the process never started. The grace timer reports that outcome.
+      if (timedOut) {
+        logDebug(`Non-fatal: the movie process reported an error after the kill: ${error.message}`);
+        return;
+      }
+      activeMovieChildren.delete(child);
       finish({ exitCode: null, stdout, stderr, timedOut: false, spawnError: error.message });
     });
     child.on('close', (code: number | null) => {
+      activeMovieChildren.delete(child);
       finish({ exitCode: normalizeExitCode(code), stdout, stderr, timedOut });
     });
 
@@ -187,7 +210,7 @@ export function runMovieProcess(
       timedOut = true;
       deps.killTree(child);
       timers.grace = setTimeout(() => {
-        finish({ exitCode: null, stdout, stderr, timedOut: true });
+        finish({ exitCode: null, stdout, stderr, timedOut: true, killUnconfirmed: true });
       }, MOVIE_KILL_GRACE_MS);
     }, timeoutMs);
   });

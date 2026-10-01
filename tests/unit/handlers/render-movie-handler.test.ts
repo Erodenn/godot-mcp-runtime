@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import { dirname, extname, join, resolve } from 'path';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
 import {
+  MOVIE_RUNTIME_WARNINGS_MAX,
   MOVIE_TIMEOUT_BASE_MS,
   MOVIE_TIMEOUT_PER_FRAME_MS,
   buildMovieArgs,
@@ -40,6 +41,7 @@ const LAST_TEST_FRAME = TEST_FRAMES - 1;
 const INVALID_SAMPLED_FRAME = 8;
 const FRAMES_ABOVE_LISTING_CAP = 61;
 const STDERR_LINES = 40;
+const RUNTIME_ERROR_FLOOD_EXTRA = 70;
 const OTHER_SESSION_PID = 4242;
 const DEFAULT_FRAMES_ARG = '30';
 const DEFAULT_FPS_ARG = '30';
@@ -589,6 +591,27 @@ describe('render_movie launch gate', () => {
     );
     expect(payload.warnings?.some((w) => w.includes('evil.gd'))).toBe(true);
   });
+
+  it('gate findings survive a flood of runtime error lines', async () => {
+    const floodLines = MOVIE_RUNTIME_WARNINGS_MAX + RUNTIME_ERROR_FLOOD_EXTRA;
+    const stderr = Array.from({ length: floodLines }, (_, i) => `SCRIPT ERROR: flood ${i}`).join(
+      '\n',
+    );
+    const { dir, runner, handler } = setup({
+      projectGodot: EVIL_AUTOLOAD_PROJECT,
+      stub: { result: { stderr } },
+    });
+    writeEvilAutoload(dir);
+    const payload = payloadOf(
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, makeContext()),
+    );
+    const warnings = payload.warnings!;
+    expect(warnings.some((w) => w.includes('evil.gd'))).toBe(true);
+    expect(warnings).toContain(`+${RUNTIME_ERROR_FLOOD_EXTRA} more runtime error lines`);
+    expect(warnings.filter((w) => w.startsWith('SCRIPT ERROR: flood'))).toHaveLength(
+      MOVIE_RUNTIME_WARNINGS_MAX,
+    );
+  });
 });
 
 describe('render_movie run outcomes', () => {
@@ -629,6 +652,16 @@ describe('render_movie run outcomes', () => {
       /render_movie timed out after \d+ ms and the Godot process tree was killed/,
     );
     expect(movieRunDirs(dir)).toEqual([]);
+  });
+
+  it('a timeout whose kill was not confirmed says a process may still be running', async () => {
+    const { dir, runner, handler } = setup({
+      stub: { result: { timedOut: true, exitCode: null, killUnconfirmed: true } },
+    });
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    expectErrorMatching(result, /did not report exiting within \d+ ms/);
+    expectErrorMatching(result, /a Godot process may still be running/);
+    expect(errorText(result)).not.toMatch(/process tree was killed/);
   });
 
   it('a non-zero exit returns the stderr tail', async () => {
@@ -769,6 +802,22 @@ describe('render_movie check mode', () => {
     expect(unknown.anyMotion).toBeNull();
   });
 
+  it('a single written frame leaves motion and anyMotion null with a warning', async () => {
+    const { dir, runner, handler } = setup({ stub: { frameCount: 1 } });
+    const payload = payloadOf(
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+    );
+    expect(payload.frameCount).toBe(1);
+    expect(payload.measuredFrames).toBe(1);
+    expect(payload.motionPairs).toEqual([]);
+    expect(payload.motion).toBeNull();
+    expect(payload.anyMotion).toBeNull();
+    expect(payload.likelyBlank).toBe(false);
+    expect(payload.warnings).toContain(
+      'Motion was not measured: fewer than two frames were sampled.',
+    );
+  });
+
   it('an undecodable last frame leaves likelyBlank null and leads warnings with it', async () => {
     const { dir, runner, handler } = setup({
       stub: { makeFrame: (i) => (i === LAST_TEST_FRAME ? invalidPng() : movingFrame(i)) },
@@ -886,7 +935,7 @@ describe('render_movie video mode', () => {
     );
     expectErrorMatching(
       ogvResult,
-      /Godot 4\.5\.1\.stable did not write a ogv movie \(no output file\)/,
+      /Godot 4\.5\.1\.stable did not write an ogv movie \(no output file\)/,
     );
     expectErrorMatching(ogvResult, /may not support the ogv/);
     expect(movieRunDirs(ogv.dir)).toEqual([]);
@@ -897,7 +946,7 @@ describe('render_movie video mode', () => {
       { projectPath: avi.dir, mode: 'video' },
       NO_GATE,
     );
-    expectErrorMatching(aviResult, /did not write a avi movie \(no output file\)/);
+    expectErrorMatching(aviResult, /did not write an avi movie \(no output file\)/);
     expect(errorText(aviResult)).not.toMatch(/may not support the ogv/);
   });
 

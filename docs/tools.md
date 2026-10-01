@@ -115,7 +115,7 @@ Measurements are observations, sampled the same way as `take_screenshot` stats. 
 
 What it cannot say: that the right thing rendered, that a small element between sample points moved, or anything that needs input. It never simulates input; for that, use `run_project`, `simulate_input` and `take_screenshot`. `video` mode has no pixel stats at all, and says so in the payload instead of leaving the fields out silently.
 
-A frame that cannot be read is `stats: null` with a leading `warnings` entry, never a made-up number. `likelyBlank`, `motion` and `anyMotion` are `null` when they could not be determined. A timeout (the process tree is killed), a non-zero exit (with the last stderr lines) and a run that wrote no frames are errors. A `video` failure names the format and the engine version; `ogv` needs an engine that can write it. Kept runs are never pruned by the server: delete the run directory when you are done with it.
+A frame that cannot be read is `stats: null` with a leading `warnings` entry, never a made-up number. `likelyBlank`, `motion` and `anyMotion` are `null` when they could not be determined. A timeout (the process tree is killed, and the error says so when the kill could not be confirmed), a non-zero exit (with the last stderr lines) and a run that wrote no frames are errors. A `video` failure names the format and the engine version; `ogv` needs an engine that can write it. Kept runs are never pruned by the server: delete the run directory when you are done with it.
 
 ## Profiling (requires `run_project` with `profiling: true`)
 
