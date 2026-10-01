@@ -14,7 +14,9 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as net from 'net';
+import Ajv from 'ajv';
 import { decodeVariant, encodeVariant, type Variant } from '../../src/utils/godot-variant.js';
+import { profilerToolDefinitions } from '../../src/tools/profiler-tools.js';
 import {
   DebuggerProfiler,
   ProfilerError,
@@ -1544,5 +1546,89 @@ describe('DebuggerProfiler timeline', () => {
   ])('rejects %s', async (_label, options) => {
     const { profiler: p } = await connectedProfiler();
     await expect(p.start(5, 512, options)).rejects.toMatchObject({ code: 'bad_args' });
+  });
+});
+
+describe('DebuggerProfiler incomplete captures keep what they measured', () => {
+  const TRACK = '/root/Main/Player:position';
+  const TOTALS_TIMEOUT_ADVANCE_MS = 10_001;
+  const RENDER_FRAME_NUMBER = 41;
+  const TRACK_SAMPLE = { frame: 3, values: { [TRACK]: { x: 1, y: 2 } } };
+  const GAME_EXITED = 'The game exited before its track was collected';
+
+  /**
+   * An open capture with render stages, a timeline, a track and a monitor
+   * sample, all of it folded before any clock is faked: two usable frames,
+   * one render frame, one monitor sample.
+   */
+  async function openRichCapture(): Promise<{ p: DebuggerProfiler; fake: FakeGodot }> {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512, { visual: true, timelineMs: 500, track: [TRACK] });
+    await waitUntil(() => fake.commandsNamed('profiler:visual').length >= 1, 'visual enable');
+    await feedStart(fake, running, [
+      frame(1, 0.016, []),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0.016, [[0, 2, 0.002, 0.004]]),
+    ]);
+    sendSettleFrames(fake);
+    fake.send(['visual:profile_frame', THREAD, visualFrame(RENDER_FRAME_NUMBER, RENDER_FRAME)]);
+    fake.send(['performance:profile_frame', THREAD, monitorSample({ 9: 100, 13: 12 })]);
+    await drain(fake);
+    return { p, fake };
+  }
+
+  it('a totals timeout keeps the render stages, the timeline and the monitors, and still collects the track', async () => {
+    const { p } = await openRichCapture();
+    const collect = vi.fn(async () => ({ samples: [TRACK_SAMPLE], error: null }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const stopped = p.stop(10, 'selfMs', collect);
+      await vi.advanceTimersByTimeAsync(TOTALS_TIMEOUT_ADVANCE_MS);
+      const result = await stopped;
+
+      expect(result.complete).toBe(false);
+      expect(Object.keys(result)[0]).toBe('warnings');
+      expect(result.warnings?.[0]).toMatch(/capture is incomplete.*closing totals/);
+      expect(result.visual).toMatchObject({ frames: 1 });
+      expect(result.monitors).toMatchObject({ samples: 1 });
+      expect(result.timeline!.buckets[0]!.frames).toBe(2);
+      expect(collect).toHaveBeenCalledTimes(1);
+      expect(result.timeline!.buckets[0]!.track).toEqual(TRACK_SAMPLE.values);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a disconnect keeps them for the re-read, which asks for the track once', async () => {
+    const { p, fake } = await openRichCapture();
+    const collect = vi.fn(async () => ({ samples: null, error: GAME_EXITED }));
+
+    const stopped = p.stop(10, 'selfMs', collect);
+    fake.close();
+    await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+    expect(collect).not.toHaveBeenCalled();
+
+    const reread = await p.stop(10, 'selfMs', collect);
+    expect(reread.complete).toBe(false);
+    expect(reread.warnings?.[0]).toMatch(/connection dropped/);
+    expect(reread.visual).toMatchObject({ frames: 1 });
+    expect(reread.monitors).toMatchObject({ samples: 1 });
+    expect(reread.timeline).toMatchObject({ trackError: GAME_EXITED });
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a capture with every section validates against the declared output schema', async () => {
+    const { p, fake } = await openRichCapture();
+    const collect = vi.fn(async () => ({ samples: [TRACK_SAMPLE], error: null }));
+    const result = await stopCapture(p, fake, 10, collect);
+
+    const definition = profilerToolDefinitions.find((tool) => tool.name === 'profile_project');
+    if (!definition) throw new Error('profile_project definition not found');
+    const validate = new Ajv({ strict: false }).compile(definition.outputSchema as object);
+    expect(validate({ projectPath: '/p', ...result }), JSON.stringify(validate.errors)).toBe(true);
+    // Not an empty capture that would validate with every section null.
+    expect(result.visual).not.toBeNull();
+    expect(result.timeline).not.toBeNull();
+    expect(result.monitors).not.toBeNull();
   });
 });

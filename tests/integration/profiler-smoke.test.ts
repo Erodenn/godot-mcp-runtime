@@ -7,7 +7,7 @@
  * the only test that can catch a layout change in a future Godot release.
  *
  * Requires GODOT_PATH and a display server. CI supplies both in the
- * godot-integration job (xvfb) and runs this file on Godot 4.5.1 and 4.6.2.
+ * godot-integration job (xvfb) and runs this file on every Godot version in its matrix.
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
@@ -26,6 +26,7 @@ import {
   handleStopProfiler,
 } from '../../src/tools/profiler-tools.js';
 import { hasError, unwrap } from '../helpers/assertions.js';
+import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 
 interface CaptureShape {
   frames: number;
@@ -106,6 +107,11 @@ describe('profiler smoke', () => {
 
       const result = await handleProfileProject(runner, { seconds: 2, top: 10 });
       expect(hasError(result)).toBe(false);
+      expectMatchesOutputSchema('profile_project', result);
+      expect(unwrap(result).structuredContent).toMatchObject({
+        projectPath: tmpProject,
+        complete: true,
+      });
 
       const capture = unwrap(result).structuredContent as unknown as CaptureShape;
       expect(capture.frames).toBeGreaterThan(0);
@@ -146,6 +152,9 @@ describe('profiler smoke', () => {
       // Monitors arrive once a second, so the window has to span a few.
       const result = await handleProfileProject(runner, { seconds: 3, top: 50, visual: true });
       expect(hasError(result)).toBe(false);
+      expectMatchesOutputSchema('profile_project', result);
+      // The engine must still send its closing totals with the visual profiler on.
+      expect((unwrap(result).structuredContent as { complete: boolean }).complete).toBe(true);
       const capture = unwrap(result).structuredContent as unknown as CaptureShape;
 
       expect(capture.fps).toBeGreaterThan(0);
@@ -178,12 +187,14 @@ describe('profiler smoke', () => {
         track: ['/root/Main:position'],
       });
       expect(hasError(started)).toBe(false);
+      expectMatchesOutputSchema('start_profiler', started);
       // Another command holds the bridge while the game keeps sampling.
       await runner.sendCommand('get_ui_elements', {});
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
       const stopped = await handleStopProfiler(runner, {});
       expect(hasError(stopped)).toBe(false);
+      expectMatchesOutputSchema('stop_profiler', stopped);
       const timeline = (unwrap(stopped).structuredContent as unknown as CaptureShape).timeline;
       expect(timeline).not.toBeNull();
       expect(timeline!.trackError).toBeNull();
@@ -208,6 +219,7 @@ describe('profiler smoke', () => {
 
       const started = await handleStartProfiler(runner, { seconds: 10 });
       expect(hasError(started)).toBe(false);
+      expectMatchesOutputSchema('start_profiler', started);
       expect(unwrap(started).structuredContent).toMatchObject({ active: true });
 
       // A capture must survive normal bridge traffic in the middle of it.
@@ -215,6 +227,7 @@ describe('profiler smoke', () => {
 
       const stopped = await handleStopProfiler(runner, { top: 5, sort: 'calls' });
       expect(hasError(stopped)).toBe(false);
+      expectMatchesOutputSchema('stop_profiler', stopped);
       const capture = unwrap(stopped).structuredContent as unknown as CaptureShape;
       expect(capture.frames).toBeGreaterThan(0);
       expect(capture.rows.map((row) => row.function)).toContain('burn');

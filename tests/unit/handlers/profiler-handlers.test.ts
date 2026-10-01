@@ -611,6 +611,50 @@ describe('handleStopProfiler', () => {
     expect(unwrap(result).structuredContent).not.toHaveProperty('warnings');
   });
 
+  it('warns when fps could not be measured', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({ ...captureResult, fps: null });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(Object.keys(content)[0]).toBe('warnings');
+    expect(content.warnings).toEqual([expect.stringMatching(/^fps is null/)]);
+  });
+
+  it('warns when no monitor sample arrived', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({ ...captureResult, monitors: null });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(Object.keys(content)[0]).toBe('warnings');
+    expect(content.warnings).toEqual([expect.stringMatching(/^monitors is null/)]);
+  });
+
+  it('names the monitors that had no finite sample', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      monitors: { ...captureResult.monitors, drawCallsInFrame: null, nodes: null },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toHaveLength(1);
+    expect(content.warnings![0]).toMatch(/^Monitors with no finite sample, reported as null:/);
+    expect(content.warnings![0]).toContain('nodes');
+    expect(content.warnings![0]).toContain('drawCallsInFrame');
+  });
+
   it('adds no warnings to a clean capture', async () => {
     const fake = createProfilerFake();
     const result = await handleStopProfiler(fake.asRunner, {});
@@ -715,6 +759,47 @@ describe('profiler handlers: incomplete captures', () => {
     expect(Object.keys(payload)[0]).toBe('warnings');
     expect(payload.warnings).toEqual([INCOMPLETE_WARNING]);
     expect(payload.complete).toBe(false);
+  });
+
+  it('keeps the incomplete warning ahead of everything the handler adds', async () => {
+    const TRACK_ERROR = 'The game exited before its track was collected';
+    const NO_TIME = { avg: 0, max: 0 };
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...incompleteResult,
+      visual: {
+        hardware: null,
+        framesReceived: 3,
+        frames: 0,
+        gpuTimed: false,
+        truncatedFrames: 0,
+        stoppedAt: null,
+        cpuMs: NO_TIME,
+        gpuMs: NO_TIME,
+        areasReceived: 0,
+        areas: [],
+        worstFrame: null,
+      },
+      timeline: {
+        bucketMs: 500,
+        track: ['/root/Main/Player:position'],
+        trackError: TRACK_ERROR,
+        buckets: [],
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const payload = expectMatchesOutputSchema('stop_profiler', result);
+    expect(payload.complete).toBe(false);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    const warnings = payload.warnings as string[];
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toBe(INCOMPLETE_WARNING);
+    expect(warnings[1]).toMatch(/no usable render frames/);
+    expect(warnings[2]).toMatch(/tracked values are missing: The game exited/);
   });
 
   it('declares warnings, complete and a nullable percentOfFrame, and names complete in the descriptions', () => {

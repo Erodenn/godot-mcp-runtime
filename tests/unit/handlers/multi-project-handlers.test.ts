@@ -3,8 +3,10 @@
  * holding installed session records (no Godot process, no bridge socket).
  *
  * Covers switch_project, the runtime and profiling handlers refusing to fall
- * back to another live session, and the project path every runtime response
- * names. The bridge is a spy on `sendCommandWithErrors`.
+ * back to another live session, the project path every runtime response
+ * names, and a profiler capture's track staying with the session that ran it.
+ * The bridge is a spy on `sendCommandWithErrors`, or on `sendCommand` for the
+ * profiler's track.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -30,6 +32,7 @@ import {
   handleStartProfiler,
   handleStopProfiler,
 } from '../../../src/tools/profiler-tools.js';
+import { MONITOR_NAMES, ProfilerError } from '../../../src/utils/profiler.js';
 import { installSession, currentRecord } from '../../helpers/session-install.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
@@ -512,6 +515,144 @@ describe('projectPath in runtime responses', () => {
     const exited = payloadOf(handleGetDebugOutput(runner, {}));
     expect(exited.projectPath).toBe(b);
     expect(exited.running).toBe(false);
+  });
+});
+
+describe('profiler track collection follows the session that ran the capture', () => {
+  const SPEC = '/root/Main/Player:position';
+  const TRACK_STARTED = '{"status":"tracking"}';
+  const NO_SAMPLES = '{"samples":[]}';
+  const MONITOR_STAT = { avg: 1, min: 1, max: 1 };
+
+  type Collector = () => Promise<{ samples: unknown[] | null; error: string | null }>;
+
+  /** What a closed capture hands the handler, with the track result it was given. */
+  function captureWithTrack(trackError: string | null): Record<string, unknown> {
+    return {
+      complete: true,
+      fps: 60,
+      monitors: {
+        samples: 1,
+        ...Object.fromEntries(MONITOR_NAMES.map((name) => [name, MONITOR_STAT])),
+      },
+      visual: null,
+      timeline: { bucketMs: 500, track: [SPEC], trackError, buckets: [] },
+    };
+  }
+
+  /** The profiler members the handlers reach before a test's own methods. */
+  const idleProfiler = {
+    hasResult: false,
+    close: () => undefined,
+    assertCanStart: () => undefined,
+  };
+
+  function installProfiled(
+    runner: GodotRunner,
+    projectPath: string,
+    bridgePort: number,
+    current: boolean,
+    profiler: unknown,
+  ): void {
+    installSession(runner, {
+      projectPath,
+      mode: 'spawned',
+      bridgePort,
+      process: liveProcess(),
+      profiler,
+      current,
+    });
+  }
+
+  function sentCommands(send: { mock: { calls: unknown[][] } }): unknown[] {
+    return send.mock.calls.map((call) => call[0]);
+  }
+
+  it('profile_project does not ask another session for the track after switch_project', async () => {
+    const runner = new GodotRunner();
+    const a = makeProjectPath('track-a-');
+    const b = makeProjectPath('track-b-');
+    installProfiled(runner, a, PORT_A, true, {
+      ...idleProfiler,
+      captureWindow: async (...args: unknown[]) => {
+        runner.switchSession(b);
+        const { error } = await (args[5] as Collector)();
+        return captureWithTrack(error);
+      },
+    });
+    installLive(runner, b, PORT_B, false);
+    const send = vi.spyOn(runner, 'sendCommand').mockResolvedValue(TRACK_STARTED);
+
+    const payload = payloadOf(await handleProfileProject(runner, { track: [SPEC] }));
+
+    expect(payload.projectPath).toBe(a);
+    expect(sentCommands(send)).toEqual(['track_start']);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/no longer the current one/)]),
+    );
+  });
+
+  it('a failed capture does not send its cleanup track_stop to another session', async () => {
+    const runner = new GodotRunner();
+    const a = makeProjectPath('track-a-');
+    const b = makeProjectPath('track-b-');
+    installProfiled(runner, a, PORT_A, true, {
+      ...idleProfiler,
+      captureWindow: async () => {
+        runner.switchSession(b);
+        throw new ProfilerError('profile_timeout', 'Godot sent no profiler frames');
+      },
+    });
+    installLive(runner, b, PORT_B, false);
+    const send = vi.spyOn(runner, 'sendCommand').mockResolvedValue(TRACK_STARTED);
+
+    const result = await handleProfileProject(runner, { track: [SPEC] });
+
+    expectErrorMatching(result, /no profiler frames/);
+    expect(sentCommands(send)).not.toContain('track_stop');
+  });
+
+  it("stop_profiler reads the current session's capture, and the track once its own session is current again", async () => {
+    const runner = new GodotRunner();
+    const a = makeProjectPath('track-a-');
+    const b = makeProjectPath('track-b-');
+    installProfiled(runner, a, PORT_A, true, {
+      ...idleProfiler,
+      start: async (...args: unknown[]) => ({
+        active: true,
+        visual: false,
+        timeline: true,
+        timelineMs: 500,
+        maxSeconds: args[0],
+        firstFrame: 1,
+        captureLimit: args[1],
+      }),
+      stop: async (...args: unknown[]) => {
+        const { error } = await (args[2] as Collector)();
+        return captureWithTrack(error);
+      },
+    });
+    installProfiled(runner, b, PORT_B, false, {
+      ...idleProfiler,
+      stop: async () => {
+        throw new ProfilerError('profile_not_started', 'Start a capture first');
+      },
+    });
+    const send = vi.spyOn(runner, 'sendCommand').mockResolvedValue(TRACK_STARTED);
+
+    payloadOf(await handleStartProfiler(runner, { track: [SPEC] }));
+
+    runner.switchSession(b);
+    expectErrorMatching(await handleStopProfiler(runner, {}), /Start a capture first/);
+    expect(sentCommands(send)).not.toContain('track_stop');
+
+    runner.switchSession(a);
+    send.mockResolvedValue(NO_SAMPLES);
+    const payload = payloadOf(await handleStopProfiler(runner, {}));
+
+    expect(payload.projectPath).toBe(a);
+    expect(sentCommands(send)).toEqual(['track_start', 'track_stop']);
+    expect((payload.timeline as { trackError: string | null }).trackError).toBeNull();
   });
 });
 

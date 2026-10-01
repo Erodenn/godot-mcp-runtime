@@ -46,6 +46,8 @@ export const TRACK_MIN_INTERVAL_MS = 50;
 const TRACK_INTERVAL_MS = 250;
 /** How long the bridge keeps sampling past the window if nobody stops it. */
 const TRACK_GRACE_MS = 10000;
+/** How much of an unrecognized bridge reply an error quotes. */
+const TRACK_REPLY_PREVIEW_CHARS = 200;
 const TRACK_OWNER_NOT_CURRENT =
   'The session that ran this capture is no longer the current one, so its track was not collected';
 
@@ -637,7 +639,7 @@ async function startTrack(
     const reason =
       typeof reply.error === 'string'
         ? reply.error
-        : `unexpected bridge reply ${raw.slice(0, 200)}`;
+        : `unexpected bridge reply ${raw.slice(0, TRACK_REPLY_PREVIEW_CHARS)}`;
     return err(
       createErrorResponse(`Could not start the track: ${reason}`, [
         'Check each entry is NodePath:property',
@@ -742,6 +744,7 @@ function captureWarnings(result: ProfileResult): string[] {
     );
   }
   warnings.push(...trackWarnings(result.timeline ?? null));
+  warnings.push(...unmeasuredWarnings(result));
   return warnings;
 }
 
@@ -771,6 +774,32 @@ function trackWarnings(timeline: ProfileResult['timeline']): string[] {
   return [
     `Track entries null in every interval: ${unresolved.join(', ')}. The node path or property probably does not resolve - use an absolute path from /root, e.g. "/root/Main/Player:global_position".`,
   ];
+}
+
+/**
+ * A null that stands for "not measured" gets a sentence saying so, the same
+ * as percentOfFrame does. Nulls inside one timeline interval are left alone:
+ * they are per interval by design and would bury everything else.
+ */
+function unmeasuredWarnings(result: ProfileResult): string[] {
+  const warnings: string[] = [];
+  if (result.fps === null) {
+    warnings.push(
+      'fps is null: fewer than two frames were folded, so there is no span to measure a rate over. Capture for longer.',
+    );
+  }
+  if (result.monitors === null) {
+    warnings.push(
+      'monitors is null: no monitor sample arrived while the capture was open. The engine sends one a second, so capture for two seconds or more.',
+    );
+  } else {
+    const monitors = result.monitors;
+    const missing = MONITOR_NAMES.filter((name) => monitors[name] === null);
+    if (missing.length > 0) {
+      warnings.push(`Monitors with no finite sample, reported as null: ${missing.join(', ')}.`);
+    }
+  }
+  return warnings;
 }
 
 /** Say so when a long window made the timeline coarser than the caller asked. */
