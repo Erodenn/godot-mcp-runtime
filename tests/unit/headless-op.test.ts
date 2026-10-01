@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
-import { executeSceneOp } from '../../src/utils/headless-op.js';
+import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
@@ -834,5 +834,38 @@ describe('executeSceneOp reads only the sentinel line as the payload', () => {
     const text = unwrap(result).content[0]?.text ?? '';
     expect(text).not.toContain(OPERATION_RESULT_SENTINEL);
     expect(JSON.parse(text)).toEqual(PAYLOAD);
+  });
+});
+
+describe('findLiveSessionOnProject', () => {
+  const OTHER_PID = 4242;
+
+  it('returns null with no session and no other owner', () => {
+    const fake = runnerWithLiveSession(null);
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
+  });
+
+  it('reports self for a live session on the same project, ignoring case and separators', () => {
+    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: 'C:\\Games\\Proj\\' });
+    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+  });
+
+  it('returns null for a live session on a different project', () => {
+    const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/other' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
+  });
+
+  it("reports the other owner's info", () => {
+    const fake = runnerWithLiveSession(null);
+    const info = {
+      pid: OTHER_PID,
+      instanceId: 'abc123',
+      hostname: 'some-host',
+      mode: 'spawned',
+      startedAt: new Date().toISOString(),
+      port: 9900,
+    };
+    (fake.asRunner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [info];
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toEqual({ owner: 'other', info });
   });
 });

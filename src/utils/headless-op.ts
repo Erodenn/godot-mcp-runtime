@@ -2,6 +2,7 @@ import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 import { createStructuredResponse } from './structured-response.js';
+import type { BridgeOwnerInfo } from './bridge-manager.js';
 import {
   extractOperationPayload,
   normalizeForCompare,
@@ -252,6 +253,37 @@ export async function executeSceneOp(
   }
 }
 
+/** Who is running a game on a project, as seen from this server. */
+export type LiveSessionOnProject = { owner: 'self' } | { owner: 'other'; info: BridgeOwnerInfo };
+
+/**
+ * The one live-session detector. Own session first (this runner has an active
+ * runtime session and it is on this project), then any other MCP session
+ * registered as an owner of the project. Null when nothing is running it.
+ */
+export function findLiveSessionOnProject(
+  runner: GodotRunner,
+  projectPath: string,
+): LiveSessionOnProject | null {
+  if (runner.hasActiveRuntimeSession()) {
+    const activeProject = runner.activeProjectPath;
+    const isSameProject =
+      activeProject !== null &&
+      normalizeForCompare(activeProject).toLowerCase() ===
+        normalizeForCompare(projectPath).toLowerCase();
+    if (isSameProject) return { owner: 'self' };
+  }
+
+  // Own-session check above covers this server. A sibling server process (or
+  // a second BridgeManager instance in this one) can also be running the
+  // game on this project, and this runner has no way to stop that session —
+  // it isn't its own.
+  const other = runner.otherLiveSessionsOnProject(projectPath)[0];
+  if (other) return { owner: 'other', info: other };
+
+  return null;
+}
+
 // A running (spawned or attached) engine process can write its own project's
 // scene files at any point during its lifetime -- not just in response to an
 // MCP call. An autoload's _process loop calling ResourceSaver.save is enough;
@@ -264,44 +296,31 @@ function rejectIfLiveSessionOnProject(
   projectPath: string,
   extraSolutions: string[] = [],
 ): HandlerResult | null {
-  if (runner.hasActiveRuntimeSession()) {
-    const activeProject = runner.activeProjectPath;
-    const isSameProject =
-      activeProject !== null &&
-      normalizeForCompare(activeProject).toLowerCase() ===
-        normalizeForCompare(projectPath).toLowerCase();
-    if (isSameProject) {
-      return err(
-        createErrorResponse(
-          "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
-          ['Call stop_project, then retry the scene edit', ...extraSolutions],
-        ),
-      );
-    }
-  }
+  const live = findLiveSessionOnProject(runner, projectPath);
+  if (live === null) return null;
 
-  // Own-session check above covers this server. A sibling server process (or
-  // a second BridgeManager instance in this one) can also be running the
-  // game on this project, and this runner has no way to stop that session —
-  // it isn't its own.
-  const otherOwners = runner.otherLiveSessionsOnProject(projectPath);
-  const other = otherOwners[0];
-  if (other) {
+  if (live.owner === 'self') {
     return err(
       createErrorResponse(
-        `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
-          "project's game. That game belongs to the other session, not this one, and only it can " +
-          "stop it. A running game can write this project's scene files at any time, so a " +
-          'headless edit now would race it. Wait for the other session to finish (stop_project ' +
-          'there), then retry.',
-        [
-          'Wait and retry once the other MCP session has stopped or detached its game',
-          "check_project on this project shows this session's own state, not the other session's",
-          ...extraSolutions,
-        ],
+        "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
+        ['Call stop_project, then retry the scene edit', ...extraSolutions],
       ),
     );
   }
 
-  return null;
+  const other = live.info;
+  return err(
+    createErrorResponse(
+      `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
+        "project's game. That game belongs to the other session, not this one, and only it can " +
+        "stop it. A running game can write this project's scene files at any time, so a " +
+        'headless edit now would race it. Wait for the other session to finish (stop_project ' +
+        'there), then retry.',
+      [
+        'Wait and retry once the other MCP session has stopped or detached its game',
+        "check_project on this project shows this session's own state, not the other session's",
+        ...extraSolutions,
+      ],
+    ),
+  );
 }

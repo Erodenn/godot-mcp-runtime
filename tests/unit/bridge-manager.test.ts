@@ -747,3 +747,31 @@ describe('BridgeManager with concurrent sessions on one project', () => {
     });
   });
 });
+
+describe('BridgeManager.ensureArtifactRoot', () => {
+  it('creates .mcp/.gdignore and the .gitignore entry without touching project.godot', () => {
+    const { projectPath } = setupProject();
+    const projectGodotPath = join(projectPath, 'project.godot');
+    const before = readFileSync(projectGodotPath);
+
+    BridgeManager.ensureArtifactRoot(projectPath);
+
+    expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+    expect(readFileSync(join(projectPath, '.gitignore'), 'utf8')).toContain('.mcp/');
+    expect(readFileSync(projectGodotPath).equals(before)).toBe(true);
+  });
+
+  it('is idempotent and keeps an existing .gdignore', () => {
+    const { projectPath } = setupProject();
+    const gdignorePath = join(projectPath, '.mcp', '.gdignore');
+    mkdirSync(join(projectPath, '.mcp'), { recursive: true });
+    writeFileSync(gdignorePath, 'user content\n', 'utf8');
+
+    BridgeManager.ensureArtifactRoot(projectPath);
+    BridgeManager.ensureArtifactRoot(projectPath);
+
+    expect(readFileSync(gdignorePath, 'utf8')).toBe('user content\n');
+    const gitignore = readFileSync(join(projectPath, '.gitignore'), 'utf8');
+    expect(gitignore.split('.mcp/').length - 1).toBe(1);
+  });
+});

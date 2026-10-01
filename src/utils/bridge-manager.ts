@@ -254,7 +254,7 @@ export class BridgeManager {
     // inject rather than only once — a project can be missing it if a git
     // checkout or a sibling process's cleanup removed the whole .mcp/ subtree
     // between sessions.
-    this.ensureMcpGdignore(projectPath);
+    BridgeManager.ensureMcpGdignore(projectPath);
     mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
 
     // Owner file lands BEFORE project.godot is touched, so a concurrent
@@ -277,7 +277,7 @@ export class BridgeManager {
     const attachOwner = this.liveAttachOwner(projectPath, false);
     this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
 
-    this.ensureGitignored(projectPath);
+    BridgeManager.ensureGitignored(projectPath);
 
     // Re-read rather than reuse the collision-check read above: a sibling
     // session may have added or migrated the entry since, and acting on the
@@ -655,7 +655,17 @@ export class BridgeManager {
     }
   }
 
-  private ensureMcpGdignore(projectPath: string): void {
+  /**
+   * Guarantee `.mcp/.gdignore` and the `.mcp/` .gitignore entry before a
+   * non-bridge writer puts files under `.mcp/`. The one entry point for any
+   * writer under `.mcp/` that is not the bridge itself.
+   */
+  static ensureArtifactRoot(projectPath: string): void {
+    BridgeManager.ensureMcpGdignore(projectPath);
+    BridgeManager.ensureGitignored(projectPath);
+  }
+
+  private static ensureMcpGdignore(projectPath: string): void {
     const dir = mcpDir(projectPath);
     mkdirSync(dir, { recursive: true });
     const gdignorePath = join(dir, '.gdignore');
@@ -666,7 +676,7 @@ export class BridgeManager {
     logDebug('Created .mcp/.gdignore');
   }
 
-  private ensureGitignored(projectPath: string): void {
+  private static ensureGitignored(projectPath: string): void {
     const gitignorePath = join(projectPath, '.gitignore');
     if (existsSync(gitignorePath)) {
       const gitignoreContent = readFileSync(gitignorePath, 'utf8');
