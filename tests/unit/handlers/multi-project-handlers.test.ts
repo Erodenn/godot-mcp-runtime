@@ -346,6 +346,51 @@ describe('no silent fallback', () => {
     },
   );
 
+  it.each(profilerHandlers)(
+    '%s names the exit and lists the live session when the current game exited',
+    async (_name, handler) => {
+      const runner = new GodotRunner();
+      const a = makeProjectPath('fallback-a-');
+      const b = makeProjectPath('fallback-b-');
+      installLive(runner, a, PORT_A, false);
+      installExited(runner, b, true);
+
+      const result = await handler(runner, {});
+
+      expectErrorMatching(result, /spawned Godot process has exited/);
+      const text = fullText(result);
+      expect(text).toContain(b);
+      expect(text).toContain(a);
+      expect(text).toContain('switch_project');
+      expect(runner.getCurrentSessionInfo()?.projectPath).toBe(b);
+    },
+  );
+
+  it('names the ended current session instead of claiming no project is selected', async () => {
+    // What stop_project leaves behind for an exited game with a finished
+    // profiler capture: a current record with no mode and no process.
+    const runner = new GodotRunner();
+    const a = makeProjectPath('fallback-a-');
+    const b = makeProjectPath('fallback-b-');
+    installLive(runner, a, PORT_A, false);
+    installSession(runner, {
+      projectPath: b,
+      mode: null,
+      profiler: { hasResult: true, close: () => undefined },
+    });
+    const bridge = stubBridge(runner, { elements: [] });
+
+    const result = await handleGetUiElements(runner, {});
+
+    expectErrorMatching(result, /current session .* has ended/);
+    const text = fullText(result);
+    expect(text).toContain(b);
+    expect(text).toContain(a);
+    expect(text).toContain('switch_project');
+    expect(text).not.toContain('not pointed at any project');
+    expect(bridge).not.toHaveBeenCalled();
+  });
+
   it('get_debug_output errors and lists the live session when nothing is current', () => {
     const runner = new GodotRunner();
     const a = makeProjectPath('fallback-a-');

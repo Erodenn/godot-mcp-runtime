@@ -139,11 +139,18 @@ interface RecordingBridge {
   shutdown(): Promise<void>;
 }
 
-/** Loopback bridge that records each parsed frame and answers it with a pong. */
-async function startRecordingBridge(): Promise<RecordingBridge> {
+/**
+ * Loopback bridge that records each parsed frame and answers it with a pong.
+ * With `dropFirstFrame`, the first frame it ever receives is recorded and its
+ * connection closed without an answer, the way a transient drop looks.
+ */
+async function startRecordingBridge(
+  opts: { dropFirstFrame: boolean } = { dropFirstFrame: false },
+): Promise<RecordingBridge> {
   const frames: Array<Record<string, unknown>> = [];
   const peers = new Set<net.Socket>();
   let connections = 0;
+  let dropPending = opts.dropFirstFrame;
   const server = net.createServer((socket) => {
     connections += 1;
     peers.add(socket);
@@ -154,6 +161,11 @@ async function startRecordingBridge(): Promise<RecordingBridge> {
       rx = parsed.remainder;
       for (const frame of parsed.frames) {
         frames.push(JSON.parse(frame.toString('utf8')) as Record<string, unknown>);
+        if (dropPending) {
+          dropPending = false;
+          socket.destroy();
+          return;
+        }
         socket.write(encodeFrame(PONG));
       }
     });
@@ -229,8 +241,10 @@ describe('multi-project runtime sessions', () => {
     return child;
   }
 
-  async function startLoopback(): Promise<RecordingBridge> {
-    const loopback = await startRecordingBridge();
+  async function startLoopback(
+    opts: { dropFirstFrame: boolean } = { dropFirstFrame: false },
+  ): Promise<RecordingBridge> {
+    const loopback = await startRecordingBridge(opts);
     loopbacks.push(loopback);
     return loopback;
   }
@@ -673,5 +687,88 @@ describe('multi-project runtime sessions', () => {
     // The failed start had taken the current pointer and nothing is promoted
     // into its place.
     expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  it('a start that is stopped inside its profiler await launches nothing and removes its bridge', async () => {
+    let resolveProfiler: (profiler: FakeProfiler) => void = () => {};
+    profilerCreateMock.mockReturnValue(
+      new Promise<FakeProfiler>((done) => {
+        resolveProfiler = done;
+      }),
+    );
+    const profiler = makeFakeProfiler(false);
+
+    // Held inside the profiler await: injected, nothing spawned yet.
+    const pending = runner.runProject(projectA, undefined, false, PORT_A, true);
+    expect(bridge.injectCalls).toEqual([projectA]);
+
+    // A server shutdown landing in that window finds a record with no process.
+    await runner.stopAllSessions();
+    expect(runner.listSessions()).toEqual([]);
+
+    resolveProfiler(profiler);
+
+    await expect(pending).rejects.toThrow(/stopped or replaced while it was starting/);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(profiler.close).toHaveBeenCalledTimes(1);
+    expect(bridge.cleanupCalls).toEqual([projectA]);
+    expect(runner.listSessions()).toEqual([]);
+    expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Paths and ports a command may reach
+  // -------------------------------------------------------------------------
+
+  it("replacing a session through a differently spelled path removes the replaced spelling's bridge artifacts", async () => {
+    const first = await startProject(projectA, PORT_A, { exitOnKill: false });
+    // Same session key, different string. On a case-sensitive filesystem this
+    // can be another directory, so the replaced one must not keep its bridge.
+    const respelled = projectA.toUpperCase();
+
+    await startProject(respelled, PORT_A_RERUN, { exitOnKill: false });
+
+    expect(first.kill).toHaveBeenCalledTimes(1);
+    expect(bridge.cleanupCalls).toEqual([projectA]);
+    expect(sessionPaths()).toEqual([respelled]);
+  });
+
+  it('a command for a current session whose game exited is rejected for lack of a bridge port', async () => {
+    const childA = await startProject(projectA, PORT_A);
+    childA.emit('exit', 1);
+
+    // The record keeps no port, and no default port stands in for it.
+    await expect(runner.sendCommandWithErrors('run_script', {})).rejects.toThrow(/no bridge port/);
+  });
+
+  it('a retried command stays on the session it started on when current changes during the reconnect delay', async () => {
+    const loopbackA = await startLoopback({ dropFirstFrame: true });
+    const loopbackB = await startLoopback();
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: projectB,
+      bridgePort: loopbackB.port,
+      token: TOKEN_B,
+      current: false,
+    });
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: projectA,
+      bridgePort: loopbackA.port,
+      token: TOKEN_A,
+    });
+
+    const pending = runner.sendCommandWithErrors('get_ui_elements', {});
+    await vi.waitFor(() => expect(loopbackA.frames).toHaveLength(1));
+    runner.switchSession(projectB);
+
+    const { response } = await pending;
+
+    expect(response).toBe(PONG);
+    expect(loopbackA.frames).toEqual([
+      { command: 'get_ui_elements', token: TOKEN_A },
+      { command: 'get_ui_elements', token: TOKEN_A },
+    ]);
+    expect(loopbackB.frames).toEqual([]);
   });
 });

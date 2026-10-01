@@ -9,7 +9,6 @@ import { BridgeAutoloadCollisionError, BridgeManager } from './bridge-manager.js
 import type { BridgeOwnerInfo } from './bridge-manager.js';
 import { DebuggerProfiler } from './profiler.js';
 import {
-  DEFAULT_BRIDGE_PORT,
   encodeFrame,
   findFreePort,
   parseFrames,
@@ -754,8 +753,9 @@ export class GodotRunner {
         logDebug('Killing existing Godot process before starting a new one');
         previous.process.process.kill();
       }
-      // No bridge cleanup: the replacement runs on the same project and
-      // re-injects over the same owner file.
+      // No bridge cleanup for the same path: the replacement re-injects over
+      // the same owner file.
+      this.cleanupRespelledProject(previous, projectPath);
     }
 
     const session = this.createSession(projectPath, 'spawned');
@@ -766,6 +766,7 @@ export class GodotRunner {
     let injected = false;
     try {
       const port = bridgePort ?? (await findFreePort());
+      this.assertStartStillOwned(session, epoch);
       session.bridgePort = port;
 
       try {
@@ -784,7 +785,10 @@ export class GodotRunner {
       const cmdArgs = ['--path', projectPath];
       if (profiling) {
         const profiler = await DebuggerProfiler.create();
+        // Assigned before the check so a start that lost its record still
+        // releases the listener through discardFailedStart.
         session.profiler = profiler;
+        this.assertStartStillOwned(session, epoch);
         cmdArgs.push('--remote-debug', `tcp://127.0.0.1:${profiler.port}`);
         logDebug(`Profiling enabled (debugger port ${profiler.port})`);
       }
@@ -940,10 +944,44 @@ export class GodotRunner {
     this.closeProfiler(session);
     this.forgetSession(session);
     if (!ownsArtifacts) return;
+    // Another record took this project while the start was in flight. It
+    // shares the owner file, so the artifacts are its to remove now.
+    if (this.sessions.has(session.key)) return;
     try {
       this.bridge.cleanup(session.projectPath);
     } catch (err) {
       logDebug(`Bridge cleanup after a failed start failed (ignored): ${err}`);
+    }
+  }
+
+  /**
+   * Refuse to go on with a start whose record was stopped or replaced inside
+   * one of the start's own awaits (a server shutdown landing there is the
+   * realistic case). Going on would inject a bridge and spawn a process for a
+   * record nothing tracks any more: its exit handler is already inert, no
+   * stop can reach it, and the exit-time cleanup never visits it.
+   */
+  private assertStartStillOwned(session: RuntimeSession, epoch: number): void {
+    if (session.epoch === epoch && this.sessions.get(session.key) === session) return;
+    throw new Error(
+      `The session on ${session.projectPath} was stopped or replaced while it was starting; nothing was launched.`,
+    );
+  }
+
+  /**
+   * Session keys fold case and separators, so a start can replace a record
+   * whose stored path is spelled differently. When the two spellings are the
+   * same directory this costs one redundant cleanup before the re-inject; on a
+   * case-sensitive filesystem they can be two directories, and the replaced
+   * one would otherwise keep its bridge artifacts with no record left to
+   * remove them.
+   */
+  private cleanupRespelledProject(previous: RuntimeSession, projectPath: string): void {
+    if (previous.projectPath === projectPath) return;
+    try {
+      this.bridge.cleanup(previous.projectPath);
+    } catch (err) {
+      logDebug(`Bridge cleanup for a replaced session failed (ignored): ${err}`);
     }
   }
 
@@ -1067,15 +1105,18 @@ export class GodotRunner {
         this.beginSessionTransition(previous);
         this.closeProfiler(previous);
         this.forgetSession(previous);
+        this.cleanupRespelledProject(previous, projectPath);
       }
     }
 
     const session = this.createSession(projectPath, 'attached');
+    const epoch = session.epoch;
     this.sessions.set(key, session);
     this.setCurrent(session);
 
     try {
       const port = bridgePort ?? (await findFreePort());
+      this.assertStartStillOwned(session, epoch);
       session.bridgePort = port;
       // Attach has no env channel to a Godot process the user launched
       // themselves, so the baked script copy is the only way to deliver the
@@ -1327,11 +1368,14 @@ export class GodotRunner {
    * MCP serializes tool calls so we hold one in-flight command at a time. The
    * socket is lazy-connected on first call and persists across commands until
    * `closeConnection` (or a peer-side close). A close mid-flight rejects with
-   * `BridgeDisconnectedError`; a per-command timeout rejects but does NOT
-   * close the socket — a slow command does not invalidate the session.
+   * `BridgeDisconnectedError`. A per-command timeout rejects with a plain
+   * `Error` and destroys the socket, so a late response cannot be read as the
+   * answer to the next command; it does not end the session, and the next
+   * command reconnects.
    *
-   * Always addresses the current session. With none, the frame carries no
-   * token and goes to the default port.
+   * Always addresses the current session. With none, or with one that has no
+   * bridge port left, nothing is dialed and the call rejects with
+   * `BridgeDisconnectedError`.
    */
   sendCommand(
     command: string,
@@ -1366,6 +1410,20 @@ export class GodotRunner {
 
       if (this.socket !== null && this.socketSession !== target) this.closeConnection();
 
+      // A session with no bridge port has nothing to dial: it never started,
+      // or its process exited and the port went with it. Dialing a default
+      // port instead could reach some other Godot that happens to listen
+      // there, with a frame that carries no token.
+      const port = target?.bridgePort ?? null;
+      if (port === null) {
+        reject(
+          new BridgeDisconnectedError(
+            `Command '${command}' not sent: the session has no bridge port to connect to`,
+          ),
+        );
+        return;
+      }
+
       const settle = (err: Error | null, value?: string): void => {
         if (!this.inFlight) return;
         const flight = this.inFlight;
@@ -1395,21 +1453,30 @@ export class GodotRunner {
         );
       }, timeoutMs);
 
-      this.inFlight = { command, resolve, reject, timer };
+      const flight: InFlightCommand = { command, resolve, reject, timer };
+      this.inFlight = flight;
 
       const ensureSocket = (cb: (err?: Error) => void): void => {
         if (this.socket) {
           cb();
           return;
         }
-        // Fallback to DEFAULT_BRIDGE_PORT is defensive — every entry point
-        // (runProject, attachProject) sets the session's bridgePort before a
-        // command can be sent to it, so this branch is not expected in practice.
-        const port = target?.bridgePort ?? DEFAULT_BRIDGE_PORT;
         const sock = net.connect(port, '127.0.0.1');
+        // A connect can outlive the command that started it: the command timed
+        // out, or closeConnection rejected it, while the connect was still
+        // pending. Its late outcome then belongs to nobody. Installing that
+        // socket would point the one channel at this command's session and
+        // write this command's stale frame; reporting its failure would reject
+        // whichever command is in flight by then, possibly one for another
+        // session. Both callbacks act only while this command is still the one
+        // in flight.
         const onConnect = (): void => {
-          sock.setNoDelay(true);
           sock.removeListener('error', onConnectError);
+          if (this.inFlight !== flight) {
+            sock.destroy();
+            return;
+          }
+          sock.setNoDelay(true);
           this.socket = sock;
           this.socketSession = target;
           this.bridgeConnectObserved = true;
@@ -1484,6 +1551,7 @@ export class GodotRunner {
         };
         const onConnectError = (connErr: Error): void => {
           sock.destroy();
+          if (this.inFlight !== flight) return;
           cb(connErr);
         };
         sock.once('connect', onConnect);
@@ -1720,10 +1788,12 @@ export class GodotRunner {
    * `BridgeDisconnectedError` (it rejects any in-flight command with one), and
    * the command in flight during our own teardown is a `shutdown`. Probing on
    * that would clear a session already being torn down deliberately, and
-   * probing on a `ping` would recurse into the probe itself. Today both
-   * teardown `shutdown`s go through `sendCommandTo` and the probe calls
-   * `sendCommand` directly, so this set is unreached in production; it is
-   * here so routing either through the reconnect wrapper stays correct.
+   * probing on a `ping` would recurse into the probe itself. Both teardown
+   * `shutdown`s and the probe go straight to `sendCommandTo`, so for them this
+   * set only keeps a later rerouting through the reconnect wrapper correct.
+   * The `ping` entry is live: `check_project` and `switch_project` ping
+   * through `sendCommandWithErrors`, and an unanswered status ping must report
+   * the bridge as unresponsive without ending the session.
    */
   private static readonly DISCONNECT_EXEMPT_BRIDGE_COMMANDS = new Set(['shutdown', 'ping']);
 
@@ -1751,13 +1821,14 @@ export class GodotRunner {
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
   ): Promise<string> {
-    // The session this command belongs to. Read once: the disconnect handling
-    // below must judge and, if it comes to that, clear this session, not
-    // whichever one is current by the time the probe has failed.
+    // The session this command belongs to. Read once: the first send, the
+    // retry and the probe all go to this session, and the disconnect handling
+    // judges and, if it comes to that, clears this session, not whichever one
+    // is current by the time a delay or a probe has run its course.
     const session = this.current;
     let failure: Error;
     try {
-      return await this.sendCommand(command, params, timeoutMs);
+      return await this.sendCommandTo(session, command, params, timeoutMs);
     } catch (err) {
       if (!(err instanceof BridgeDisconnectedError)) throw err;
       failure = err;
@@ -1770,7 +1841,7 @@ export class GodotRunner {
       if (session?.mode && retryable) {
         this.closeConnection();
         await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
-        return this.sendCommand(command, params, timeoutMs);
+        return this.sendCommandTo(session, command, params, timeoutMs);
       }
       throw failure;
     }
@@ -1781,7 +1852,7 @@ export class GodotRunner {
       this.closeConnection();
       await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
       try {
-        return await this.sendCommand(command, params, timeoutMs);
+        return await this.sendCommandTo(session, command, params, timeoutMs);
       } catch (retryErr) {
         if (!(retryErr instanceof BridgeDisconnectedError)) throw retryErr;
         failure = retryErr;
@@ -1793,7 +1864,7 @@ export class GodotRunner {
     // gone and the attached session ends here.
     this.closeConnection();
     try {
-      await this.sendCommand('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+      await this.sendCommandTo(session, 'ping', {}, BRIDGE_PING_TIMEOUT_MS);
     } catch {
       this.clearAttachedSession(session);
     }

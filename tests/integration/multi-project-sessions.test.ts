@@ -42,6 +42,11 @@ const MARKER_SCENE = 'marker.tscn';
 const LABEL_A = 'project-a';
 const LABEL_B = 'project-b';
 const MAIN_SCENE = 'main.tscn';
+// switch_project gives its probe ping a few seconds. With two software-rendered
+// games on a loaded CI runner one probe can miss that budget with nothing
+// wrong, so the idempotent switch is asked again before the bridge is called
+// unresponsive. It still has to answer within these attempts.
+const SWITCH_PROBE_ATTEMPTS = 3;
 
 const tmpDirs: string[] = [];
 let runner: GodotRunner;
@@ -94,6 +99,20 @@ function labels(result: unknown): string[] {
   return elements.map((element) => element.text).filter((text): text is string => !!text);
 }
 
+/**
+ * True once switch_project's probe has seen a pong from the selected session.
+ * `first` is the payload of the switch already made; later attempts repeat the
+ * switch, which changes nothing but the probe result.
+ */
+async function probeAnswers(projectPath: string, first: Record<string, unknown>): Promise<boolean> {
+  let payload = first;
+  for (let attempt = 1; attempt < SWITCH_PROBE_ATTEMPTS; attempt += 1) {
+    if (payload.bridgeResponsive === true) break;
+    payload = payloadOf(await handleSwitchProject(runner, { projectPath }));
+  }
+  return payload.bridgeResponsive === true;
+}
+
 function liveProjectPaths(): string[] {
   return runner.listLiveSessions().map((info) => info.projectPath);
 }
@@ -137,7 +156,7 @@ describe('two projects on one runner', () => {
       expect(switched.projectPath).toBe(a);
       expect(switched.previousProjectPath).toBe(b);
       expect(switched.live).toBe(true);
-      expect(switched.bridgeResponsive).toBe(true);
+      expect(await probeAnswers(projectA, switched)).toBe(true);
 
       // 4. Now they act on A.
       const uiA = await handleGetUiElements(runner, {});

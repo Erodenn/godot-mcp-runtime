@@ -71,6 +71,16 @@ export function noLiveCurrentSessionError(
     );
   }
   if (others === '') return createErrorResponse(wording.noneMessage, wording.noneSolutions);
+  if (status.current !== null) {
+    // Current is set but holds neither a live game nor an exited process:
+    // what is left of an ended session (a finished profiler capture kept
+    // readable after stop_project). "Not pointed at any project" would be
+    // false here, and check_project names this project as the current one.
+    return createErrorResponse(
+      `The current session (project ${status.current.projectPath}) has ended, so this call cannot ${wording.action}.${others}`,
+      [...switchSolution, ...wording.noneSolutions],
+    );
+  }
   return createErrorResponse(
     `No current runtime session: the runtime tools are not pointed at any project, so this call cannot ${wording.action}.${others}`,
     [...switchSolution, ...wording.noneSolutions],

@@ -75,6 +75,7 @@ tests/
 | `unit/handlers/multi-project-handlers.test.ts`      | `switch_project`, the no-fallback errors of the runtime and profiling handlers, and `projectPath` in their payloads, against a real `GodotRunner` with installed session records     | No Godot required                                                           |
 | `integration/multi-project-sessions.test.ts`        | Two projects running at once: `switch_project`, per-project UI content, the edit guard on a non-current project, stop and self-exit without fallback                                 | Requires `GODOT_PATH`                                                       |
 | `unit/godot-runner-multi-session.test.ts`           | Per-project session map, per-session exit epoch, `switchSession`, stop without promotion                                                                                             | Mocks `child_process`                                                       |
+| `unit/godot-runner-abandoned-connect.test.ts`       | A bridge connect that outlives its command (timed out or rejected while pending) is discarded and cannot fail or redirect the next command                                           | Mocks `net.connect`                                                         |
 
 (Add new rows here as additional test files land. The map indexes the
 load-bearing files rather than every file in the suite.)

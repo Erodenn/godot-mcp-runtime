@@ -50,7 +50,7 @@ export const projectToolDefinitions = [
   {
     name: 'check_project',
     description:
-      "Get project metadata (name, path, Godot version, structure) plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session (the one the runtime tools act on), runtime.projectPath names its project (null when none) and runtime.liveSessions lists every live session. With projectPath, runtime.project reports that project\'s own session: live, exited or none. Never errors on the runtime probe. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath lacks project.godot.",
+      "Get project metadata (name, path, Godot version, structure) plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session (the one the runtime tools act on), runtime.projectPath names its project (null when none) and runtime.liveSessions lists every live session. With projectPath, runtime.project reports that project's own session: live, exited or none. Never errors on the runtime probe. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath lacks project.godot.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
