@@ -201,7 +201,7 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 ## Strict mode
 
-`GODOT_MCP_STRICT=true` is read once at process start. When enabled:
+`GODOT_MCP_STRICT=true` is read once at process start. Only the exact string `true` enables it. Any other value except `false` or an empty one (`1`, `TRUE`, `yes`) leaves it off and is reported on stderr at startup. When enabled:
 
 - Every Tier 2 match becomes Tier 1 (hard reject). No elicitation prompt is sent.
 - `run_project` becomes a hard reject if any autoload script or the launched scene's attached scripts contain a Tier 1 primitive.
@@ -214,7 +214,7 @@ Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on 
 
 ## Disabling elicitation
 
-`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients - notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) - advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
+`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start, and only the exact string `true` enables it. Any other value except `false` or an empty one is reported on stderr at startup and leaves confirmation prompts on. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients - notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) - advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
 
 When enabled, the interactive confirmation is skipped and treated as accepted (**fail-open**):
 
@@ -230,7 +230,7 @@ Only enable this when you trust the project and the agent driving it - it remove
 
 ## Disabling the entire gate
 
-`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar - for both handlers.
+`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start, and only the exact string `true` enables it. Any other value except `false` or an empty one is reported on stderr at startup and leaves the gate on. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar - for both handlers.
 
 Specifically, this flag skips:
 

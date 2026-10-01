@@ -452,3 +452,37 @@ describe('handleListProjects', () => {
     expect(text).not.toContain('.git');
   });
 });
+
+describe('handleGetProjectSettings: section names are data, not object keys', () => {
+  const PROTO_PROJECT =
+    'config_version=5\n\n[__proto__]\npolluted="yes"\n\n[application]\nconfig/name="X"\n';
+
+  it('a [__proto__] section does not reach Object.prototype and is returned as a section', async () => {
+    const dir = tmp.makeProject('mcp-proto-', PROTO_PROJECT);
+    const result = await handleGetProjectSettings({ projectPath: dir });
+    expectMatchesOutputSchema('get_project_settings', result);
+    const parsed = parseText<{ settings: Record<string, Record<string, unknown>> }>(result);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.hasOwn(parsed.settings, '__proto__')).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(parsed.settings, '__proto__')?.value).toEqual({
+      polluted: 'yes',
+    });
+    expect(Object.hasOwn(parsed.settings, 'application')).toBe(true);
+
+    const filtered = await handleGetProjectSettings({ projectPath: dir, section: '__proto__' });
+    const payload = expectMatchesOutputSchema('get_project_settings', filtered);
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.settings).toEqual({ polluted: 'yes' });
+  });
+
+  it('a section filter named constructor reports the section as absent', async () => {
+    const dir = tmp.makeProject('mcp-ctor-', PROTO_PROJECT);
+    const result = await handleGetProjectSettings({ projectPath: dir, section: 'constructor' });
+    const payload = expectMatchesOutputSchema('get_project_settings', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      'Section "constructor" is not present in project.godot, so settings is empty',
+    ]);
+    expect(payload.settings).toEqual({});
+  });
+});

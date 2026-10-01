@@ -19,7 +19,12 @@ import { getErrorMessage } from './utils/error-response.js';
 import { registerProcessLifecycle } from './utils/process-lifecycle.js';
 
 import { dispatchToolCall } from './dispatch.js';
-import { resolveDisableSecurity, type Elicitor, type McpContext } from './utils/mcp-context.js';
+import {
+  describeIgnoredFlagValues,
+  resolveDisableSecurity,
+  type Elicitor,
+  type McpContext,
+} from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import { renderToolDefinitions } from './tools/render-tools.js';
 import { autoloadToolDefinitions } from './tools/autoload-tools.js';
@@ -85,6 +90,9 @@ function createContextFromServer(server: Server): McpContext {
       ? { action: result.action, content: result.content as Record<string, unknown> }
       : { action: result.action };
   };
+  // A flag set to anything but the exact string "true" is off; say so, because
+  // a value like "1" otherwise leaves the operator believing it took effect.
+  for (const line of describeIgnoredFlagValues(process.env)) console.error(line);
   const strictMode = process.env.GODOT_MCP_STRICT === 'true';
   // Strict mode mandates explicit confirmation, so it overrides the
   // disable-elicitation opt-out: when both are set, strict wins and disableElicitation

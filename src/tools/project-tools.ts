@@ -525,7 +525,7 @@ function parseProjectSettings(
 ): Record<string, Record<string, SettingsValue>> {
   const content = readFileSync(projectFilePath, 'utf8');
   const lines = content.split('\n');
-  const result: Record<string, Record<string, SettingsValue>> = {};
+  const result: Record<string, Record<string, SettingsValue>> = Object.create(null);
   let currentSection = '__global__';
 
   let i = 0;
@@ -573,7 +573,7 @@ function parseProjectSettings(
       const num = Number(rawVal);
       value = isNaN(num) ? rawVal : num;
     }
-    const section = (result[currentSection] ??= {});
+    const section = (result[currentSection] ??= Object.create(null));
     section[key] = value;
   }
   return result;
@@ -886,7 +886,9 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
     const projectFile = projectGodotPath(parsed.value.projectPath);
     const allSettings = parseProjectSettings(projectFile);
     if (section.value) {
-      const sectionData = allSettings[section.value];
+      const sectionData = Object.hasOwn(allSettings, section.value)
+        ? allSettings[section.value]
+        : undefined;
       const warnings =
         sectionData === undefined
           ? [`Section "${section.value}" is not present in project.godot, so settings is empty`]

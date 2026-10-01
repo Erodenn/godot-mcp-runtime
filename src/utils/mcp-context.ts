@@ -124,6 +124,32 @@ export function resolveDisableSecurity(
   return { disableSecurity, strictIgnored: disableSecurity && strictMode };
 }
 
+/** The flags that turn on only for the exact string `true`, and what each being off means. */
+const BOOLEAN_FLAG_OFF_EFFECTS: ReadonlyArray<readonly [name: string, effect: string]> = [
+  ['GODOT_MCP_STRICT', 'strict mode is OFF'],
+  ['GODOT_MCP_DISABLE_ELICITATION', 'confirmation prompts stay ON'],
+  ['GODOT_MCP_DISABLE_SECURITY', 'the security gate stays ON'],
+];
+
+/**
+ * One startup line per security flag that is set to something other than
+ * `true` or `false`. Each flag is read as the exact string `true`, so a value
+ * such as `1` or `TRUE` leaves the flag off without any other sign; naming it
+ * on stderr is the only way the operator finds out. Unset and empty values are
+ * not reported: they are how a flag is normally left off.
+ */
+export function describeIgnoredFlagValues(env: Record<string, string | undefined>): string[] {
+  const lines: string[] = [];
+  for (const [name, effect] of BOOLEAN_FLAG_OFF_EFFECTS) {
+    const value = env[name];
+    if (value === undefined || value === '' || value === 'true' || value === 'false') continue;
+    lines.push(
+      `[SERVER] ${name}=${JSON.stringify(value)} is not "true" and was ignored: ${effect}`,
+    );
+  }
+  return lines;
+}
+
 /**
  * Normalize an absolute project path for use as a key in `runProjectConfirmed`.
  * Windows paths are case-insensitive at the filesystem level, so two calls with
