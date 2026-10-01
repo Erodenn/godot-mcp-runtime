@@ -89,7 +89,7 @@ export interface TscnScan {
   malformed: Array<{ line: number; reason: string; raw: string }>;
 }
 
-interface QuotedString {
+export interface QuotedString {
   value: string;
   /** Index just past the closing quote. */
   end: number;
@@ -115,7 +115,7 @@ function isBlank(ch: string | undefined): boolean {
  * Read the quoted string whose opening quote is at `start`, unescaping it.
  * Returns null when no closing quote is found before `limit`.
  */
-function readQuoted(content: string, start: number, limit: number): QuotedString | null {
+export function readQuoted(content: string, start: number, limit: number): QuotedString | null {
   let out = '';
   let i = start + 1;
   while (i < limit) {

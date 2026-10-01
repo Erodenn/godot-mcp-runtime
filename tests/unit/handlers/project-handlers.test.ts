@@ -486,3 +486,193 @@ describe('handleGetProjectSettings: section names are data, not object keys', ()
     expect(payload.settings).toEqual({});
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleGetProjectSettings: values as Godot writes them
+// ---------------------------------------------------------------------------
+
+describe('handleGetProjectSettings: value lexing', () => {
+  type SettingsPayload = {
+    warnings?: string[];
+    settings: Record<string, Record<string, unknown>>;
+  };
+
+  async function readSettings(projectGodot: string): Promise<SettingsPayload> {
+    const projectPath = tmp.makeProject('mcp-lex-', projectGodot);
+    const result = await handleGetProjectSettings({ projectPath });
+    expectMatchesOutputSchema('get_project_settings', result);
+    return parseText<SettingsPayload>(result);
+  }
+
+  it('a string value spanning two lines is returned whole and invents no key', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'config/description="First line',
+        'second line, speed=fast"',
+        'config/name="Game"',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application['config/description']).toBe(
+      'First line\nsecond line, speed=fast',
+    );
+    expect(parsed.settings.application).not.toHaveProperty('second line, speed');
+    expect(parsed.settings.application['config/name']).toBe('Game');
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('a dictionary value holding a string that ends in an escaped backslash does not swallow the keys after it', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'custom/drives=["C:\\\\", "D:\\\\"]',
+        'custom/after=7',
+        'custom/paths={',
+        String.raw`"root": "C:\\",`,
+        '"extra": ["a", "b"]',
+        '}',
+        'config/name="Game"',
+        '',
+        '[display]',
+        '',
+        'window/size/viewport_width=1920',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application['custom/drives']).toBe(String.raw`["C:\\", "D:\\"]`);
+    expect(parsed.settings.application['custom/after']).toBe(7);
+    expect(parsed.settings.application['custom/paths']).toBe(
+      ['{', String.raw`"root": "C:\\",`, '"extra": ["a", "b"]', '}'].join('\n'),
+    );
+    expect(parsed.settings.application['config/name']).toBe('Game');
+    expect(parsed.settings.display['window/size/viewport_width']).toBe(1920);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('a section name with a hyphen is recognized', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'config/name="Game"',
+        '',
+        '[my-addon]',
+        '',
+        'feature/enabled=true',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings['my-addon']).toEqual({ 'feature/enabled': true });
+    expect(parsed.settings.application).not.toHaveProperty('feature/enabled');
+  });
+
+  it('an unterminated value is returned with a leading warning', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[input]',
+        '',
+        'jump={',
+        '"deadzone": 0.5,',
+        '',
+        '[display]',
+        '',
+        'window/size/viewport_width=1920',
+        '',
+      ].join('\n'),
+    );
+    expect(Object.keys(parsed)[0]).toBe('warnings');
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings?.[0]).toMatch(/input\/jump is unterminated/);
+    expect(parsed.settings.input.jump).toBe('{\n"deadzone": 0.5,');
+    expect(parsed.settings.display['window/size/viewport_width']).toBe(1920);
+  });
+
+  it('a line that cannot be parsed is counted in a leading warning', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'this line has no equals sign',
+        'config/name="Game"',
+        'another stray line',
+        '',
+      ].join('\n'),
+    );
+    expect(Object.keys(parsed)[0]).toBe('warnings');
+    expect(parsed.warnings).toEqual([
+      '2 line(s) could not be parsed and were skipped; first: this line has no equals sign',
+    ]);
+    expect(parsed.settings.application['config/name']).toBe('Game');
+  });
+
+  it('an empty value is null with a warning', async () => {
+    const parsed = await readSettings(
+      ['config_version=5', '', '[application]', '', 'config/tags=', 'config/name="Game"', ''].join(
+        '\n',
+      ),
+    );
+    expect(parsed.settings.application['config/tags']).toBeNull();
+    expect(Object.keys(parsed)[0]).toBe('warnings');
+    expect(parsed.warnings).toEqual(['Value of application/config/tags is empty and is null']);
+  });
+
+  it('string escapes are unescaped', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        String.raw`config/name="My \"Game\" in C:\\games"`,
+        String.raw`config/note="a \\ b"`,
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application['config/name']).toBe('My "Game" in C:\\games');
+    expect(parsed.settings.application['config/note']).toBe('a \\ b');
+  });
+
+  it('config_version is reported under __global__', async () => {
+    const parsed = await readSettings('config_version=5\n\n[application]\n\nconfig/name="Game"\n');
+    expect(parsed.settings.__global__).toEqual({ config_version: 5 });
+  });
+
+  it('constructor values stay raw strings and numbers and booleans are typed', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'config/features=PackedStringArray("4.3", "Forward Plus")',
+        'config/icon="res://icon.svg"',
+        'run/max_fps=60',
+        'run/ratio=0.5',
+        'run/big=1e3',
+        'config/use_hidden_project_data_directory=false',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application).toEqual({
+      'config/features': 'PackedStringArray("4.3", "Forward Plus")',
+      'config/icon': 'res://icon.svg',
+      'run/max_fps': 60,
+      'run/ratio': 0.5,
+      'run/big': 1000,
+      'config/use_hidden_project_data_directory': false,
+    });
+  });
+});

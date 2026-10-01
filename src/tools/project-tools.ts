@@ -6,7 +6,7 @@ import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.type
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
   parseSceneArgs,
@@ -18,6 +18,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
+import { readQuoted } from '../utils/scene-parsing.js';
 
 function fileExtension(name: string): string {
   const dotIdx = name.lastIndexOf('.');
@@ -254,7 +255,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into JSON without launching Godot. Use to inspect display, input, rendering and other settings. Pass section to read one INI section (e.g. "display"). Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section when one was given; warnings leads when that section is absent. Complex Godot values, multi-line arrays and dicts such as an [input] action included, come back as their complete raw string. Keys outside any section appear under __global__.',
+      'Parse project.godot into JSON without launching Godot. Use to inspect display, input and rendering settings. Pass section for one INI section (e.g. "display"). Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section. Strings are unescaped, an empty value is null, complex values stay raw text. Keys before any section, config_version included, are under __global__. warnings leads when the section is absent, a value is unterminated or empty, or a line was skipped.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -276,7 +277,7 @@ export const projectToolDefinitions = [
         settings: {
           type: 'object',
           description:
-            'Without section: { [section]: { [key]: value } }. With section: { [key]: value }.',
+            'Without section: { [section]: { [key]: value } }. With section: { [key]: value }. A value is a string, number, boolean or null (an empty value).',
         },
       },
       required: ['settings'],
@@ -488,95 +489,152 @@ function searchInFiles(
 
 // --- Project helper: project settings parser ---
 
-type SettingsValue = string | number | boolean;
+type SettingsValue = string | number | boolean | null;
+
+interface ParsedSettings {
+  settings: Record<string, Record<string, SettingsValue>>;
+  warnings: string[];
+}
+
+/** Settings keys that precede every section header are reported under this name. */
+const GLOBAL_SECTION = '__global__';
+
+/** Longest slice of an unparsed line quoted in a warning. */
+const UNPARSED_LINE_SNIPPET_MAX = 120;
 
 // Godot section headers are a bare identifier-ish name in brackets on its own
 // line (e.g. "[input]"), never containing commas or spaces the way a
-// multi-line array/dict literal's closing lines can. Used both to detect a
-// real section boundary and to cap a runaway multi-line scan at one.
+// multi-line array/dict literal's closing lines can. Used only to cap a runaway
+// multi-line value at the next real section boundary.
 const SECTION_HEADER_REGEX = /^\[[A-Za-z0-9_/.]+\]$/;
 
-/**
- * Net count of unmatched `{`/`[` in a single line, ignoring any such
- * character inside a double-quoted segment so a brace embedded in a string
- * value does not unbalance the scan.
- */
-function scanBraceDelta(line: string): { curly: number; square: number } {
-  let curly = 0;
-  let square = 0;
-  let inQuote = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' && line[i - 1] !== '\\') {
-      inQuote = !inQuote;
-      continue;
-    }
-    if (inQuote) continue;
-    if (ch === '{') curly++;
-    else if (ch === '}') curly--;
-    else if (ch === '[') square++;
-    else if (ch === ']') square--;
-  }
-  return { curly, square };
+/** A statement-level header: any bracketed line, the test `walkIniSection` applies. */
+const SECTION_LINE_REGEX = /^\[.*\]$/;
+
+const NUMBER_VALUE_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+interface RawValue {
+  raw: string;
+  /** Index of the line break that ended the value, or the content length. */
+  end: number;
+  unterminated: boolean;
 }
 
-function parseProjectSettings(
-  projectFilePath: string,
-): Record<string, Record<string, SettingsValue>> {
-  const content = readFileSync(projectFilePath, 'utf8');
-  const lines = content.split('\n');
-  const result: Record<string, Record<string, SettingsValue>> = Object.create(null);
-  let currentSection = '__global__';
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = (lines[i] ?? '').trim();
-    i++;
-    if (line === '' || line.startsWith(';') || line.startsWith('#')) continue;
-    if (line.startsWith('config_version')) continue; // header line
-    if (SECTION_HEADER_REGEX.test(line)) {
-      currentSection = line.slice(1, -1);
+/**
+ * Read one value starting at `start` (just after the `=`). Quoted strings keep
+ * their backslash escapes and may span lines; `{ [ (` depth is tracked outside
+ * strings, and the value ends at the first line break at depth zero outside a
+ * string. While inside brackets, a following line that is a section header ends
+ * the value as unterminated, so a malformed file cannot swallow the rest of it.
+ */
+function readRawValue(content: string, start: number): RawValue {
+  const length = content.length;
+  let depth = 0;
+  let inString = false;
+  let i = start;
+  while (i < length) {
+    const ch = content[i]!;
+    if (inString) {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      i++;
       continue;
     }
-    const eqIdx = line.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = line.slice(0, eqIdx).trim();
-    const rawVal = line.slice(eqIdx + 1).trim();
-    let value: SettingsValue;
-
-    if (rawVal.startsWith('{') || rawVal.startsWith('[')) {
-      // Multi-line array/dict literal: keep consuming lines until brace and
-      // bracket depth returns to zero, capping at the next section header (or
-      // EOF) so a malformed file cannot run away. The joined raw text is
-      // returned as-is; we do not attempt to parse Godot's Object(...) syntax.
-      const valueLines = [rawVal];
-      const delta = scanBraceDelta(rawVal);
-      let curly = delta.curly;
-      let square = delta.square;
-      while (curly !== 0 || square !== 0) {
-        const nextLine = lines[i];
-        if (nextLine === undefined || SECTION_HEADER_REGEX.test(nextLine.trim())) break;
-        valueLines.push(nextLine);
-        const nextDelta = scanBraceDelta(nextLine);
-        curly += nextDelta.curly;
-        square += nextDelta.square;
-        i++;
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{' || ch === '[' || ch === '(') {
+      depth++;
+    } else if ((ch === '}' || ch === ']' || ch === ')') && depth > 0) {
+      depth--;
+    } else if (ch === '\n') {
+      if (depth === 0) return { raw: content.slice(start, i).trim(), end: i, unterminated: false };
+      const nextEnd = content.indexOf('\n', i + 1);
+      const nextLine = content.slice(i + 1, nextEnd === -1 ? length : nextEnd).trim();
+      if (SECTION_HEADER_REGEX.test(nextLine)) {
+        return { raw: content.slice(start, i).trim(), end: i, unterminated: true };
       }
-      value = valueLines.join('\n').trim();
-    } else if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
-      value = rawVal.slice(1, -1);
-    } else if (rawVal === 'true') {
-      value = true;
-    } else if (rawVal === 'false') {
-      value = false;
-    } else {
-      const num = Number(rawVal);
-      value = isNaN(num) ? rawVal : num;
     }
-    const section = (result[currentSection] ??= Object.create(null));
-    section[key] = value;
+    i++;
   }
-  return result;
+  return {
+    raw: content.slice(start, length).trim(),
+    end: length,
+    unterminated: inString || depth > 0,
+  };
+}
+
+/**
+ * Convert a trimmed, non-empty raw value. A lone quoted string is unescaped;
+ * `true`, `false` and plain numbers are typed; everything else (constructors
+ * such as `PackedStringArray(...)`, arrays, dictionaries) stays its raw text.
+ */
+function convertSettingsValue(raw: string): SettingsValue {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw.startsWith('"')) {
+    const quoted = readQuoted(raw, 0, raw.length);
+    return quoted !== null && quoted.end === raw.length ? quoted.value : raw;
+  }
+  return NUMBER_VALUE_REGEX.test(raw) ? Number(raw) : raw;
+}
+
+function parseProjectSettings(projectFilePath: string): ParsedSettings {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const settings: ParsedSettings['settings'] = Object.create(null);
+  const warnings: string[] = [];
+  const unparsed: string[] = [];
+  let currentSection = GLOBAL_SECTION;
+
+  let pos = 0;
+  while (pos < content.length) {
+    const newlineAt = content.indexOf('\n', pos);
+    const lineEnd = newlineAt === -1 ? content.length : newlineAt;
+    const rawLine = content.slice(pos, lineEnd);
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith(';') || line.startsWith('#')) {
+      pos = lineEnd + 1;
+      continue;
+    }
+    if (SECTION_LINE_REGEX.test(line)) {
+      currentSection = line.slice(1, -1);
+      pos = lineEnd + 1;
+      continue;
+    }
+    const equalsAt = rawLine.indexOf('=');
+    const key = equalsAt === -1 ? '' : rawLine.slice(0, equalsAt).trim();
+    if (key === '') {
+      unparsed.push(line);
+      pos = lineEnd + 1;
+      continue;
+    }
+
+    const value = readRawValue(content, pos + equalsAt + 1);
+    pos = value.end + 1;
+    const location = `${currentSection}/${key}`;
+    if (value.unterminated) {
+      warnings.push(
+        `Value of ${location} is unterminated and was returned as far as it could be read`,
+      );
+    }
+    let converted: SettingsValue = null;
+    if (value.raw === '') {
+      if (!value.unterminated) warnings.push(`Value of ${location} is empty and is null`);
+    } else {
+      converted = convertSettingsValue(value.raw);
+    }
+    const section = (settings[currentSection] ??= Object.create(null));
+    section[key] = converted;
+  }
+
+  if (unparsed.length > 0) {
+    warnings.push(
+      `${unparsed.length} line(s) could not be parsed and were skipped; first: ${unparsed[0]!.slice(0, UNPARSED_LINE_SNIPPET_MAX)}`,
+    );
+  }
+  return { settings, warnings };
 }
 
 // --- Handlers ---
@@ -884,22 +942,25 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const allSettings = parseProjectSettings(projectFile);
+    const { settings: allSettings, warnings: parseWarnings } = parseProjectSettings(projectFile);
     if (section.value) {
       const sectionData = Object.hasOwn(allSettings, section.value)
         ? allSettings[section.value]
         : undefined;
       const warnings =
         sectionData === undefined
-          ? [`Section "${section.value}" is not present in project.godot, so settings is empty`]
-          : [];
-      return createStructuredResponse({
-        ...(warnings.length > 0 ? { warnings } : {}),
-        section: section.value,
-        settings: sectionData ?? {},
-      });
+          ? [
+              `Section "${section.value}" is not present in project.godot, so settings is empty`,
+              ...parseWarnings,
+            ]
+          : parseWarnings;
+      return createStructuredResponse(
+        leadWithWarnings({ warnings, section: section.value, settings: sectionData ?? {} }),
+      );
     }
-    return createStructuredResponse({ settings: allSettings });
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: parseWarnings, settings: allSettings }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project settings: ${getErrorMessage(error)}`, [

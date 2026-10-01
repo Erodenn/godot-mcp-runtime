@@ -391,7 +391,7 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 - `add_autoload`: `autoload`, the new entry as read back from `project.godot`, and a `tip` on verifying that it loads.
 - `update_autoload`: `autoload`, the entry as read back after the edit.
 - `remove_autoload`: `removed`, the name, and `autoloads[]`, the entries that remain.
-- `get_project_settings`: `settings`. Without `section` it is `{ [section]: { [key]: value } }`. With `section` it is that section's `{ [key]: value }` and the payload repeats `section`; a section that `project.godot` does not have returns an empty `settings` and a leading `warnings` entry.
+- `get_project_settings`: `settings`. Without `section` it is `{ [section]: { [key]: value } }`. With `section` it is that section's `{ [key]: value }` and the payload repeats `section`; a section that `project.godot` does not have returns an empty `settings` and a leading `warnings` entry. Quoted strings are returned unescaped, including a string that spans lines; a number or boolean is typed; an empty value is `null`; any other value (a constructor such as `PackedStringArray(...)`, an array, a dictionary) is its complete raw text. `config_version` and any key before the first section are under `__global__`. `warnings` also leads when a value is unterminated (returned as far as it could be read) or empty, and counts the lines that could not be parsed.
 - `get_project_files`: the root directory node `{ name, type, path, children[] }`. A file child is `{ name, type, path, extension }`; a directory child has the root's shape.
 - `search_project`: `matches[]` of `{ file, lineNumber, line }` and `truncated`.
 - `get_scene_dependencies`: `scenePath` and `dependencies[]` of `{ path, type, uid? }`.
