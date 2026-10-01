@@ -48,7 +48,7 @@ export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes, with their descendants, from a scene. Always-array: pass a single-element nodePaths array for a one-off delete. Saves once at the end. The scene root cannot be deleted: that entry reports an error and the rest still process. Returns: results[], one entry per nodePath in input order, each with success or error. Errors while a runtime session is live on this project.',
+      'Remove one or more nodes, with their descendants, from a scene. Always-array: pass a single-element nodePaths array for a one-off delete. Saves once at the end. The scene root, and any node inside an instanced scene, cannot be deleted: that entry reports an error and the rest still process. Returns: results[], one entry per nodePath in input order, each with success or error. Errors while a runtime session is live on this project.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

@@ -568,6 +568,9 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		if unstored != "":
 			warnings.append(unstored)
 	parent.add_child(new_node)
+	# A parent inside an instanced child is dropped by pack() unless the instance
+	# is editable from the scene root.
+	_claim_for_serialization(scene_root, new_node)
 	new_node.owner = scene_root
 	# Read the outcome back from the node now that it is in the tree. add_child
 	# renames a child whose name collides with a sibling, and assigning a name
@@ -616,6 +619,9 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	# cannot serialize it, so the assignment would silently vanish on save.
 	if texture.resource_path == "":
 		return {"ok": false, "error": "Texture was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
+	# A sprite inside an instanced child keeps this assignment only when the
+	# instance is editable from the scene root.
+	_claim_for_serialization(scene_root, sprite_node)
 	sprite_node.texture = texture
 	# Report what the node holds after the assignment, not what was asked for.
 	var assigned = sprite_node.texture
@@ -813,6 +819,11 @@ func delete_nodes(params):
 			entry["error"] = "Node not found: " + node_path
 		elif node == scene_root:
 			entry["error"] = "Cannot delete the root node"
+		elif node.owner != scene_root:
+			# An instance re-creates its inner nodes on every load, so a deletion
+			# made here would be reported saved and come back. The instance's own
+			# root is owned by this scene and stays deletable.
+			entry["error"] = "Node '%s' belongs to an instanced scene (or is not owned by this scene) and cannot be deleted from here; edit the scene it comes from" % node_path
 		else:
 			var parent = node.get_parent()
 			parent.remove_child(node)
@@ -1160,6 +1171,9 @@ func attach_script(params):
 		quit(1)
 		return
 
+	# A node inside an instanced child keeps its script only when the instance
+	# is editable from the scene root.
+	_claim_for_serialization(scene_root, node)
 	node.set_script(script)
 
 	var verify = _verify_script_attached(node, script)
@@ -1215,13 +1229,24 @@ func duplicate_node(params):
 			return
 
 	parent.add_child(duplicate)
+	# A duplicate placed inside an instanced child is dropped by pack() unless
+	# the instance is editable from the scene root.
+	_claim_for_serialization(scene_root, duplicate)
 	duplicate.owner = scene_root
 	# Iterative BFS to set owner on all descendants — avoids recursion depth.
-	var queue: Array = duplicate.get_children()
+	# The inner nodes of an instanced scene are not this scene's own: the
+	# instance is saved as one instance= line and re-creates them on load, so
+	# giving them this scene as owner would make pack() write them out a second
+	# time and leave two copies after a reload. The instance root itself is
+	# owned like any other node; nothing below it is touched.
+	var queue: Array = []
+	if duplicate.get_scene_file_path() == "":
+		queue = duplicate.get_children()
 	while not queue.is_empty():
 		var current = queue.pop_front()
 		current.owner = scene_root
-		queue.append_array(current.get_children())
+		if current.get_scene_file_path() == "":
+			queue.append_array(current.get_children())
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		emit_result({
