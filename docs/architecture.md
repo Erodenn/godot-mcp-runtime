@@ -141,7 +141,9 @@ The sentinel constant lives in `src/utils/bridge-protocol.ts` and `src/scripts/m
 
 ## Runtime Artifacts
 
-Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, and validation temp files in `validate/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
+Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, validation temp files in `validate/`, and `render_movie` output in `movies/<run id>/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
+
+`render_movie` is the one launcher that never touches the bridge. It spawns Godot with `--write-movie` through `runMovieProcess` in `src/utils/movie-process.ts`, holds no session state on the runner, and reads the result from disk: PNG frames are decoded and measured by the same Node-side statistics module `take_screenshot` uses. The call is bounded by a timeout that scales with the requested frames, and a timeout kills the whole process tree. `check` runs delete their directory before returning; `frames` and `video` runs stay until someone deletes them.
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
 

@@ -274,6 +274,8 @@ Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release.
 
 The first `run_project` call against a given `projectPath` in a session prompts one elicitation: "Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?" Subsequent calls in the same session against the same project skip. A `cancel` response (client dismissed the prompt without a choice, or auto-cancelled it) is reported distinctly from an explicit `decline` and points the user at `GODOT_MCP_DISABLE_ELICITATION`. When that flag is set, this gate is skipped entirely (see "Disabling elicitation").
 
+`render_movie` launches the project too, so it runs this same pre-flight scan and shares the once-per-session launch confirmation with `run_project`: confirming either one covers both for that project. Strict mode and `GODOT_MCP_DISABLE_SECURITY` apply to it exactly as they do to `run_project`.
+
 ---
 
 ## Audit trail

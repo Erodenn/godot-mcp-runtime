@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { runtimeToolDefinitions } from '../../src/tools/runtime-tools.js';
+import { renderToolDefinitions } from '../../src/tools/render-tools.js';
 import { autoloadToolDefinitions } from '../../src/tools/autoload-tools.js';
 import { projectToolDefinitions } from '../../src/tools/project-tools.js';
 import { sceneToolDefinitions } from '../../src/tools/scene-tools.js';
@@ -10,6 +11,7 @@ import type { ToolDefinition } from '../../src/mcp.types.js';
 
 const allDefinitions: ToolDefinition[] = [
   ...runtimeToolDefinitions,
+  ...renderToolDefinitions,
   ...autoloadToolDefinitions,
   ...projectToolDefinitions,
   ...sceneToolDefinitions,

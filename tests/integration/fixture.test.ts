@@ -43,4 +43,16 @@ describe('tests/fixtures/godot-project: fixture health', () => {
     expect(content).toContain('probe_move');
     expect(content).toContain('"physical_keycode":87');
   });
+
+  // The two sibling scenes below are the animated and static cases for the
+  // render_movie motion tests.
+  it('motion_animated.tscn references motion_animated.gd, which exists', () => {
+    const content = readFileSync(join(fixturePath, 'motion_animated.tscn'), 'utf8');
+    expect(content).toContain('res://motion_animated.gd');
+    expect(existsSync(join(fixturePath, 'motion_animated.gd'))).toBe(true);
+  });
+
+  it('motion_static.tscn exists alongside main.tscn', () => {
+    expect(existsSync(join(fixturePath, 'motion_static.tscn'))).toBe(true);
+  });
 });

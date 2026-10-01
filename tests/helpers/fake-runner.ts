@@ -19,7 +19,7 @@
  * actually invoked the batch operation rather than the single-target one.
  */
 
-import type { GodotRunner, OperationResult } from '../../src/utils/godot-runner.js';
+import { GodotRunner, type OperationResult } from '../../src/utils/godot-runner.js';
 import type { OperationParams } from '../../src/mcp.types.js';
 import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
@@ -66,6 +66,12 @@ export interface FakeRunnerOptions {
    * Default: "4.3.stable".
    */
   godotVersion?: string;
+  /**
+   * Path returned by getGodotPath() for handlers that need the executable
+   * (e.g. render_movie). Default: "/fake/godot". Set to null to simulate an
+   * undetected Godot.
+   */
+  godotPath?: string | null;
   /** If set, importAssets() rejects with this error instead of resolving. */
   importThrows?: Error;
 }
@@ -90,6 +96,7 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const responses = options.responses ?? [];
   const godotVersion = options.godotVersion ?? '4.3.stable';
   const importThrows = options.importThrows;
+  const godotPath = options.godotPath !== undefined ? options.godotPath : '/fake/godot';
 
   const fake = {
     calls,
@@ -125,6 +132,15 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     async getVersion(): Promise<string> {
       return godotVersion;
     },
+    getGodotPath(): string | null {
+      return godotPath;
+    },
+    async detectGodotPath(): Promise<void> {
+      // Detection is a no-op: godotPath is fixed by the option.
+    },
+    // The real filter, which reads no instance state.
+    extractRuntimeErrors: (lines: string[]): string[] =>
+      GodotRunner.prototype.extractRuntimeErrors.call(undefined, lines),
     // Mirrors the real GodotRunner.hasActiveRuntimeSession() predicate so
     // guard tests exercise the same liveness logic production code does.
     hasActiveRuntimeSession(): boolean {

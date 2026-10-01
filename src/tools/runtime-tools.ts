@@ -47,8 +47,8 @@ import { runLaunchGate } from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
-const DEFAULT_PREVIEW_MAX_WIDTH = 960;
-const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
+export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
+export const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
 const STATS_NOT_MEASURED_WARNING_PREFIX = 'Pixel stats were not measured: ';
 const STATS_NOT_MEASURED_WARNING_SUFFIX =
   '. The screenshot was saved; stats is null, which does not mean the frame is blank.';

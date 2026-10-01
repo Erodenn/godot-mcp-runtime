@@ -86,6 +86,37 @@ Neither wait is capped by a client-timeout budget. `ms` is uncapped outright, an
 
 Signal observers are connected before injection and disconnected after the one settle frame, so `signals` reports what the target emitted inside that frame. A handler that emits later (via `call_deferred`, a tween, an animation callback or a timer) is not observed: an absent entry means "not within one frame", not "never".
 
+## Render check: `render_movie` (no runtime session)
+
+| Tool           | Description                                                                                                         |
+| -------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `render_movie` | Render a fixed number of frames in a separate short Godot run and report what rendered: blank or not, moving or not |
+
+`render_movie` spawns one Godot process under the engine's movie writer (`--write-movie`, `--fixed-fps`, `--quit-after`) and waits for it to exit. Nothing is injected: no bridge, no autoload edit, no runtime session, and `project.godot` is not touched. It needs a display server, like `run_project`; the movie writer does not render under `--headless`. A window appears for the length of the run.
+
+It launches the project, so it goes through the same pre-flight scan and the same once-per-project launch confirmation as `run_project`. It is refused while a runtime session is live on the same project, from this server or another one, because the second process would load the injected bridge.
+
+| Parameter      | Default | Notes                                                         |
+| -------------- | ------- | ------------------------------------------------------------- |
+| `scene`        | main    | Project-relative scene to render                              |
+| `mode`         | `check` | `check`, `frames` or `video`                                  |
+| `frames`       | 30      | 2 to 600. The run is budgeted at 30 s plus 250 ms per frame   |
+| `fps`          | 30      | 1 to 120. Game time covered is `frames / fps` seconds         |
+| `inlineFrames` | 3       | `check` only, 0 to 6. Evenly spaced, ending at the last frame |
+| `format`       | `avi`   | `video` only: `avi` or `ogv`                                  |
+
+| Mode     | Keeps files                                      | Returns                                                                                                             |
+| -------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `check`  | No, frames and `frame.wav` deleted               | `likelyBlank`, `motion`, `anyMotion`, `motionPairs`, `samples`, and inline images downscaled to fit 960x540         |
+| `frames` | Yes, under `.mcp/godot-runtime/movies/<run id>/` | The same measurements without images, plus `directory`, `framePattern`, `framePaths` (up to 60 frames), `audioPath` |
+| `video`  | Yes, one file                                    | `path`, `format`, `byteSize`, `fps`, `framesRequested`, and `statsAvailable: false`                                 |
+
+Measurements are observations, sampled the same way as `take_screenshot` stats. At most 8 frames are measured, evenly spaced after the first 5, so `frameCount` (frames on disk) and `measuredFrames` are reported separately. `likelyBlank` is judged on the last frame, because the first frames of a run can be blank while the scene loads. `motionPairs` holds the mean color difference between consecutive measured frames on a 0 to 1 scale; `motion` is the largest and `anyMotion` is true when any pair is above 0.0005. No parameter changes these thresholds.
+
+What it cannot say: that the right thing rendered, that a small element between sample points moved, or anything that needs input. It never simulates input; for that, use `run_project`, `simulate_input` and `take_screenshot`. `video` mode has no pixel stats at all, and says so in the payload instead of leaving the fields out silently.
+
+A frame that cannot be read is `stats: null` with a leading `warnings` entry, never a made-up number. `likelyBlank`, `motion` and `anyMotion` are `null` when they could not be determined. A timeout (the process tree is killed), a non-zero exit (with the last stderr lines) and a run that wrote no frames are errors. A `video` failure names the format and the engine version; `ogv` needs an engine that can write it. Kept runs are never pruned by the server: delete the run directory when you are done with it.
+
 ## Profiling (requires `run_project` with `profiling: true`)
 
 `profiling: true` adds `--remote-debug` to the launch, so the numbers are Godot's own editor profiler measurements. The channel is set at launch: an already-running session, and every session started with `attach: true`, returns "Profiling is not enabled for this session."

@@ -21,6 +21,7 @@ import { registerProcessLifecycle } from './utils/process-lifecycle.js';
 import { dispatchToolCall } from './dispatch.js';
 import { resolveDisableSecurity, type Elicitor, type McpContext } from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
+import { renderToolDefinitions } from './tools/render-tools.js';
 import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
 import { sceneToolDefinitions } from './tools/scene-tools.js';
@@ -30,6 +31,7 @@ import { validateToolDefinitions } from './tools/validate-tools.js';
 
 export const allToolDefinitions = [
   ...runtimeToolDefinitions,
+  ...renderToolDefinitions,
   ...autoloadToolDefinitions,
   ...projectToolDefinitions,
   ...sceneToolDefinitions,
@@ -45,6 +47,7 @@ Tool categories:
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
 - Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
 - Runtime (requires run_project): take_screenshot, simulate_input, get_ui_elements, run_script
+- Render check (no runtime session): render_movie
 - Profiling (requires run_project with profiling: true): profile_project, start_profiler, stop_profiler
 - Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings
 - Validation: validate
@@ -57,6 +60,7 @@ Key behaviors:
 - A runtime session ends by itself when the game exits or an attached bridge disconnects: the bridge autoload is removed at that moment and the scene-editing tools unblock. After a spawned game exits, stop_project is still worth calling (it frees the retained process slot and returns the captured logs) and succeeds. After an attached session ends by itself nothing is left to stop: stop_project then reports no active session, which needs no follow-up.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - simulate_input reports per-action results (signals fired, the Control hit, UI changes, watched values), so it needs no take_screenshot round trip to tell whether an action landed. Omitting \`pressed\` taps; set it only to hold or release across actions.
+- render_movie is a separate short Godot run under the movie writer, with no bridge and no input: use it to check that a scene renders (likelyBlank) or animates (anyMotion) without starting a session. It needs a display, asks for the same launch confirmation as run_project, and is refused while a runtime session is live on the same project.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.
 - profiling: true attaches Godot's own remote debugger for the profiling tools. Errors and \`breakpoint\` still do not pause the game - the server answers every debugger break with continue.

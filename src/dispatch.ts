@@ -72,6 +72,8 @@ import {
   handleStopProfiler,
 } from './tools/profiler-tools.js';
 
+import { handleRenderMovie } from './tools/render-tools.js';
+
 import { handleValidate } from './tools/validate-tools.js';
 
 export const toolDispatch = {
@@ -94,6 +96,9 @@ export const toolDispatch = {
   search_project: (_runner, args) => handleSearchProject(args),
   get_scene_dependencies: (_runner, args) => handleGetSceneDependencies(args),
   get_project_settings: (_runner, args) => handleGetProjectSettings(args),
+
+  // Render tools
+  render_movie: handleRenderMovie,
 
   // Scene tools
   create_scene: handleCreateScene,
