@@ -379,3 +379,28 @@ describe('handleListAutoloads unparsed lines', () => {
     expect(expectMatchesOutputSchema('list_autoloads', result)).not.toHaveProperty('warnings');
   });
 });
+
+describe('autoload tools accept the snake_case spellings of their parameters', () => {
+  it('update_autoload accepts autoload_path', async () => {
+    const dir = makeTmpProjectWithAutoload('Game', 'game.gd');
+    const result = await handleUpdateAutoload({
+      project_path: dir,
+      autoload_name: 'Game',
+      autoload_path: 'res://new_game.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Game="*res://new_game.gd"');
+    expect(readProjectGodot(dir)).not.toContain('res://game.gd');
+  });
+
+  it('add_autoload accepts autoload_name and autoload_path', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      project_path: dir,
+      autoload_name: 'Manager',
+      autoload_path: 'res://manager.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Manager="*res://manager.gd"');
+  });
+});

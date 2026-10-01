@@ -35,6 +35,9 @@ const parameterMappings = {
   max_results: 'maxResults',
   capture_limit: 'captureLimit',
   inline_frames: 'inlineFrames',
+  autoload_name: 'autoloadName',
+  autoload_path: 'autoloadPath',
+  visible_only: 'visibleOnly',
   has_property: 'hasProperty', // nested in validate checks[].schema; flows through strict converter
 } as const satisfies Record<string, string>;
 

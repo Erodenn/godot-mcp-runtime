@@ -8,6 +8,7 @@ import { nodeToolDefinitions } from '../../src/tools/node-tools.js';
 import { profilerToolDefinitions } from '../../src/tools/profiler-tools.js';
 import { validateToolDefinitions } from '../../src/tools/validate-tools.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
+import { normalizeParameters } from '../../src/utils/parameter-conversion.js';
 
 const allDefinitions: ToolDefinition[] = [
   ...runtimeToolDefinitions,
@@ -115,5 +116,30 @@ describe('tool definitions: description budget', () => {
 
   it.each(cases)('%s description has no em-dash or en-dash', (_name, tool) => {
     expect(tool.description).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+describe('tool definitions: snake_case spellings', () => {
+  /** Collect every property name an input schema declares, at any nesting depth. */
+  function collectPropertyNames(schema: unknown, names: Set<string>): void {
+    if (typeof schema !== 'object' || schema === null) return;
+    const node = schema as { properties?: Record<string, unknown>; items?: unknown };
+    for (const [name, child] of Object.entries(node.properties ?? {})) {
+      names.add(name);
+      collectPropertyNames(child, names);
+    }
+    collectPropertyNames(node.items, names);
+  }
+
+  it('every camelCase input property has a snake_case mapping', () => {
+    const names = new Set<string>();
+    for (const tool of allDefinitions) collectPropertyNames(tool.inputSchema, names);
+    const unmapped = [...names]
+      .filter((name) => /[A-Z]/.test(name))
+      .filter((name) => {
+        const snake = name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+        return !(name in normalizeParameters({ [snake]: 1 }));
+      });
+    expect(unmapped).toEqual([]);
   });
 });
