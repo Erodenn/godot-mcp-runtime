@@ -40,6 +40,7 @@ import type {
 } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
+import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,7 @@ function createRuntimeFake(): RuntimeFake {
   let bridgeRuntimeErrors: string[] = [];
   let stopResult: RuntimeStopResult | null = {
     mode: 'spawned',
+    projectPath: '/fake/project',
     output: [],
     errors: [],
   };
@@ -196,6 +198,13 @@ function createRuntimeFake(): RuntimeFake {
     get activeProcess() {
       return state.activeProcess;
     },
+    ...fakeSessionApi(() => ({
+      current: {
+        mode: state.activeSessionMode,
+        projectPath: state.activeProjectPath,
+        process: state.activeProcess,
+      },
+    })),
     async sendCommandWithErrors(
       command: string,
       params: Record<string, unknown> = {},
@@ -660,6 +669,7 @@ describe('handleGetDebugOutput', () => {
     const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed).toEqual({
+      projectPath: '/p',
       output: [],
       errors: [],
       running: null,
@@ -777,6 +787,15 @@ describe('handleStopProject', () => {
     expect(parsed.message).toBe('Attached project detached and MCP bridge state cleaned up');
     expect(parsed.mode).toBe('attached');
     expect(parsed.externalProcessPreserved).toBe(true);
+  });
+
+  it('names the stopped project', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({ mode: 'spawned', projectPath: '/p', output: [], errors: [] });
+    const result = await handleStopProject(fake.asRunner);
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.projectPath).toBe('/p');
   });
 
   it('returns isError when no session was active', async () => {
@@ -1159,7 +1178,7 @@ describe('handleSimulateInput', () => {
     });
     expect(hasError(result)).toBe(false);
     const payload = unwrap(result).structuredContent as Record<string, unknown>;
-    expect(Object.keys(payload).sort()).toEqual(['results', 'success']);
+    expect(Object.keys(payload).sort()).toEqual(['projectPath', 'results', 'success']);
   });
 });
 
@@ -2247,6 +2266,16 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       previewPath,
       previewSize: { width: 960, height: 540 },
     });
+  });
+
+  it('names the session project in the payload', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png', 'full-image');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, width: 1280, height: 720 }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    expect(parseMetadata(result).projectPath).toBe(projectPath);
   });
 
   it('returns full inline PNG when responseMode is full', async () => {

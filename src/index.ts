@@ -43,7 +43,7 @@ export const allToolDefinitions = [
 export const serverInstructions = `Godot MCP Server - AI-driven Godot 4.x project manipulation.
 
 Tool categories:
-- Project management: launch_editor, run_project, stop_project, get_debug_output, list_projects, check_project
+- Project management: launch_editor, run_project, switch_project, stop_project, get_debug_output, list_projects, check_project
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
 - Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
 - Runtime (requires run_project): take_screenshot, simulate_input, get_ui_elements, run_script
@@ -57,6 +57,7 @@ Key behaviors:
 - Headless Godot initializes ALL registered autoloads. If any autoload is broken, headless operations will fail. Use list_autoloads / remove_autoload to diagnose.
 - run_project waits for the MCP bridge before returning success and returns a JSON payload (sessionMode, bridgePort, warnings). If the bridge never answers it returns an error and tears the session down; retry run_project.
 - run_project with attach: true is the path for a Godot process you launch yourself: it injects the bridge and marks the project active, but spawns nothing and captures no stdout/stderr. The pre-flight scan still runs; the launch confirmation does not. stop_project ends it without killing that process.
+- Several projects can run at once, one session per project. run_project on another project adds a session and makes it current; it does not stop the others. The runtime tools, the profiling tools, get_debug_output and stop_project act on the current session only, and every response names it in projectPath. switch_project({ projectPath }) changes which session is current. stop_project stops the current session and leaves none current. When no session is current, or the current one's game has exited, these tools return an error listing the live sessions instead of picking one: call switch_project. check_project reports the current project and every live session.
 - A runtime session ends by itself when the game exits or an attached bridge disconnects: the bridge autoload is removed at that moment and the scene-editing tools unblock. After a spawned game exits, stop_project is still worth calling (it frees the retained process slot and returns the captured logs) and succeeds. After an attached session ends by itself nothing is left to stop: stop_project then reports no active session, which needs no follow-up.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - simulate_input reports per-action results (signals fired, the Control hit, UI changes, watched values), so it needs no take_screenshot round trip to tell whether an action landed. Omitting \`pressed\` taps; set it only to hold or release across actions.

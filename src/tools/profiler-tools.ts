@@ -5,6 +5,7 @@ import { createErrorResponse, getErrorMessage } from '../utils/error-response.js
 import { createStructuredResponse } from '../utils/structured-response.js';
 import { optionalNumber, optionalString } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
+import { noLiveCurrentSessionError, type NoSessionWording } from '../utils/session-report.js';
 import {
   CAPTURE_LIMIT_MAX,
   PROFILE_SORTS,
@@ -86,6 +87,7 @@ const rowSchema = {
 const captureResultSchema = {
   type: 'object',
   properties: {
+    projectPath: { type: 'string' },
     seconds: { type: 'number' },
     frames: { type: 'number' },
     framesReceived: { type: 'number' },
@@ -125,7 +127,7 @@ export const profilerToolDefinitions = [
   {
     name: 'profile_project',
     description:
-      "Capture a window of Godot's function profiler - the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
+      "Capture a window of Godot's function profiler - the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: projectPath, rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -145,7 +147,7 @@ export const profilerToolDefinitions = [
   {
     name: 'start_profiler',
     description:
-      'Start a profiler capture and return immediately, so simulate_input, run_script and screenshots can drive the game while it records. Requires run_project with profiling: true. Stops itself after `seconds` (default 30, max 60); call stop_profiler for the results. Returns: active, firstFrame, captureLimit, maxSeconds. Use profile_project instead for an unattended window. Errors if a capture is already running or profiling was not enabled at launch.',
+      'Start a profiler capture and return immediately, so simulate_input, run_script and screenshots can drive the game while it records. Requires run_project with profiling: true. Stops itself after `seconds` (default 30, max 60); call stop_profiler for the results. Returns: projectPath, active, firstFrame, captureLimit, maxSeconds. Use profile_project instead for an unattended window. Errors if a capture is already running or profiling was not enabled at launch.',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -162,6 +164,7 @@ export const profilerToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         active: { type: 'boolean' },
         maxSeconds: { type: 'number' },
         firstFrame: { type: ['number', 'null'] },
@@ -188,23 +191,34 @@ export const profilerToolDefinitions = [
 
 // --- Helpers ---
 
+const PROFILER_WORDING: NoSessionWording = {
+  action: 'capture a profile',
+  noneMessage: 'No active runtime session. A project must be running to profile it.',
+  noneSolutions: [
+    'Use run_project with profiling: true to start a Godot project first',
+    'Profiling cannot be added to a session that is already running',
+  ],
+  exitedSolutions: [
+    'Use get_debug_output to inspect the last captured logs',
+    'Call stop_project to clean up, then run_project with profiling: true again',
+  ],
+};
+
 /**
  * The profiler lives on the runner for as long as the spawned session does.
  * Its absence is always the same user-facing story: this session was not
  * launched with the debugger channel, so there is nothing to measure.
  */
-function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResponse> {
-  if (runner.activeProfiler === null) {
+function requireProfiler(
+  runner: GodotRunner,
+): Result<{ profiler: DebuggerProfiler; projectPath: string }, ToolResponse> {
+  const status = runner.getRuntimeSessionStatus();
+  const profiler = runner.activeProfiler;
+  if (status.current === null) return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
+  if (profiler === null) {
     // "Nothing is running" and "running without profiling" have different
     // fixes, and every sibling runtime tool already draws this line.
-    if (!runner.activeSessionMode || !runner.activeProjectPath) {
-      return err(
-        createErrorResponse('No active runtime session. A project must be running to profile it.', [
-          'Use run_project with profiling: true to start a Godot project first',
-          'Profiling cannot be added to a session that is already running',
-        ]),
-      );
-    }
+    if (status.state !== 'live') return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
         'Call run_project with profiling: true - the debugger channel is set at launch and cannot be added later',
@@ -212,18 +226,12 @@ function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResp
       ]),
     );
   }
-  const profiler = runner.activeProfiler;
   // A finished capture outlives the engine: re-ranking folded data needs no
   // process, and the capture taken just before a crash is the one worth having.
-  if (runner.activeProcess?.hasExited === true && !profiler.hasResult) {
-    return err(
-      createErrorResponse('The spawned Godot process has exited and cannot be profiled.', [
-        'Use get_debug_output to inspect the last captured logs',
-        'Call stop_project to clean up, then run_project with profiling: true again',
-      ]),
-    );
+  if (status.state !== 'live' && !profiler.hasResult) {
+    return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
   }
-  return ok(profiler);
+  return ok({ profiler, projectPath: status.current.projectPath });
 }
 
 /**
@@ -313,13 +321,13 @@ export async function handleProfileProject(
   if (!profiler.ok) return profiler;
 
   try {
-    const result = await profiler.value.captureWindow(
+    const result = await profiler.value.profiler.captureWindow(
       seconds.value ?? DEFAULT_WINDOW_SECONDS,
       top.value,
       sort.value,
       captureLimit.value ?? CAPTURE_LIMIT_MAX,
     );
-    return createStructuredResponse({ ...result });
+    return createStructuredResponse({ projectPath: profiler.value.projectPath, ...result });
   } catch (error: unknown) {
     return err(profilerFailure(error));
   }
@@ -340,11 +348,11 @@ export async function handleStartProfiler(
   if (!profiler.ok) return profiler;
 
   try {
-    const result = await profiler.value.start(
+    const result = await profiler.value.profiler.start(
       seconds.value ?? DEFAULT_MAX_SECONDS,
       captureLimit.value ?? CAPTURE_LIMIT_MAX,
     );
-    return createStructuredResponse({ ...result });
+    return createStructuredResponse({ projectPath: profiler.value.projectPath, ...result });
   } catch (error: unknown) {
     return err(profilerFailure(error));
   }
@@ -365,8 +373,8 @@ export async function handleStopProfiler(
   if (!profiler.ok) return profiler;
 
   try {
-    const result = await profiler.value.stop(top.value, sort.value);
-    return createStructuredResponse({ ...result });
+    const result = await profiler.value.profiler.stop(top.value, sort.value);
+    return createStructuredResponse({ projectPath: profiler.value.projectPath, ...result });
   } catch (error: unknown) {
     return err(profilerFailure(error));
   }

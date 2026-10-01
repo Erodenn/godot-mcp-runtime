@@ -11,10 +11,12 @@
 import type {
   GodotRunner,
   GodotProcess,
+  RuntimeSessionInfo,
   RuntimeSessionMode,
   RuntimeStopResult,
 } from '../../src/utils/godot-runner.js';
 import type { Elicitor, McpContext } from '../../src/utils/mcp-context.js';
+import { fakeSessionApi } from './fake-sessions.js';
 
 export interface BridgeCall {
   command: string;
@@ -32,6 +34,8 @@ export interface RuntimeFake {
     process?: Partial<GodotProcess> | null;
     hasExited?: boolean;
   }): void;
+  /** Sessions on projects other than the fake's current one, as the runner reports them. */
+  setOtherSessions(infos: RuntimeSessionInfo[]): void;
   setBridgeResponse(response: unknown, runtimeErrors?: string[]): void;
   setSendCommandError(error: Error | null): void;
   setBridgeHook(hook: (() => void) | null): void;
@@ -74,6 +78,7 @@ export function createRuntimeFake(): RuntimeFake {
   let actionErrorBuckets: string[][] = [];
   let actionErrorTrailing: string[] = [];
   let actionSentinelTimedOut = false;
+  let others: RuntimeSessionInfo[] = [];
 
   let state = {
     activeSessionMode: null as RuntimeSessionMode | null,
@@ -91,6 +96,14 @@ export function createRuntimeFake(): RuntimeFake {
     get activeProcess() {
       return state.activeProcess;
     },
+    ...fakeSessionApi(() => ({
+      current: {
+        mode: state.activeSessionMode,
+        projectPath: state.activeProjectPath,
+        process: state.activeProcess,
+      },
+      others,
+    })),
     detectGodotPath: async () => '/usr/local/bin/godot',
     getVersion: async () => '4.7.2.stable.official',
     sendCommandWithErrors: async (
@@ -120,7 +133,7 @@ export function createRuntimeFake(): RuntimeFake {
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
-      return { success: true };
+      return { mode: 'spawned', projectPath: '/fake/project', output: [], errors: [] };
     },
     getErrorCount: () => 0,
     beginActionErrorCapture: () => ({ marker: 0 }),
@@ -158,6 +171,9 @@ export function createRuntimeFake(): RuntimeFake {
         activeProjectPath: opts.projectPath ?? null,
         activeProcess: proc,
       };
+    },
+    setOtherSessions(infos: RuntimeSessionInfo[]) {
+      others = infos;
     },
     setBridgeResponse(response: unknown, runtimeErrors?: string[]) {
       bridgeResponse = response;

@@ -23,6 +23,7 @@ import { GodotRunner, sessionKey, type OperationResult } from '../../src/utils/g
 import type { OperationParams } from '../../src/mcp.types.js';
 import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import { fakeSessionApi, liveSessionInfo } from './fake-sessions.js';
 
 /**
  * What the real runner hands back for an operation that emitted a JSON
@@ -110,6 +111,14 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     activeProcess: null as { hasExited: boolean } | null,
     // No other MCP session on this project by default -- the cross-server
     // edit guard test sets this directly on `asRunner`.
+    ...fakeSessionApi(() => ({
+      current: {
+        mode: fake.activeSessionMode,
+        projectPath: fake.activeProjectPath,
+        process: fake.activeProcess,
+      },
+      others: fake.extraLiveSessionPaths.map((path) => liveSessionInfo(path)),
+    })),
     otherLiveSessions: [] as BridgeOwnerInfo[],
     otherLiveSessionsOnProject(_projectPath: string): BridgeOwnerInfo[] {
       return fake.otherLiveSessions;

@@ -16,6 +16,7 @@ import {
 import { ProfilerError, type DebuggerProfiler } from '../../../src/utils/profiler.js';
 import type { GodotProcess, GodotRunner } from '../../../src/utils/godot-runner.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
+import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 
 interface ProfilerCall {
   method: 'start' | 'stop' | 'captureWindow';
@@ -75,6 +76,17 @@ function createProfilerFake(
     activeSessionMode: options.session === false ? null : 'spawned',
     activeProjectPath: options.session === false ? null : 'D:/proj',
   };
+  Object.assign(
+    runner,
+    fakeSessionApi(() => ({
+      current: {
+        mode: runner.activeSessionMode as 'spawned' | null,
+        projectPath: runner.activeProjectPath,
+        process: runner.activeProcess,
+        profiling: runner.activeProfiler !== null,
+      },
+    })),
+  );
   return { asRunner: runner as unknown as GodotRunner, calls };
 }
 
@@ -104,6 +116,20 @@ describe('profiler handlers: session requirements', () => {
   ])('%s rejects a Godot process that already exited', async (_name, handler) => {
     const fake = createProfilerFake({ exited: true });
     expectErrorMatching(await handler(fake.asRunner, {}), /has exited/);
+  });
+});
+
+describe('profiler handlers: session project', () => {
+  it.each([
+    ['profile_project', handleProfileProject],
+    ['start_profiler', handleStartProfiler],
+    ['stop_profiler', handleStopProfiler],
+  ])('%s names the session project', async (_name, handler) => {
+    const fake = createProfilerFake();
+    const result = await handler(fake.asRunner, {});
+
+    expect(hasError(result)).toBe(false);
+    expect(unwrap(result).structuredContent).toMatchObject({ projectPath: 'D:/proj' });
   });
 });
 

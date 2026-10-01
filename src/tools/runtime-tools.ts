@@ -45,6 +45,13 @@ import {
 } from '../utils/bridge-manager.js';
 import { runLaunchGate } from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
+import {
+  noLiveCurrentSessionError,
+  otherLiveSessionsClause,
+  requireRuntimeSession,
+  runtimeCommandFailure,
+  runtimeToolWording,
+} from '../utils/session-report.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -124,7 +131,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true inject the MCP bridge for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. Returns: sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Call stop_project when done. Errors if the bridge never answers or attach is combined with a spawn-only parameter.',
+      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true inject the MCP bridge for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. It becomes the current session; sessions on other projects keep running (switch_project). Returns: projectPath, sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Call stop_project when done. Errors if the bridge never answers or attach is combined with a spawn-only parameter.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -176,9 +183,49 @@ export const runtimeToolDefinitions = [
     },
   },
   {
+    name: 'switch_project',
+    description:
+      "Point the runtime tools (screenshots, input, UI, run_script, debug output, profiling, stop_project) at another project's session. Needed only when several sessions exist; run_project makes its own session current. A session whose game exited can be selected to read its logs or stop it: live is then false and warnings leads. Returns: projectPath, previousProjectPath, live, sessionMode, bridgePort, bridgeResponsive, message. Errors if the project has no session, listing the live ones.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description:
+            'Path to the Godot project directory whose session becomes the current one. check_project lists the live sessions.',
+        },
+      },
+      required: ['projectPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        projectPath: { type: 'string' },
+        previousProjectPath: { type: ['string', 'null'] },
+        live: { type: 'boolean' },
+        sessionMode: { type: ['string', 'null'], enum: ['spawned', 'attached', null] },
+        bridgePort: { type: ['number', 'null'] },
+        bridgeResponsive: { type: ['boolean', 'null'] },
+        exitCode: { type: ['number', 'null'] },
+        message: { type: 'string' },
+      },
+      required: [
+        'projectPath',
+        'previousProjectPath',
+        'live',
+        'sessionMode',
+        'bridgePort',
+        'bridgeResponsive',
+        'message',
+      ],
+    },
+  },
+  {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires a spawned session (attach mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires a spawned session (attach mode does not capture output). Returns: projectPath, output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -193,6 +240,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         output: { type: 'array', items: { type: 'string' } },
         errors: { type: 'array', items: { type: 'string' } },
         running: { type: ['boolean', 'null'] },
@@ -205,7 +253,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the runtime session and clean up bridge state. A spawned Godot is stopped; an attached one (run_project attach: true) is detached and left running, never killed. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
+      'End the current runtime session and clean up bridge state; sessions on other projects keep running and none becomes current (switch_project selects one). A spawned Godot is stopped; an attached one (run_project attach: true) is detached and left running, never killed. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Returns: projectPath, message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -215,6 +263,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         message: { type: 'string' },
         mode: { type: 'string' },
         externalProcessPreserved: { type: 'boolean' },
@@ -228,7 +277,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline preview bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
+      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline preview bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -261,6 +310,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         responseMode: { type: 'string' },
         path: { type: 'string' },
         size: {
@@ -292,13 +342,13 @@ export const runtimeToolDefinitions = [
         },
         warnings: { type: 'array', items: { type: 'string' } },
       },
-      required: ['responseMode', 'path', 'stats'],
+      required: ['projectPath', 'responseMode', 'path', 'stats'],
     },
   },
   {
     name: 'simulate_input',
     description:
-      'Simulate sequential input in a running project and report what each action did. Action `type`: key, mouse_button, mouse_motion, click_element, action, text, wait. For key/mouse_button/action, omit `pressed` to tap (press+release); set it to hold or release. click_element resolves by node path/name (see get_ui_elements), not visible text. Returns: results[] per action with ok, timing, signals fired, the Control hit, UI `changes` (appeared/disappeared/changed), `watch` samples, and `errors` from input handlers (spawned sessions only). Invalid batches inject nothing; a runtime failure stops the batch and skips the rest.',
+      'Simulate sequential input in a running project and report what each action did. Action `type`: key, mouse_button, mouse_motion, click_element, action, text, wait. For key/mouse_button/action, omit `pressed` to tap (press+release); set it to hold or release. click_element resolves by node path/name (see get_ui_elements), not visible text. Returns: projectPath and results[] per action with ok, timing, signals fired, the Control hit, UI `changes` (appeared/disappeared/changed), `watch` samples, and `errors` from input handlers (spawned sessions only). Invalid batches inject nothing; a runtime failure stops the batch and skips the rest.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -416,6 +466,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         success: {
           type: 'boolean',
           description: 'False when an action failed and the remaining actions were skipped.',
@@ -485,7 +536,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_ui_elements',
     description:
-      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
+      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: projectPath and elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -505,6 +556,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         elements: {
           type: 'array',
           items: {
@@ -538,7 +590,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output - it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
+      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output - it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { projectPath, success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -558,6 +610,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        projectPath: { type: 'string' },
         success: { type: 'boolean' },
         result: {},
         warnings: { type: 'array', items: { type: 'string' } },
@@ -744,54 +797,6 @@ function buildRunProjectResponse(session: {
     bridgeReady: true,
     message: session.message,
   });
-}
-
-function exitedProcessError(actionDescription: string): HandlerResult {
-  return err(
-    createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
-      'Use get_debug_output to inspect the last captured logs',
-      'Call stop_project to clean up, then run_project again',
-    ]),
-  );
-}
-
-function ensureRuntimeSession(
-  runner: GodotRunner,
-  actionDescription: string,
-): HandlerResult | null {
-  // A spawned process that exited on its own clears the session fields but
-  // keeps `activeProcess`, so this diagnosis has to come before the
-  // generic no-session message it would otherwise fall into.
-  //
-  // WIDEST INPUT: also matches a session torn down by `stopProject` in the
-  // same tick, but that path nulls `activeProcess` synchronously, so the
-  // window is not observable from a handler.
-  if (!runner.activeSessionMode && runner.activeProcess?.hasExited) {
-    return exitedProcessError(actionDescription);
-  }
-
-  if (!runner.activeSessionMode || !runner.activeProjectPath) {
-    return err(
-      createErrorResponse(
-        `No active runtime session. A project must be running or attached to ${actionDescription}.`,
-        [
-          'Use run_project to start a Godot project first',
-          'Or pass attach: true to run_project before launching Godot yourself',
-        ],
-      ),
-    );
-  }
-
-  // Still reachable for a live spawned session whose process died between the
-  // auto-clear and this call, and for a spawn that never produced a process.
-  if (
-    runner.activeSessionMode === 'spawned' &&
-    (!runner.activeProcess || runner.activeProcess.hasExited)
-  ) {
-    return exitedProcessError(actionDescription);
-  }
-
-  return null;
 }
 
 /**
@@ -1157,6 +1162,84 @@ async function startAttachedSession(
   }
 }
 
+/** One ping after a switch: a fresh TCP connect plus one engine frame. Far below the 60 s client ceiling. */
+const SWITCH_PROBE_TIMEOUT_MS = 3000;
+
+export async function handleSwitchProject(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+  const target = resolve(parsed.value.projectPath);
+
+  const previousProjectPath = runner.getCurrentSessionInfo()?.projectPath ?? null;
+  const session = runner.switchSession(target);
+  if (session === null) {
+    const live = runner.listLiveSessions().map((info) => info.projectPath);
+    const liveClause =
+      live.length > 0 ? ` Live sessions: ${live.join(', ')}.` : ' No session is live.';
+    return err(
+      createErrorResponse(
+        `No runtime session on ${target}: this server has not started one there, or it was stopped.${liveClause}`,
+        live.length > 0
+          ? [
+              'Pass one of the listed project paths to switch_project',
+              'Or call run_project on this project to start a session, which becomes the current one',
+            ]
+          : ['Call run_project on this project to start a session, which becomes the current one'],
+      ),
+    );
+  }
+
+  const warnings: string[] = [];
+  let bridgeResponsive: boolean | null = null;
+  if (session.live) {
+    try {
+      const { response } = await runner.sendCommandWithErrors('ping', {}, SWITCH_PROBE_TIMEOUT_MS);
+      bridgeResponsive = (JSON.parse(response) as { status?: string }).status === 'pong';
+      if (!bridgeResponsive) {
+        warnings.push(
+          'The session answered the probe with an unexpected payload, so its bridge may not be usable.',
+        );
+      }
+    } catch (error: unknown) {
+      bridgeResponsive = false;
+      warnings.push(
+        `The session did not answer a ping after the switch: ${getErrorMessage(error)}. It is still the current session; if its game was closed, the next runtime call reports that.`,
+      );
+    }
+  } else if (session.processExited) {
+    warnings.push(
+      `This session is not live: its Godot process exited with code ${session.exitCode ?? 'unknown'}. get_debug_output reads its captured logs and stop_project frees it; the other runtime tools will error.`,
+    );
+  } else {
+    warnings.push(
+      'This session is not live: only a finished profiler capture is retained. stop_profiler can still read it and stop_project frees it.',
+    );
+  }
+
+  const message =
+    previousProjectPath === session.projectPath
+      ? `${session.projectPath} was already the current session.`
+      : session.live
+        ? `Runtime tools now act on ${session.projectPath}.`
+        : `Selected ${session.projectPath}; its session is not live.`;
+
+  return createStructuredResponse({
+    ...(warnings.length > 0 ? { warnings } : {}),
+    projectPath: session.projectPath,
+    previousProjectPath,
+    live: session.live,
+    sessionMode: session.mode,
+    bridgePort: session.bridgePort,
+    bridgeResponsive,
+    ...(session.processExited ? { exitCode: session.exitCode } : {}),
+    message,
+  });
+}
+
 export function handleGetDebugOutput(
   runner: GodotRunner,
   args: OperationParams = {},
@@ -1164,19 +1247,27 @@ export function handleGetDebugOutput(
   args = normalizeParameters(args);
 
   // The mode is nulled the moment a spawned process exits, but its logs
-  // live on the retained `activeProcess` and are exactly what the caller is
-  // here for. Gate on both.
-  if (!runner.activeSessionMode && !runner.activeProcess) {
+  // live on the retained process and are exactly what the caller is here
+  // for. Gate on the current record, not on a live session.
+  const status = runner.getRuntimeSessionStatus();
+  const current = status.current;
+  if (current === null || (current.mode === null && !current.hasRetainedLogs)) {
     return err(
-      createErrorResponse('No active runtime session.', [
-        'Use run_project to start a Godot project first',
-        'Or pass attach: true to run_project before launching Godot yourself',
-      ]),
+      noLiveCurrentSessionError(status, {
+        action: 'read debug output',
+        noneMessage: 'No active runtime session.',
+        noneSolutions: [
+          'Use run_project to start a Godot project first',
+          'Or pass attach: true to run_project before launching Godot yourself',
+        ],
+        exitedSolutions: [],
+      }),
     );
   }
 
-  if (runner.activeSessionMode === 'attached') {
+  if (current.mode === 'attached') {
     return createStructuredResponse({
+      projectPath: current.projectPath,
       output: [],
       errors: [],
       running: null,
@@ -1199,12 +1290,14 @@ export function handleGetDebugOutput(
   if (!limitResult.ok) return limitResult;
   const limit = limitResult.value ?? 200;
   const response: {
+    projectPath: string;
     output: string[];
     errors: string[];
     running: boolean;
     exitCode?: number | null;
     tip?: string;
   } = {
+    projectPath: current.projectPath,
     output: proc.output.slice(-limit),
     errors: proc.errors.slice(-limit),
     running: !proc.hasExited,
@@ -1223,22 +1316,31 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
   const result = await runner.stopProject();
 
   if (!result) {
+    const others = otherLiveSessionsClause(runner.getRuntimeSessionStatus());
     return err(
-      createErrorResponse('No active Godot process to stop.', [
+      createErrorResponse(`No active Godot process to stop.${others}`, [
         'Use run_project to start a Godot project first',
         'The process may have already terminated',
+        ...(others === ''
+          ? []
+          : [
+              'Call switch_project with one of the listed project paths, then stop_project, to stop that session',
+            ]),
       ]),
     );
   }
 
   const alreadyExited = result.alreadyExited === true;
+  const base =
+    result.mode === 'attached'
+      ? 'Attached project detached and MCP bridge state cleaned up'
+      : alreadyExited
+        ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
+        : 'Godot project stopped';
+  const remaining = otherLiveSessionsClause(runner.getRuntimeSessionStatus());
   return createStructuredResponse({
-    message:
-      result.mode === 'attached'
-        ? 'Attached project detached and MCP bridge state cleaned up'
-        : alreadyExited
-          ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
-          : 'Godot project stopped',
+    projectPath: result.projectPath,
+    message: remaining === '' ? base : `${base}.${remaining} Call switch_project to select one.`,
     mode: result.mode,
     externalProcessPreserved: result.externalProcessPreserved === true,
     alreadyExited,
@@ -1279,10 +1381,10 @@ export async function handleTakeScreenshot(
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const sessionError = ensureRuntimeSession(runner, 'take a screenshot');
-  if (sessionError) {
-    return sessionError;
-  }
+  const wording = runtimeToolWording('take a screenshot');
+  const session = requireRuntimeSession(runner, wording);
+  if (!session.ok) return session;
+  const sessionProjectPath = session.value.projectPath;
 
   const timeoutResult = optionalNumber(args, 'timeout');
   if (!timeoutResult.ok) return timeoutResult;
@@ -1451,16 +1553,26 @@ export async function handleTakeScreenshot(
     const warnings = [...statsWarnings, ...runtimeErrors].slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
 
     return createStructuredResponse(
-      { ...(warnings.length > 0 ? { warnings } : {}), ...metadata },
+      {
+        ...(warnings.length > 0 ? { warnings } : {}),
+        projectPath: sessionProjectPath,
+        ...metadata,
+      },
       content,
     );
   } catch (error: unknown) {
     return err(
-      createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
-        'Check get_debug_output for crash backtraces or runtime errors',
-        'If the game has exited, call stop_project, then run_project again',
-        'For slow renders, increase the timeout parameter',
-      ]),
+      runtimeCommandFailure(
+        runner,
+        error,
+        'Failed to take screenshot',
+        [
+          'Check get_debug_output for crash backtraces or runtime errors',
+          'If the game has exited, call stop_project, then run_project again',
+          'For slow renders, increase the timeout parameter',
+        ],
+        wording,
+      ),
     );
   }
 }
@@ -1587,10 +1699,10 @@ export async function handleSimulateInput(
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const sessionError = ensureRuntimeSession(runner, 'simulate input');
-  if (sessionError) {
-    return sessionError;
-  }
+  const wording = runtimeToolWording('simulate input');
+  const session = requireRuntimeSession(runner, wording);
+  if (!session.ok) return session;
+  const sessionProjectPath = session.value.projectPath;
 
   const actionsResult = requireArray(args, 'actions', { minLength: 1 });
   if (!actionsResult.ok) return actionsResult;
@@ -1666,6 +1778,7 @@ export async function handleSimulateInput(
     // timeline survives; createErrorResponse is reserved for session errors,
     // pre-validation refusals, and transport failures.
     const payload: Record<string, unknown> = {
+      projectPath: sessionProjectPath,
       success: parsed.success === true,
       results,
     };
@@ -1676,10 +1789,16 @@ export async function handleSimulateInput(
     return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
-      createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
-        'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
-        'If the game has exited, call stop_project, then run_project again',
-      ]),
+      runtimeCommandFailure(
+        runner,
+        error,
+        'Failed to simulate input',
+        [
+          'Check get_debug_output for crash backtraces or runtime errors (a signal handler firing on input may have crashed the game)',
+          'If the game has exited, call stop_project, then run_project again',
+        ],
+        wording,
+      ),
     );
   }
 }
@@ -1690,10 +1809,10 @@ export async function handleGetUiElements(
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const sessionError = ensureRuntimeSession(runner, 'query UI elements');
-  if (sessionError) {
-    return sessionError;
-  }
+  const wording = runtimeToolWording('query UI elements');
+  const session = requireRuntimeSession(runner, wording);
+  if (!session.ok) return session;
+  const sessionProjectPath = session.value.projectPath;
 
   const visibleOnlyResult = optionalBoolean(args, 'visibleOnly');
   if (!visibleOnlyResult.ok) return visibleOnlyResult;
@@ -1727,6 +1846,7 @@ export async function handleGetUiElements(
 
     const payload: Record<string, unknown> = {
       ...parsed,
+      projectPath: sessionProjectPath,
       tip: "Use simulate_input with type 'click_element' and a path or node name from this list to interact with these elements.",
     };
     attachRuntimeWarnings(payload, runtimeErrors);
@@ -1734,10 +1854,16 @@ export async function handleGetUiElements(
     return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
-      createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
-        'Check get_debug_output for crash backtraces or runtime errors',
-        'If the game has exited, call stop_project, then run_project again',
-      ]),
+      runtimeCommandFailure(
+        runner,
+        error,
+        'Failed to get UI elements',
+        [
+          'Check get_debug_output for crash backtraces or runtime errors',
+          'If the game has exited, call stop_project, then run_project again',
+        ],
+        wording,
+      ),
     );
   }
 }
@@ -1749,10 +1875,10 @@ export async function handleRunScript(
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
-  const sessionError = ensureRuntimeSession(runner, 'execute scripts');
-  if (sessionError) {
-    return sessionError;
-  }
+  const wording = runtimeToolWording('execute scripts');
+  const session = requireRuntimeSession(runner, wording);
+  if (!session.ok) return session;
+  const sessionProjectPath = session.value.projectPath;
 
   const scriptResult = requireString(args, 'script');
   if (!scriptResult.ok) return scriptResult;
@@ -1773,7 +1899,7 @@ export async function handleRunScript(
   let warningsFromPolicy: string[] = [];
   if (!ctx.disableSecurity) {
     const policy = evaluateScript(script, ctx.strictMode);
-    const projectPath = runner.activeProjectPath;
+    const projectPath = sessionProjectPath;
 
     // Tier 1: hard block. Write audit, refuse to forward to the bridge.
     if (policy.decision === 'hard_block') {
@@ -1921,6 +2047,7 @@ export async function handleRunScript(
       }
 
       const nullPayload: Record<string, unknown> = {
+        projectPath: sessionProjectPath,
         success: true,
         result: null,
         warnings: [
@@ -1933,6 +2060,7 @@ export async function handleRunScript(
     }
 
     const payload: Record<string, unknown> = {
+      projectPath: sessionProjectPath,
       success: true,
       result: parsed.result,
       tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
@@ -1945,11 +2073,17 @@ export async function handleRunScript(
     return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
-      createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [
-        'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
-        'If the game has exited, call stop_project, then run_project again',
-        'For long-running scripts, increase the timeout parameter',
-      ]),
+      runtimeCommandFailure(
+        runner,
+        error,
+        'Failed to execute script',
+        [
+          'Check get_debug_output for crash backtraces or runtime errors raised inside the script',
+          'If the game has exited, call stop_project, then run_project again',
+          'For long-running scripts, increase the timeout parameter',
+        ],
+        wording,
+      ),
     );
   }
 }

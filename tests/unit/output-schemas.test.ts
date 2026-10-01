@@ -64,6 +64,7 @@ describe('outputSchema: expected coverage', () => {
     'simulate_input',
     'stop_profiler',
     'stop_project',
+    'switch_project',
     'take_screenshot',
   ];
 
