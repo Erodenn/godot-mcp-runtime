@@ -3,6 +3,7 @@ import * as net from 'net';
 import type { AddressInfo } from 'net';
 import { GodotRunner, BridgeDisconnectedError } from '../../src/utils/godot-runner.js';
 import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
+import { currentRecord, installSession } from '../helpers/session-install.js';
 
 interface MockBridge {
   port: number;
@@ -86,8 +87,9 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   beforeEach(async () => {
     bridge = await startMockBridge();
     runner = new GodotRunner({ godotPath: 'godot' });
-    // Direct assignment: port is now baked, not read from env at sendCommand time.
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
+    // Installed on a session record: the port is read from the current session
+    // at sendCommand time, not from env.
+    installSession(runner, { bridgePort: bridge.port });
   });
 
   afterEach(async () => {
@@ -184,13 +186,13 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {
     // Point the runner at a port nobody is listening on.
     const r = new GodotRunner({ godotPath: 'godot' });
-    (r as unknown as { activeBridgePort: number }).activeBridgePort = 1;
+    installSession(r, { bridgePort: 1 });
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
     r.closeConnection();
   });
 
   it('attaches the session token field to every outgoing frame when set', async () => {
-    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'sekrit-token';
+    currentRecord(runner).token = 'sekrit-token';
     const pending = runner.sendCommand('ping');
     const received = await bridge.nextFrame();
     expect(JSON.parse(received)).toEqual({ command: 'ping', token: 'sekrit-token' });
@@ -214,7 +216,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   beforeEach(async () => {
     bridge = await startMockBridge();
     runner = new GodotRunner({ godotPath: 'godot' });
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
+    installSession(runner, { bridgePort: bridge.port });
   });
 
   afterEach(async () => {
@@ -224,7 +226,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
 
   it('retries once on BridgeDisconnectedError during an active session', async () => {
     // Simulate an active session so reconnect logic kicks in.
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();
@@ -251,7 +253,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry shutdown commands', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('shutdown', {}, 5000);
     await bridge.nextFrame();
@@ -260,7 +262,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry input commands because they are not idempotent', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('input', { actions: [] }, 5000);
     await bridge.nextFrame();
@@ -269,7 +271,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry run_script commands because they may have side effects', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors(
       'run_script',
@@ -282,7 +284,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('propagates error if retry also fails', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();

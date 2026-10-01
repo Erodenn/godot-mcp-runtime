@@ -30,11 +30,12 @@ export interface LifecycleProcess {
  * arguments defaulted, IS the production wiring.
  *
  * - `SIGINT` / `SIGTERM` and stdin `'end'` / `'close'` all run the async
- *   `cleanup` (which stops any running project) exactly once — `'end'` and
+ *   `cleanup` (which stops every running project) exactly once — `'end'` and
  *   `'close'` both fire on a normal stdin close, and an MCP client going away
  *   is the case stdin EOF covers.
- * - `'exit'` runs the synchronous bridge-artifact removal, the only teardown
- *   that can still do useful work once the event loop is done.
+ * - `'exit'` runs the synchronous bridge-artifact removal for every session,
+ *   the only teardown that can still do useful work once the event loop is
+ *   done.
  *
  * Listening for `'end'`/`'close'` does not put stdin in flowing mode (only
  * `'data'` or `resume()` would), so StdioServerTransport keeps ownership of

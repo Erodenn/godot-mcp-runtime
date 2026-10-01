@@ -15,6 +15,8 @@ import type { AddressInfo } from 'net';
 import type * as childProcess from 'child_process';
 import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
 import { useTmpDirs } from '../helpers/tmp.js';
+import { currentRecord, installSession } from '../helpers/session-install.js';
+import type { RuntimeSession } from '../../src/utils/godot-runner.js';
 
 const spawnMock = vi.fn();
 vi.mock('child_process', async (importOriginal) => {
@@ -123,7 +125,7 @@ describe('spawned-process exit auto-clear', () => {
     const captured = runner.activeProcess!;
     proc.stdout.emit('data', Buffer.from('hello from the game\n'));
     const profiler = { hasResult: true, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
 
     proc.emit('exit', 3);
 
@@ -153,7 +155,10 @@ describe('spawned-process exit auto-clear', () => {
     // before assigning the new `activeProcess`. Throughout that window the old
     // process is still `activeProcess`, so an identity guard does not fire -
     // only the epoch distinguishes the sessions.
-    (runner as unknown as { beginSessionTransition(): number }).beginSessionTransition();
+    const internals = runner as unknown as {
+      beginSessionTransition(session: RuntimeSession): number;
+    };
+    internals.beginSessionTransition(currentRecord(runner));
     expect(runner.activeProcess).toBe(captured);
 
     proc.emit('exit', 0);
@@ -194,7 +199,7 @@ describe('spawned-process exit auto-clear', () => {
   it('keeps a finished profiler capture across the already-exited stop', async () => {
     await start();
     const profiler = { hasResult: true, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
     proc.emit('exit', 0);
 
     await runner.stopProject();
@@ -206,7 +211,7 @@ describe('spawned-process exit auto-clear', () => {
   it('closes an unfinished profiler capture across the already-exited stop', async () => {
     await start();
     const profiler = { hasResult: false, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
     proc.emit('exit', 0);
 
     await runner.stopProject();
@@ -265,8 +270,8 @@ describe('spawned-process exit auto-clear', () => {
     // rest of the session state, so point them at the scripted bridge only
     // after the exit - mirroring how a caller would still be able to reach a
     // bridge command after the session cleared (activeProcess survives).
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = scripted.port;
-    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'test-token';
+    currentRecord(runner).bridgePort = scripted.port;
+    currentRecord(runner).token = 'test-token';
 
     // Marker capture inside sendCommandWithErrors happens synchronously before
     // it awaits the round-trip, so emitting the stderr line right after the
@@ -357,16 +362,12 @@ describe('attached-mode bridge disconnect', () => {
   });
 
   function attach(port: number): void {
-    const r = runner as unknown as {
-      activeSessionMode: string;
-      activeProjectPath: string;
-      activeBridgePort: number;
-      activeSessionToken: string;
-    };
-    r.activeSessionMode = 'attached';
-    r.activeProjectPath = projectPath;
-    r.activeBridgePort = port;
-    r.activeSessionToken = 'test-token';
+    installSession(runner, {
+      mode: 'attached',
+      projectPath,
+      bridgePort: port,
+      token: 'test-token',
+    });
   }
 
   it(

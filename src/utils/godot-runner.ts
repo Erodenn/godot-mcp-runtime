@@ -144,8 +144,113 @@ export interface ActionErrorBuckets {
 
 export type RuntimeSessionMode = 'spawned' | 'attached';
 
+/** Map key for a project: one normalization for the runner, the edit guard and the tools. */
+export function sessionKey(projectPath: string): string {
+  return normalizeForCompare(resolve(projectPath)).toLowerCase();
+}
+
+/**
+ * One runtime session. Internal to the runner; exported only so the test
+ * helper can type it. Handlers use {@link RuntimeSessionInfo}.
+ */
+export interface RuntimeSession {
+  readonly key: string;
+  /** Resolved absolute project path. */
+  readonly projectPath: string;
+  /** Null once the spawned process exited by itself. */
+  mode: RuntimeSessionMode | null;
+  bridgePort: number | null;
+  /**
+   * Bridge auth token. Spawned sessions deliver it through the
+   * MCP_SESSION_TOKEN env var; attached sessions bake it into the injected
+   * script (see BridgeManager.inject). Attached to every outgoing frame so the
+   * bridge can reject unauthenticated drive-by commands.
+   */
+  token: string | null;
+  process: GodotProcess | null;
+  /**
+   * Debugger receiver for `run_project({ profiling: true })`. Bound before the
+   * spawn so `--remote-debug` has a port to dial, and torn down with the
+   * session. Null in attached mode: the channel is set at launch or never.
+   */
+  profiler: DebuggerProfiler | null;
+  /**
+   * Monotonic counter bumped at the head of every transition that supersedes
+   * or stops this session. See `GodotRunner.beginSessionTransition`.
+   */
+  epoch: number;
+}
+
+/** Plain-data snapshot of one session, safe to hand to a tool handler. */
+export interface RuntimeSessionInfo {
+  projectPath: string;
+  mode: RuntimeSessionMode | null;
+  live: boolean;
+  current: boolean;
+  bridgePort: number | null;
+  /** A process is retained and has exited. */
+  processExited: boolean;
+  /** Null unless `processExited`. */
+  exitCode: number | null;
+  /** A process, and so its stdout/stderr buffers, is retained. */
+  hasRetainedLogs: boolean;
+  profiling: boolean;
+}
+
+export interface RuntimeSessionStatus {
+  /** State of the current pointer. `exited` means current is set but not live. */
+  state: 'live' | 'exited' | 'none';
+  /** Null exactly when `state` is `none`. */
+  current: RuntimeSessionInfo | null;
+  /** Live sessions other than the current one. */
+  otherLiveSessions: RuntimeSessionInfo[];
+}
+
+/** Copies of a session's retained process buffers, as `readSessionLogs` returns them. */
+export interface RuntimeSessionLogs {
+  output: string[];
+  errors: string[];
+  hasExited: boolean;
+  exitCode: number | null;
+}
+
+function describeNoLiveCurrent(status: RuntimeSessionStatus): string {
+  const head =
+    status.current === null
+      ? 'No current runtime session.'
+      : `The current session's Godot process (${status.current.projectPath}) exited with code ${status.current.exitCode ?? 'unknown'}.`;
+  const others = status.otherLiveSessions.map((info) => info.projectPath);
+  const tail =
+    others.length > 0 ? ` Live sessions: ${others.join(', ')}.` : ' No other session is live.';
+  return head + tail;
+}
+
+/**
+ * Thrown when a runtime command has no live current session to act on. Carries
+ * the status so the caller can name the other live sessions; the runner never
+ * picks one of them by itself.
+ */
+export class NoLiveCurrentSessionError extends Error {
+  constructor(readonly status: RuntimeSessionStatus) {
+    super(describeNoLiveCurrent(status));
+    this.name = 'NoLiveCurrentSessionError';
+  }
+}
+
+/**
+ * An attached session is live until its bridge is seen to be gone. A spawned
+ * session is live while its process is tracked and has not exited.
+ */
+function isSessionLive(session: RuntimeSession): boolean {
+  if (session.mode === 'attached') return true;
+  if (session.mode === 'spawned') return session.process !== null && !session.process.hasExited;
+  return false;
+}
+
 export interface RuntimeStopResult {
   mode: RuntimeSessionMode;
+  /** Resolved absolute path of the project whose session was stopped. */
+  projectPath: string;
   output: string[];
   errors: string[];
   externalProcessPreserved?: boolean;
@@ -220,38 +325,27 @@ export class GodotRunner {
   private bridge: BridgeManager;
   private validatedPaths: Map<string, boolean> = new Map();
   private cachedVersion: string | null = null;
-  public activeProcess: GodotProcess | null = null;
-  public activeProjectPath: string | null = null;
-  public activeSessionMode: RuntimeSessionMode | null = null;
-  public activeBridgePort: number | null = null;
-  // Debugger receiver for `run_project({ profiling: true })`. Bound before the
-  // spawn so `--remote-debug` has a port to dial, and torn down with the
-  // session. Null in attached mode — the channel is set at launch or never.
-  public activeProfiler: DebuggerProfiler | null = null;
-  // Per-session bridge auth token. Spawned sessions deliver this via the
-  // MCP_SESSION_TOKEN env var; attached sessions bake it into the injected
-  // script (see BridgeManager.inject). Attached to every outgoing frame in
-  // sendCommand so the bridge can reject unauthenticated drive-by commands.
-  private activeSessionToken: string | null = null;
+  /** One record per project, keyed by {@link sessionKey}. */
+  private sessions = new Map<string, RuntimeSession>();
   /**
-   * Monotonic counter bumped at the head of every session transition
-   * (`runProject`, `attachProject`, `stopProject`). A spawned process's exit
-   * handler captures the value current at registration and does nothing when
-   * it no longer matches, so a late exit from a superseded session cannot
-   * clear the session that replaced it. Identity of `activeProcess` is not
-   * enough: under `profiling: true`, `runProject` awaits
-   * `DebuggerProfiler.create()` between `bridge.inject()` and the new
-   * `activeProcess` assignment, and an identity-guarded handler firing in that
-   * window would clean the new session's freshly injected bridge script.
+   * The session the runtime tools act on, or null. Set by `runProject`,
+   * `attachProject` and `switchSession`; emptied when its session is stopped
+   * or forgotten. Never moved to another session implicitly.
    */
-  private sessionEpoch = 0;
+  private current: RuntimeSession | null = null;
 
   private socket: net.Socket | null = null;
   /**
-   * True once a TCP connect to the bridge port has succeeded during the
-   * current session. Set in `sendCommand`'s `ensureSocket` `onConnect`
-   * callback, read by `pollBridge` to switch to the extended readiness
-   * budget, and reset in `beginSessionTransition` so it never leaks across
+   * The session the open bridge socket was dialed for. There is one socket,
+   * and it follows the session a command is sent to: `sendCommandTo` closes a
+   * socket that belongs to a different session before dialing.
+   */
+  private socketSession: RuntimeSession | null = null;
+  /**
+   * True once a TCP connect to the bridge port has succeeded since the current
+   * session became current. Set in `sendCommandTo`'s `ensureSocket`
+   * `onConnect` callback, read by `pollBridge` to switch to the extended
+   * readiness budget, and reset in `setCurrent` so it never leaks across
    * sessions.
    */
   private bridgeConnectObserved = false;
@@ -278,6 +372,36 @@ export class GodotRunner {
         console.warn(`[SERVER] Invalid custom Godot path provided: ${normalizedPath}`);
       }
     }
+  }
+
+  // Read-only views of the current session. A session on another project is
+  // reachable only through the methods that take a projectPath or return
+  // RuntimeSessionInfo snapshots, so a caller reading these names can never
+  // act on a non-current session by accident.
+
+  get activeSessionMode(): RuntimeSessionMode | null {
+    return this.current?.mode ?? null;
+  }
+
+  /** Null once the current session's process exited; the record keeps its path. */
+  get activeProjectPath(): string | null {
+    return this.current !== null && this.current.mode !== null ? this.current.projectPath : null;
+  }
+
+  get activeBridgePort(): number | null {
+    return this.current?.bridgePort ?? null;
+  }
+
+  get activeProcess(): GodotProcess | null {
+    return this.current?.process ?? null;
+  }
+
+  get activeProfiler(): DebuggerProfiler | null {
+    return this.current?.profiler ?? null;
+  }
+
+  private get activeSessionToken(): string | null {
+    return this.current?.token ?? null;
   }
 
   private isValidGodotPathSync(path: string): boolean {
@@ -608,26 +732,10 @@ export class GodotRunner {
     // The bridge reports an absolute project_path in its pong, so a relative
     // expectedPath makes pollBridge's path guard fail immediately and mask
     // the real reason as a generic bridge timeout.
-    const epoch = this.beginSessionTransition();
     projectPath = resolve(projectPath);
-    this.closeProfiler();
 
-    if (this.activeSessionMode === 'spawned' && this.activeProcess) {
-      logDebug('Killing existing Godot process before starting a new one');
-      this.closeConnection();
-      this.activeProcess.process.kill();
-      if (this.activeProjectPath && this.activeProjectPath !== projectPath) {
-        this.bridge.cleanup(this.activeProjectPath);
-      }
-    } else if (
-      this.activeSessionMode === 'attached' &&
-      this.activeProjectPath &&
-      this.activeProjectPath !== projectPath
-    ) {
-      this.closeConnection();
-      this.bridge.cleanup(this.activeProjectPath);
-    }
-
+    // Checked before any teardown: a launch that cannot happen must not cost
+    // the project the session it already has.
     if (!checkDisplayAvailable()) {
       throw new Error(
         'No display server available (DISPLAY and WAYLAND_DISPLAY are both unset). ' +
@@ -635,118 +743,223 @@ export class GodotRunner {
       );
     }
 
-    const port = bridgePort ?? (await findFreePort());
-    this.activeBridgePort = port;
+    // Only a session on this same project is replaced. Sessions on other
+    // projects keep running and are not touched.
+    const key = sessionKey(projectPath);
+    const previous = this.sessions.get(key) ?? null;
+    if (previous !== null) {
+      this.beginSessionTransition(previous);
+      this.closeProfiler(previous);
+      if (previous.mode === 'spawned' && previous.process) {
+        logDebug('Killing existing Godot process before starting a new one');
+        previous.process.process.kill();
+      }
+      // No bridge cleanup: the replacement runs on the same project and
+      // re-injects over the same owner file.
+    }
 
+    const session = this.createSession(projectPath, 'spawned');
+    const epoch = session.epoch;
+    this.sessions.set(key, session);
+    this.setCurrent(session);
+
+    let injected = false;
     try {
-      this.bridge.inject(projectPath, port);
-    } catch (err) {
-      // A name collision with a user's own McpBridge autoload is the one
-      // inject failure the caller can act on, and swallowing it would surface
-      // as a generic bridge timeout minutes later. Everything else (an
-      // unwritable project directory, a packaging problem in the shipped
-      // template) still degrades to a bridgeless run, as before.
-      if (err instanceof BridgeAutoloadCollisionError) throw err;
-      logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
-    }
-    this.activeProjectPath = projectPath;
-    this.activeSessionMode = 'spawned';
+      const port = bridgePort ?? (await findFreePort());
+      session.bridgePort = port;
 
-    const cmdArgs = ['--path', projectPath];
-    if (profiling) {
-      this.activeProfiler = await DebuggerProfiler.create();
-      cmdArgs.push('--remote-debug', `tcp://127.0.0.1:${this.activeProfiler.port}`);
-      logDebug(`Profiling enabled (debugger port ${this.activeProfiler.port})`);
-    }
-    if (scene && validateSubPath(projectPath, scene)) {
-      logDebug(`Adding scene parameter: ${scene}`);
-      cmdArgs.push(scene);
-    }
+      try {
+        this.bridge.inject(projectPath, port);
+        injected = true;
+      } catch (err) {
+        // A name collision with a user's own McpBridge autoload is the one
+        // inject failure the caller can act on, and swallowing it would surface
+        // as a generic bridge timeout minutes later. Everything else (an
+        // unwritable project directory, a packaging problem in the shipped
+        // template) still degrades to a bridgeless run, as before.
+        if (err instanceof BridgeAutoloadCollisionError) throw err;
+        logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
+      }
 
-    const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
-    logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
-    const sessionToken = randomBytes(16).toString('hex');
-    this.activeSessionToken = sessionToken;
-    const spawnOptions: SpawnOptions = {
-      stdio: 'pipe',
-      env: {
-        ...process.env,
-        MCP_SESSION_TOKEN: sessionToken,
-        // Delivers this session's resolved port without baking it into the
-        // shared script — see BridgeManager: spawned sessions never bake,
-        // so the on-disk script stays identical for every spawned session
-        // regardless of who wrote it.
-        MCP_BRIDGE_PORT: String(port),
-      },
-    };
-    if (background) {
-      spawnOptions.env = { ...spawnOptions.env, MCP_BACKGROUND: '1' };
-    }
-    let proc;
-    try {
-      proc = spawn(this.godotPath, cmdArgs, spawnOptions);
+      const cmdArgs = ['--path', projectPath];
+      if (profiling) {
+        const profiler = await DebuggerProfiler.create();
+        session.profiler = profiler;
+        cmdArgs.push('--remote-debug', `tcp://127.0.0.1:${profiler.port}`);
+        logDebug(`Profiling enabled (debugger port ${profiler.port})`);
+      }
+      if (scene && validateSubPath(projectPath, scene)) {
+        logDebug(`Adding scene parameter: ${scene}`);
+        cmdArgs.push(scene);
+      }
+
+      const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
+      logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
+      const sessionToken = randomBytes(16).toString('hex');
+      session.token = sessionToken;
+      const spawnOptions: SpawnOptions = {
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          MCP_SESSION_TOKEN: sessionToken,
+          // Delivers this session's resolved port without baking it into the
+          // shared script — see BridgeManager: spawned sessions never bake,
+          // so the on-disk script stays identical for every spawned session
+          // regardless of who wrote it.
+          MCP_BRIDGE_PORT: String(port),
+        },
+      };
+      if (background) {
+        spawnOptions.env = { ...spawnOptions.env, MCP_BACKGROUND: '1' };
+      }
+      const proc = spawn(this.godotPath, cmdArgs, spawnOptions);
+      const output: string[] = [];
+      const errors: string[] = [];
+
+      const godotProcess: GodotProcess = {
+        process: proc,
+        output,
+        errors,
+        totalErrorsWritten: 0,
+        exitCode: null,
+        hasExited: false,
+        sessionToken,
+      };
+
+      proc.stdout?.on('data', (data: Buffer) => {
+        const lines = data.toString().split('\n');
+        output.push(...lines);
+        if (output.length > 500) output.splice(0, output.length - 500);
+        lines.forEach((line: string) => {
+          if (line.trim()) logDebug(`[Godot stdout] ${line}`);
+        });
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        this.ingestStderrChunk(godotProcess, data.toString());
+      });
+
+      proc.on('exit', (code: number | null) => {
+        this.handleSpawnedProcessExit(session, godotProcess, epoch, code);
+      });
+
+      proc.on('error', (err: Error) => {
+        console.error('Failed to start Godot process:', err);
+        // Through ingestStderrChunk, not a bare errors.push: it is the only
+        // writer of `errors` and `totalErrorsWritten`, and every sentinel `seq`
+        // and `getErrorsSince` window is computed from the two staying in step.
+        // One uncounted push shifts every later window by a line.
+        this.ingestStderrChunk(godotProcess, `Process error: ${err.message}\n`);
+        godotProcess.hasExited = true;
+        // The engine will never dial back, so nothing can arrive on the debugger
+        // listener. Holding the port open until the next run_project is pointless.
+        this.closeProfiler(session);
+      });
+
+      session.process = godotProcess;
+      return godotProcess;
     } catch (err) {
-      // Nothing will dial the debugger listener now; don't strand the port.
-      this.closeProfiler();
+      // Nothing is running for this record: drop it, release the debugger
+      // listener, and remove whatever bridge artifacts the start (or the
+      // session it replaced) left on the project.
+      this.discardFailedStart(session, injected || previous !== null);
       throw err;
     }
-    const output: string[] = [];
-    const errors: string[] = [];
-
-    const godotProcess: GodotProcess = {
-      process: proc,
-      output,
-      errors,
-      totalErrorsWritten: 0,
-      exitCode: null,
-      hasExited: false,
-      sessionToken,
-    };
-
-    proc.stdout?.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      output.push(...lines);
-      if (output.length > 500) output.splice(0, output.length - 500);
-      lines.forEach((line: string) => {
-        if (line.trim()) logDebug(`[Godot stdout] ${line}`);
-      });
-    });
-
-    proc.stderr?.on('data', (data: Buffer) => {
-      this.ingestStderrChunk(godotProcess, data.toString());
-    });
-
-    const exitProjectPath = projectPath;
-    proc.on('exit', (code: number | null) => {
-      this.handleSpawnedProcessExit(godotProcess, exitProjectPath, epoch, code);
-    });
-
-    proc.on('error', (err: Error) => {
-      console.error('Failed to start Godot process:', err);
-      // Through ingestStderrChunk, not a bare errors.push: it is the only
-      // writer of `errors` and `totalErrorsWritten`, and every sentinel `seq`
-      // and `getErrorsSince` window is computed from the two staying in step.
-      // One uncounted push shifts every later window by a line.
-      this.ingestStderrChunk(godotProcess, `Process error: ${err.message}\n`);
-      godotProcess.hasExited = true;
-      // The engine will never dial back, so nothing can arrive on the debugger
-      // listener. Holding the port open until the next run_project is pointless.
-      this.closeProfiler();
-    });
-
-    this.activeProcess = godotProcess;
-    return this.activeProcess;
   }
 
   /**
-   * Open a new session epoch. Called as the first statement of every entry
-   * point that installs or tears down session state, so handlers registered
-   * under a previous epoch become inert the moment the transition starts.
+   * Move a session to its next epoch. Called as the first synchronous
+   * statement of every path that supersedes or stops that session, before any
+   * `await`, any `kill` and any bridge call, so handlers registered under the
+   * previous epoch are inert the moment the transition starts.
+   *
+   * The counter is per session on purpose. A spawned process's exit handler
+   * captures the value its own session had at registration and does nothing
+   * when it no longer matches, so a late exit from a superseded process cannot
+   * clear the session that replaced it. Process identity is not enough: under
+   * `profiling: true`, `runProject` awaits `DebuggerProfiler.create()` between
+   * `bridge.inject()` and the new record's `process` assignment, and a handler
+   * that only asked "does this project have a session" firing in that window
+   * would clean the replacement's freshly injected bridge script. A single
+   * runner-wide counter fails the other way: starting a second project would
+   * make the first project's own later exit look superseded, and that session
+   * would never clear itself.
    */
-  private beginSessionTransition(): number {
-    this.sessionEpoch += 1;
+  private beginSessionTransition(session: RuntimeSession): number {
+    session.epoch += 1;
+    return session.epoch;
+  }
+
+  /** Build a session record. Does not register it. */
+  private createSession(projectPath: string, mode: RuntimeSessionMode | null): RuntimeSession {
+    return {
+      key: sessionKey(projectPath),
+      projectPath,
+      mode,
+      bridgePort: null,
+      token: null,
+      process: null,
+      profiler: null,
+      epoch: 0,
+    };
+  }
+
+  /**
+   * Point `current` at a session, or at nothing. The bridge socket follows:
+   * a socket dialed for any other session is closed here, and the next
+   * command lazy-connects to the new current session's port with its token.
+   */
+  private setCurrent(session: RuntimeSession | null): void {
+    if (this.current === session) return;
+    if (this.socketSession !== session) this.closeConnection();
     this.bridgeConnectObserved = false;
-    return this.sessionEpoch;
+    this.current = session;
+  }
+
+  /**
+   * Drop a session record. Leaves `current` empty when it pointed here; no
+   * other session is promoted in its place.
+   */
+  private forgetSession(session: RuntimeSession): void {
+    if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
+    if (this.current === session) this.setCurrent(null);
+  }
+
+  private closeProfiler(session: RuntimeSession): void {
+    session.profiler?.close();
+    session.profiler = null;
+  }
+
+  /**
+   * Undo a start that threw before it produced a running session. The record
+   * is dropped so nothing reports a session that never ran, and the bridge
+   * artifacts are removed when this start injected them or when it replaced a
+   * session whose artifacts would otherwise have no owner left to remove them.
+   */
+  private discardFailedStart(session: RuntimeSession, ownsArtifacts: boolean): void {
+    this.closeProfiler(session);
+    this.forgetSession(session);
+    if (!ownsArtifacts) return;
+    try {
+      this.bridge.cleanup(session.projectPath);
+    } catch (err) {
+      logDebug(`Bridge cleanup after a failed start failed (ignored): ${err}`);
+    }
+  }
+
+  private describeSession(session: RuntimeSession): RuntimeSessionInfo {
+    const exited = session.process !== null && session.process.hasExited ? session.process : null;
+    return {
+      projectPath: session.projectPath,
+      mode: session.mode,
+      live: isSessionLive(session),
+      current: this.current === session,
+      bridgePort: session.bridgePort,
+      processExited: exited !== null,
+      exitCode: exited !== null ? exited.exitCode : null,
+      hasRetainedLogs: session.process !== null,
+      profiling: session.profiler !== null,
+    };
   }
 
   /**
@@ -756,17 +969,19 @@ export class GodotRunner {
    * spawned — a crash, a window the user closed, a `stopProject` kill, and the
    * kill `runProject` issues before starting a replacement. `exitCode` and
    * `hasExited` are recorded unconditionally because the buffer belongs to the
-   * captured process regardless of which session is current; everything after
-   * the epoch check mutates shared session state and so runs only for the
-   * session that registered this handler.
+   * captured process whichever record holds it; everything after the epoch
+   * check mutates the session and its bridge artifacts and so runs only while
+   * the session is still in the epoch that registered this handler.
    *
-   * `activeProcess` and `activeProfiler` are deliberately left alone: the
-   * output buffer and exit code live on the former, and a capture that
-   * finished just before a crash stays readable through the latter.
+   * The record's `process` and `profiler` are deliberately left alone, the
+   * record stays in the map, and `current` is not moved: the output buffer and
+   * exit code live on the former, a capture that finished just before a crash
+   * stays readable through the latter, and a session that was current stays
+   * the one `get_debug_output` and `stop_project` act on.
    */
   private handleSpawnedProcessExit(
+    session: RuntimeSession,
     proc: GodotProcess,
-    projectPath: string,
     epoch: number,
     code: number | null,
   ): void {
@@ -775,21 +990,22 @@ export class GodotRunner {
     proc.exitCode = normalizedCode;
     proc.hasExited = true;
 
-    if (this.sessionEpoch !== epoch) {
+    if (session.epoch !== epoch) {
       logDebug('Ignoring exit from a superseded Godot session (session epoch moved on)');
       return;
     }
 
-    this.activeSessionMode = null;
-    this.activeProjectPath = null;
-    this.activeBridgePort = null;
-    this.activeSessionToken = null;
-    // The socket to a dead peer is garbage. Idempotent, and the rejection it
-    // issues on an in-flight command is a BridgeDisconnectedError the spawned
-    // branch of sendCommandWithReconnect already ignores.
-    this.closeConnection();
+    session.mode = null;
+    session.bridgePort = null;
+    session.token = null;
+    // The socket to a dead peer is garbage. Only when it is this session's:
+    // an exit on another project must not cut the current session's channel.
+    // Idempotent, and the rejection it issues on an in-flight command is a
+    // BridgeDisconnectedError the spawned branch of sendCommandWithReconnect
+    // already ignores.
+    if (this.socketSession === session) this.closeConnection();
     try {
-      this.bridge.cleanup(projectPath);
+      this.bridge.cleanup(session.projectPath);
     } catch (err) {
       logDebug(`Bridge cleanup after process exit failed (ignored): ${err}`);
     }
@@ -797,94 +1013,103 @@ export class GodotRunner {
 
   /**
    * Drop an attached session whose bridge has gone away. Mirrors the
-   * attached branch of `stopProject` minus the `shutdown` command and the
-   * process handling, since there is no process here and no peer to talk to.
+   * attached branch of `stopSession` minus the `shutdown` command, since
+   * there is no peer left to talk to. An attached session retains nothing, so
+   * its record is deleted outright.
    *
    * Production call site: the disconnect probe in `sendCommandWithReconnect`.
    */
-  private clearAttachedSession(): void {
-    this.closeConnection();
-    const projectPath = this.activeProjectPath;
-    if (projectPath) {
-      try {
-        this.bridge.cleanup(projectPath);
-      } catch (err) {
-        logDebug(`Bridge cleanup after attached disconnect failed (ignored): ${err}`);
-      }
+  private clearAttachedSession(session: RuntimeSession): void {
+    if (this.socketSession === session) this.closeConnection();
+    try {
+      this.bridge.cleanup(session.projectPath);
+    } catch (err) {
+      logDebug(`Bridge cleanup after attached disconnect failed (ignored): ${err}`);
     }
-    this.activeSessionMode = null;
-    this.activeProjectPath = null;
-    this.activeBridgePort = null;
-    this.activeSessionToken = null;
+    this.forgetSession(session);
   }
 
   /**
-   * Synchronous, never-throwing bridge artifact removal for the active
-   * project. `BridgeManager.cleanup` is pure synchronous `fs`, so this is safe
-   * from a `process.on('exit')` handler, where promises never settle.
+   * Synchronous, never-throwing bridge artifact removal for every session
+   * that still holds artifacts. `BridgeManager.cleanup` is pure synchronous
+   * `fs`, so this is safe from a `process.on('exit')` handler, where promises
+   * never settle. One guard per session, so a cleanup that throws on one
+   * project does not cost the others theirs. A session whose mode is null was
+   * already cleaned by its own exit handler.
    *
    * Production call site: the `'exit'` handler registered by
    * `registerProcessLifecycle` in `src/index.ts`.
    */
   cleanupBridgeArtifactsSync(): void {
-    const projectPath = this.activeProjectPath;
-    if (!projectPath) return;
-    try {
-      this.bridge.cleanup(projectPath);
-    } catch {
-      // Exit handlers must not throw; there is nowhere left to report to.
+    for (const session of [...this.sessions.values()]) {
+      if (session.mode === null) continue;
+      try {
+        this.bridge.cleanup(session.projectPath);
+      } catch {
+        // Exit handlers must not throw; there is nowhere left to report to.
+      }
     }
   }
 
   async attachProject(projectPath: string, bridgePort?: number): Promise<void> {
-    this.beginSessionTransition();
     // Resolve relative paths for the same reason as runProject — pollBridge
     // compares against the absolute path the bridge reports.
     projectPath = resolve(projectPath);
-    this.closeProfiler();
-    if (this.activeSessionMode === 'spawned' && this.activeProcess) {
-      await this.stopProject();
-    } else if (
-      this.activeSessionMode === 'attached' &&
-      this.activeProjectPath &&
-      this.activeProjectPath !== projectPath
-    ) {
-      // Different project — detach the old one cleanly so its bridge
-      // releases the port before we inject into the new project.
-      try {
-        await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
-      } catch (err) {
-        logDebug(`Shutdown command failed during attach swap (ignored): ${err}`);
+
+    // Only a session on this same project is replaced. A session on another
+    // project, spawned or attached, is left as it is.
+    const key = sessionKey(projectPath);
+    const previous = this.sessions.get(key) ?? null;
+    if (previous !== null) {
+      if (previous.mode === 'spawned' && previous.process) {
+        await this.stopSession(previous);
+      } else {
+        this.beginSessionTransition(previous);
+        this.closeProfiler(previous);
+        this.forgetSession(previous);
       }
-      this.closeConnection();
-      this.bridge.cleanup(this.activeProjectPath);
-      this.activeProjectPath = null;
-      this.activeSessionMode = null;
     }
 
-    const port = bridgePort ?? (await findFreePort());
-    this.activeBridgePort = port;
-    // Attach has no env channel to a Godot process the user launched
-    // themselves, so the baked script copy is the only way to deliver the
-    // auth token.
-    const token = randomBytes(16).toString('hex');
-    this.activeSessionToken = token;
-    this.bridge.inject(projectPath, port, token);
-    const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
-    logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
-    this.activeProjectPath = projectPath;
-    this.activeSessionMode = 'attached';
-    this.activeProcess = null;
+    const session = this.createSession(projectPath, 'attached');
+    this.sessions.set(key, session);
+    this.setCurrent(session);
+
+    try {
+      const port = bridgePort ?? (await findFreePort());
+      session.bridgePort = port;
+      // Attach has no env channel to a Godot process the user launched
+      // themselves, so the baked script copy is the only way to deliver the
+      // auth token.
+      const token = randomBytes(16).toString('hex');
+      session.token = token;
+      this.bridge.inject(projectPath, port, token);
+      const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
+      logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
+    } catch (err) {
+      this.discardFailedStart(session, previous !== null);
+      throw err;
+    }
   }
 
+  /**
+   * Stop the current session. Leaves `current` empty afterwards: a session on
+   * another project is never promoted in its place.
+   */
   async stopProject(): Promise<RuntimeStopResult | null> {
-    this.beginSessionTransition();
-    if (!this.activeSessionMode) {
-      // Release the debugger listener before any early return. A spawn that
-      // failed after the profiler bound leaves `activeProcess` null, and
-      // stop_project is exactly where the user goes to clean that up.
-      if (!this.activeProcess) {
-        this.closeProfiler();
+    const session = this.current;
+    if (!session) return null;
+    return this.stopSession(session);
+  }
+
+  private async stopSession(session: RuntimeSession): Promise<RuntimeStopResult | null> {
+    this.beginSessionTransition(session);
+    if (session.mode === null) {
+      // Release the debugger listener before any early return. A record with
+      // no mode and no process is a finished capture kept readable after an
+      // earlier stop; stopping again is where it is finally released.
+      if (!session.process) {
+        this.closeProfiler(session);
+        this.forgetSession(session);
         return null;
       }
 
@@ -893,13 +1118,17 @@ export class GodotRunner {
       // left to kill or clean — hand back the captured logs so stop_project
       // stays idempotent. A capture that finished before the exit survives;
       // only an unfinished one is torn down.
-      const exited = this.activeProcess;
-      if (this.activeProfiler !== null && !this.activeProfiler.hasResult) {
-        this.closeProfiler();
+      const exited = session.process;
+      if (session.profiler !== null && !session.profiler.hasResult) {
+        this.closeProfiler(session);
       }
-      this.activeProcess = null;
+      session.process = null;
+      // A finished capture keeps the record, process-less, so it stays
+      // readable through `activeProfiler` until the next stop.
+      if (session.profiler === null) this.forgetSession(session);
       return {
         mode: 'spawned',
+        projectPath: session.projectPath,
         output: exited.output,
         errors: exited.errors,
         alreadyExited: true,
@@ -907,57 +1136,53 @@ export class GodotRunner {
       };
     }
 
-    if (this.activeSessionMode === 'attached') {
+    if (session.mode === 'attached') {
       // Ask the bridge to shut down so the user's still-running Godot
       // releases the port. A timeout here is non-fatal — same end state
       // as today, the bridge dies when the user closes Godot.
       try {
-        await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
+        await this.sendCommandTo(session, 'shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
       } catch (err) {
         logDebug(`Attached shutdown timed out or failed (continuing cleanup): ${err}`);
       }
       this.closeConnection();
-      this.closeProfiler();
-      const projectPath = this.activeProjectPath;
-      if (projectPath) {
-        this.bridge.cleanup(projectPath);
-      }
-      this.activeProjectPath = null;
-      this.activeSessionMode = null;
-      this.activeBridgePort = null;
-      this.activeSessionToken = null;
-      this.activeProcess = null;
+      this.closeProfiler(session);
+      this.bridge.cleanup(session.projectPath);
+      this.forgetSession(session);
       return {
         mode: 'attached',
+        projectPath: session.projectPath,
         output: [],
         errors: [],
         externalProcessPreserved: true,
       };
     }
 
-    if (!this.activeProcess) {
-      this.closeProfiler();
-      this.activeSessionMode = null;
-      this.activeProjectPath = null;
+    const tracked = session.process;
+    if (!tracked) {
+      // Only a start that has not spawned yet looks like this (a shutdown
+      // arriving inside the start's own awaits). There is nothing to kill.
+      this.closeProfiler(session);
+      this.forgetSession(session);
       return null;
     }
 
     // Spawned: try graceful shutdown so the bridge releases the port,
     // then ensure the process actually exits.
     try {
-      await this.sendCommand('shutdown', {}, BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS);
+      await this.sendCommandTo(session, 'shutdown', {}, BRIDGE_SHUTDOWN_SPAWNED_TIMEOUT_MS);
     } catch {
       // Bridge may already be unreachable — proceed to kill.
     }
     this.closeConnection();
-    this.closeProfiler();
+    this.closeProfiler(session);
 
-    logDebug('Stopping active Godot process');
-    const proc = this.activeProcess.process;
+    logDebug('Stopping Godot process');
+    const proc = tracked.process;
     proc.kill();
 
     // Wait up to BRIDGE_PROCESS_EXIT_TIMEOUT_MS for graceful exit; otherwise SIGKILL.
-    if (!this.activeProcess.hasExited) {
+    if (!tracked.hasExited) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           try {
@@ -976,35 +1201,124 @@ export class GodotRunner {
 
     const result: RuntimeStopResult = {
       mode: 'spawned',
-      output: this.activeProcess.output,
-      errors: this.activeProcess.errors,
+      projectPath: session.projectPath,
+      output: tracked.output,
+      errors: tracked.errors,
     };
-    this.activeProcess = null;
-
-    if (this.activeProjectPath) {
-      this.bridge.cleanup(this.activeProjectPath);
-      this.activeProjectPath = null;
-    }
-    this.activeSessionMode = null;
-    this.activeBridgePort = null;
-    this.activeSessionToken = null;
+    session.process = null;
+    this.bridge.cleanup(session.projectPath);
+    this.forgetSession(session);
 
     return result;
   }
 
-  private closeProfiler(): void {
-    this.activeProfiler?.close();
-    this.activeProfiler = null;
+  /**
+   * Stop every session, for server shutdown. Bounded: each stop spends at
+   * most its shutdown-command timeout plus BRIDGE_PROCESS_EXIT_TIMEOUT_MS. One
+   * session failing to stop does not keep the others running.
+   */
+  async stopAllSessions(): Promise<void> {
+    for (const session of [...this.sessions.values()]) {
+      try {
+        await this.stopSession(session);
+      } catch (err) {
+        logDebug(`Stopping the session on ${session.projectPath} failed (continuing): ${err}`);
+      }
+    }
+    // A stop of an already-exited session keeps a finished profiler capture
+    // readable; at shutdown nothing will read it. A record whose stop threw
+    // still has a mode and is left in place, so the synchronous exit handler
+    // gets one more attempt at its bridge artifacts.
+    for (const session of [...this.sessions.values()]) {
+      if (session.mode !== null) continue;
+      this.closeProfiler(session);
+      this.forgetSession(session);
+    }
   }
 
+  /** True when there is a current session and it is live. */
   hasActiveRuntimeSession(): boolean {
-    if (!this.activeSessionMode || !this.activeProjectPath) {
-      return false;
+    return this.current !== null && isSessionLive(this.current);
+  }
+
+  /** Every session record, live or retained, in the order the projects were started. */
+  listSessions(): RuntimeSessionInfo[] {
+    return [...this.sessions.values()].map((session) => this.describeSession(session));
+  }
+
+  listLiveSessions(): RuntimeSessionInfo[] {
+    return this.listSessions().filter((info) => info.live);
+  }
+
+  /** The session on one project, current or not. Null when the project has none. */
+  getSessionInfo(projectPath: string): RuntimeSessionInfo | null {
+    const session = this.sessions.get(sessionKey(projectPath));
+    return session ? this.describeSession(session) : null;
+  }
+
+  getCurrentSessionInfo(): RuntimeSessionInfo | null {
+    return this.current ? this.describeSession(this.current) : null;
+  }
+
+  getRuntimeSessionStatus(): RuntimeSessionStatus {
+    const current = this.current;
+    const otherLiveSessions = [...this.sessions.values()]
+      .filter((session) => session !== current && isSessionLive(session))
+      .map((session) => this.describeSession(session));
+    if (current === null) return { state: 'none', current: null, otherLiveSessions };
+    return {
+      state: isSessionLive(current) ? 'live' : 'exited',
+      current: this.describeSession(current),
+      otherLiveSessions,
+    };
+  }
+
+  /**
+   * The current session, or a `NoLiveCurrentSessionError` when there is none
+   * or it is no longer live. Never falls back to another live session.
+   */
+  requireLiveCurrentSession(): RuntimeSessionInfo {
+    const status = this.getRuntimeSessionStatus();
+    if (status.state !== 'live' || status.current === null) {
+      throw new NoLiveCurrentSessionError(status);
     }
-    if (this.activeSessionMode === 'spawned') {
-      return this.activeProcess !== null && !this.activeProcess.hasExited;
-    }
-    return true;
+    return status.current;
+  }
+
+  /** True when this runner has a live session on the project, current or not. */
+  hasLiveSessionOnProject(projectPath: string): boolean {
+    const session = this.sessions.get(sessionKey(projectPath));
+    return session !== undefined && isSessionLive(session);
+  }
+
+  /**
+   * Make a project's session current and close the bridge socket, so the next
+   * command dials that session. Returns null, changing nothing, when the
+   * project has no session. Succeeds on a retained session whose process has
+   * exited and reports it as `live: false`: that is how its logs are read and
+   * how it is freed.
+   */
+  switchSession(projectPath: string): RuntimeSessionInfo | null {
+    const session = this.sessions.get(sessionKey(projectPath));
+    if (!session) return null;
+    this.setCurrent(session);
+    return this.describeSession(session);
+  }
+
+  /**
+   * Copies of the retained stdout/stderr of a project's session, current or
+   * not. Null when the project has no session or the session holds no process
+   * (attached mode), so "nothing was captured" is never reported as empty logs.
+   */
+  readSessionLogs(projectPath: string): RuntimeSessionLogs | null {
+    const proc = this.sessions.get(sessionKey(projectPath))?.process;
+    if (!proc) return null;
+    return {
+      output: [...proc.output],
+      errors: [...proc.errors],
+      hasExited: proc.hasExited,
+      exitCode: proc.exitCode,
+    };
   }
 
   /**
@@ -1015,11 +1329,30 @@ export class GodotRunner {
    * `closeConnection` (or a peer-side close). A close mid-flight rejects with
    * `BridgeDisconnectedError`; a per-command timeout rejects but does NOT
    * close the socket — a slow command does not invalidate the session.
+   *
+   * Always addresses the current session. With none, the frame carries no
+   * token and goes to the default port.
    */
   sendCommand(
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
+  ): Promise<string> {
+    return this.sendCommandTo(this.current, command, params, timeoutMs);
+  }
+
+  /**
+   * `sendCommand` against a named session. There is one socket: when the open
+   * one was dialed for a different session it is closed first, and this
+   * command dials the target's port and carries the target's token. Used
+   * directly only by teardown, which has to reach a session that may not be
+   * the current one.
+   */
+  private sendCommandTo(
+    target: RuntimeSession | null,
+    command: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.inFlight) {
@@ -1030,6 +1363,8 @@ export class GodotRunner {
         );
         return;
       }
+
+      if (this.socket !== null && this.socketSession !== target) this.closeConnection();
 
       const settle = (err: Error | null, value?: string): void => {
         if (!this.inFlight) return;
@@ -1068,14 +1403,15 @@ export class GodotRunner {
           return;
         }
         // Fallback to DEFAULT_BRIDGE_PORT is defensive — every entry point
-        // (runProject, attachProject) sets activeBridgePort before sendCommand
-        // can be reached, so this branch is not expected in practice.
-        const port = this.activeBridgePort ?? DEFAULT_BRIDGE_PORT;
+        // (runProject, attachProject) sets the session's bridgePort before a
+        // command can be sent to it, so this branch is not expected in practice.
+        const port = target?.bridgePort ?? DEFAULT_BRIDGE_PORT;
         const sock = net.connect(port, '127.0.0.1');
         const onConnect = (): void => {
           sock.setNoDelay(true);
           sock.removeListener('error', onConnectError);
           this.socket = sock;
+          this.socketSession = target;
           this.bridgeConnectObserved = true;
           this.resetRxBuffer();
 
@@ -1170,7 +1506,7 @@ export class GodotRunner {
         try {
           const payload = JSON.stringify({
             command,
-            token: this.activeSessionToken ?? undefined,
+            token: target?.token ?? undefined,
             ...params,
           });
           this.socket.write(encodeFrame(payload));
@@ -1199,6 +1535,7 @@ export class GodotRunner {
       sock.removeAllListeners();
       sock.destroy();
     }
+    this.socketSession = null;
     this.resetRxBuffer();
   }
 
@@ -1384,9 +1721,9 @@ export class GodotRunner {
    * the command in flight during our own teardown is a `shutdown`. Probing on
    * that would clear a session already being torn down deliberately, and
    * probing on a `ping` would recurse into the probe itself. Today both
-   * teardown `shutdown`s and the probe call `sendCommand` directly, so this
-   * set is unreached in production; it is here so routing either through the
-   * reconnect wrapper stays correct.
+   * teardown `shutdown`s go through `sendCommandTo` and the probe calls
+   * `sendCommand` directly, so this set is unreached in production; it is
+   * here so routing either through the reconnect wrapper stays correct.
    */
   private static readonly DISCONNECT_EXEMPT_BRIDGE_COMMANDS = new Set(['shutdown', 'ping']);
 
@@ -1399,7 +1736,7 @@ export class GodotRunner {
    * disconnect-means-session-end probe.
    *
    * WIDEST INPUT of the disconnect predicate: `BridgeDisconnectedError` has
-   * seven producers in `sendCommand` — connect failure, socket unavailable,
+   * seven producers in `sendCommandTo` — connect failure, socket unavailable,
    * oversized frame header, framing parse error, socket `'error'`, peer
    * `'close'`, and `closeConnection`'s in-flight rejection. A per-command
    * timeout is a plain `Error` and never reaches here, so a wedged-but-alive
@@ -1414,6 +1751,10 @@ export class GodotRunner {
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
   ): Promise<string> {
+    // The session this command belongs to. Read once: the disconnect handling
+    // below must judge and, if it comes to that, clear this session, not
+    // whichever one is current by the time the probe has failed.
+    const session = this.current;
     let failure: Error;
     try {
       return await this.sendCommand(command, params, timeoutMs);
@@ -1424,9 +1765,9 @@ export class GodotRunner {
 
     const retryable = GodotRunner.RETRYABLE_BRIDGE_COMMANDS.has(command);
 
-    if (this.activeSessionMode !== 'attached') {
+    if (session === null || session.mode !== 'attached') {
       // Spawned (or already-cleared) session: unchanged behavior.
-      if (this.activeSessionMode && retryable) {
+      if (session?.mode && retryable) {
         this.closeConnection();
         await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
         return this.sendCommand(command, params, timeoutMs);
@@ -1454,7 +1795,7 @@ export class GodotRunner {
     try {
       await this.sendCommand('ping', {}, BRIDGE_PING_TIMEOUT_MS);
     } catch {
-      this.clearAttachedSession();
+      this.clearAttachedSession(session);
     }
     throw failure;
   }
@@ -1464,13 +1805,20 @@ export class GodotRunner {
     params: Record<string, unknown> = {},
     timeoutMs: number = 10000,
   ): Promise<{ response: string; runtimeErrors: string[]; stderrWindow: string[] }> {
+    // No current session: reject before any socket is dialed, with the live
+    // sessions on the error. Another session is never picked in its place. A
+    // current session that is no longer live still sends, as before.
+    if (this.current === null) {
+      throw new NoLiveCurrentSessionError(this.getRuntimeSessionStatus());
+    }
     const marker = this.getErrorCount();
     const response = await this.sendCommandWithReconnect(command, params, timeoutMs);
     const newErrors = this.getErrorsSince(marker);
-    // Keyed on the retained `activeProcess` rather than the session mode: the
+    // Keyed on the retained process rather than the session mode: the
     // auto-clear nulls the mode the moment a spawned process exits, but the
-    // stderr buffer being classified here lives on `activeProcess`, which
-    // survives. Attached sessions have no `activeProcess` and so still get [].
+    // stderr buffer being classified here lives on the current session's
+    // process, which survives. Attached sessions have no process and so still
+    // get [].
     const runtimeErrors = this.activeProcess !== null ? this.extractRuntimeErrors(newErrors) : [];
     // Unfiltered stderr window (newErrors) for callers that need the full
     // engine output around a failure — e.g. run_script compile diagnostics,
