@@ -193,6 +193,17 @@ Spatial properties (`position`, `rotation`, `scale`, `visible`, `modulate`) may 
 
 Every path argument is confined to the project root. A path that resolves outside it (for example `../enemy.tscn`) is rejected rather than followed, on both the standalone and batch paths.
 
+### What the scene tools return
+
+Each tool returns one JSON object, as `structuredContent` and as the same JSON in a text block. Outcome fields are read back from the engine after the operation, not copied from the request.
+
+- `create_scene`: `success` and the `scenePath` that was written.
+- `add_node`: `nodeName`, `nodeType` and `nodePath` of the node as it exists after the add. `nodePath` is in the `root/...` form every node tool accepts. Godot renames a child whose name is already taken by a sibling, and replaces characters a node name cannot hold. When either happens the payload carries the name Godot assigned and leads with a `warnings` entry saying so.
+- `load_sprite`: `nodePath`, `nodeType` and `texturePath`, the project-relative path of the texture the node holds after the assignment.
+- `save_scene`: `scenePath`, the scene that was loaded, and `savedScenePath`, the file that was written and then confirmed on disk. The two are equal unless `newPath` was given.
+- `export_mesh_library`: `outputPath`, `itemCount` and `itemNames`, read from the library that was saved. A name in `meshItemNames` that matched no child, or matched a child with no mesh, is listed in a leading `warnings` entry instead of being dropped silently.
+- `batch_scene_operations`: `results[]` in input order. Every entry has `operation`, `scenePath` and either `success: true` or `error`, plus the fields the standalone tool returns: `nodeName`, `nodeType` and `nodePath` for `add_node`; `nodePath`, `nodeType` and `texturePath` for `load_sprite`; `updates[]` for `set_node_properties`; `savedScenePath` for `save`. A renamed `add_node` is reported in a top-level `warnings` entry that names the item index.
+
 ## Node Editing (headless)
 
 All mutation operations save automatically. Property and delete tools take always-array input - pass a single-element array for one-off operations, or many for batched work in one Godot process.
@@ -210,6 +221,17 @@ All mutation operations save automatically. Property and delete tools take alway
 | `get_node_signals`    | List all signals on a node with their connections                         |
 | `connect_signal`      | Connect a signal to a method on another node                              |
 | `disconnect_signal`   | Disconnect a signal connection                                            |
+
+### What the node tools return
+
+- `get_scene_tree`: the root node of the tree, `{ name, type, path, script, children[] }`, with every child in the same shape. `script` is the attached script's `res://` path, or an empty string.
+- `get_node_properties`: `results[]`, one entry per requested node in input order: `{ nodePath, nodeType, properties }`, or `{ nodePath, error }` when the node was not found. A scene that cannot be loaded returns an empty `results[]` and a top-level `error`.
+- `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`.
+- `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`.
+- `attach_script`: `success`, `nodePath`, `scriptPath`.
+- `duplicate_node`: `success`, `nodePath` (the node that was copied) and `newNodePath`, where the duplicate is after the add, in the `root/...` form.
+- `get_node_signals`: `nodePath`, `nodeType` and `signals[]`, each with `name` and `connections[]` of `{ signal, target, method }`.
+- `connect_signal` and `disconnect_signal`: `nodePath`, `signal`, `targetNodePath`, `method` and `connected`. `connected` is not an echo of the request: after the save, the scene file is loaded again from disk and the connection is looked up in it. It is `true` after a connect and `false` after a disconnect. If that second load fails, `connected` is `null` and `warnings` leads the payload. A connect the saved scene does not hold, or a disconnect it still holds, is an error.
 
 ## Property Values (`add_node`, `set_node_properties`)
 
@@ -327,6 +349,8 @@ Validate before attaching or running. Catches syntax errors and missing resource
 A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds structural and signal-verification checks in the same validation call. With `scenePath + checks`, both the resource-integrity validation and the checks run; their errors are merged into one `errors` array, each check-attributed error carrying a `check` discriminator.
 
 A parse error carries a `line` only when Godot's stderr includes one, which is not always.
+
+**Returns.** One target returns `{ valid, errors }`. A `targets` array returns `{ results }`, one `{ target, valid, errors }` per target in input order. Every `errors` entry has a `message`. A parse error adds `line` when Godot reported one. A `checks` finding adds `check`; a signals finding also adds `node`, `signal`, `target`, `method` and `problem`, and a structure finding about one node adds `path`.
 
 ```json
 {

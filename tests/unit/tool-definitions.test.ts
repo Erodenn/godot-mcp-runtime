@@ -20,6 +20,19 @@ const allDefinitions: ToolDefinition[] = [
   ...validateToolDefinitions,
 ];
 
+// Tools that do not declare an outputSchema yet. A tool named here is skipped
+// by the check below; the list shrinks to nothing and is then deleted.
+const TOOLS_PENDING_OUTPUT_SCHEMA: readonly string[] = [
+  'launch_editor',
+  'list_projects',
+  'get_project_files',
+  'get_project_settings',
+  'list_autoloads',
+  'add_autoload',
+  'remove_autoload',
+  'update_autoload',
+];
+
 describe('tool definitions: per-tool shape contract', () => {
   it.each(allDefinitions.map((t) => [t.name, t] as [string, ToolDefinition]))(
     '%s has a non-empty name',
@@ -77,5 +90,16 @@ describe('tool definitions: no duplicate names', () => {
     const names = allDefinitions.map((t) => t.name);
     const unique = new Set(names);
     expect(unique.size).toBe(names.length);
+  });
+});
+
+describe('tool definitions: every tool declares an outputSchema', () => {
+  it.each(
+    allDefinitions
+      .filter((t) => !TOOLS_PENDING_OUTPUT_SCHEMA.includes(t.name))
+      .map((t) => [t.name, t] as [string, ToolDefinition]),
+  )('%s declares an object outputSchema', (_name, tool) => {
+    expect(tool.outputSchema).toBeDefined();
+    expect(tool.outputSchema?.type).toBe('object');
   });
 });

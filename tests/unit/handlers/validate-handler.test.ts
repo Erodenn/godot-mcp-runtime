@@ -3,6 +3,7 @@ import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { useTmpDirs } from '../../helpers/tmp.js';
@@ -106,6 +107,7 @@ describe('handleValidate', () => {
       source: 'extends Node',
     });
     expect(hasError(result)).toBe(false);
+    expect(expectMatchesOutputSchema('validate', result)).toEqual({ valid: true, errors: [] });
   });
 
   it('returns a result (not isError) when runner succeeds with invalid JSON stdout (treated as invalid script)', async () => {
@@ -244,6 +246,23 @@ describe('handleValidate batch mode', () => {
     });
     // Handler runs batch mode; with an empty results list this is not an error
     expect(hasError(result)).toBe(false);
+    expect(expectMatchesOutputSchema('validate', result)).toEqual({ results: [] });
+  });
+
+  it('validates a batch payload against the declared schema', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'placeholder.gd', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 'placeholder.gd' }],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect((payload.results as unknown[])[0]).toEqual({
+      target: 'placeholder.gd',
+      valid: true,
+      errors: [],
+    });
   });
 
   it('rejects missing projectPath even in batch mode', async () => {

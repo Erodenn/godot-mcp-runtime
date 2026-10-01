@@ -122,12 +122,10 @@ func _init():
 	return
 
 # Logging functions.
-# Every one of these writes to stderr. stdout carries the operation's result:
-# the sentinel-framed JSON line from emit_result, or for the operations that
-# report in prose, the sentence itself, which the handler returns as it stands.
-# Anything else printed there is noise the Node side has to filter out, and
-# next to a prose result it cannot always tell the two apart. DEBUG=true must
-# never change what a tool returns.
+# Every one of these writes to stderr. stdout carries one thing only: the
+# sentinel-framed JSON line from emit_result. Anything else printed there is
+# noise the Node side has to filter out. DEBUG=true must never change what a
+# tool returns.
 func log_debug(message):
 	if debug_mode:
 		printerr("[DEBUG] " + message)
@@ -236,6 +234,14 @@ func normalize_scene_path(scene_path: String) -> String:
 	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
 		return ""
 	return "res://" + relative
+
+# Strip the res:// scheme from a normalized path, giving the project-relative
+# form every path parameter of this tool surface accepts. Payloads report paths
+# in this form so a caller can pass them straight back in.
+func _project_relative(res_path: String) -> String:
+	if res_path.begins_with("res://"):
+		return res_path.substr("res://".length())
+	return res_path
 
 # Resolves a ResourceLoader.get_dependencies() entry to its underlying
 # res:// path. Dependency strings come in two shapes:
@@ -503,7 +509,9 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 # Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
-# Returns {"ok": bool, "error": String}; error is empty on success.
+# Returns {"ok": bool, "error": String}; on success also "payload" (the result
+# fields, read back from the node after add_child) and "warning" ("" unless
+# Godot did not keep the requested name).
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	var parent_path = "root"
 	if op.has("parent_node_path"):
@@ -550,7 +558,24 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 				return {"ok": false, "error": verify.error}
 	parent.add_child(new_node)
 	new_node.owner = scene_root
-	return {"ok": true, "error": ""}
+	# Read the outcome back from the node now that it is in the tree. add_child
+	# renames a child whose name collides with a sibling, and assigning a name
+	# replaces characters a node name cannot hold, so the requested name is not
+	# evidence of the final one.
+	var final_name := String(new_node.name)
+	var warning := ""
+	if final_name != str(op.node_name):
+		warning = "Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [str(op.node_name), final_name]
+	return {
+		"ok": true,
+		"error": "",
+		"warning": warning,
+		"payload": {
+			"nodeName": final_name,
+			"nodeType": new_node.get_class(),
+			"nodePath": _relative_path(scene_root, new_node),
+		},
+	}
 
 # Apply a load_sprite mutation without saving. Shared by standalone load_sprite
 # and batch_scene_operations.
@@ -582,7 +607,19 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	if texture.resource_path == "":
 		return {"ok": false, "error": "Texture was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
 	sprite_node.texture = texture
-	return {"ok": true, "error": ""}
+	# Report what the node holds after the assignment, not what was asked for.
+	var assigned = sprite_node.texture
+	if assigned == null or assigned.resource_path == "":
+		return {"ok": false, "error": "Texture assignment did not land on the node: " + full_texture_path}
+	return {
+		"ok": true,
+		"error": "",
+		"payload": {
+			"nodePath": _relative_path(scene_root, sprite_node),
+			"nodeType": sprite_node.get_class(),
+			"texturePath": _project_relative(assigned.resource_path),
+		},
+	}
 
 func add_node(params):
 	printerr("Adding node to scene: " + params.scene_path)
@@ -599,7 +636,10 @@ func add_node(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Node '" + params.node_name + "' of type '" + params.node_type + "' added successfully")
+		var payload: Dictionary = result.payload
+		if result.warning != "":
+			payload["warnings"] = [result.warning]
+		emit_result(payload)
 	else:
 		log_error("Failed to save scene after adding node")
 		quit(1)
@@ -621,7 +661,7 @@ func load_sprite(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Sprite loaded successfully with texture: " + params.texture_path)
+		emit_result(result.payload)
 	else:
 		log_error("Failed to save scene after loading sprite")
 		quit(1)
@@ -684,7 +724,24 @@ func export_mesh_library(params):
 
 		var error = ResourceSaver.save(mesh_library, full_output_path)
 		if error == OK:
-			print("MeshLibrary exported successfully with " + str(item_id) + " items to: " + params.output_path)
+			# Report what the saved library holds, read from the library itself
+			# rather than from the loop counter.
+			var exported_names: Array = []
+			for id in mesh_library.get_item_list():
+				exported_names.append(mesh_library.get_item_name(id))
+			var payload := {
+				"outputPath": _project_relative(full_output_path),
+				"itemCount": exported_names.size(),
+				"itemNames": exported_names,
+			}
+			if use_specific_items:
+				var not_exported: Array = []
+				for requested in mesh_item_names:
+					if not (str(requested) in exported_names):
+						not_exported.append(str(requested))
+				if not not_exported.is_empty():
+					payload["warnings"] = ["Requested mesh items were not exported (no child with that name, or the child has no mesh): " + ", ".join(not_exported)]
+			emit_result(payload)
 		else:
 			log_error("Failed to save MeshLibrary: " + str(error))
 			quit(1)
@@ -705,12 +762,22 @@ func save_scene(params):
 
 	var save_path = params.new_path if params.has("new_path") else params.scene_path
 
-	if save_scene_to_path(scene_root, save_path):
-		print("Scene saved successfully to: " + save_path)
-	else:
+	if not save_scene_to_path(scene_root, save_path):
 		log_error("Failed to save scene")
 		quit(1)
 		return
+
+	# save_scene_to_path already accepted this path, so it normalizes cleanly.
+	# Confirm the file on disk before reporting it as written.
+	var saved_full_path = normalize_scene_path(str(save_path))
+	if not FileAccess.file_exists(saved_full_path):
+		log_error("Scene save reported success but the file is not on disk: " + saved_full_path)
+		quit(1)
+		return
+	emit_result({
+		"scenePath": _project_relative(normalize_scene_path(str(params.scene_path))),
+		"savedScenePath": _project_relative(saved_full_path),
+	})
 
 # ============================================
 # NODE OPERATIONS
@@ -1080,26 +1147,11 @@ func duplicate_node(params):
 		current.owner = scene_root
 		queue.append_array(current.get_children())
 
-	# Compute the new node's scene-relative path: parent path + "/" + duplicate.name.
-	# The scene tree isn't attached in headless mode so get_path() is unreliable;
-	# derive parent path from the input node_path (or target_parent_path).
-	var parent_relative_path: String
-	if params.has("target_parent_path"):
-		parent_relative_path = params.target_parent_path
-	else:
-		var last_slash = params.node_path.rfind("/")
-		parent_relative_path = params.node_path.substr(0, last_slash) if last_slash > 0 else ""
-	var new_path: String
-	if parent_relative_path == "":
-		new_path = String(duplicate.name)
-	else:
-		new_path = parent_relative_path + "/" + String(duplicate.name)
-
 	if save_scene_to_path(scene_root, params.scene_path):
 		emit_result({
 			"success": true,
-			"originalPath": params.node_path,
-			"newPath": new_path
+			"nodePath": _relative_path(scene_root, node),
+			"newNodePath": _relative_path(scene_root, duplicate)
 		})
 	else:
 		log_error("Failed to save scene after duplicating node")
@@ -1366,6 +1418,68 @@ func _get_script_user_defined_methods(node: Node) -> Array:
 
 	return methods
 
+# Read a scene back from disk after a save, bypassing the resource cache so the
+# result is what the file holds and not the instance that was just packed.
+# Returns the instantiated root, or null when the file cannot be read back.
+func _reload_saved_scene(scene_path: String):
+	var full_path = normalize_scene_path(scene_path)
+	if full_path.is_empty():
+		return null
+	var packed = ResourceLoader.load(full_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if packed == null or not (packed is PackedScene):
+		return null
+	return packed.instantiate()
+
+# Count the connections from source's signal to target.method: the same walk
+# get_node_signals reports from.
+func _count_signal_connections(source: Node, signal_name: String, target: Node, method: String) -> int:
+	var count := 0
+	for conn in source.get_signal_connection_list(signal_name):
+		var callable: Callable = conn["callable"]
+		if callable.get_object() == target and String(callable.get_method()) == method:
+			count += 1
+	return count
+
+# Look one connection up in the scene file as it is on disk after a save.
+# Returns {"read": bool, "connected": bool, "source": String, "target": String}.
+# read is false when the saved scene could not be loaded again or a node could
+# not be found in it; nothing is then known about the connection.
+func _read_back_connection(scene_path: String, node_path: String, signal_name: String, target_node_path: String, method: String) -> Dictionary:
+	var outcome := {"read": false, "connected": false, "source": "", "target": ""}
+	var reloaded = _reload_saved_scene(scene_path)
+	if reloaded == null:
+		return outcome
+	var source = find_node_by_path(reloaded, node_path)
+	var target = find_node_by_path(reloaded, target_node_path)
+	if source != null and target != null:
+		outcome = {
+			"read": true,
+			"connected": _count_signal_connections(source, signal_name, target, method) > 0,
+			"source": _relative_path(reloaded, source),
+			"target": _relative_path(reloaded, target),
+		}
+	reloaded.free()
+	return outcome
+
+# Build the connect_signal / disconnect_signal payload. connected comes from
+# the saved scene read back from disk. When that read failed it is null and a
+# warning says so, rather than reporting the state the request asked for.
+func _signal_result_payload(scene_root: Node, source: Node, target: Node, params, read_back: Dictionary) -> Dictionary:
+	var payload := {
+		"nodePath": _relative_path(scene_root, source),
+		"signal": str(params.signal),
+		"targetNodePath": _relative_path(scene_root, target),
+		"method": str(params.method),
+		"connected": null,
+	}
+	if read_back.read:
+		payload["nodePath"] = read_back.source
+		payload["targetNodePath"] = read_back.target
+		payload["connected"] = read_back.connected
+	else:
+		payload["warnings"] = ["The scene was saved, but it could not be read back to confirm the connection, so connected is null"]
+	return payload
+
 # Connect a signal from one node to a method on another node
 func connect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
@@ -1403,12 +1517,17 @@ func connect_signal(params):
 		quit(1)
 		return
 
-	if save_scene_to_path(scene_root, params.scene_path):
-		print("Signal '" + params.signal + "' connected from '" + params.node_path + "' to '" + params.target_node_path + "." + params.method + "'")
-	else:
+	if not save_scene_to_path(scene_root, params.scene_path):
 		log_error("Failed to save scene after connecting signal")
 		quit(1)
 		return
+
+	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	if read_back.read and not read_back.connected:
+		log_error("Signal was connected and the scene saved, but the saved scene does not hold the connection when it is read back")
+		quit(1)
+		return
+	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
 # Disconnect a signal connection between two nodes
 func disconnect_signal(params):
@@ -1436,12 +1555,17 @@ func disconnect_signal(params):
 
 	source.disconnect(params.signal, Callable(target, params.method))
 
-	if save_scene_to_path(scene_root, params.scene_path):
-		print("Signal '" + params.signal + "' disconnected from '" + params.target_node_path + "." + params.method + "'")
-	else:
+	if not save_scene_to_path(scene_root, params.scene_path):
 		log_error("Failed to save scene after disconnecting signal")
 		quit(1)
 		return
+
+	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	if read_back.read and read_back.connected:
+		log_error("Signal was disconnected and the scene saved, but the saved scene still holds the connection when it is read back")
+		quit(1)
+		return
+	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
 # ============================================
 # VALIDATE OPERATION
@@ -2301,6 +2425,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var abort_on_error = params.get("abort_on_error", false)
 	var results: Array = []
 	var scene_cache: Dictionary = {}
+	var batch_warnings: Array = []
 
 	# Pre-pass: probe everything the batch will load, for the cold-import state
 	# and for missing files, BEFORE any mutation is applied. Two kinds of value
@@ -2390,6 +2515,9 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
+						result.merge(apply_result.payload)
+						if apply_result.warning != "":
+							batch_warnings.append("operations[%d]: %s" % [results.size(), apply_result.warning])
 			"load_sprite":
 				if scene_root == null:
 					result["error"] = "scene_path required for load_sprite"
@@ -2399,6 +2527,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
+						result.merge(apply_result.payload)
 			"set_node_properties":
 				if scene_root == null:
 					result["error"] = "scene_path required for set_node_properties"
@@ -2419,6 +2548,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 					var new_path = op.get("new_path", scene_path)
 					if save_scene_to_path(scene_root, new_path):
 						result["success"] = true
+						result["savedScenePath"] = _project_relative(normalize_scene_path(str(new_path)))
 						# Only evict on normal save; save-as leaves the mutated scene in
 						# cache so subsequent ops on scene_path still see accumulated mutations.
 						if new_path == scene_path:
@@ -2458,4 +2588,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 	for scene_path in scene_cache:
 		save_scene_to_path(scene_cache[scene_path], scene_path)
 
-	emit_result({"results": results})
+	var batch_payload := {"results": results}
+	if not batch_warnings.is_empty():
+		batch_payload["warnings"] = batch_warnings
+	emit_result(batch_payload)

@@ -24,6 +24,24 @@ import { executeSceneOp } from '../utils/headless-op.js';
 
 // --- Tool definitions ---
 
+/** Result of connect_signal and disconnect_signal. `connected` is read back from the saved scene. */
+const SIGNAL_RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    warnings: { type: 'array', items: { type: 'string' } },
+    nodePath: { type: 'string' },
+    signal: { type: 'string' },
+    targetNodePath: { type: 'string' },
+    method: { type: 'string' },
+    connected: {
+      type: ['boolean', 'null'],
+      description:
+        'Whether the saved scene holds the connection. Null when the scene could not be read back.',
+    },
+  },
+  required: ['nodePath', 'signal', 'targetNodePath', 'method', 'connected'],
+} as const;
+
 export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
@@ -152,6 +170,29 @@ export const nodeToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodes'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        error: {
+          type: 'string',
+          description: 'Present when the scene could not be loaded; results is then empty.',
+        },
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              nodePath: { type: 'string' },
+              nodeType: { type: 'string' },
+              properties: { type: 'object' },
+              error: { type: 'string' },
+            },
+            required: ['nodePath'],
+          },
+        },
+      },
+      required: ['results'],
+    },
   },
   {
     name: 'attach_script',
@@ -184,7 +225,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_scene_tree',
     description:
-      'Get the scene hierarchy as a nested tree of { name, type, path, script, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Returns the nested tree as JSON text. Errors if scene does not exist or parentPath is not found.',
+      'Get the scene hierarchy as a nested tree of { name, type, path, script, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Returns: the root node of the tree; every child has the same shape. Errors if scene does not exist or parentPath is not found.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -203,11 +244,26 @@ export const nodeToolDefinitions = [
       },
       required: ['projectPath', 'scenePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        type: { type: 'string' },
+        path: { type: 'string' },
+        script: { type: 'string', description: 'res:// path of the attached script, or "".' },
+        children: {
+          type: 'array',
+          description: 'Child nodes, each in this same shape.',
+          items: { type: 'object' },
+        },
+      },
+      required: ['name', 'type', 'path', 'script', 'children'],
+    },
   },
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives. Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success, nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -229,8 +285,8 @@ export const nodeToolDefinitions = [
       type: 'object',
       properties: {
         success: { type: 'boolean' },
-        originalPath: { type: 'string' },
-        newPath: { type: 'string' },
+        nodePath: { type: 'string' },
+        newNodePath: { type: 'string' },
       },
     },
   },
@@ -283,7 +339,7 @@ export const nodeToolDefinitions = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, which is read back from the saved scene (null with a leading warning if that read failed). Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -305,11 +361,12 @@ export const nodeToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'signal', 'targetNodePath', 'method'],
     },
+    outputSchema: SIGNAL_RESULT_SCHEMA,
   },
   {
     name: 'disconnect_signal',
     description:
-      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, read back from the saved scene: false once the connection is gone, null with a leading warning if that read failed. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -323,6 +380,7 @@ export const nodeToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'signal', 'targetNodePath', 'method'],
     },
+    outputSchema: SIGNAL_RESULT_SCHEMA,
   },
 ] as const satisfies readonly ToolDefinition[];
 
@@ -408,6 +466,8 @@ export async function handleGetNodeProperties(
     parsed.value.projectPath,
     'Failed to get node properties',
     ['Check node paths'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -485,6 +545,8 @@ export async function handleGetSceneTree(
     parsed.value.projectPath,
     'Failed to get scene tree',
     ['Ensure the scene is valid'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -605,7 +667,7 @@ export async function handleConnectSignal(
     'Failed to connect signal',
     ['Ensure the signal exists on the source node and the method exists on the target node'],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -632,6 +694,6 @@ export async function handleDisconnectSignal(
     'Failed to disconnect signal',
     ['Ensure the signal connection exists before trying to disconnect it'],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }

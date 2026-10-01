@@ -48,7 +48,7 @@ export const sceneToolDefinitions = [
   {
     name: 'add_node',
     description:
-      "Add a node to a Godot scene. Saves automatically. position, rotation, scale, visible, modulate are top-level params; anything else goes in properties. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Returns plain-text confirmation of the new node and type. Errors and adds nothing if nodeType is not a registered class, the parent is missing, or a property name or value is invalid. Errors while a Godot runtime session is active; stop_project clears it.",
+      "Add a node to a Godot scene. Saves automatically. position, rotation, scale, visible, modulate are top-level params; anything else goes in properties. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Returns: nodeName, nodeType and nodePath, read back after the add; warnings leads when Godot did not keep the requested name. Errors and adds nothing if nodeType is not a registered class, the parent is missing, or a property name or value is invalid. Errors while a Godot runtime session is active; stop_project clears it.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,11 +99,31 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        nodeName: {
+          type: 'string',
+          description:
+            'Name the node has after the add. Differs from the requested nodeName when Godot renamed it.',
+        },
+        nodeType: {
+          type: 'string',
+          description: 'Class of the added node, or of the root of an instanced scene.',
+        },
+        nodePath: {
+          type: 'string',
+          description: 'Path from the scene root in "root/..." form, usable as nodePath elsewhere.',
+        },
+      },
+      required: ['nodeName', 'nodeType', 'nodePath'],
+    },
   },
   {
     name: 'load_sprite',
     description:
-      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. For new nodes, pass texture via add_node properties instead. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. For new nodes, pass texture via add_node properties instead. Saves automatically. texturePath must be a real file under projectPath. Returns: nodePath, nodeType and texturePath, read back from the node after the assignment. Errors if the node is not one of those three classes, or the texture file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -122,11 +142,23 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'texturePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        nodePath: { type: 'string' },
+        nodeType: { type: 'string' },
+        texturePath: {
+          type: 'string',
+          description: 'Project-relative path of the texture the node holds after the assignment.',
+        },
+      },
+      required: ['nodePath', 'nodeType', 'texturePath'],
+    },
   },
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns: scenePath (the scene that was loaded) and savedScenePath (the file written, confirmed on disk). Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -141,11 +173,22 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        scenePath: { type: 'string', description: 'The scene that was loaded.' },
+        savedScenePath: {
+          type: 'string',
+          description: 'The file that was written. Equal to scenePath unless newPath was given.',
+        },
+      },
+      required: ['scenePath', 'savedScenePath'],
+    },
   },
   {
     name: 'export_mesh_library',
     description:
-      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. For grid-based 3D tile palettes only, not 2D scenes. Source scene must contain MeshInstance3D children. Pass meshItemNames for a subset, or omit for all. Saves to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. For grid-based 3D tile palettes only, not 2D scenes. Source scene must contain MeshInstance3D children. Pass meshItemNames for a subset, or omit for all. Saves to outputPath, overwriting silently. Returns: outputPath, itemCount and itemNames, read from the saved library; warnings leads when a requested name was not exported. Errors if the scene contains no valid meshes. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -163,6 +206,16 @@ export const sceneToolDefinitions = [
         },
       },
       required: ['projectPath', 'scenePath', 'outputPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        outputPath: { type: 'string' },
+        itemCount: { type: 'number' },
+        itemNames: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['outputPath', 'itemCount', 'itemNames'],
     },
   },
   {
@@ -258,6 +311,7 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         results: {
           type: 'array',
           items: {
@@ -267,10 +321,29 @@ export const sceneToolDefinitions = [
               scenePath: { type: 'string' },
               success: { type: 'boolean' },
               error: { type: 'string' },
+              nodeName: { type: 'string', description: '[add_node] Name after the add.' },
+              nodeType: { type: 'string', description: '[add_node, load_sprite]' },
+              nodePath: { type: 'string', description: '[add_node, load_sprite]' },
+              texturePath: { type: 'string', description: '[load_sprite]' },
+              savedScenePath: { type: 'string', description: '[save] The file written.' },
+              updates: {
+                type: 'array',
+                description: '[set_node_properties] One entry per update, in input order.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    nodePath: { type: 'string' },
+                    property: { type: 'string' },
+                    success: { type: 'boolean' },
+                    error: { type: 'string' },
+                  },
+                },
+              },
             },
           },
         },
       },
+      required: ['results'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -381,7 +454,7 @@ export async function handleAddNode(
       'If nodeType is a scene path, verify the file exists and loads (.tscn or .scn)',
     ],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -427,7 +500,7 @@ export async function handleLoadSprite(
     'Failed to load sprite',
     ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -459,7 +532,7 @@ export async function handleSaveScene(
     'Failed to save scene',
     ['Check if the scene file is valid'],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -499,7 +572,7 @@ export async function handleExportMeshLibrary(
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
     undefined,
-    { mutatesSceneFile: true },
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 

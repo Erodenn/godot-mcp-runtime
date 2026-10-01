@@ -30,7 +30,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -90,7 +90,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="ChildInstance"[^\]]*instance=ExtResource\(/);
@@ -116,7 +116,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/instance=ExtResource\(/);
     },
@@ -146,7 +146,7 @@ describe('scene instancing via add_node', () => {
         // acceptable: some engine versions propagate the nonzero exit
       }
 
-      expect(stdout).not.toContain('added successfully');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       const after = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(after).toBe(before);
     },
@@ -169,7 +169,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="PlainNode" type="Node2D"/);
       expect(saved).not.toMatch(/instance=ExtResource/);
@@ -287,7 +287,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toMatch(
         /instance=ExtResource\(/,
       );

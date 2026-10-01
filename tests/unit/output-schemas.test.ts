@@ -41,42 +41,6 @@ describe('outputSchema and Returns: prose are complementary, not exclusive', () 
   );
 });
 
-describe('outputSchema: expected coverage', () => {
-  // Exact allowlist so adding/removing a tool from the structuredContent
-  // contract is a deliberate one-line edit, not a silent drift. Update this
-  // list whenever a tool grows or loses an outputSchema.
-  const TOOLS_WITH_OUTPUT_SCHEMA: readonly string[] = [
-    'attach_script',
-    'batch_scene_operations',
-    'check_project',
-    'create_scene',
-    'delete_nodes',
-    'duplicate_node',
-    'get_debug_output',
-    'get_node_signals',
-    'get_scene_dependencies',
-    'get_ui_elements',
-    'profile_project',
-    'render_movie',
-    'run_project',
-    'run_script',
-    'search_project',
-    'start_profiler',
-    'set_node_properties',
-    'simulate_input',
-    'stop_profiler',
-    'stop_project',
-    'switch_project',
-    'take_screenshot',
-  ];
-
-  it('every tool with outputSchema is on the explicit allowlist', () => {
-    expect(toolsWithOutputSchema.map(([name]) => name).sort()).toEqual(
-      [...TOOLS_WITH_OUTPUT_SCHEMA].sort(),
-    );
-  });
-});
-
 describe('simulate_input: every declared entry shape validates', () => {
   // The per-action entry is the widest shape this server returns: keys differ by
   // action type, a skipped entry carries almost nothing, and a failed batch

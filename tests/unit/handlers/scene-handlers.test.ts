@@ -10,6 +10,7 @@ import {
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
@@ -103,6 +104,7 @@ describe('handleCreateScene', () => {
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({ success: true, scenePath: 'scenes/x.tscn' });
     expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
+    expectMatchesOutputSchema('create_scene', result);
   });
 });
 
@@ -182,6 +184,36 @@ describe('handleAddNode', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
+    const added = { nodeName: 'Foo', nodeType: 'Node2D', nodePath: 'root/Foo' };
+    const fake = createFakeRunner({ stdout: JSON.stringify(added) });
+    const result = await handleAddNode(fake.asRunner, {
+      ...validBase,
+      nodeType: 'Node2D',
+      nodeName: 'Foo',
+    });
+    expect(expectMatchesOutputSchema('add_node', result)).toEqual(added);
+  });
+
+  it('puts warnings first when Godot renamed the node', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        nodeName: '@Foo@2',
+        nodePath: 'root/@Foo@2',
+        nodeType: 'Node2D',
+        warnings: ['renamed'],
+      }),
+    });
+    const result = await handleAddNode(fake.asRunner, {
+      ...validBase,
+      nodeType: 'Node2D',
+      nodeName: 'Foo',
+    });
+    const payload = expectMatchesOutputSchema('add_node', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.nodeName).toBe('@Foo@2');
+  });
+
+  it('reports output with no result line as an error', async () => {
     const fake = createFakeRunner({
       stdout: "Node 'Foo' of type 'Node2D' added successfully",
     });
@@ -190,9 +222,7 @@ describe('handleAddNode', () => {
       nodeType: 'Node2D',
       nodeName: 'Foo',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('added successfully');
+    expectErrorMatching(result, /no JSON payload was emitted/);
   });
 });
 
@@ -263,17 +293,18 @@ describe('handleLoadSprite', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: 'Sprite loaded successfully with texture: placeholder.png',
-    });
+    const loaded = {
+      nodePath: 'root/Sprite',
+      nodeType: 'Sprite2D',
+      texturePath: 'placeholder.png',
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(loaded) });
     const result = await handleLoadSprite(fake.asRunner, {
       ...validBase,
       nodePath: 'root/Sprite',
       texturePath: 'placeholder.png',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('loaded successfully');
+    expect(expectMatchesOutputSchema('load_sprite', result)).toEqual(loaded);
   });
 });
 
@@ -328,11 +359,10 @@ describe('handleSaveScene', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({ stdout: 'Scene saved successfully to: main.tscn' });
+    const saved = { scenePath: 'main.tscn', savedScenePath: 'main.tscn' };
+    const fake = createFakeRunner({ stdout: JSON.stringify(saved) });
     const result = await handleSaveScene(fake.asRunner, validBase);
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('saved successfully');
+    expect(expectMatchesOutputSchema('save_scene', result)).toEqual(saved);
   });
 });
 
@@ -404,16 +434,31 @@ describe('handleExportMeshLibrary', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: 'MeshLibrary exported successfully with 3 items to: lib.res',
-    });
+    const exported = { outputPath: 'lib.res', itemCount: 3, itemNames: ['A', 'B', 'C'] };
+    const fake = createFakeRunner({ stdout: JSON.stringify(exported) });
     const result = await handleExportMeshLibrary(fake.asRunner, {
       ...validBase,
       outputPath: 'lib.res',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('MeshLibrary exported');
+    expect(expectMatchesOutputSchema('export_mesh_library', result)).toEqual(exported);
+  });
+
+  it('puts warnings first when a requested item was not exported', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        outputPath: 'lib.res',
+        itemCount: 3,
+        itemNames: ['A', 'B', 'C'],
+        warnings: ['Requested mesh items were not exported: D'],
+      }),
+    });
+    const result = await handleExportMeshLibrary(fake.asRunner, {
+      ...validBase,
+      outputPath: 'lib.res',
+      meshItemNames: ['A', 'D'],
+    });
+    const payload = expectMatchesOutputSchema('export_mesh_library', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
   });
 });
 
@@ -489,5 +534,36 @@ describe('handleBatchSceneOperations', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
     expect(parsed.results[0].operation).toBe('add_node');
+  });
+
+  it('validates a batch payload with per-operation fields', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          {
+            operation: 'add_node',
+            scenePath: 'main.tscn',
+            success: true,
+            nodeName: '@Foo@2',
+            nodeType: 'Node2D',
+            nodePath: 'root/@Foo@2',
+          },
+          {
+            operation: 'save',
+            scenePath: 'main.tscn',
+            success: true,
+            savedScenePath: 'copy.tscn',
+          },
+        ],
+        warnings: ['operations[0]: renamed'],
+      }),
+    });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: validOps,
+    });
+    const payload = expectMatchesOutputSchema('batch_scene_operations', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.results).toHaveLength(2);
   });
 });

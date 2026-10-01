@@ -33,7 +33,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -476,7 +476,7 @@ describe('add_node type validation (silent-success gap)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen.toLowerCase()).toMatch(/object-typed|resource/);
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="BadShape"/);
@@ -512,7 +512,7 @@ describe('add_node type validation (silent-success gap)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen.toLowerCase()).toMatch(/does not exist/);
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="UnknownProp"/);
@@ -548,7 +548,7 @@ describe('add_node type validation (silent-success gap)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen.toLowerCase()).toMatch(/int/);
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="BadZIndex"/);
@@ -939,7 +939,7 @@ describe('packed-array element coercion', () => {
       } catch (err) {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/cannot be coerced/i);
     },
     60000,
@@ -1358,7 +1358,7 @@ describe('typed Array[T] element coercion', () => {
         tmpProject,
         30000,
       );
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toMatch(/points\s*=\s*Array\[Vector2\]\(\[Vector2\(7(\.0)?, 8(\.0)?\)\]\)/);

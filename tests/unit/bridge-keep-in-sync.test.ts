@@ -94,4 +94,13 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
       .filter((line) => line.includes('print(OPERATION_RESULT_SENTINEL'));
     expect(printsSentinel).toHaveLength(1);
   });
+
+  it('writes nothing to stdout except the framed result', () => {
+    const stdoutPrints = operationsSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .filter((line) => /(^|[^A-Za-z_])print\(/.test(line));
+    expect(stdoutPrints).toHaveLength(1);
+    expect(stdoutPrints[0]).toContain('print(OPERATION_RESULT_SENTINEL');
+  });
 });

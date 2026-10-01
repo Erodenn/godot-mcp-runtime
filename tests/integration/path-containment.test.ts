@@ -21,6 +21,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const ESCAPE_MESSAGE = 'escapes the project root';
 
@@ -202,7 +203,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toContain('Plain');
     },
     60000,

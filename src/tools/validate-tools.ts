@@ -12,7 +12,8 @@ import {
   parseScriptDiagnostics,
   stripOperationSentinel,
 } from '../utils/output-parsing.js';
-import { ok, err } from '../utils/result.js';
+import { err } from '../utils/result.js';
+import { createStructuredResponse } from '../utils/structured-response.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
 
@@ -43,11 +44,28 @@ const CHECK_ITEM_SCHEMA = {
   required: ['type'],
 } as const;
 
+/** One entry of an `errors` array: a parse error, or a checks[] finding. */
+const VALIDATE_ERROR_SCHEMA = {
+  type: 'object',
+  properties: {
+    message: { type: 'string' },
+    line: { type: 'number', description: 'Parse errors only, when Godot reported a line.' },
+    check: { type: 'string', description: 'checks[] findings: "structure" or "signals".' },
+    path: { type: 'string', description: 'Structure findings about one node.' },
+    node: { type: 'string' },
+    signal: { type: 'string' },
+    target: { type: 'string' },
+    method: { type: 'string' },
+    problem: { type: 'string', description: 'Signals findings: the problem code.' },
+  },
+  required: ['message'],
+} as const;
+
 export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. checks requires scenePath and instantiates the scene, running each attached script's _init(). Any parse error yields valid:false.",
+      "Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns: { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. checks requires scenePath and instantiates the scene, running each attached script's _init(). Any parse error yields valid:false.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -104,6 +122,26 @@ export const validateToolDefinitions = [
         },
       },
       required: ['projectPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        valid: { type: 'boolean', description: 'Single target only.' },
+        errors: { type: 'array', description: 'Single target only.', items: VALIDATE_ERROR_SCHEMA },
+        results: {
+          type: 'array',
+          description: 'targets only: one entry per target, in input order.',
+          items: {
+            type: 'object',
+            properties: {
+              target: { type: 'string' },
+              valid: { type: 'boolean' },
+              errors: { type: 'array', items: VALIDATE_ERROR_SCHEMA },
+            },
+            required: ['target', 'valid', 'errors'],
+          },
+        },
+      },
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -321,7 +359,7 @@ export async function handleValidate(
           const pre = preErrors.get(i)!;
           return { target: pre.target, valid: false, errors: pre.errors };
         });
-        return ok({ content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] });
+        return createStructuredResponse({ results });
       }
 
       const { stdout, stderr } = await executeValidateOp(
@@ -400,7 +438,7 @@ export async function handleValidate(
         }
       }
 
-      return ok({ content: [{ type: 'text', text: JSON.stringify({ results }, null, 2) }] });
+      return createStructuredResponse({ results });
     } catch (error: unknown) {
       return err(
         createErrorResponse(`Batch validation failed: ${getErrorMessage(error)}`, [
@@ -610,7 +648,7 @@ export async function handleValidate(
       };
     }
 
-    return ok({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
+    return createStructuredResponse(result);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Validation failed: ${getErrorMessage(error)}`, [
