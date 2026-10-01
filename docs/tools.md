@@ -384,7 +384,7 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 
 ### What the project config tools return
 
-- `list_autoloads`: `autoloads[]`, each `{ name, path, singleton }`.
+- `list_autoloads`: `autoloads[]`, each `{ name, path, singleton }`. A leading `warnings` entry names any line of `[autoload]` that could not be parsed and is therefore not listed.
 - `add_autoload`: `autoload`, the new entry as read back from `project.godot`, and a `tip` on verifying that it loads.
 - `update_autoload`: `autoload`, the entry as read back after the edit.
 - `remove_autoload`: `removed`, the name, and `autoloads[]`, the entries that remain.

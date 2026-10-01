@@ -74,21 +74,42 @@ export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
 
-export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
+/**
+ * One `[autoload]` data line: `Name="*res://path"`. The `"?` pairs are
+ * intentional: Godot always writes quotes, but hand-edited project.godot files
+ * sometimes omit them, and optional blanks round the `=` are tolerated too.
+ * Tolerating each shape means it doesn't silently drop the entry.
+ */
+const AUTOLOAD_ENTRY_REGEX = /^(\w+)\s*=\s*"?(\*?)([^"]*?)"?$/;
+
+/**
+ * Parse the `[autoload]` section, keeping the data lines it could not read.
+ * A line in `unparsed` is registered in the file but absent from `entries`, so
+ * a caller that lists or scans autoloads must say so rather than present
+ * `entries` as the whole section.
+ */
+export function parseAutoloadSection(
+  projectFilePath: string,
+  existingContent?: string,
+): { entries: AutoloadEntry[]; unparsed: string[] } {
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
-  const autoloads: AutoloadEntry[] = [];
+  const entries: AutoloadEntry[] = [];
+  const unparsed: string[] = [];
 
   walkIniSection(content, 'autoload', (trimmed) => {
-    // The surrounding `"?` are intentional: Godot always writes quotes, but
-    // hand-edited project.godot files sometimes omit them. Tolerating both
-    // shapes means a missing quote pair doesn't silently drop the entry.
-    const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
+    const match = trimmed.match(AUTOLOAD_ENTRY_REGEX);
     if (match) {
       const [, name = '', star = '', path = ''] = match;
-      autoloads.push({ name, singleton: star === '*', path });
+      entries.push({ name, singleton: star === '*', path });
+    } else {
+      unparsed.push(trimmed);
     }
   });
-  return autoloads;
+  return { entries, unparsed };
+}
+
+export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
+  return parseAutoloadSection(projectFilePath, existingContent).entries;
 }
 
 export function addAutoloadEntry(
@@ -135,7 +156,7 @@ export function removeAutoloadEntry(projectFilePath: string, name: string): bool
       return true;
     }
     if (inAutoloadSection) {
-      const match = trimmed.match(/^(\w+)=/);
+      const match = trimmed.match(/^(\w+)\s*=/);
       if (match && match[1] === name) {
         removed = true;
         return false;
@@ -172,10 +193,7 @@ export function updateAutoloadEntry(
       return line;
     }
     if (inAutoloadSection) {
-      // The surrounding `"?` are intentional: Godot always writes quotes, but
-      // hand-edited project.godot files sometimes omit them. Tolerating both
-      // shapes means a missing quote pair doesn't silently drop the entry.
-      const match = trimmed.match(/^(\w+)="?(\*?)([^"]*?)"?$/);
+      const match = trimmed.match(AUTOLOAD_ENTRY_REGEX);
       if (match && match[1] === name) {
         const effectiveSingleton = singleton !== undefined ? singleton : match[2] === '*';
         const effectivePath = newPath !== undefined ? normalizeAutoloadPath(newPath) : match[3];

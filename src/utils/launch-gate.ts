@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join, relative, resolve } from 'path';
 import type { ToolResponse } from '../mcp.types.js';
 import { isServerOwnedBridgePath } from './artifact-paths.js';
-import { parseAutoloads } from './autoload-ini.js';
+import { parseAutoloadSection } from './autoload-ini.js';
 import { BRIDGE_AUTOLOAD_NAME } from './bridge-manager.js';
 import { createErrorResponse, getErrorMessage } from './error-response.js';
 import {
@@ -31,11 +31,19 @@ import {
 } from './path-validation.js';
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
-import { collectSceneScriptsRecursive, resolveLaunchScene } from './scene-parsing.js';
+import { collectSceneScripts, resolveLaunchScene } from './scene-parsing.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
-/** Cap on the `warnings` entries a gate outcome carries before the `+N more` tail. */
+/** Cap on the findings a gate outcome carries before the `+N more` tail. */
 export const MAX_SCAN_WARNINGS_SHOWN = 10;
+/**
+ * Cap on the scan and confirmation warnings (what could not be scanned, what
+ * was skipped) a gate outcome carries, counted apart from the findings so a
+ * long list of findings never pushes an incomplete-scan notice out of the answer.
+ */
+export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
+const GDSCRIPT_EXTENSION = '.gd';
+const SCENE_EXTENSION = '.tscn';
 
 export interface LaunchGateRequest {
   /** Validated project directory; resolved to an absolute path inside. */
@@ -50,21 +58,35 @@ export interface LaunchGateRequest {
 
 export interface LaunchGateOutcome {
   /**
-   * Scan findings first, then scan and confirmation warnings. Capped at
-   * `MAX_SCAN_WARNINGS_SHOWN` entries plus a final `+N more` entry.
+   * Scan findings first, capped at `MAX_SCAN_WARNINGS_SHOWN` entries plus a
+   * `+N more` entry; then the scan and confirmation warnings, capped at
+   * `MAX_SCAN_INCOMPLETE_SHOWN` entries plus a `+N more files were not scanned`
+   * entry.
    */
   warnings: string[];
 }
 
+/** A finding and the name to show for the source it came from. */
+interface ScanFinding {
+  label: string;
+  match: PolicyMatch;
+}
+
+/**
+ * The name to show for a file: project-relative when it is inside the project.
+ * Out-of-tree paths are surfaced verbatim (path.relative would emit
+ * `..`-prefixed strings that obscure where the file actually lives).
+ */
+function displayPath(projectPath: string, sourcePath: string): string {
+  return isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
+}
+
 /**
  * Build a one-line summary of a project-scan finding so a launch response can
- * carry a `warnings` array without flooding it. Out-of-tree paths
- * are surfaced verbatim (path.relative would emit `..`-prefixed strings that
- * obscure where the file actually lives).
+ * carry a `warnings` array without flooding it.
  */
-function formatScanFinding(sourcePath: string, projectPath: string, match: PolicyMatch): string {
-  const rel = isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
-  return `${rel}:${match.line} ${match.matchedText} - ${match.reason}`;
+function formatScanFinding(finding: ScanFinding): string {
+  return `${finding.label}:${finding.match.line} ${finding.match.matchedText} - ${finding.match.reason}`;
 }
 
 /**
@@ -111,17 +133,52 @@ export async function runLaunchGate(
 
   // Pre-flight security scan: autoloads + the launched scene's scripts,
   // scanning transitively into every PackedScene it instances (subscene
-  // recursion — see collectSceneScriptsRecursive). Result is a list of
-  // findings + a list of scan warnings (file-not-found, read errors,
-  // "no launchable scene"); both flow into the response warnings array.
+  // recursion, see collectSceneScripts) and into inline GDScript sub-resources.
+  // Result is a list of findings + a list of scan warnings (file-not-found,
+  // read errors, every script or scene the scan could not read, "no launchable
+  // scene"); both flow into the response warnings array.
   // Strict mode + any Tier 1 finding → hard reject before launch.
   const scanWarnings: string[] = [];
-  const scanFindings: Array<{ sourcePath: string; match: PolicyMatch }> = [];
+  const scanFindings: ScanFinding[] = [];
   const absProjectPath = resolve(request.projectPath);
+
+  const scanScriptPath = (filePath: string): void => {
+    const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+    if (warning) scanWarnings.push(warning);
+    const label = displayPath(absProjectPath, filePath);
+    for (const m of findings) scanFindings.push({ label, match: m });
+  };
+
+  // Scan one scene: every script file it reaches, the source of every inline
+  // script, and a note for everything the walk met and could not read.
+  const scanScene = (scenePath: string): void => {
+    const collected = collectSceneScripts(scenePath, absProjectPath);
+    for (const filePath of collected.scripts) {
+      if (!isUnderDir(absProjectPath, filePath)) {
+        scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
+        continue;
+      }
+      scanScriptPath(filePath);
+    }
+    for (const inline of collected.inlineScripts) {
+      const label = `${displayPath(absProjectPath, inline.scenePath)}[GDScript ${inline.id}]`;
+      const decision = evaluateScript(inline.source, ctx.strictMode);
+      for (const m of decision.matches) scanFindings.push({ label, match: m });
+    }
+    for (const item of collected.unscanned) {
+      scanWarnings.push(
+        `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`,
+      );
+    }
+  };
+
   try {
     const projectGodot = projectGodotPath(absProjectPath);
     if (existsSync(projectGodot)) {
-      const autoloads = parseAutoloads(projectGodot);
+      const { entries: autoloads, unparsed } = parseAutoloadSection(projectGodot);
+      for (const line of unparsed) {
+        scanWarnings.push(`Autoload line could not be parsed and was not scanned: ${line}`);
+      }
       for (const entry of autoloads) {
         // Skip this server's own injected bridge. It is left registered
         // between a launch and its cleanup, so a second run_project against
@@ -132,7 +189,15 @@ export async function runLaunchGate(
         // this server does not own is a user's own autoload and still scans.
         if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
         const stripped = stripResPrefix(entry.path);
-        if (!stripped.endsWith('.gd')) continue;
+        const lowered = stripped.toLowerCase();
+        const isScript = lowered.endsWith(GDSCRIPT_EXTENSION);
+        const isScene = lowered.endsWith(SCENE_EXTENSION);
+        if (!isScript && !isScene) {
+          scanWarnings.push(
+            `Autoload ${entry.name} (${entry.path}) was not scanned: only ${GDSCRIPT_EXTENSION} scripts and ${SCENE_EXTENSION} scenes are scanned`,
+          );
+          continue;
+        }
         if (!validateSubPath(absProjectPath, stripped)) {
           scanWarnings.push(
             `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
@@ -140,11 +205,8 @@ export async function runLaunchGate(
           continue;
         }
         const filePath = join(absProjectPath, stripped);
-        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-        if (warning) scanWarnings.push(warning);
-        for (const m of findings) {
-          scanFindings.push({ sourcePath: filePath, match: m });
-        }
+        if (isScript) scanScriptPath(filePath);
+        else scanScene(filePath);
       }
     }
     const launchScene = resolveLaunchScene(absProjectPath, request.scene);
@@ -157,18 +219,7 @@ export async function runLaunchGate(
         `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
       );
     } else {
-      const scripts = collectSceneScriptsRecursive(launchScene, absProjectPath);
-      for (const filePath of scripts) {
-        if (!isUnderDir(absProjectPath, filePath)) {
-          scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
-          continue;
-        }
-        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-        if (warning) scanWarnings.push(warning);
-        for (const m of findings) {
-          scanFindings.push({ sourcePath: filePath, match: m });
-        }
-      }
+      scanScene(launchScene);
     }
   } catch (error) {
     scanWarnings.push(`${request.toolName} pre-flight scan failed: ${getErrorMessage(error)}`);
@@ -179,7 +230,7 @@ export async function runLaunchGate(
     const top = scanFindings
       .filter((f) => f.match.tier === 1)
       .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
-    const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
+    const summary = top.map(formatScanFinding);
     const more =
       scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
     return err(
@@ -266,13 +317,17 @@ export async function runLaunchGate(
     }
   }
 
-  const allWarnings = [
-    ...scanFindings.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match)),
-    ...scanWarnings,
-  ];
-  const warnings = allWarnings.slice(0, MAX_SCAN_WARNINGS_SHOWN);
-  if (allWarnings.length > MAX_SCAN_WARNINGS_SHOWN) {
-    warnings.push(`+${allWarnings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+  const warnings = scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map(formatScanFinding);
+  if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
+    warnings.push(`+${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+  }
+  // Scan and confirmation warnings are capped apart from the findings, so a
+  // long list of findings cannot push the "this scan was incomplete" notices out.
+  warnings.push(...scanWarnings.slice(0, MAX_SCAN_INCOMPLETE_SHOWN));
+  if (scanWarnings.length > MAX_SCAN_INCOMPLETE_SHOWN) {
+    warnings.push(
+      `+${scanWarnings.length - MAX_SCAN_INCOMPLETE_SHOWN} more files were not scanned`,
+    );
   }
   return ok({ warnings });
 }

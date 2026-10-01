@@ -10,9 +10,10 @@ import {
   optionalBoolean,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseAutoloads,
+  parseAutoloadSection,
   addAutoloadEntry,
   removeAutoloadEntry,
   updateAutoloadEntry,
@@ -37,7 +38,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
-      'List the autoloads registered in a project, with their paths and singleton flags. Use first when diagnosing headless failures: a broken autoload crashes every headless operation, so this shows what is loaded. Reads project.godot directly, no Godot process. Returns: autoloads[], each { name, path, singleton }; empty when none are registered.',
+      'List the autoloads registered in a project, with their paths and singleton flags. Use first when diagnosing headless failures: a broken autoload crashes every headless operation, so this shows what is loaded. Reads project.godot directly, no Godot process. Returns: autoloads[], each { name, path, singleton }; empty when none are registered. warnings leads when [autoload] holds lines that could not be parsed and are not listed.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -49,6 +50,12 @@ export const autoloadToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present only when a line of [autoload] could not be parsed and is not listed.',
+        },
         autoloads: { type: 'array', items: AUTOLOAD_ENTRY_SCHEMA },
       },
       required: ['autoloads'],
@@ -147,7 +154,14 @@ export function handleListAutoloads(args: OperationParams): HandlerResult {
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    return createStructuredResponse({ autoloads: parseAutoloads(projectFile) });
+    const { entries, unparsed } = parseAutoloadSection(projectFile);
+    const warnings =
+      unparsed.length > 0
+        ? [
+            `[autoload] has ${unparsed.length} line(s) that could not be parsed and are not listed: ${unparsed.join(' | ')}`,
+          ]
+        : [];
+    return createStructuredResponse(leadWithWarnings({ warnings, autoloads: entries }));
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [

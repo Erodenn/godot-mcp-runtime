@@ -258,8 +258,8 @@ This exists for experienced users who do not need the gate: developers who accep
 
 `run_project` runs the same scanner over:
 
-1. Every `[autoload]` entry in `project.godot` whose path ends in `.gd`.
-2. Every `[ext_resource type="Script" path="res://…"]` attached to the launched scene, recursing transitively into every `[ext_resource type="PackedScene"]` it instances (cycle-safe). The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only).
+1. Every `[autoload]` entry in `project.godot` whose path ends in `.gd` or `.tscn` (case-insensitive). A scene autoload is scanned the way the launched scene is, as in item 2.
+2. Every `[ext_resource type="Script" path="res://…"]` attached to the launched scene, and the source of every inline `[sub_resource type="GDScript"]` it embeds, recursing transitively into every `[ext_resource type="PackedScene"]` it instances (cycle-safe). The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only). A script an instanced node or an instance override attaches is always an ext_resource or an inline sub-resource of the same scene file, so it is covered by the same two forms. Inline findings are labelled `<scene>[GDScript <id>]:<line>`, with the line counted inside the inline source.
 
 Findings are aggregated and:
 
@@ -268,7 +268,7 @@ Findings are aggregated and:
 
 With `attach: true` the same scan runs over the autoloads and `run/main_scene` before the bridge is injected, and findings are handled the same way: `warnings` in default mode, and in strict mode a Tier 1 finding refuses to inject. Attach mode has no confirmation prompt, because MCP launches nothing there.
 
-Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides - see "What this does NOT do."
+What the scan cannot read is reported, not skipped. Still not scanned: scripts that are not GDScript (a C# script, an autoload that is neither `.gd` nor `.tscn`), binary `.scn` scenes, scripts carried by non-scene resources a scene references (`.tres` / `.res`), and references by `uid://` alone. Each one the scan meets is listed in `warnings` as `Not scanned: <scene>: <reason>` (or an `Autoload ... was not scanned` entry), as is an `[autoload]` line the parser could not read. Findings and these notices are capped separately (10 each, with a `+N more` tail), so a long list of findings never pushes a not-scanned notice out of the answer. Strict mode refuses on a Tier 1 finding only; a not-scanned item does not refuse a launch. See "What this does NOT do."
 
 ### Session-confirmation gate
 
@@ -330,7 +330,7 @@ This section exists because the doctrine at the top of this document demands it:
 - **Loopback is not a boundary in every host configuration.** Both listeners bind `127.0.0.1` and are unreachable from the network, but a Linux process under WSL2 in mirrored networking mode shares the Windows host's loopback. The bridge is token-protected there; the profiler channel is not.
 - **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.
 - **Identifier aliasing / dataflow is invisible.** `var f = FileAccess; f.open(...)`, or any indirection through a local variable, defeats every chain-based rule, because the scanner is token-level, not a dataflow analysis. This is a structural limit of tokenizer-level matching, not something the next rule addition can close.
-- **Inline scene scripts and instance overrides are not scanned by `run_project`'s pre-flight.** `[sub_resource type="GDScript"]` embeds GDScript source directly inside a `.tscn`; `[instance]` property overrides can also carry code-bearing values. Neither is chased. (Subscene _ext_resource_ recursion, meaning scripts attached to a referenced PackedScene, IS scanned as of this release; see "`run_project` pre-flight".)
+- **Some scripts a launch brings in are not scanned by `run_project`'s pre-flight.** Inline `[sub_resource type="GDScript"]` source and scripts attached to instanced scenes are scanned (see "`run_project` pre-flight"). Not scanned: non-GDScript scripts, binary `.scn` scenes, scripts carried by `.tres` / `.res` resources a scene references, and `uid://`-only references. The scan reports each of these it meets in `warnings`, but it does not refuse a launch over them, even in strict mode.
 - **Bypassable by anyone who reads the open-source rule table and obfuscates.** This is the central, load-bearing limitation: the catalogue above is deliberately auditable, which means an adversary who wants to bypass it can read exactly what triggers each tier and construct GDScript that doesn't. That's accepted as inherent to a best-effort filter aimed at unobfuscated primitives, not a defect to be patched away.
 - **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
 - No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch: mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.

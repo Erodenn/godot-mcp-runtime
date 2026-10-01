@@ -355,3 +355,27 @@ describe('handleUpdateAutoload', () => {
     expect(readProjectGodot(dir)).not.toContain('TestManager="*');
   });
 });
+
+describe('handleListAutoloads unparsed lines', () => {
+  it('list_autoloads leads with a warning for an unparsed line', async () => {
+    const dir = makeTmpProject();
+    writeFileSync(
+      join(dir, 'project.godot'),
+      'config_version=5\n\n[autoload]\nGood="*res://a.gd"\nmy-auto="res://b.gd"\n',
+      'utf8',
+    );
+    const result = await handleListAutoloads({ projectPath: dir });
+    const payload = expectMatchesOutputSchema('list_autoloads', result) as Record<string, unknown>;
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      '[autoload] has 1 line(s) that could not be parsed and are not listed: my-auto="res://b.gd"',
+    ]);
+    expect(payload.autoloads).toEqual([{ name: 'Good', path: 'res://a.gd', singleton: true }]);
+  });
+
+  it('list_autoloads has no warnings key when every line parses', async () => {
+    const dir = makeTmpProjectWithAutoload('Ok', 'ok.gd');
+    const result = await handleListAutoloads({ projectPath: dir });
+    expect(expectMatchesOutputSchema('list_autoloads', result)).not.toHaveProperty('warnings');
+  });
+});

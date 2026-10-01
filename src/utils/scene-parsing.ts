@@ -1,27 +1,54 @@
 /**
  * .tscn / project.godot parsing helpers shared by the run-script security
- * pipeline. Parallel in style to `autoload-ini.ts` — line-oriented INI/TSCN
- * parsing, no Godot process required.
+ * pipeline. Parallel in style to `autoload-ini.ts`: text parsing, no Godot
+ * process required.
  *
  * Responsibilities:
  *  - Resolve the scene a `run_project` call will actually launch (explicit
  *    `scene` arg > `run/main_scene` in [application] > null).
- *  - Extract the list of `[ext_resource type="Script" path="res://..."]`
- *    references from a .tscn file, mapped to absolute project-relative paths.
- *  - Recurse transitively into `[ext_resource type="PackedScene"]` references
- *    so a script attached to a subscene the launched scene instances is
- *    caught too (`collectSceneScriptsRecursive`).
+ *  - Read a text scene with one quote-aware scanner (`scanTscn`): section
+ *    headers, their attributes, and the string-valued properties that follow
+ *    them, so a bracketed line inside a multi-line string is never mistaken
+ *    for a header and a `]` inside a quoted path never ends one early.
+ *  - Collect every script a scene brings with it (`collectSceneScripts`):
+ *    `[ext_resource type="Script"]` files, the source of inline
+ *    `[sub_resource type="GDScript"]` scripts, and the same for every
+ *    `[ext_resource type="PackedScene"]` it instances, transitively. A script
+ *    attached to an instanced node, or assigned by an instance override, is
+ *    always one of those two forms, so it is covered by construction.
+ *  - Report what it could not read instead of skipping it: scripts that are
+ *    not GDScript, binary scenes, malformed headers, unterminated strings.
  *
- * Not chased (documented limitation, not a TODO — see `docs/security.md`):
- * inline `[sub_resource type="GDScript"]` scripts embedded directly in the
- * .tscn, and `[instance]` property overrides. Both would need a separate
- * parsing pipeline beyond ext_resource line-scanning.
+ * Not read (documented limitation, see `docs/security.md`): scripts carried by
+ * non-scene resources a scene references (`.tres` / `.res`), binary `.scn`
+ * scenes, and references by `uid://` alone. Each of these that the walk meets
+ * is reported, not dropped.
  */
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { projectGodotPath, stripResPrefix } from './path-validation.js';
 import { walkIniSection } from './autoload-ini.js';
+
+/** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
+const TSCN_RAW_SNIPPET_MAX = 200;
+const TSCN_RES_PREFIX = 'res://';
+const GDSCRIPT_EXTENSION = '.gd';
+const UNICODE_SHORT_ESCAPE_DIGITS = 4;
+const UNICODE_LONG_ESCAPE_DIGITS = 6;
+const HEX_BASE = 16;
+const UNICODE_MAX_CODE_POINT = 0x10ffff;
+const INLINE_SCRIPT_SOURCE_KEY = 'script/source';
+const SCENE_HEADER_TAGS: ReadonlySet<string> = new Set(['gd_scene', 'gd_resource']);
+const SIMPLE_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ['n', '\n'],
+  ['t', '\t'],
+  ['r', '\r'],
+  ['b', '\b'],
+  ['f', '\f'],
+]);
+const NOT_TEXT_SCENE_REASON =
+  'not a text scene (no [gd_scene] header); binary scenes cannot be scanned';
 
 function isFileNotFound(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
@@ -40,34 +67,214 @@ function readSceneFileSafe(scenePath: string): string | null {
   }
 }
 
-/**
- * Shared ext_resource line-scanner underlying both `extractSceneScripts` and
- * `collectSceneScriptsRecursive`. Returns `res://`-stripped paths (not yet
- * joined to a project root) for every top-level
- * `[ext_resource type="<typeValue>" path="res://..."]` entry, optionally
- * filtered to paths ending in `requiredExt`.
- */
-function extractExtResourcePaths(
-  content: string,
-  typeValue: string,
-  requiredExt?: string,
-): string[] {
-  const result: string[] = [];
-  const lineRe = /^\[ext_resource\b([^\]]*)\]/;
-  const typeRe = new RegExp(`type\\s*=\\s*"${typeValue}"`);
-  for (const rawLine of content.split('\n')) {
-    const match = rawLine.match(lineRe);
-    if (!match) continue;
-    const attrs = match[1] ?? '';
-    if (!typeRe.test(attrs)) continue;
-    const pathMatch = attrs.match(/path\s*=\s*"([^"]+)"/);
-    if (!pathMatch || !pathMatch[1]) continue;
-    const stripped = stripResPrefix(pathMatch[1]);
-    if (requiredExt && !stripped.endsWith(requiredExt)) continue;
-    result.push(stripped);
-  }
-  return result;
+// --- Text scene scanner ---
+
+/** One `[tag key=value ...]` section header and the string properties under it. */
+export interface TscnHeader {
+  tag: string;
+  /** Attribute values as written: quoted strings unescaped, bare tokens verbatim. */
+  attrs: Map<string, string>;
+  line: number;
+  /** The header line, trimmed and capped at `TSCN_RAW_SNIPPET_MAX` characters. */
+  raw: string;
+  /** Property lines whose value is exactly one string, unescaped, by key. */
+  stringProps: Map<string, string>;
 }
+
+export interface TscnScan {
+  /** True when the first header is `gd_scene` or `gd_resource`. */
+  isTextResource: boolean;
+  headers: TscnHeader[];
+  /** Headers and strings the scanner could not read; none of them is in `headers`. */
+  malformed: Array<{ line: number; reason: string; raw: string }>;
+}
+
+interface QuotedString {
+  value: string;
+  /** Index just past the closing quote. */
+  end: number;
+}
+
+function snippet(text: string): string {
+  return text.trimEnd().slice(0, TSCN_RAW_SNIPPET_MAX);
+}
+
+function countNewlines(content: string, from: number, to: number): number {
+  let count = 0;
+  for (let i = from; i < to; i++) {
+    if (content[i] === '\n') count++;
+  }
+  return count;
+}
+
+function isBlank(ch: string | undefined): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\r';
+}
+
+/**
+ * Read the quoted string whose opening quote is at `start`, unescaping it.
+ * Returns null when no closing quote is found before `limit`.
+ */
+function readQuoted(content: string, start: number, limit: number): QuotedString | null {
+  let out = '';
+  let i = start + 1;
+  while (i < limit) {
+    const ch = content[i]!;
+    if (ch === '"') return { value: out, end: i + 1 };
+    if (ch !== '\\') {
+      out += ch;
+      i++;
+      continue;
+    }
+    const escaped = content[i + 1];
+    if (escaped === undefined || i + 1 >= limit) return null;
+    if (escaped === 'u' || escaped === 'U') {
+      const digits = escaped === 'u' ? UNICODE_SHORT_ESCAPE_DIGITS : UNICODE_LONG_ESCAPE_DIGITS;
+      const hex = content.slice(i + 2, i + 2 + digits);
+      if (hex.length === digits && /^[0-9a-fA-F]+$/.test(hex)) {
+        const code = parseInt(hex, HEX_BASE);
+        if (code <= UNICODE_MAX_CODE_POINT) {
+          out += String.fromCodePoint(code);
+          i += 2 + digits;
+          continue;
+        }
+      }
+    }
+    out += SIMPLE_ESCAPES.get(escaped) ?? escaped;
+    i += 2;
+  }
+  return null;
+}
+
+type HeaderParse =
+  | { ok: true; tag: string; attrs: Map<string, string> }
+  | { ok: false; reason: string };
+
+/**
+ * Parse the header that starts at `start` (a `[`) and must end before
+ * `lineEnd`. Quoted strings may hold `]`; a bare value such as
+ * `ExtResource("1_a")` or `["x", "y"]` is read through its balanced brackets.
+ */
+function parseHeader(content: string, start: number, lineEnd: number): HeaderParse {
+  let i = start + 1;
+  const tagStart = i;
+  while (i < lineEnd && /[A-Za-z0-9_]/.test(content[i]!)) i++;
+  const tag = content.slice(tagStart, i);
+  if (tag === '') return { ok: false, reason: 'header has no tag' };
+  const attrs = new Map<string, string>();
+  for (;;) {
+    while (i < lineEnd && isBlank(content[i])) i++;
+    if (i >= lineEnd) return { ok: false, reason: 'header has no closing bracket' };
+    if (content[i] === ']') return { ok: true, tag, attrs };
+    const keyStart = i;
+    while (i < lineEnd && content[i] !== '=' && content[i] !== ']' && !isBlank(content[i])) i++;
+    const key = content.slice(keyStart, i);
+    if (key === '' || content[i] !== '=') {
+      return { ok: false, reason: `attribute ${key === '' ? '' : key + ' '}has no value` };
+    }
+    i++;
+    if (content[i] === '"') {
+      const quoted = readQuoted(content, i, lineEnd);
+      if (quoted === null) return { ok: false, reason: 'unterminated string in header' };
+      attrs.set(key, quoted.value);
+      i = quoted.end;
+      continue;
+    }
+    const valueStart = i;
+    let depth = 0;
+    while (i < lineEnd) {
+      const c = content[i]!;
+      if (c === '"') {
+        const quoted = readQuoted(content, i, lineEnd);
+        if (quoted === null) return { ok: false, reason: 'unterminated string in header' };
+        i = quoted.end;
+        continue;
+      }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') {
+        if (depth === 0) break;
+        depth--;
+      } else if (depth === 0 && isBlank(c)) break;
+      i++;
+    }
+    if (i === valueStart) return { ok: false, reason: `attribute ${key} has no value` };
+    attrs.set(key, content.slice(valueStart, i));
+  }
+}
+
+/**
+ * Read a `.tscn` / `.tres` text in one linear pass. A line that starts with
+ * `[` opens a header; any other line is a property of the most recent header,
+ * and a string in its value runs to the closing quote across newlines, so
+ * nothing inside a string is ever read as structure.
+ */
+export function scanTscn(content: string): TscnScan {
+  const headers: TscnHeader[] = [];
+  const malformed: TscnScan['malformed'] = [];
+  const length = content.length;
+  let i = 0;
+  let line = 1;
+  let current: TscnHeader | null = null;
+
+  while (i < length) {
+    if (content[i] === '[') {
+      const newlineAt = content.indexOf('\n', i);
+      const lineEnd = newlineAt === -1 ? length : newlineAt;
+      const parsed = parseHeader(content, i, lineEnd);
+      const raw = snippet(content.slice(i, lineEnd));
+      if (parsed.ok) {
+        current = { tag: parsed.tag, attrs: parsed.attrs, line, raw, stringProps: new Map() };
+        headers.push(current);
+      } else {
+        current = null;
+        malformed.push({ line, reason: parsed.reason, raw });
+      }
+      i = lineEnd + 1;
+      line++;
+      continue;
+    }
+
+    let j = i;
+    let equalsAt = -1;
+    let unterminated = false;
+    while (j < length && content[j] !== '\n') {
+      const c = content[j]!;
+      if (c === '"') {
+        const quoted = readQuoted(content, j, length);
+        if (quoted === null) {
+          malformed.push({
+            line: line + countNewlines(content, i, j),
+            reason: 'unterminated string',
+            raw: snippet(content.slice(j)),
+          });
+          unterminated = true;
+          j = length;
+          break;
+        }
+        j = quoted.end;
+        continue;
+      }
+      if (c === '=' && equalsAt === -1) equalsAt = j;
+      j++;
+    }
+    if (current !== null && equalsAt !== -1 && !unterminated) {
+      let valueStart = equalsAt + 1;
+      while (valueStart < j && isBlank(content[valueStart])) valueStart++;
+      if (content[valueStart] === '"') {
+        const quoted = readQuoted(content, valueStart, length);
+        if (quoted !== null && content.slice(quoted.end, j).trim() === '') {
+          current.stringProps.set(content.slice(i, equalsAt).trim(), quoted.value);
+        }
+      }
+    }
+    line += countNewlines(content, i, Math.min(j, length)) + 1;
+    i = j + 1;
+  }
+
+  return { isTextResource: SCENE_HEADER_TAGS.has(headers[0]?.tag ?? ''), headers, malformed };
+}
+
+// --- Launch scene resolution ---
 
 /**
  * Read `run/main_scene` from `[application]` in project.godot. Returns the
@@ -119,70 +326,134 @@ export function resolveLaunchScene(projectDir: string, sceneArg?: string | null)
   return join(projectDir, stripResPrefix(main));
 }
 
-/**
- * Extract top-level `[ext_resource type="Script" path="res://..."]` references
- * from a .tscn file. Returns absolute filesystem paths relative to the project
- * root.
- *
- * Limitations (intentional — see `docs/security.md`):
- *  - Does NOT chase `[sub_resource type="GDScript"]` inline scripts — those
- *    embed GDScript source inside the .tscn and would need a separate scan
- *    pipeline.
- *  - Does NOT account for `[instance]` property overrides.
- *  - Returns paths even if the file does not exist on disk; caller is
- *    responsible for the existence check (and recording a warning).
- *
- * Does NOT recurse into `[ext_resource type="PackedScene"]` references — use
- * `collectSceneScriptsRecursive` for the transitive walk across subscenes.
- */
-export function extractSceneScripts(scenePath: string, projectDir: string): string[] {
-  const content = readSceneFileSafe(scenePath);
-  if (content === null) return [];
-  // ext_resource lines look like:
-  //   [ext_resource type="Script" path="res://scripts/foo.gd" id="1_xxx"]
-  // or with uid="...":
-  //   [ext_resource type="Script" uid="..." path="res://..." id="..."]
-  // We do a permissive match: `type="Script"` somewhere in the line + a
-  // `path="res://..."` clause.
-  return extractExtResourcePaths(content, 'Script', '.gd').map((stripped) =>
-    join(projectDir, stripped),
-  );
+// --- Script collection ---
+
+/** An inline `[sub_resource type="GDScript"]` and the source it carries. */
+export interface InlineSceneScript {
+  /** Absolute path of the scene file that holds the sub-resource. */
+  scenePath: string;
+  id: string;
+  source: string;
+  /** Line of the sub-resource header in the scene file. */
+  line: number;
+}
+
+/** Something the walk met and could not read. */
+export interface UnscannedSceneItem {
+  scenePath: string;
+  reason: string;
+}
+
+export interface SceneScriptCollection {
+  /** Absolute paths of the `.gd` files every reachable scene attaches. */
+  scripts: string[];
+  inlineScripts: InlineSceneScript[];
+  unscanned: UnscannedSceneItem[];
+}
+
+function resPathOf(attrs: Map<string, string>): string | null {
+  const path = attrs.get('path');
+  return path !== undefined && path.startsWith(TSCN_RES_PREFIX) ? path : null;
 }
 
 /**
- * Transitively walk `[ext_resource type="PackedScene"]` references starting
- * at `scenePath`, unioning every reachable scene's `type="Script"`
- * ext_resources. Closes the subscene-recursion gap in `extractSceneScripts`:
- * a hostile script attached to a PackedScene the launched scene instances is
- * invisible to a single-scene scan.
+ * Transitively walk `[ext_resource type="PackedScene"]` references starting at
+ * `scenePath` and collect, from every reachable scene, the `.gd` files its
+ * `type="Script"` ext_resources name and the source of its inline GDScript
+ * sub-resources. A hostile script attached to a PackedScene the launched scene
+ * instances is invisible to a single-scene scan.
  *
- * Cycle-safe: scene graphs can reference each other in a cycle, so visited
- * scenes (by resolved absolute path) are never re-walked. Missing scene
- * files are skipped silently, same as `extractSceneScripts` — a stale
- * reference must not crash the run_project pre-flight.
- *
- * Returns the de-duplicated union of script paths (absolute).
+ * Cycle-safe: scene graphs can reference each other, so a scene already walked
+ * (by resolved absolute path) is never walked again. Nothing throws on a stale
+ * reference; whatever could not be read is listed in `unscanned` so the caller
+ * can say the scan was incomplete.
  */
-export function collectSceneScriptsRecursive(scenePath: string, projectDir: string): string[] {
+export function collectSceneScripts(scenePath: string, projectDir: string): SceneScriptCollection {
   const visited = new Set<string>();
   const scripts = new Set<string>();
+  const inlineScripts: InlineSceneScript[] = [];
+  const unscanned: UnscannedSceneItem[] = [];
 
   function walk(currentScenePath: string): void {
     const absScenePath = resolve(currentScenePath);
     if (visited.has(absScenePath)) return;
     visited.add(absScenePath);
+    const skip = (reason: string): void => {
+      unscanned.push({ scenePath: absScenePath, reason });
+    };
 
     const content = readSceneFileSafe(currentScenePath);
-    if (content === null) return;
-
-    for (const stripped of extractExtResourcePaths(content, 'Script', '.gd')) {
-      scripts.add(join(projectDir, stripped));
+    if (content === null) {
+      skip('scene file not found');
+      return;
     }
-    for (const stripped of extractExtResourcePaths(content, 'PackedScene')) {
-      walk(join(projectDir, stripped));
+    const scan = scanTscn(content);
+    if (!scan.isTextResource) {
+      skip(NOT_TEXT_SCENE_REASON);
+      return;
+    }
+
+    for (const header of scan.headers) {
+      if (header.tag === 'ext_resource') {
+        const type = header.attrs.get('type');
+        const path = resPathOf(header.attrs);
+        if (type === 'Script') {
+          if (path === null) {
+            skip(`Script ext_resource has no res:// path: ${header.raw}`);
+          } else if (path.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) {
+            scripts.add(join(projectDir, stripResPrefix(path)));
+          } else {
+            skip(`script ${path} is not GDScript and is not scanned`);
+          }
+        } else if (type === 'PackedScene') {
+          if (path === null) skip(`PackedScene ext_resource has no res:// path: ${header.raw}`);
+          else walk(join(projectDir, stripResPrefix(path)));
+        }
+      } else if (header.tag === 'sub_resource' && header.attrs.get('type') === 'GDScript') {
+        const id = header.attrs.get('id') ?? '?';
+        const source = header.stringProps.get(INLINE_SCRIPT_SOURCE_KEY);
+        if (source === undefined) skip(`inline GDScript ${id} has no readable script/source`);
+        else inlineScripts.push({ scenePath: absScenePath, id, source, line: header.line });
+      }
+    }
+    for (const problem of scan.malformed) {
+      if (
+        problem.reason === 'unterminated string' ||
+        problem.raw.startsWith('[ext_resource') ||
+        problem.raw.startsWith('[sub_resource')
+      ) {
+        skip(`${problem.reason} at line ${problem.line}: ${problem.raw}`);
+      }
     }
   }
 
   walk(scenePath);
-  return Array.from(scripts);
+  return { scripts: Array.from(scripts), inlineScripts, unscanned };
+}
+
+/**
+ * Extract the `[ext_resource type="Script" path="res://....gd"]` references of
+ * one scene as absolute filesystem paths under the project root.
+ *
+ * Does not chase subscenes (use `collectSceneScripts` for the transitive walk)
+ * and does not read inline `[sub_resource type="GDScript"]` source. Returns
+ * paths even when the file does not exist on disk; the caller owns the
+ * existence check. A missing scene yields `[]`.
+ */
+export function extractSceneScripts(scenePath: string, projectDir: string): string[] {
+  const content = readSceneFileSafe(scenePath);
+  if (content === null) return [];
+  const result: string[] = [];
+  for (const header of scanTscn(content).headers) {
+    if (header.tag !== 'ext_resource' || header.attrs.get('type') !== 'Script') continue;
+    const path = resPathOf(header.attrs);
+    if (path === null || !path.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) continue;
+    result.push(join(projectDir, stripResPrefix(path)));
+  }
+  return result;
+}
+
+/** The `string[]` view of `collectSceneScripts`: every `.gd` path the walk reaches. */
+export function collectSceneScriptsRecursive(scenePath: string, projectDir: string): string[] {
+  return collectSceneScripts(scenePath, projectDir).scripts;
 }
