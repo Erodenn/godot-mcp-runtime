@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import {
@@ -27,6 +28,7 @@ import {
   handleRunProject,
   handleAttachProject,
   handleLaunchEditor,
+  runtimeToolDefinitions,
 } from '../../../src/tools/runtime-tools.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
@@ -332,6 +334,20 @@ function createRuntimeFake(): RuntimeFake {
 
 const tmp = useTmpDirs();
 
+interface RunProjectPayload {
+  warnings?: string[];
+  projectPath: string;
+  sessionMode: string;
+  bridgePort: number | null;
+  bridgeReady: boolean;
+  message: string;
+}
+
+/** The structured payload of a run_project success, as a strict client reads it. */
+function runProjectPayload(result: unknown): RunProjectPayload {
+  return unwrap(result).structuredContent as unknown as RunProjectPayload;
+}
+
 function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
   return {
     // Intentionally unset: no covered handler reads `.process`. If a future handler calls
@@ -440,8 +456,10 @@ describe('handleRunProject bridge port', () => {
       acceptingContext(),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/port \d+/);
+    const payload = runProjectPayload(result);
+    expect(payload.bridgePort).toBe(19900);
+    expect(payload.sessionMode).toBe('spawned');
+    expect(payload.bridgeReady).toBe(true);
   });
 });
 
@@ -1641,9 +1659,9 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Security scan findings/);
-    expect(text).toMatch(/OS\.execute/);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings?.some((w) => /OS\.execute/.test(w))).toBe(true);
+    expect(Object.keys(payload)[0]).toBe('warnings');
   });
 
   it('strict mode hard-rejects when autoload contains Tier 1 primitives', async () => {
@@ -1684,9 +1702,7 @@ describe('handleRunProject security pre-flight', () => {
     );
     expect(hasError(result)).toBe(false);
     expect(elicitCalls).toBe(0);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/Security scan findings/);
-    expect(text).not.toMatch(/OS\.execute/);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
   });
 
   it("skips this server's own bridge autoload so a relaunch does not self-reject", async () => {
@@ -1714,9 +1730,9 @@ describe('handleRunProject security pre-flight', () => {
       acceptingContext({ strict: true }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/save_png/);
-    expect(text).not.toMatch(/make_dir_recursive_absolute/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).not.toMatch(/save_png/);
+    expect(warnings).not.toMatch(/make_dir_recursive_absolute/);
   });
 
   it('still scans an McpBridge autoload pointing at a path the server does not own', async () => {
@@ -1764,8 +1780,8 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/No launchable scene found/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/No launchable scene found/);
   });
 
   it('session gate elicits once and skips on subsequent calls', async () => {
@@ -1829,9 +1845,9 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: declineElicitor, disableElicitation: true }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Elicitation disabled \(GODOT_MCP_DISABLE_ELICITATION\)/);
-    expect(text).toMatch(/launching without user confirmation/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/Elicitation disabled \(GODOT_MCP_DISABLE_ELICITATION\)/);
+    expect(warnings).toMatch(/launching without user confirmation/);
   });
 
   it('session gate blocks the launch when accept carries content.confirm:false', async () => {
@@ -1872,9 +1888,9 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: throwingElicitor, strict: false }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Elicitation unavailable/);
-    expect(text).toMatch(/launching without explicit user confirmation/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/Elicitation unavailable/);
+    expect(warnings).toMatch(/launching without explicit user confirmation/);
   });
 
   it('scans the launched scene resolved from run/main_scene', async () => {
@@ -1897,8 +1913,8 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/attack\.gd:3.*OS\.execute/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/attack\.gd:3.*OS\.execute/);
   });
 
   it('explicit scene arg overrides main_scene during scan', async () => {
@@ -1928,8 +1944,60 @@ describe('handleRunProject security pre-flight', () => {
       acceptingContext(),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/OS\.execute/);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run_project: the success payload against its declared outputSchema
+// ---------------------------------------------------------------------------
+
+describe('run_project outputSchema', () => {
+  const runProjectDef = runtimeToolDefinitions.find((t) => t.name === 'run_project');
+  if (!runProjectDef || !('outputSchema' in runProjectDef)) {
+    throw new Error('run_project outputSchema not found');
+  }
+  const validate = new Ajv({ strict: false }).compile(runProjectDef.outputSchema as object);
+
+  function expectValid(payload: unknown): void {
+    const valid = validate(payload);
+    expect(valid, JSON.stringify(validate.errors)).toBe(true);
+  }
+
+  it('validates a spawn success payload with no warnings', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      makeContext({ disableSecurity: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings).toBeUndefined();
+    expectValid(payload);
+  });
+
+  it('validates a spawn success payload that carries warnings', async () => {
+    const dir = tmp.makeProject('run-project-schema-warnings-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings?.length).toBeGreaterThan(0);
+    expectValid(payload);
+  });
+
+  it('rejects a payload missing sessionMode', () => {
+    expect(
+      validate({
+        projectPath: fixtureProjectPath,
+        bridgePort: 19900,
+        bridgeReady: true,
+        message: 'Godot project started and the MCP bridge is ready.',
+      }),
+    ).toBe(false);
   });
 });
 

@@ -56,6 +56,7 @@ describe('outputSchema: expected coverage', () => {
     'get_scene_dependencies',
     'get_ui_elements',
     'profile_project',
+    'run_project',
     'run_script',
     'search_project',
     'start_profiler',

@@ -1,6 +1,6 @@
 import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import type { GodotRunner } from '../utils/godot-runner.js';
+import type { GodotRunner, RuntimeSessionMode } from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -106,7 +106,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. Set profiling: true at launch to enable the profiler tools. Use attach_project for one you launched yourself. Verifies MCP bridge readiness before returning success. Returns status with the assigned bridge port. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
+      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. Set profiling: true at launch to enable the profiler tools. Use attach_project for one you launched yourself. Verifies MCP bridge readiness before returning success. Returns: projectPath, sessionMode, bridgePort, bridgeReady, message; warnings leads when the pre-flight script scan found something. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -139,6 +139,18 @@ export const runtimeToolDefinitions = [
         },
       },
       required: ['projectPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        projectPath: { type: 'string' },
+        sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+        bridgePort: { type: ['number', 'null'] },
+        bridgeReady: { type: 'boolean' },
+        message: { type: 'string' },
+      },
+      required: ['projectPath', 'sessionMode', 'bridgePort', 'bridgeReady', 'message'],
     },
   },
   {
@@ -712,6 +724,34 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
   return out;
 }
 
+const BRIDGE_PORT_UNAVAILABLE_WARNING =
+  'Bridge port unavailable: the session ended as the bridge became ready.';
+
+/**
+ * Build the `run_project` success payload. `warnings` is the first key and is
+ * omitted when empty. A session that ended between the readiness check and
+ * this read has no port to report: that is `bridgePort: null` plus a leading
+ * warning, never a stale or made-up number.
+ */
+function buildRunProjectResponse(session: {
+  projectPath: string;
+  sessionMode: RuntimeSessionMode;
+  bridgePort: number | null;
+  warnings: readonly string[];
+  message: string;
+}): HandlerResult {
+  const warnings = [...session.warnings];
+  if (session.bridgePort === null) warnings.unshift(BRIDGE_PORT_UNAVAILABLE_WARNING);
+  return createStructuredResponse({
+    ...(warnings.length > 0 ? { warnings } : {}),
+    projectPath: resolve(session.projectPath),
+    sessionMode: session.sessionMode,
+    bridgePort: session.bridgePort,
+    bridgeReady: true,
+    message: session.message,
+  });
+}
+
 function exitedProcessError(actionDescription: string): HandlerResult {
   return err(
     createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
@@ -926,29 +966,20 @@ export async function handleRunProject(
       return err(createErrorResponse(lines.join('\n'), solutions));
     }
 
-    const port = runner.activeBridgePort;
-    const lines = [
-      `Godot project started and MCP bridge is ready (port ${port}).`,
-      '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
-      '- Use get_debug_output to check runtime output and errors',
-      '- Call stop_project when done',
-    ];
+    let message = 'Godot project started and the MCP bridge is ready.';
     if (isBackground) {
-      lines.push('- Background mode: window hidden, physical input blocked');
+      message += ' Background mode: window hidden, physical input blocked.';
     }
     if (isProfiling) {
-      lines.push('- Profiling enabled: use profile_project or start_profiler');
+      message += ' Profiling enabled: use profile_project or start_profiler.';
     }
-    if (warnings.length > 0) {
-      lines.push('', 'Security scan findings:');
-      for (const w of warnings) lines.push(`- ${w}`);
-    }
-
-    const content: Array<{ type: string; [k: string]: unknown }> = [
-      { type: 'text', text: lines.join('\n') },
-    ];
-
-    return ok({ content });
+    return buildRunProjectResponse({
+      projectPath,
+      sessionMode: 'spawned',
+      bridgePort: runner.activeBridgePort,
+      warnings,
+      message,
+    });
   } catch (error: unknown) {
     const errorMessage = getErrorMessage(error);
     if (error instanceof BridgeAutoloadCollisionError) {
