@@ -195,7 +195,7 @@ export const runtimeToolDefinitions = [
         warnings: { type: 'array', items: { type: 'string' } },
         projectPath: { type: 'string' },
         sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
-        bridgePort: { type: ['number', 'null'] },
+        bridgePort: { type: 'number' },
         message: { type: 'string' },
       },
       required: ['projectPath', 'sessionMode', 'bridgePort', 'message'],
@@ -244,7 +244,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_debug_output',
     description:
-      'Read captured stdout/stderr from a spawned Godot project. Use whenever a runtime tool fails unexpectedly: script errors, missing nodes and crash backtraces surface here. Still works after the process exits or crashes; the logs are kept until stop_project. Returns: projectPath, sessionMode, output and errors (last `limit` lines each, default 200), running (false after exit) and exitCode after exit. An attached session captures nothing: output and errors are empty and running is null.',
+      'Read captured stdout/stderr from a spawned Godot project. Use whenever a runtime tool fails unexpectedly: script errors, missing nodes and crash backtraces surface here. Still works after the process exits or crashes; the logs are kept until stop_project. Returns: projectPath, sessionMode, output and errors (last `limit` lines each, default 200), running (false after exit) and exitCode after exit. An attached session captures nothing: output, errors and running are null and warnings leads.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -259,10 +259,19 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         projectPath: { type: 'string' },
         sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
-        output: { type: 'array', items: { type: 'string' } },
-        errors: { type: 'array', items: { type: 'string' } },
+        output: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Null in an attached session, which captures nothing.',
+        },
+        errors: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Null in an attached session, which captures nothing.',
+        },
         running: { type: ['boolean', 'null'] },
         exitCode: { type: ['number', 'null'] },
         tip: { type: 'string' },
@@ -273,7 +282,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed); warnings leads when cleanup was not confirmed. Errors if no session.',
+      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed; null if attached); warnings leads when cleanup was not confirmed. Errors if no session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -290,8 +299,16 @@ export const runtimeToolDefinitions = [
         externalProcessPreserved: { type: 'boolean' },
         alreadyExited: { type: 'boolean' },
         exitCode: { type: ['number', 'null'] },
-        finalOutput: { type: 'array', items: { type: 'string' } },
-        finalErrors: { type: 'array', items: { type: 'string' } },
+        finalOutput: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Null for an attached session, which captures nothing.',
+        },
+        finalErrors: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Null for an attached session, which captures nothing.',
+        },
       },
       required: [
         'projectPath',
@@ -378,7 +395,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      'Send input actions to the running project in order and report what each did. Action types: see the `actions` schema. For key, mouse_button and action, omit `pressed` to tap; set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success, results[] per action: ok, Control hit, signals fired, UI `changes`, `watch` samples, handler `errors` (spawned only). An invalid batch injects nothing; a runtime failure skips the rest.',
+      'Send input actions in order; report what each did. Action types: see the `actions` schema. For key, mouse_button, action: omit `pressed` to tap, set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success, results[] per action: ok, hit, signals, UI `changes`, `watch` samples, handler `errors` (spawned only); warnings leads when `errors` is incomplete. An invalid batch injects nothing; a runtime failure skips the rest.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -496,6 +513,12 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present when the per-action errors could not be attributed completely: some may sit on the wrong entry or be missing.',
+        },
         projectPath: { type: 'string' },
         success: {
           type: 'boolean',
@@ -621,7 +644,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Execute GDScript in the running project with full scene tree access. The script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, success, result, plus warnings and tip when present. In a spawned session a stderr runtime error is an error when the script returned null, otherwise a warning.',
+      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, success, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result leads with a warning.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -686,13 +709,28 @@ function parseBridgeJson<T = unknown>(
 }
 
 /**
+ * Bound a list of runtime-error lines for a payload: the first
+ * `MAX_RUNTIME_ERROR_CONTEXT_LINES`, then one entry counting what was cut and
+ * naming where the rest is. A list at or under the limit comes back whole. The
+ * cut is never silent: thirty lines out of a hundred must not read as thirty.
+ */
+function capRuntimeErrorLines(lines: string[]): string[] {
+  const cut = lines.length - MAX_RUNTIME_ERROR_CONTEXT_LINES;
+  if (cut <= 0) return lines;
+  return [
+    ...lines.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES),
+    `+${cut} more runtime error lines (get_debug_output has the full log)`,
+  ];
+}
+
+/**
  * Attach captured runtime errors as a `warnings` array on a tool response
- * payload. No-op when there are no runtime errors. Truncates to
- * `MAX_RUNTIME_ERROR_CONTEXT_LINES` to keep payloads bounded.
+ * payload. No-op when there are no runtime errors. Bounded by
+ * `capRuntimeErrorLines`.
  */
 function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: string[]): void {
   if (runtimeErrors.length > 0) {
-    target.warnings = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    target.warnings = capRuntimeErrorLines(runtimeErrors);
   }
 }
 
@@ -802,27 +840,28 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
   return out;
 }
 
-const BRIDGE_PORT_UNAVAILABLE_WARNING =
-  'Bridge port unavailable: the session ended as the bridge became ready.';
+const SESSION_ENDED_AT_READY_MESSAGE =
+  'The session ended as the bridge became ready; no session is running.';
+/** Trailing stderr lines quoted in a run_project error about a game that did not stay up. */
+const RECENT_STDERR_LINES_IN_ERROR = 20;
 
 const EDITOR_LAUNCH_MESSAGE =
   'Godot editor launched. It is a GUI application and cannot be controlled programmatically: use the headless scene and node tools (add_node, set_node_properties, etc.) to change the project.';
 
 /**
  * Build the `run_project` success payload. `warnings` is the first key and is
- * omitted when empty. A session that ended between the readiness check and
- * this read has no port to report: that is `bridgePort: null` plus a leading
- * warning, never a stale or made-up number.
+ * omitted when empty. `bridgePort` is the port of a session that exists: a
+ * caller that found none after the readiness check returns an error instead
+ * of reaching here (see `SESSION_ENDED_AT_READY_MESSAGE`).
  */
 function buildRunProjectResponse(session: {
   projectPath: string;
   sessionMode: RuntimeSessionMode;
-  bridgePort: number | null;
+  bridgePort: number;
   warnings: readonly string[];
   message: string;
 }): HandlerResult {
   const warnings = [...session.warnings];
-  if (session.bridgePort === null) warnings.unshift(BRIDGE_PORT_UNAVAILABLE_WARNING);
   return createStructuredResponse({
     ...(warnings.length > 0 ? { warnings } : {}),
     projectPath: resolve(session.projectPath),
@@ -1043,7 +1082,7 @@ async function startSpawnedSession(
         );
       }
 
-      const recentErrors = runner.getRecentErrors(20);
+      const recentErrors = runner.getRecentErrors(RECENT_STDERR_LINES_IN_ERROR);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
       const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
       const lines = [
@@ -1073,6 +1112,23 @@ async function startSpawnedSession(
       return err(createErrorResponse(lines.join('\n'), solutions));
     }
 
+    // Read after readiness, not assumed from it: a game that exits in between
+    // clears its port, and a session with no port is no session. Reporting
+    // that as a start with `bridgePort: null` would be a success for nothing.
+    const readyPort = runner.activeBridgePort;
+    if (readyPort === null) {
+      // Read the log tail before the teardown: stopProject releases it.
+      const lastErrors = runner.getRecentErrors(RECENT_STDERR_LINES_IN_ERROR);
+      const errorTail = lastErrors.length > 0 ? `\nLast stderr:\n${lastErrors.join('\n')}` : '';
+      await runner.stopProject();
+      return err(
+        createErrorResponse(`${SESSION_ENDED_AT_READY_MESSAGE}${errorTail}`, [
+          'Retry run_project',
+          'If the game keeps exiting right after it starts, check its startup scripts and autoloads (list_autoloads)',
+        ]),
+      );
+    }
+
     let message = 'Godot project started and the MCP bridge is ready.';
     if (isBackground) {
       message += ' Background mode: window hidden, physical input blocked.';
@@ -1083,7 +1139,7 @@ async function startSpawnedSession(
     return buildRunProjectResponse({
       projectPath,
       sessionMode: 'spawned',
-      bridgePort: runner.activeBridgePort,
+      bridgePort: readyPort,
       warnings,
       message,
     });
@@ -1170,10 +1226,23 @@ async function startAttachedSession(
       );
     }
 
+    // Same read as the spawned path: an attached session whose bridge went
+    // away as it became ready has been cleared and has no port.
+    const readyPort = runner.activeBridgePort;
+    if (readyPort === null) {
+      await runner.stopProject();
+      return err(
+        createErrorResponse(SESSION_ENDED_AT_READY_MESSAGE, [
+          'Retry run_project with attach: true once the Godot process is running',
+          'If Godot closed right after it started, launch it again and check its own output',
+        ]),
+      );
+    }
+
     return buildRunProjectResponse({
       projectPath,
       sessionMode: 'attached',
-      bridgePort: runner.activeBridgePort,
+      bridgePort: readyPort,
       warnings,
       message:
         'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
@@ -1281,6 +1350,14 @@ export async function handleSwitchProject(
   });
 }
 
+/**
+ * The warning that leads a payload whose log fields are null because the
+ * session is attached. Names the two fields the caller is looking at.
+ */
+function attachedNothingCapturedWarning(outputField: string, errorsField: string): string {
+  return `An attached session captures no stdout or stderr (Godot was launched outside MCP), so ${outputField} and ${errorsField} are null, not empty.`;
+}
+
 export function handleGetDebugOutput(
   runner: GodotRunner,
   args: OperationParams = {},
@@ -1307,13 +1384,16 @@ export function handleGetDebugOutput(
   }
 
   if (current.mode === 'attached') {
+    // Nothing was captured, which is not the same as nothing was printed. An
+    // empty `errors` list would read as "no errors", so both are null and the
+    // reason leads.
     return createStructuredResponse({
+      warnings: [attachedNothingCapturedWarning('output', 'errors')],
       projectPath: current.projectPath,
       sessionMode: 'attached',
-      output: [],
-      errors: [],
+      output: null,
+      errors: null,
       running: null,
-      tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
     });
   }
 
@@ -1382,6 +1462,12 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
   if (result.mode === 'attached' && result.shutdownAcknowledged === false) {
     warnings.push(SHUTDOWN_UNACKNOWLEDGED_WARNING);
   }
+  // Null logs mean nothing was captured (an attached session), and the
+  // payload says so instead of handing back lists that look like silence.
+  const nothingCaptured = result.output === null || result.errors === null;
+  if (nothingCaptured) {
+    warnings.push(attachedNothingCapturedWarning('finalOutput', 'finalErrors'));
+  }
   // The message says the bridge was cleaned up only when every step was
   // confirmed: with a problem on record it says so instead.
   const cleanupComplete = result.cleanupProblems.length === 0;
@@ -1408,8 +1494,10 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     externalProcessPreserved: result.externalProcessPreserved === true,
     alreadyExited,
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-    finalOutput: condenseProcessTail(result.output, STOP_OUTPUT_MAX_LINES),
-    finalErrors: condenseProcessTail(result.errors, STOP_OUTPUT_MAX_LINES),
+    finalOutput:
+      result.output === null ? null : condenseProcessTail(result.output, STOP_OUTPUT_MAX_LINES),
+    finalErrors:
+      result.errors === null ? null : condenseProcessTail(result.errors, STOP_OUTPUT_MAX_LINES),
   });
 }
 
@@ -1618,7 +1706,7 @@ export async function handleTakeScreenshot(
     const statsWarnings = measured.ok
       ? []
       : [STATS_NOT_MEASURED_WARNING_PREFIX + measured.error + STATS_NOT_MEASURED_WARNING_SUFFIX];
-    const warnings = [...statsWarnings, ...runtimeErrors].slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    const warnings = [...statsWarnings, ...capRuntimeErrorLines(runtimeErrors)];
 
     return createStructuredResponse(
       {
@@ -1757,9 +1845,12 @@ function attachActionErrors(
     if (!entry || entry.skipped === true) continue;
     let lines = buckets[i] ?? [];
     if (i === lastExecuted && trailing.length > 0) lines = [...lines, ...trailing];
-    if (lines.length > 0) entry.errors = lines.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    if (lines.length > 0) entry.errors = capRuntimeErrorLines(lines);
   }
 }
+
+const PARTIAL_ERROR_ATTRIBUTION_WARNING =
+  "Runtime errors raised during this batch may be attributed to the wrong action or be missing: Godot's stderr had not delivered every action boundary in time. Read get_debug_output for the full log.";
 
 export async function handleSimulateInput(
   runner: GodotRunner,
@@ -1834,8 +1925,6 @@ export async function handleSimulateInput(
       executed,
     );
     if (sentinelTimedOut) {
-      // Attribution is partial, not wrong: the lines are still reported, just
-      // pooled onto the last executed entry. Not worth a payload field.
       logDebug(
         `[simulate_input] stderr drained without all ${executed} action boundaries; error attribution is partial`,
       );
@@ -1846,6 +1935,11 @@ export async function handleSimulateInput(
     // timeline survives; createErrorResponse is reserved for session errors,
     // pre-validation refusals, and transport failures.
     const payload: Record<string, unknown> = {
+      // Not every action boundary arrived before the drain deadline. Lines
+      // that did arrive may sit on the wrong entry, and lines still in flight
+      // are on no entry at all, so the per-action `errors` cannot be read as
+      // complete. That has to lead the payload, not sit in a debug log.
+      ...(sentinelTimedOut ? { warnings: [PARTIAL_ERROR_ATTRIBUTION_WARNING] } : {}),
       projectPath: sessionProjectPath,
       success: parsed.success === true,
       results,
@@ -1935,6 +2029,11 @@ export async function handleGetUiElements(
     );
   }
 }
+
+const ATTACHED_NULL_RESULT_WARNING =
+  "Script returned null in an attached session. Runtime errors cannot be observed there (Godot's output is not captured), so this may be a script that raised; check the Godot process's own output.";
+const RUN_SCRIPT_TIP =
+  'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.';
 
 export async function handleRunScript(
   runner: GodotRunner,
@@ -2105,7 +2204,7 @@ export async function handleRunScript(
     // return null and the real error only appears in stderr.
     if (parsed.success && parsed.result === null && runner.activeSessionMode === 'spawned') {
       if (runtimeErrors.length > 0) {
-        const errorContext = runtimeErrors.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES).join('\n');
+        const errorContext = capRuntimeErrorLines(runtimeErrors).join('\n');
         return err(
           createErrorResponse(`Script runtime error detected:\n${errorContext}`, [
             'Fix the GDScript error in your script and retry',
@@ -2122,20 +2221,35 @@ export async function handleRunScript(
           'Script returned null. If unexpected, check get_debug_output for runtime errors - GDScript does not propagate exceptions.',
           ...warningsFromPolicy,
         ],
-        tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+        tip: RUN_SCRIPT_TIP,
       };
       return createStructuredResponse(leadWithWarnings(nullPayload));
+    }
+
+    // An attached session captures no stderr, so the check above cannot run
+    // there: a script that raised and a script that returned null produce the
+    // same frame. The result is reported, and so is what could not be seen.
+    if (parsed.success && parsed.result === null && runner.activeSessionMode === 'attached') {
+      return createStructuredResponse({
+        warnings: [ATTACHED_NULL_RESULT_WARNING, ...warningsFromPolicy],
+        projectPath: sessionProjectPath,
+        success: true,
+        result: null,
+        tip: RUN_SCRIPT_TIP,
+      });
     }
 
     const payload: Record<string, unknown> = {
       projectPath: sessionProjectPath,
       success: true,
       result: parsed.result,
-      tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+      tip: RUN_SCRIPT_TIP,
     };
-    const combinedWarnings = [...warningsFromPolicy, ...runtimeErrors];
+    // Only the runtime-error lines are capped: they are the unbounded part,
+    // and the count entry names the log that holds the rest of them.
+    const combinedWarnings = [...warningsFromPolicy, ...capRuntimeErrorLines(runtimeErrors)];
     if (combinedWarnings.length > 0) {
-      payload.warnings = combinedWarnings.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+      payload.warnings = combinedWarnings;
     }
 
     return createStructuredResponse(leadWithWarnings(payload));

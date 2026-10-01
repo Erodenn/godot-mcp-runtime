@@ -114,6 +114,9 @@ interface RuntimeFake {
   setGodotPath(path: string): void;
   setEditorPid(pid: number | undefined): void;
   setBridgeReady(ready: boolean, error?: string): void;
+  /** Runs inside waitForBridge / waitForBridgeAttached, before the result is
+   *  returned: models session state changing while readiness is being decided. */
+  setBridgeWaitHook(hook: (() => void) | null): void;
   setRunProjectError(error: Error | null): void;
   setAttachProjectError(error: Error | null): void;
   /** Hook called after runProject sets session state but before returning. */
@@ -158,6 +161,7 @@ function createRuntimeFake(): RuntimeFake {
   let editorPid: number | undefined = 4242;
   let bridgeReady = true;
   let bridgeError: string | undefined;
+  let bridgeWaitHook: (() => void) | null = null;
   let runProjectError: Error | null = null;
   let attachProjectError: Error | null = null;
   let stopProjectError: Error | null = null;
@@ -264,9 +268,11 @@ function createRuntimeFake(): RuntimeFake {
       fake.activeBridgePort = bridgePort ?? 19901;
     },
     async waitForBridge() {
+      if (bridgeWaitHook) bridgeWaitHook();
       return { ready: bridgeReady, error: bridgeError };
     },
     async waitForBridgeAttached() {
+      if (bridgeWaitHook) bridgeWaitHook();
       return { ready: bridgeReady, error: bridgeError };
     },
     getRecentErrors(_n: number): string[] {
@@ -328,6 +334,9 @@ function createRuntimeFake(): RuntimeFake {
     setBridgeReady(ready: boolean, error?: string) {
       bridgeReady = ready;
       bridgeError = error;
+    },
+    setBridgeWaitHook(hook) {
+      bridgeWaitHook = hook;
     },
     setRunProjectError(error: Error | null) {
       runProjectError = error;
@@ -700,20 +709,21 @@ describe('handleGetDebugOutput', () => {
     expectErrorMatching(result, /No active runtime session/i);
   });
 
-  it('returns synthetic attached payload (no process inspection)', () => {
+  // Nothing is captured in attach mode. Empty arrays would read as "no output
+  // and no errors", so the logs are null and the reason leads the payload.
+  it('get_debug_output in an attached session returns null logs and a leading warning', () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'attached', projectPath: '/p' });
     const result = handleGetDebugOutput(fake.asRunner, {});
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toEqual({
+    const payload = expectMatchesOutputSchema('get_debug_output', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload).toEqual({
+      warnings: [expect.stringMatching(/captures no stdout or stderr.*null, not empty/)],
       projectPath: '/p',
       sessionMode: 'attached',
-      output: [],
-      errors: [],
+      output: null,
+      errors: null,
       running: null,
-      tip: expect.stringMatching(/Attached mode does not capture/i),
     });
   });
 
@@ -986,8 +996,8 @@ describe('handleStopProject', () => {
     fake.setStopResult({
       mode: 'attached',
       projectPath: '/p',
-      output: [],
-      errors: [],
+      output: null,
+      errors: null,
       externalProcessPreserved: true,
       shutdownAcknowledged: false,
     });
@@ -999,6 +1009,28 @@ describe('handleStopProject', () => {
     expect((payload.warnings as string[])[0]).toMatch(
       /did not acknowledge shutdown, so it keeps listening on its port/,
     );
+  });
+
+  it('stop_project of an attached session returns null finalOutput and finalErrors', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'attached',
+      projectPath: '/p',
+      output: null,
+      errors: null,
+      externalProcessPreserved: true,
+      shutdownAcknowledged: true,
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(payload.finalOutput).toBeNull();
+    expect(payload.finalErrors).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      expect.stringMatching(/captures no stdout or stderr.*null, not empty/),
+    ]);
   });
 
   it('carries no shutdown warning when the attached bridge acknowledged', async () => {
@@ -1328,6 +1360,85 @@ describe('handleSimulateInput', () => {
     const payload = unwrap(result).structuredContent as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual(['projectPath', 'results', 'success']);
   });
+
+  it('simulate_input leads with a warning when error attribution was partial', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, results: [{ index: 0, type: 'key', ok: true }] }),
+    );
+    // The stderr drain ended before every action boundary had arrived.
+    fake.setActionErrorBuckets([[]], [], true);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [{ type: 'key', key: 'A' }],
+    });
+    const payload = expectMatchesOutputSchema('simulate_input', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      expect.stringMatching(/may be attributed to the wrong action or be missing/),
+    ]);
+    expect((payload.warnings as string[])[0]).toMatch(/get_debug_output/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime-error lists: a cut is counted, never silent
+// ---------------------------------------------------------------------------
+
+describe('runtime error lists end with a count of what was cut', () => {
+  const SHOWN_LINES = 30;
+  const CUT_LINES = 5;
+  const lines = Array.from(
+    { length: SHOWN_LINES + CUT_LINES },
+    (_unused, i) => `SCRIPT ERROR: failure ${i}`,
+  );
+  const CUT_ENTRY = `+${CUT_LINES} more runtime error lines (get_debug_output has the full log)`;
+
+  function activeFake(): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    return fake;
+  }
+
+  it('get_ui_elements warnings', async () => {
+    const fake = activeFake();
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), lines);
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    const warnings = payload.warnings as string[];
+    expect(warnings).toHaveLength(SHOWN_LINES + 1);
+    expect(warnings.slice(0, SHOWN_LINES)).toEqual(lines.slice(0, SHOWN_LINES));
+    expect(warnings[SHOWN_LINES]).toBe(CUT_ENTRY);
+  });
+
+  it('a simulate_input entry', async () => {
+    const fake = activeFake();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, results: [{ index: 0, type: 'click_element', ok: true }] }),
+    );
+    fake.setActionErrorBuckets([lines]);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [{ type: 'click_element', element: 'Btn' }],
+    });
+    const results = (unwrap(result).structuredContent as Record<string, unknown>).results as Array<
+      Record<string, unknown>
+    >;
+    const errors = results[0].errors as string[];
+    expect(errors).toHaveLength(SHOWN_LINES + 1);
+    expect(errors[SHOWN_LINES]).toBe(CUT_ENTRY);
+  });
+
+  it('a list at the limit is returned whole, with no count entry', async () => {
+    const fake = activeFake();
+    const atLimit = lines.slice(0, SHOWN_LINES);
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), atLimit);
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    expect(payload.warnings).toEqual(atLimit);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1455,6 +1566,33 @@ describe('handleRunScript', () => {
     fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), []);
     const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
     expect(hasError(result)).toBe(false);
+  });
+
+  // An attached session captures no stderr, so a script that raised and one
+  // that returned null are the same frame. The payload has to say so.
+  it('run_script in an attached session leads with a warning when the result is null', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'attached', projectPath: dir });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /returned null in an attached session\. Runtime errors cannot be observed there/,
+    );
+    expect(payload.result).toBeNull();
+  });
+
+  it('carries no attached-session warning when the attached script returned a value', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'attached', projectPath: dir });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 7 }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.result).toBe(7);
   });
 
   it('returns success and surfaces runtimeErrors as warnings when result is non-null', async () => {
@@ -2326,11 +2464,12 @@ describe('run_project outputSchema', () => {
     expectValid(payload);
   });
 
-  it('validates a payload whose bridge port could not be read, with the warning leading', async () => {
+  // A session that ended in the gap between the readiness check and the port
+  // read has no port because there is no session. That is not a success.
+  it('run_project is an error when the session ended as the bridge became ready', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
-    // The session ends in the gap between the readiness check and the port read.
-    fake.setRunProjectAfterHook(() => {
+    fake.setBridgeWaitHook(() => {
       fake.asRunner.activeBridgePort = null;
     });
     const result = await handleRunProject(
@@ -2338,12 +2477,33 @@ describe('run_project outputSchema', () => {
       { projectPath: fixtureProjectPath },
       makeContext({ disableSecurity: true }),
     );
-    expect(hasError(result)).toBe(false);
-    const payload = runProjectPayload(result);
-    expect(payload.bridgePort).toBeNull();
-    expect(Object.keys(payload)[0]).toBe('warnings');
-    expect(payload.warnings?.[0]).toMatch(/Bridge port unavailable/);
-    expectValid(payload);
+    expectErrorMatching(result, /session ended as the bridge became ready; no session is running/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('run_project with attach: true is an error when the session ended as the bridge became ready', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeWaitHook(() => {
+      fake.asRunner.activeBridgePort = null;
+    });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, attach: true },
+      makeContext({ disableSecurity: true }),
+    );
+    expectErrorMatching(result, /session ended as the bridge became ready; no session is running/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('rejects a payload whose bridgePort is null', () => {
+    expect(
+      validate({
+        projectPath: fixtureProjectPath,
+        sessionMode: 'spawned',
+        bridgePort: null,
+        message: 'Godot project started and the MCP bridge is ready.',
+      }),
+    ).toBe(false);
   });
 
   it('rejects a payload missing sessionMode', () => {

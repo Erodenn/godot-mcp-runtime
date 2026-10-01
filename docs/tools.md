@@ -32,10 +32,10 @@ Inside a listing of things that have a path of their own (files, scene tree node
 ### What the project and session tools return
 
 - `launch_editor`: `projectPath`, `pid` and `message`. `pid` is the editor process id. A spawn that reports no pid did not start anything, so that is an error response, not a launch.
-- `run_project`: `projectPath`, `sessionMode`, `bridgePort` and `message`, led by `warnings` when the pre-flight scan flagged a script. Success already means the bridge answered, so there is no separate readiness flag.
+- `run_project`: `projectPath`, `sessionMode`, `bridgePort` and `message`, led by `warnings` when the pre-flight scan flagged a script. Success already means the bridge answered, so there is no separate readiness flag. `bridgePort` is always a number: a session that ended in the moment the bridge became ready is an error response, not a success without a port.
 - `switch_project`: `projectPath`, `previousProjectPath`, `live`, `sessionMode`, `bridgePort`, `bridgeResponsive`, `message`, and `exitCode` for a session whose process exited.
-- `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`. `warnings` leads the payload when a teardown step was attempted and not confirmed: the `McpBridge` autoload entry or the bridge script could not be removed, the owner registry could not be read, or an attached bridge did not acknowledge the shutdown. The session is stopped either way; the message then says the cleanup was incomplete.
-- `get_debug_output`: `projectPath`, `sessionMode`, `output`, `errors`, `running`, and `exitCode` after an exit. An attached session has nothing captured: both arrays are empty and `running` is `null`.
+- `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`. `warnings` leads the payload when a teardown step was attempted and not confirmed: the `McpBridge` autoload entry or the bridge script could not be removed, the owner registry could not be read, or an attached bridge did not acknowledge the shutdown. The session is stopped either way; the message then says the cleanup was incomplete. For an attached session `finalOutput` and `finalErrors` are `null` with a `warnings` entry, because nothing was captured.
+- `get_debug_output`: `projectPath`, `sessionMode`, `output`, `errors`, `running`, and `exitCode` after an exit. An attached session has nothing captured: `output`, `errors` and `running` are `null` and `warnings` leads with the reason. `null` there means not captured, never "nothing was printed".
 - `list_projects`: `projects[]`, each `{ projectPath, name }`. Empty when nothing matches.
 - `check_project`: `name`, `projectPath` and `structure` when a project was asked about, `godotVersion`, and the `runtime` block described under "Several projects at once".
 
@@ -55,6 +55,8 @@ Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejecte
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image. The game waits up to 5 s for a frame to render before it captures; a window that renders nothing in that time (minimized, or fully covered on a platform that stops drawing occluded windows) is an error response saying so, never a screenshot of an older frame.
 
 `get_ui_elements` takes an optional `filter`, a native Control class name such as `Button` or `Label`; subclasses match. A name that is not a Control class, a script `class_name` included, is an error naming the filter, so an empty `elements` list always means the scene has no such control.
+
+The runtime tools report the GDScript runtime errors a spawned game printed while the call ran: as `warnings`, or per action as `errors` for `simulate_input`. Each list shows at most 30 lines, and a longer one ends with an entry such as `+12 more runtime error lines (get_debug_output has the full log)`, so a cut is always counted. An attached session cannot observe these errors. That matters most for `run_script`, where a script that raised returns `null` exactly like one that returned `null`: there, a `null` result leads with a warning saying so.
 
 ### Several projects at once
 
@@ -125,7 +127,7 @@ Neither wait is capped by a client-timeout budget. `ms` is uncapped outright, an
 
 **Failure handling.** An invalid batch is rejected whole, before anything is injected, with an error response naming the offending action index. A runtime failure part-way through is different: the batch stops there, the remaining entries come back as `{index, type, skipped: true}`, `success` is `false`, and the response is still a normal success-shaped response carrying the partial timeline. Read `results[]` to see how far it got.
 
-`errors` is only available for sessions this server spawned. A session started with `attach: true` has no captured stderr, so handler errors cannot be attributed and the field is simply omitted.
+`errors` is only available for sessions this server spawned. A session started with `attach: true` has no captured stderr, so handler errors cannot be attributed and the field is simply omitted. In a spawned session, attribution depends on Godot's stderr reaching the server before the call returns. When it has not all arrived, `warnings` leads the payload: errors may then sit on the wrong action or be missing, and `get_debug_output` has the full log.
 
 `hit` and the occlusion check behind it both read the viewport's hovered control, which older Godot 4.x builds do not expose. On those builds `hit` is omitted and an occluded click reports plain success, so treat `hit` as a bonus rather than a guarantee.
 

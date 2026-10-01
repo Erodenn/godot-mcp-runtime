@@ -258,8 +258,13 @@ export interface RuntimeStopResult {
   mode: RuntimeSessionMode;
   /** Resolved absolute path of the project whose session was stopped. */
   projectPath: string;
-  output: string[];
-  errors: string[];
+  /**
+   * The stopped process's retained stdout and stderr lines. Null for an
+   * attached stop: that session captured nothing, which is not the same as a
+   * process that printed nothing.
+   */
+  output: string[] | null;
+  errors: string[] | null;
   externalProcessPreserved?: boolean;
   /**
    * True when the spawned process had already exited on its own and
@@ -1254,8 +1259,9 @@ export class GodotRunner {
       return {
         mode: 'attached',
         projectPath: session.projectPath,
-        output: [],
-        errors: [],
+        // Nothing was captured: null, never an empty log.
+        output: null,
+        errors: null,
         externalProcessPreserved: true,
         cleanupProblems,
         shutdownAcknowledged,
