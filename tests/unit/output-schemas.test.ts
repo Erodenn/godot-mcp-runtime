@@ -169,11 +169,11 @@ describe('check_project: every declared response shape validates and carries str
     expect(payload.runtime).toEqual({ activeSession: false, projectPath: null, liveSessions: [] });
   });
 
-  it('validates the projectPath-present shape (name/path/structure/godotVersion/runtime)', async () => {
+  it('validates the projectPath-present shape (name/projectPath/structure/godotVersion/runtime)', async () => {
     const fake = createRuntimeFake();
     const payload = await checkAndValidate(fake, { projectPath: fixtureProjectPath });
     expect(payload).toHaveProperty('name');
-    expect(payload).toHaveProperty('path', fixtureProjectPath);
+    expect(payload).toHaveProperty('projectPath', resolve(fixtureProjectPath));
     expect(payload).toHaveProperty('structure');
     expect(payload.runtime).toEqual({
       activeSession: false,

@@ -88,7 +88,7 @@ describe('GodotRunner.executeOperation', () => {
         const info = JSON.parse(text);
         // The fixture's project.godot has: config/name="godot-mcp-runtime test fixture"
         expect(info).toHaveProperty('name', 'godot-mcp-runtime test fixture');
-        expect(info).toHaveProperty('path', fixtureProjectPath);
+        expect(info).toHaveProperty('projectPath', resolve(fixtureProjectPath));
         expect(info).toHaveProperty('godotVersion');
         expect(typeof info.godotVersion).toBe('string');
         // No run_project was called against this runner, so

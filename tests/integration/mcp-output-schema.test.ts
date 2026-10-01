@@ -102,11 +102,46 @@ describe('MCP outputSchema contract (issue #18)', () => {
           projectPath: fixtureProjectPath,
           scenePath: 'main.tscn',
         },
-      })) as { structuredContent?: { scene?: string; dependencies?: unknown[] } };
+      })) as { structuredContent?: { scenePath?: string; dependencies?: unknown[] } };
 
       expect(result.structuredContent).toBeDefined();
-      expect(typeof result.structuredContent?.scene).toBe('string');
+      expect(typeof result.structuredContent?.scenePath).toBe('string');
       expect(Array.isArray(result.structuredContent?.dependencies)).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('list_projects: returns an object with a projects array, never a bare array', async () => {
+    const { client, server } = await makeLinkedPair();
+
+    try {
+      const result = (await client.callTool({
+        name: 'list_projects',
+        arguments: { directory: fixtureProjectPath },
+      })) as { structuredContent?: { projects?: Array<{ projectPath?: unknown }> } };
+
+      expect(result.structuredContent).toBeDefined();
+      expect(Array.isArray(result.structuredContent?.projects)).toBe(true);
+      expect(typeof result.structuredContent?.projects?.[0]?.projectPath).toBe('string');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('list_autoloads: returns structuredContent with an autoloads array', async () => {
+    const { client, server } = await makeLinkedPair();
+
+    try {
+      const result = (await client.callTool({
+        name: 'list_autoloads',
+        arguments: { projectPath: fixtureProjectPath },
+      })) as { structuredContent?: { autoloads?: unknown[] } };
+
+      expect(result.structuredContent).toBeDefined();
+      expect(Array.isArray(result.structuredContent?.autoloads)).toBe(true);
     } finally {
       await client.close();
       await server.close();

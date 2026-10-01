@@ -16,7 +16,7 @@ import {
   optionalNumber,
   optionalStringArray,
 } from '../utils/arg-parsing.js';
-import { ok, err } from '../utils/result.js';
+import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 
 function fileExtension(name: string): string {
@@ -26,11 +26,28 @@ function fileExtension(name: string): string {
 
 // --- Tool definitions ---
 
+/** One node of the get_project_files tree. Children repeat this shape. */
+const FILE_TREE_NODE_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    type: { type: 'string', enum: ['file', 'dir'] },
+    path: { type: 'string', description: 'Project-relative path; "." for the root.' },
+    extension: { type: 'string', description: 'Files only, lower case, no dot.' },
+    children: {
+      type: 'array',
+      description: 'Directories only. Each child has this same shape.',
+      items: { type: 'object' },
+    },
+  },
+  required: ['name', 'type', 'path'],
+} as const;
+
 export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use check_project. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
+      'Find Godot projects under a directory by locating project.godot files. Use to discover projects when the user has not named one; to inspect a known project use check_project. recursive: true descends into subdirectories (skipping .git, .godot, .mcp, node_modules and the like); the default checks only the directory and its immediate children. Returns: projects[], each { projectPath, name }; empty when nothing matches.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -46,11 +63,28 @@ export const projectToolDefinitions = [
       },
       required: ['directory'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        projects: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'name'],
+          },
+        },
+      },
+      required: ['projects'],
+    },
   },
   {
     name: 'check_project',
     description:
-      "Get project metadata (name, path, Godot version, structure) plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session (the one the runtime tools act on), runtime.projectPath names its project (null when none) and runtime.liveSessions lists every live session. With projectPath, runtime.project reports that project's own session: live, exited or none. Never errors on the runtime probe. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath lacks project.godot.",
+      "Get project metadata and the Godot version, plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session, the one the runtime tools act on; runtime.projectPath names its project (null when none) and runtime.liveSessions lists every live session. With projectPath, runtime.project reports that project's own session: live, exited or none. Returns: { name?, projectPath?, structure?, godotVersion, runtime }. Errors if projectPath lacks project.godot.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -67,7 +101,7 @@ export const projectToolDefinitions = [
       type: 'object',
       properties: {
         name: { type: 'string' },
-        path: { type: 'string' },
+        projectPath: { type: 'string' },
         godotVersion: { type: 'string' },
         structure: {
           type: 'object',
@@ -122,7 +156,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_files',
     description:
-      'Return a recursive file tree of a Godot project. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns: { name, type, path, extension?, children? } (nested tree).',
+      'Return the file tree of a Godot project. Use to discover project structure when paths are unknown. extensions filters files (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 is unlimited). Skips dot-prefixed entries, .mcp included. Returns: the root directory node { name, type, path, children[] }; each child is a file { name, type, path, extension } or a nested directory.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -141,6 +175,7 @@ export const projectToolDefinitions = [
       },
       required: ['projectPath'],
     },
+    outputSchema: FILE_TREE_NODE_SCHEMA,
   },
   {
     name: 'search_project',
@@ -183,7 +218,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_scene_dependencies',
     description:
-      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to inspect what a scene depends on before refactoring or moving files. Returns: the queried scene path and dependencies[] from ext_resource refs (path, type, optional uid). Errors if scene file does not exist.',
+      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to see what a scene depends on before refactoring or moving files. Returns: scenePath and dependencies[], one per ext_resource reference (path, type, optional uid). Errors if the scene file does not exist.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -200,7 +235,7 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        scene: { type: 'string' },
+        scenePath: { type: 'string' },
         dependencies: {
           type: 'array',
           items: {
@@ -218,7 +253,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns: { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types (including multi-line arrays/dicts, e.g. the full "[input]" action map) are returned as their complete raw string, not just the first line; keys outside any section appear under __global__.',
+      'Parse project.godot into JSON without launching Godot. Use to inspect display, input, rendering and other settings. Pass section to read one INI section (e.g. "display"). Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section when one was given; warnings leads when that section is absent. Complex Godot values, multi-line arrays and dicts such as an [input] action included, come back as their complete raw string. Keys outside any section appear under __global__.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -231,6 +266,19 @@ export const projectToolDefinitions = [
         },
       },
       required: ['projectPath'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        section: { type: 'string', description: 'Present when a section filter was applied.' },
+        settings: {
+          type: 'object',
+          description:
+            'Without section: { [section]: { [key]: value } }. With section: { [key]: value }.',
+        },
+      },
+      required: ['settings'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -558,11 +606,10 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
     const recursive = optionalBoolean(args, 'recursive');
     if (!recursive.ok) return recursive;
 
-    const projects = findGodotProjects(directory.value, recursive.value === true);
-
-    return ok({
-      content: [{ type: 'text', text: JSON.stringify(projects) }],
-    });
+    const projects = findGodotProjects(directory.value, recursive.value === true).map(
+      (project) => ({ projectPath: resolve(project.path), name: project.name }),
+    );
+    return createStructuredResponse({ projects });
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to list projects: ${getErrorMessage(error)}`, [
@@ -705,7 +752,7 @@ export async function handleCheckProject(
 
     return createStructuredResponse({
       name: projectName,
-      path: parsed.value.projectPath,
+      projectPath: resolve(parsed.value.projectPath),
       godotVersion: version,
       structure: projectStructure,
       runtime,
@@ -737,7 +784,7 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Hand
       : null;
 
     const tree = buildFilesystemTree(parsed.value.projectPath, '', maxDepth, 0, extensions);
-    return ok({ content: [{ type: 'text', text: JSON.stringify(tree) }] });
+    return createStructuredResponse(tree as unknown as Record<string, unknown>);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project files: ${getErrorMessage(error)}`, [
@@ -814,7 +861,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
       }
     }
     return createStructuredResponse({
-      scene: parsed.value.scenePath,
+      scenePath: parsed.value.scenePath,
       dependencies,
     });
   } catch (error: unknown) {
@@ -838,10 +885,18 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
     const projectFile = projectGodotPath(parsed.value.projectPath);
     const allSettings = parseProjectSettings(projectFile);
     if (section.value) {
-      const sectionData = allSettings[section.value] ?? {};
-      return ok({ content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] });
+      const sectionData = allSettings[section.value];
+      const warnings =
+        sectionData === undefined
+          ? [`Section "${section.value}" is not present in project.godot, so settings is empty`]
+          : [];
+      return createStructuredResponse({
+        ...(warnings.length > 0 ? { warnings } : {}),
+        section: section.value,
+        settings: sectionData ?? {},
+      });
     }
-    return ok({ content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] });
+    return createStructuredResponse({ settings: allSettings });
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project settings: ${getErrorMessage(error)}`, [

@@ -12,6 +12,7 @@ import {
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 
 function parseText<T>(result: unknown): T {
@@ -59,6 +60,8 @@ describe('handleGetProjectFiles', () => {
   it('returns file tree for valid project', async () => {
     const result = await handleGetProjectFiles({ projectPath: fixtureProjectPath });
     expect(hasError(result)).toBe(false);
+    const payload = expectMatchesOutputSchema('get_project_files', result);
+    expect(payload.type).toBe('dir');
   });
 
   it('filters the tree to the requested extensions', async () => {
@@ -198,8 +201,8 @@ describe('handleGetSceneDependencies', () => {
       projectPath: fixtureProjectPath,
       scenePath: 'main.tscn',
     });
-    const parsed = parseText<{ scene: string; dependencies: unknown[] }>(result);
-    expect(parsed.scene).toBe('main.tscn');
+    const parsed = parseText<{ scenePath: string; dependencies: unknown[] }>(result);
+    expect(parsed.scenePath).toBe('main.tscn');
     expect(parsed.dependencies).toEqual([]);
   });
 
@@ -221,7 +224,7 @@ describe('handleGetSceneDependencies', () => {
       scenePath: 'level.tscn',
     });
     const parsed = parseText<{
-      scene: string;
+      scenePath: string;
       dependencies: Array<{ path: string; type: string; uid?: string }>;
     }>(result);
     expect(parsed.dependencies).toEqual([
@@ -253,6 +256,7 @@ describe('handleGetProjectSettings', () => {
 
   it('returns the full settings tree grouped by section for the fixture', async () => {
     const result = await handleGetProjectSettings({ projectPath: fixtureProjectPath });
+    expectMatchesOutputSchema('get_project_settings', result);
     const parsed = parseText<{ settings: Record<string, Record<string, unknown>> }>(result);
     expect(parsed.settings).toHaveProperty('application');
     expect(parsed.settings).toHaveProperty('rendering');
@@ -264,6 +268,9 @@ describe('handleGetProjectSettings', () => {
       projectPath: fixtureProjectPath,
       section: 'application',
     });
+    const payload = expectMatchesOutputSchema('get_project_settings', result);
+    expect(payload.section).toBe('application');
+    expect(payload).not.toHaveProperty('warnings');
     const parsed = parseText<{ settings: Record<string, unknown> }>(result);
     expect(parsed.settings['config/name']).toBe('godot-mcp-runtime test fixture');
     expect(parsed.settings['run/main_scene']).toBe('res://main.tscn');
@@ -276,8 +283,10 @@ describe('handleGetProjectSettings', () => {
       projectPath: fixtureProjectPath,
       section: 'no_such_section',
     });
-    const parsed = parseText<{ settings: Record<string, unknown> }>(result);
-    expect(parsed.settings).toEqual({});
+    const payload = expectMatchesOutputSchema('get_project_settings', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toHaveLength(1);
+    expect(payload.settings).toEqual({});
   });
 
   it('returns the whole multi-line value for a wrapped [input] action instead of just its first line', async () => {
@@ -344,13 +353,13 @@ describe('handleCheckProject', () => {
     expect(hasError(result)).toBe(false);
     const parsed = parseText<{
       name: string;
-      path: string;
+      projectPath: string;
       godotVersion: string;
       structure: { scenes: number; scripts: number; assets: number; other: number };
       runtime: { activeSession: boolean };
     }>(result);
     expect(parsed.name).toBe('godot-mcp-runtime test fixture');
-    expect(parsed.path).toBe(fixtureProjectPath);
+    expect(parsed.projectPath).toBe(resolve(fixtureProjectPath));
     expect(parsed.godotVersion).toBe('4.4.stable');
     // The fixture has main.tscn (scene), placeholder.gd (script), placeholder.png (asset).
     expect(parsed.structure.scenes).toBeGreaterThanOrEqual(1);
@@ -408,6 +417,7 @@ describe('handleListProjects', () => {
     const dir = makeTmpEmptyDir();
     const result = await handleListProjects({ directory: dir });
     expect(hasError(result)).toBe(false);
+    expect(expectMatchesOutputSchema('list_projects', result)).toEqual({ projects: [] });
   });
 
   it('finds a project in a tmp dir that contains one', async () => {
@@ -417,8 +427,8 @@ describe('handleListProjects', () => {
     const projectName = dir.split(sep).pop()!;
     const result = await handleListProjects({ directory: parentDir });
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain(projectName);
+    const payload = expectMatchesOutputSchema('list_projects', result);
+    expect(payload.projects).toContainEqual({ projectPath: resolve(dir), name: projectName });
   });
 
   it('descends into dot-prefixed project dirs that are not on the blacklist', async () => {
