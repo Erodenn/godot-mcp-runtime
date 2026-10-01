@@ -18,7 +18,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
-import { readQuoted } from '../utils/scene-parsing.js';
+import { readQuoted, scanTscn } from '../utils/scene-parsing.js';
 
 function fileExtension(name: string): string {
   const dotIdx = name.lastIndexOf('.');
@@ -234,7 +234,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_scene_dependencies',
     description:
-      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to see what a scene depends on before refactoring or moving files. Returns: scenePath and dependencies[], one per ext_resource reference (path, type, optional uid). Errors if the scene file does not exist.',
+      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to see what a scene depends on before refactoring or moving files. Returns: scenePath and dependencies[], one per ext_resource reference (path, type, optional uid). warnings leads when ext_resource lines could not be read. Errors if the file does not exist or is not a text scene or resource.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -251,6 +251,7 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         scenePath: { type: 'string' },
         dependencies: {
           type: 'array',
@@ -305,6 +306,9 @@ export const projectToolDefinitions = [
 const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules', '.svn', '.hg']);
 
 // --- Walk problems: what a directory walk could not read or did not follow ---
+
+/** Start of a header line the scene scanner could not read but that was meant as a dependency. */
+const EXT_RESOURCE_HEADER_PREFIX = '[ext_resource';
 
 /** The maxDepth value that lists every level. */
 const UNLIMITED_DEPTH = -1;
@@ -1063,29 +1067,41 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
 
   try {
     const sceneFullPath = join(parsed.value.projectPath, parsed.value.scenePath);
-    const sceneContent = readFileSync(sceneFullPath, 'utf8');
-    const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
-    const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
-    let match;
-    while ((match = extResourcePattern.exec(sceneContent)) !== null) {
-      const [, attrs = ''] = match;
-      const typeMatch = attrs.match(/\btype="([^"]*)"/);
-      const pathMatch = attrs.match(/\bpath="([^"]*)"/);
-      const uidMatch = attrs.match(/\buid="([^"]*)"/);
-      if (pathMatch) {
-        const depPath = (pathMatch[1] ?? '').replace(/^res:\/\//, '');
-        const dep: { path: string; type: string; uid?: string } = {
-          path: depPath,
-          type: typeMatch?.[1] ?? 'Unknown',
-        };
-        if (uidMatch?.[1] !== undefined) dep.uid = uidMatch[1];
-        dependencies.push(dep);
-      }
+    const scan = scanTscn(readFileSync(sceneFullPath, 'utf8'));
+    if (!scan.isTextResource) {
+      return err(
+        createErrorResponse(`${parsed.value.scenePath} is not a text scene or resource file`, [
+          'Binary .scn and .res files cannot be read here; use a .tscn or .tres file',
+        ]),
+      );
     }
-    return createStructuredResponse({
-      scenePath: parsed.value.scenePath,
-      dependencies,
-    });
+    const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
+    const malformedDependencies = scan.malformed.filter((entry) =>
+      entry.raw.startsWith(EXT_RESOURCE_HEADER_PREFIX),
+    );
+    let unreadLines = malformedDependencies.length;
+    for (const header of scan.headers) {
+      if (header.tag !== 'ext_resource') continue;
+      const path = header.attrs.get('path');
+      if (path === undefined) {
+        unreadLines++;
+        continue;
+      }
+      const dep: { path: string; type: string; uid?: string } = {
+        path: path.replace(/^res:\/\//, ''),
+        type: header.attrs.get('type') ?? 'Unknown',
+      };
+      const uid = header.attrs.get('uid');
+      if (uid !== undefined) dep.uid = uid;
+      dependencies.push(dep);
+    }
+    const warnings =
+      unreadLines > 0
+        ? [`${unreadLines} ext_resource line(s) could not be read and are not listed`]
+        : [];
+    return createStructuredResponse(
+      leadWithWarnings({ warnings, scenePath: parsed.value.scenePath, dependencies }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get scene dependencies: ${getErrorMessage(error)}`, [

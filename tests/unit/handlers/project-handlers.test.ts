@@ -783,3 +783,71 @@ describe('handleSearchProject: what was searched', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// get_scene_dependencies: what could not be read
+// ---------------------------------------------------------------------------
+
+describe('handleGetSceneDependencies: unreadable input', () => {
+  type DepsPayload = {
+    warnings?: string[];
+    scenePath: string;
+    dependencies: Array<{ path: string; type: string; uid?: string }>;
+  };
+
+  it('get_scene_dependencies errors on a file that is not a text scene or resource', async () => {
+    const dir = tmp.makeProject('mcp-deps-bin-');
+    // A binary scene starts with a magic number, never a text header.
+    writeFileSync(join(dir, 'level.scn'), Buffer.from([0x52, 0x53, 0x52, 0x43, 0x00, 0xff, 0x01]));
+    expectErrorMatching(
+      await handleGetSceneDependencies({ projectPath: dir, scenePath: 'level.scn' }),
+      /not a text scene or resource/,
+    );
+  });
+
+  it('a dependency path containing a closing bracket is listed', async () => {
+    const dir = tmp.makeProject('mcp-deps-bracket-');
+    writeFileSync(
+      join(dir, 'level.tscn'),
+      [
+        '[gd_scene load_steps=2 format=3]',
+        '',
+        '[ext_resource type="Texture2D" path="res://art/tile[2].png" id="1_abc"]',
+        '',
+        '[node name="Root" type="Node2D"]',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const result = await handleGetSceneDependencies({ projectPath: dir, scenePath: 'level.tscn' });
+    expectMatchesOutputSchema('get_scene_dependencies', result);
+    const parsed = parseText<DepsPayload>(result);
+    expect(parsed.dependencies).toEqual([{ path: 'art/tile[2].png', type: 'Texture2D' }]);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('an ext_resource line with no path is counted in a leading warning', async () => {
+    const dir = tmp.makeProject('mcp-deps-nopath-');
+    writeFileSync(
+      join(dir, 'level.tscn'),
+      [
+        '[gd_scene load_steps=3 format=3]',
+        '',
+        '[ext_resource type="Script" id="1_abc"]',
+        '[ext_resource type="Script" path="res://scripts/player.gd" id=]',
+        '[ext_resource type="Script" path="res://scripts/enemy.gd" id="2_def"]',
+        '',
+        '[node name="Root" type="Node2D"]',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const result = await handleGetSceneDependencies({ projectPath: dir, scenePath: 'level.tscn' });
+    const parsed = parseText<DepsPayload>(result);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
+    expect(parsed.warnings).toEqual([
+      '2 ext_resource line(s) could not be read and are not listed',
+    ]);
+    expect(parsed.dependencies).toEqual([{ path: 'scripts/enemy.gd', type: 'Script' }]);
+  });
+});
