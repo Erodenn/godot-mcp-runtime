@@ -7,7 +7,7 @@ src/
 ├── mcp.types.ts            # Shared MCP-contract types (OperationParams, ToolDefinition, ToolResponse, ToolHandler)
 ├── tools/
 │   ├── project-tools.ts    # Project introspection (list_projects, check_project, files, search, settings, scene_dependencies)
-│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project in spawn and attach mode, stop_project, take_screenshot, etc.)
+│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project in spawn and attach mode, switch_project, stop_project, take_screenshot, etc.)
 │   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
@@ -18,7 +18,7 @@ src/
 │   ├── godot_operations.gd # Headless GDScript operations
 │   └── mcp_bridge.gd       # TCP autoload for runtime communication
 └── utils/
-    ├── godot-runner.ts          # Process spawning, runtime session, bridge TCP client
+    ├── godot-runner.ts          # Process spawning, per-project runtime sessions, bridge TCP client
     ├── output-parsing.ts        # Godot stdout parsing (extractOperationPayload, extractJson, cleanOutput, cleanStdout, normalizeForCompare)
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
     ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) - argument validators live in arg-parsing.ts
@@ -27,6 +27,7 @@ src/
     ├── result.ts                # Result<T, E> shape + ok/err/isOk/isErr used across the handler/parser/dispatch boundary
     ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
     ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
+    ├── session-report.ts        # No-fallback session gate and error wording shared by the runtime, profiler, edit and render handlers
     ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
     ├── bridge-protocol.ts       # TCP framing, port resolution, action-boundary sentinel + stderr bucketing
     ├── profiler.ts              # Godot remote-debugger receiver behind the profiling tools
@@ -128,6 +129,16 @@ Attach mode allows at most one live attach owner per project, because it bakes i
 A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own.
 
 Accepted gaps: two servers racing a read-modify-write on `project.godot` in the same instant can still lose one edit (writing the owner file first keeps the window tiny, and the next inject from either side restores the entry); and an older server version sharing a project writes no owner file, so it is invisible to this registry.
+
+### Sessions on several projects
+
+`GodotRunner` holds one session record per project in a map keyed by the normalized absolute project path (`sessionKey`), plus a `current` pointer to at most one of them. `run_project` adds or replaces only the record for its own project and points `current` at it. The `active*` accessors are read-only views of the current record, so a handler cannot reach another project's session by accident; anything else goes through `getSessionInfo(projectPath)` and the other snapshot methods.
+
+There is one bridge socket. It belongs to the session it was dialed for, and `switch_project` closes it so the next command lazy-connects to the new current session's port with that session's token. MCP serializes tool calls, so one channel is enough.
+
+Each record carries its own epoch, bumped at the head of every transition that stops or supersedes that session. A spawned process's `'exit'` handler compares the epoch it captured with the record's, so an exit from a superseded process cannot clean the bridge its replacement just injected, and starting project B never makes project A's own later exit look stale.
+
+The current pointer is never moved implicitly. Stopping the current session leaves it empty, and a game that exits by itself stays current with its logs retained. `src/utils/session-report.ts` formats the resulting errors: `requireRuntimeSession` is the one gate the runtime and profiling handlers share, and it lists the live sessions instead of choosing one. The headless-edit guard and `render_movie` ask `hasLiveSessionOnProject`, so a live session blocks edits on its project whether or not it is current, and the refusal says to `switch_project` first when it is not. Server shutdown stops every session, and the synchronous exit handler removes every session's bridge artifacts.
 
 ## Input Batches
 

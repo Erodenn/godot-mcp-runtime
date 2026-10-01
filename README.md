@@ -59,6 +59,8 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 **Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `run_project` with `attach: true` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Call `stop_project` when done: it removes the bridge and leaves your Godot process running.
 
+**Several projects at once.** `run_project` on a second project adds a session instead of ending the first, which helps when a game and a small repro project run side by side. The runtime tools act on the current session and name it in every response as `projectPath`; `switch_project` moves them to another one. Nothing falls back silently: if the current session ends, the next call errors and lists the sessions still live.
+
 > [!IMPORTANT]
 > `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Let `run_project` spawn the game if you need the debug stream.
 
