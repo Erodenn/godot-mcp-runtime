@@ -30,6 +30,8 @@ const CASE_TIMEOUT_MS = 90000;
 /** How long the bridge inject may take before the external launch is abandoned. */
 const INJECT_WAIT_MS = 10000;
 const INJECT_POLL_INTERVAL_MS = 50;
+/** How long the external Godot is watched after stop_project to prove it was left running. */
+const SURVIVAL_OBSERVATION_MS = 2000;
 /** How long to wait for the OS to deliver the killed process's exit event. */
 const EXIT_WAIT_MS = 15000;
 /** Bound on the teardown hook: one exit wait plus the session cleanup. */
@@ -136,6 +138,9 @@ describe('run_project attach mode', () => {
       expect(stopped.externalProcessPreserved).toBe(true);
 
       // The external process is still alive, and the bridge registration is gone.
+      // Checked after a pause: an exit that stop_project triggered would not
+      // have reached this process's exit event in the same tick.
+      await sleep(SURVIVAL_OBSERVATION_MS);
       expect(externalGodot.exitCode).toBeNull();
       expect(externalGodot.signalCode).toBeNull();
       expect(readFileSync(join(tmpProject, 'project.godot'), 'utf8')).not.toContain('McpBridge=');

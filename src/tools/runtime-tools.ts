@@ -1,6 +1,11 @@
 import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import type { GodotRunner, RuntimeSessionMode } from '../utils/godot-runner.js';
+import {
+  BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS,
+  BRIDGE_WAIT_ATTACHED_TIMEOUT_MS,
+  type GodotRunner,
+  type RuntimeSessionMode,
+} from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -115,7 +120,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Start a runtime session: spawn the project as a child process with stdout/stderr captured, or with attach: true inject the MCP bridge into a Godot you launch yourself (nothing is spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script. Waits for the bridge before returning. Returns: projectPath, sessionMode (spawned or attached), bridgePort, bridgeReady, message; warnings leads when the pre-flight script scan found something. Call stop_project when done. Errors if projectPath is not a Godot project, the bridge never answers (the session is torn down), or attach is combined with scene, background or profiling.',
+      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true inject the MCP bridge for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. Returns: sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Call stop_project when done. Errors if the bridge never answers or attach is combined with a spawn-only parameter.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -126,8 +131,7 @@ export const runtimeToolDefinitions = [
         },
         attach: {
           type: 'boolean',
-          description:
-            'If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to 20s for it to start listening, 45s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project. Cannot be combined with scene, background or profiling; get_debug_output and the profiler are unavailable.',
+          description: `If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to ${BRIDGE_WAIT_ATTACHED_TIMEOUT_MS / 1000}s for it to start listening, ${BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS / 1000}s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project. Cannot be combined with scene, background or profiling; get_debug_output and the profiler are unavailable.`,
         },
         scene: {
           type: 'string',
@@ -993,12 +997,14 @@ async function startSpawnedSession(
       if (isBackground) {
         lines.push('- Background mode: window hidden, physical input blocked');
       }
+      // Read the port before the teardown: stopProject clears it.
+      const assignedPort = runner.activeBridgePort;
       // Tear down before returning so hasActiveRuntimeSession() reports false
       // and the next run_project lazy-reconnects cleanly.
       await runner.stopProject();
       const solutions = [
         'Check for broken autoloads with list_autoloads',
-        `Check that the assigned bridge port (${runner.activeBridgePort}) is not occupied by another Godot process`,
+        `Check that the assigned bridge port (${assignedPort}) is not occupied by another Godot process`,
         'Retry run_project',
       ];
       return err(createErrorResponse(lines.join('\n'), solutions));
@@ -1079,6 +1085,8 @@ async function startAttachedSession(
 
     if (!bridgeResult.ready) {
       const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
+      // Read the port before the teardown: stopProject clears it.
+      const assignedPort = runner.activeBridgePort;
       // Tear down the attached-mode session state so a retry of run_project
       // works without an intervening stop_project.
       await runner.stopProject();
@@ -1086,7 +1094,7 @@ async function startAttachedSession(
         'If you are launching Godot yourself, start the launch in parallel with run_project with attach: true next time so the wait absorbs the startup - do not sequentialize',
         'If a human is launching Godot, retry run_project with attach: true once they have launched - bridge.inject is idempotent',
         'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
-        `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
+        `Check that no other Godot project is occupying the assigned bridge port (${assignedPort})`,
       ];
       const registeredLine = bridgeRegistered
         ? ''

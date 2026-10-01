@@ -208,11 +208,12 @@ function createRuntimeFake(): RuntimeFake {
       stopCallCount++;
       if (stopProjectError) throw stopProjectError;
       // Bridge-failure paths in handleRunProject tear down the session before
-      // returning the error, so reset the mode/project state to mirror the
-      // real runner's stopProject behavior.
+      // returning the error, so reset the mode/project/port state to mirror
+      // the real runner's stopProject behavior.
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
+      fake.activeBridgePort = null;
       return stopResult;
     },
     closeConnection() {},
@@ -470,6 +471,8 @@ describe('handleRunProject bridge port', () => {
 });
 
 describe('handleRunProject bridge failure paths', () => {
+  const PINNED_SPAWN_BRIDGE_PORT = 23456;
+
   it('returns "exited before MCP bridge could initialize" error when process exits during wait', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -507,6 +510,33 @@ describe('handleRunProject bridge failure paths', () => {
     );
     expectErrorMatching(result, /bridge did not respond/);
     expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('names the assigned bridge port in the timeout solutions, read before the teardown clears it', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'timeout after 5s');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, bridgePort: PINNED_SPAWN_BRIDGE_PORT },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /bridge did not respond/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain(`bridge port (${PINNED_SPAWN_BRIDGE_PORT})`);
+    expect(solutionsText).not.toContain('null');
+  });
+
+  it.each([0, 65536, 8080.5])('rejects the out-of-range bridgePort %s', async (port) => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, bridgePort: port },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /Invalid bridgePort/);
+    expect(fake.runProjectCalls()).toBe(0);
   });
 
   it('reports the missing-autoload diagnosis instead of the stuck-process line when the entry never made it in', async () => {
@@ -2000,6 +2030,31 @@ describe('handleRunProject attach mode', () => {
     expect(fake.stopCalls()).toBe(1);
   });
 
+  it('names the assigned bridge port in the not-ready solutions, read before the teardown clears it', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      bridgePort: PINNED_BRIDGE_PORT,
+    });
+    expectErrorMatching(result, /bridge is not ready/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain(`bridge port (${PINNED_BRIDGE_PORT})`);
+    expect(solutionsText).not.toContain('null');
+  });
+
+  it.each([0, 65536, 8080.5])('rejects the out-of-range bridgePort %s', async (port) => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      bridgePort: port,
+    });
+    expectErrorMatching(result, /Invalid bridgePort/);
+    expect(fake.attachProjectCalls()).toBe(0);
+  });
+
   it('reports the missing-autoload diagnosis when the entry never made it in', async () => {
     const fake = createRuntimeFake();
     fake.setBridgeReady(false, 'attach timeout');
@@ -2089,6 +2144,26 @@ describe('run_project outputSchema', () => {
     expect(hasError(result)).toBe(false);
     const payload = runProjectPayload(result);
     expect(payload.sessionMode).toBe('attached');
+    expectValid(payload);
+  });
+
+  it('validates a payload whose bridge port could not be read, with the warning leading', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    // The session ends in the gap between the readiness check and the port read.
+    fake.setRunProjectAfterHook(() => {
+      fake.asRunner.activeBridgePort = null;
+    });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      makeContext({ disableSecurity: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.bridgePort).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings?.[0]).toMatch(/Bridge port unavailable/);
     expectValid(payload);
   });
 
