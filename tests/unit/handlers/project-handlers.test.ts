@@ -676,3 +676,110 @@ describe('handleGetProjectSettings: value lexing', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// get_project_files and search_project: what was not listed or searched
+// ---------------------------------------------------------------------------
+
+describe('handleGetProjectFiles: depth limits', () => {
+  type TreeNode = {
+    name: string;
+    type: string;
+    path: string;
+    warnings?: string[];
+    children?: TreeNode[] | null;
+  };
+
+  function makeNestedProject(): string {
+    const dir = tmp.makeProject('mcp-depth-');
+    mkdirSync(join(dir, 'scenes'), { recursive: true });
+    writeFileSync(join(dir, 'scenes', 'a.tscn'), '[gd_scene format=3]\n', 'utf8');
+    return dir;
+  }
+
+  it('a directory cut by maxDepth has children null and the root leads with a warning', async () => {
+    const result = await handleGetProjectFiles({ projectPath: makeNestedProject(), maxDepth: 1 });
+    expectMatchesOutputSchema('get_project_files', result);
+    const tree = parseText<TreeNode>(result);
+    expect(Object.keys(tree)[0]).toBe('warnings');
+    expect(tree.warnings?.[0]).toMatch(/maxDepth 1 cut the listing/);
+    const scenes = tree.children?.find((c) => c.name === 'scenes');
+    expect(scenes?.children).toBeNull();
+  });
+
+  it('maxDepth 0 returns the root with children null', async () => {
+    const result = await handleGetProjectFiles({ projectPath: makeNestedProject(), maxDepth: 0 });
+    const tree = parseText<TreeNode>(result);
+    expect(tree.children).toBeNull();
+    expect(tree.warnings?.[0]).toMatch(/maxDepth 0 cut the listing/);
+  });
+
+  it('an unlimited depth lists every directory and carries no warning', async () => {
+    const result = await handleGetProjectFiles({ projectPath: makeNestedProject() });
+    const tree = parseText<TreeNode>(result);
+    expect(tree).not.toHaveProperty('warnings');
+    const scenes = tree.children?.find((c) => c.name === 'scenes');
+    expect(scenes?.children?.map((c) => c.name)).toEqual(['a.tscn']);
+  });
+
+  it('a negative maxDepth other than -1 is an error', async () => {
+    expectErrorMatching(
+      await handleGetProjectFiles({ projectPath: makeNestedProject(), maxDepth: -2 }),
+      /maxDepth/,
+    );
+    expectErrorMatching(
+      await handleGetProjectFiles({ projectPath: makeNestedProject(), maxDepth: 1.5 }),
+      /maxDepth/,
+    );
+  });
+});
+
+describe('handleSearchProject: what was searched', () => {
+  type SearchPayload = {
+    warnings?: string[];
+    matches: unknown[];
+    truncated: boolean;
+    filesSearched: number;
+    fileTypes: string[];
+  };
+
+  it('search_project reports filesSearched and the effective fileTypes', async () => {
+    const dir = tmp.makeProject('mcp-search-');
+    writeFileSync(join(dir, 'a.gd'), 'var needle = 1\n', 'utf8');
+    writeFileSync(join(dir, 'b.gd'), 'var other = 2\n', 'utf8');
+    const result = await handleSearchProject({ projectPath: dir, pattern: 'needle' });
+    expectMatchesOutputSchema('search_project', result);
+    const parsed = parseText<SearchPayload>(result);
+    expect(parsed.filesSearched).toBe(2);
+    expect(parsed.fileTypes).toEqual(['gd', 'tscn', 'cs', 'gdshader']);
+    expect(parsed.matches).toHaveLength(1);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('a fileTypes list that matches no file leads with a warning', async () => {
+    const dir = tmp.makeProject('mcp-search-none-');
+    writeFileSync(join(dir, 'a.gd'), 'var needle = 1\n', 'utf8');
+    const result = await handleSearchProject({
+      projectPath: dir,
+      pattern: 'needle',
+      fileTypes: ['gdscript'],
+    });
+    const parsed = parseText<SearchPayload>(result);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
+    expect(parsed.warnings?.[0]).toMatch(/No file with extension\(s\) gdscript exists/);
+    expect(parsed.filesSearched).toBe(0);
+    expect(parsed.fileTypes).toEqual(['gdscript']);
+    expect(parsed.matches).toEqual([]);
+  });
+
+  it('a pattern containing a line break is an error', async () => {
+    expectErrorMatching(
+      await handleSearchProject({ projectPath: fixtureProjectPath, pattern: 'a\nb' }),
+      /line break/,
+    );
+    expectErrorMatching(
+      await handleSearchProject({ projectPath: fixtureProjectPath, pattern: 'a\rb' }),
+      /line break/,
+    );
+  });
+});

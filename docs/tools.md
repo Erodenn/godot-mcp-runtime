@@ -36,8 +36,8 @@ Inside a listing of things that have a path of their own (files, scene tree node
 - `switch_project`: `projectPath`, `previousProjectPath`, `live`, `sessionMode`, `bridgePort`, `bridgeResponsive`, `message`, and `exitCode` for a session whose process exited.
 - `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`. `warnings` leads the payload when a teardown step was attempted and not confirmed: the `McpBridge` autoload entry or the bridge script could not be removed, the owner registry could not be read, or an attached bridge did not acknowledge the shutdown. The session is stopped either way; the message then says the cleanup was incomplete. For an attached session `finalOutput` and `finalErrors` are `null` with a `warnings` entry, because nothing was captured.
 - `get_debug_output`: `projectPath`, `sessionMode`, `output`, `errors`, `running`, and `exitCode` after an exit. An attached session has nothing captured: `output`, `errors` and `running` are `null` and `warnings` leads with the reason. `null` there means not captured, never "nothing was printed".
-- `list_projects`: `projects[]`, each `{ projectPath, name }`. Empty when nothing matches.
-- `check_project`: `name`, `projectPath` and `structure` when a project was asked about, `godotVersion`, and the `runtime` block described under "Several projects at once".
+- `list_projects`: `projects[]`, each `{ projectPath, name }`. Empty when nothing matches. A leading `warnings` entry names directories that could not be read and links or junctions that were not followed. A `directory` that is not a directory, or that cannot be read, is an error.
+- `check_project`: `name`, `projectPath` and `structure` when a project was asked about, `godotVersion`, and the `runtime` block described under "Several projects at once". A leading `warnings` entry says when `structure` missed directories it could not read or links it did not follow.
 
 ## Runtime (requires `run_project` first)
 
@@ -392,8 +392,8 @@ These tools edit `project.godot` directly or read the filesystem. Safe to use ev
 - `update_autoload`: `autoload`, the entry as read back after the edit.
 - `remove_autoload`: `removed`, the name, and `autoloads[]`, the entries that remain.
 - `get_project_settings`: `settings`. Without `section` it is `{ [section]: { [key]: value } }`. With `section` it is that section's `{ [key]: value }` and the payload repeats `section`; a section that `project.godot` does not have returns an empty `settings` and a leading `warnings` entry. Quoted strings are returned unescaped, including a string that spans lines; a number or boolean is typed; an empty value is `null`; any other value (a constructor such as `PackedStringArray(...)`, an array, a dictionary) is its complete raw text. `config_version` and any key before the first section are under `__global__`. `warnings` also leads when a value is unterminated (returned as far as it could be read) or empty, and counts the lines that could not be parsed.
-- `get_project_files`: the root directory node `{ name, type, path, children[] }`. A file child is `{ name, type, path, extension }`; a directory child has the root's shape.
-- `search_project`: `matches[]` of `{ file, lineNumber, line }` and `truncated`.
+- `get_project_files`: the root directory node `{ name, type, path, children[] }`. A file child is `{ name, type, path, extension }`; a directory child has the root's shape; a symbolic link or junction is `{ name, type: "link", path }` and is not followed. A directory that was not opened because of `maxDepth`, or that could not be read, has `children: null` (an empty directory has `[]`). The root node carries a leading `warnings` entry for each of those. `maxDepth` must be an integer of -1 (unlimited) or more.
+- `search_project`: `matches[]` of `{ file, lineNumber, line }`, `truncated`, `filesSearched` (files read) and `fileTypes` (the extensions searched). A leading `warnings` entry says when no file had a searched extension, and names unreadable paths and links that were not followed. A `pattern` containing a line break is an error: the search matches one line at a time.
 - `get_scene_dependencies`: `scenePath` and `dependencies[]` of `{ path, type, uid? }`.
 
 ## Validation: `validate`
