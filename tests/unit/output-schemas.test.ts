@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import Ajv from 'ajv';
+import { resolve } from 'path';
 import { allToolDefinitions } from '../../src/index.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
 import { handleCheckProject } from '../../src/tools/project-tools.js';
 import { createRuntimeFake } from '../helpers/runtime-fakes.js';
+import { liveSessionInfo } from '../helpers/fake-sessions.js';
 import { unwrap } from '../helpers/assertions.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 
@@ -200,7 +202,7 @@ describe('check_project: every declared response shape validates and carries str
   it('validates { godotVersion, runtime: { activeSession: false } } with no projectPath and no session', async () => {
     const fake = createRuntimeFake();
     const payload = await checkAndValidate(fake, {});
-    expect(payload.runtime).toEqual({ activeSession: false });
+    expect(payload.runtime).toEqual({ activeSession: false, projectPath: null, liveSessions: [] });
   });
 
   it('validates the projectPath-present shape (name/path/structure/godotVersion/runtime)', async () => {
@@ -209,7 +211,12 @@ describe('check_project: every declared response shape validates and carries str
     expect(payload).toHaveProperty('name');
     expect(payload).toHaveProperty('path', fixtureProjectPath);
     expect(payload).toHaveProperty('structure');
-    expect(payload.runtime).toEqual({ activeSession: false });
+    expect(payload.runtime).toEqual({
+      activeSession: false,
+      projectPath: null,
+      liveSessions: [],
+      project: { projectPath: resolve(fixtureProjectPath), session: 'none', current: false },
+    });
   });
 
   it('validates the active-session, bridge-responsive runtime shape', async () => {
@@ -222,6 +229,20 @@ describe('check_project: every declared response shape validates and carries str
       sessionMode: 'spawned',
       bridgeResponsive: true,
     });
+  });
+
+  it('validates the multi-session runtime shape', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: false });
+    fake.setOtherSessions([liveSessionInfo(resolve(fixtureProjectPath), { bridgePort: 6100 })]);
+    fake.setBridgeResponse({ status: 'pong' });
+    const payload = await checkAndValidate(fake, { projectPath: fixtureProjectPath });
+    expect(payload.runtime).toMatchObject({
+      activeSession: true,
+      projectPath: '/fake/project',
+      project: { session: 'live', current: false, sessionMode: 'spawned' },
+    });
+    expect((payload.runtime as { liveSessions: unknown[] }).liveSessions).toHaveLength(2);
   });
 
   it('validates the exited-process runtime shape (activeSession:false, processExited:true, diagnostics)', async () => {

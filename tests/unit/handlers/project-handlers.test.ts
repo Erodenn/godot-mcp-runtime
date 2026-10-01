@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, writeFileSync } from 'fs';
-import { join, sep } from 'path';
+import { join, resolve, sep } from 'path';
 import {
   handleGetProjectFiles,
   handleSearchProject,
@@ -333,7 +333,7 @@ describe('handleCheckProject', () => {
     expect(parsed.godotVersion).toBe('4.4.1.stable.official');
     expect(parsed.name).toBeUndefined();
     expect(parsed.structure).toBeUndefined();
-    expect(parsed.runtime).toEqual({ activeSession: false });
+    expect(parsed.runtime).toEqual({ activeSession: false, projectPath: null, liveSessions: [] });
   });
 
   it('reads config/name from project.godot and reports it as the project name', async () => {
@@ -357,7 +357,12 @@ describe('handleCheckProject', () => {
     expect(parsed.structure.scripts).toBeGreaterThanOrEqual(1);
     expect(parsed.structure.assets).toBeGreaterThanOrEqual(1);
     // No runtime session was set on the fake runner.
-    expect(parsed.runtime).toEqual({ activeSession: false });
+    expect(parsed.runtime).toEqual({
+      activeSession: false,
+      projectPath: null,
+      liveSessions: [],
+      project: { projectPath: resolve(fixtureProjectPath), session: 'none', current: false },
+    });
   });
 
   it('falls back to basename(projectPath) when project.godot has no config/name', async () => {

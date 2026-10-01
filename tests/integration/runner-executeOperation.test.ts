@@ -12,6 +12,7 @@
  */
 
 import { describe, beforeAll, expect } from 'vitest';
+import { resolve } from 'path';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { unwrap } from '../helpers/assertions.js';
@@ -92,7 +93,12 @@ describe('GodotRunner.executeOperation', () => {
         expect(typeof info.godotVersion).toBe('string');
         // No run_project was called against this runner, so
         // the always-present runtime block reports no active session.
-        expect(info.runtime).toEqual({ activeSession: false });
+        expect(info.runtime).toEqual({
+          activeSession: false,
+          projectPath: null,
+          liveSessions: [],
+          project: { projectPath: resolve(fixtureProjectPath), session: 'none', current: false },
+        });
       },
       40000,
     );

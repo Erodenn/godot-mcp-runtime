@@ -45,6 +45,8 @@ const BENIGN_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1
 const SINGLE_PROJECT_SCREENSHOT_ERROR =
   'No active runtime session. A project must be running or attached to take a screenshot.';
 
+type RuntimeHandler = (runner: GodotRunner, args: Record<string, unknown>) => unknown;
+
 function liveProcess(): GodotProcess {
   return {
     process: undefined as never,
@@ -276,21 +278,13 @@ describe('switch_project', () => {
 });
 
 describe('no silent fallback', () => {
-  const runtimeHandlers: Array<
-    [
-      string,
-      (runner: GodotRunner, args: Record<string, unknown>) => unknown,
-      Record<string, unknown>,
-    ]
-  > = [
+  const runtimeHandlers: Array<[string, RuntimeHandler, Record<string, unknown>]> = [
     ['take_screenshot', handleTakeScreenshot, {}],
     ['simulate_input', handleSimulateInput, { actions: [{ type: 'wait', ms: 1 }] }],
     ['get_ui_elements', handleGetUiElements, {}],
     ['run_script', handleRunScript, { script: BENIGN_SCRIPT }],
   ];
-  const profilerHandlers: Array<
-    [string, (runner: GodotRunner, args: Record<string, unknown>) => unknown]
-  > = [
+  const profilerHandlers: Array<[string, RuntimeHandler]> = [
     ['profile_project', handleProfileProject],
     ['start_profiler', handleStartProfiler],
     ['stop_profiler', handleStopProfiler],
@@ -443,7 +437,7 @@ describe('projectPath in runtime responses', () => {
     '%s names the session project',
     async (
       _name: string,
-      handler: (runner: GodotRunner, args: Record<string, unknown>) => unknown,
+      handler: RuntimeHandler,
       args: Record<string, unknown>,
       bridgePayload: unknown,
     ) => {

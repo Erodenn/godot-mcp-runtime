@@ -1,6 +1,6 @@
-import { join, basename } from 'path';
+import { join, basename, resolve } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
-import type { GodotRunner } from '../utils/godot-runner.js';
+import type { GodotRunner, RuntimeSessionInfo } from '../utils/godot-runner.js';
 import { BRIDGE_PING_TIMEOUT_MS } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -50,7 +50,7 @@ export const projectToolDefinitions = [
   {
     name: 'check_project',
     description:
-      'Get project metadata (name, path, Godot version, structure summary) plus an always-present runtime block reporting whether a runtime session is active, its bridge is responsive, and its process is alive. Omit projectPath for just the Godot version and runtime status. Use as the first call before driving a running project. Never errors on the runtime probe itself. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath is set but lacks project.godot.',
+      "Get project metadata (name, path, Godot version, structure) plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session (the one the runtime tools act on), runtime.projectPath names its project (null when none) and runtime.liveSessions lists every live session. With projectPath, runtime.project reports that project\'s own session: live, exited or none. Never errors on the runtime probe. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath lacks project.godot.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -82,13 +82,38 @@ export const projectToolDefinitions = [
           type: 'object',
           properties: {
             activeSession: { type: 'boolean' },
+            projectPath: { type: ['string', 'null'] },
             sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
-            projectPath: { type: 'string' },
             processExited: { type: 'boolean' },
+            exitCode: { type: ['number', 'null'] },
             bridgeResponsive: { type: 'boolean' },
             diagnostics: { type: 'array', items: { type: 'string' } },
+            liveSessions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  projectPath: { type: 'string' },
+                  sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+                  current: { type: 'boolean' },
+                  bridgePort: { type: ['number', 'null'] },
+                },
+                required: ['projectPath', 'sessionMode', 'current', 'bridgePort'],
+              },
+            },
+            project: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string' },
+                session: { type: 'string', enum: ['live', 'exited', 'none'] },
+                current: { type: 'boolean' },
+                sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+                exitCode: { type: ['number', 'null'] },
+              },
+              required: ['projectPath', 'session', 'current'],
+            },
           },
-          required: ['activeSession'],
+          required: ['activeSession', 'projectPath', 'liveSessions'],
         },
       },
       required: ['godotVersion', 'runtime'],
@@ -548,80 +573,96 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
   }
 }
 
-/**
- * Build the always-present `runtime` block for check_project. Mirrors the
- * `ensureRuntimeSession` liveness rule from runtime-tools.ts, in the same
- * order: a spawned process that has exited is not an active session, whether
- * or not the session fields survived it. The bridge
- * ping only runs when a session is nominally active, so the no-session path
- * costs nothing extra and a failed/timed-out ping never turns the call into
- * an error - it only downgrades bridgeResponsive and adds a diagnostic.
- */
-async function buildRuntimeReport(runner: GodotRunner): Promise<Record<string, unknown>> {
-  // A spawned game that exits on its own clears activeSessionMode and
-  // activeProjectPath while deliberately retaining activeProcess, so this state
-  // has to be diagnosed before the nominal-session gate below - which is the
-  // order ensureRuntimeSession uses for the same reason. Without it the state
-  // check_project exists to report reads as byte-identical to a server that has
-  // never run anything.
-  if (!runner.activeSessionMode && runner.activeProcess?.hasExited) {
-    return {
-      activeSession: false,
-      processExited: true,
-      diagnostics: [
-        'The spawned Godot process has exited; call stop_project, then run_project again',
-        'get_debug_output still returns the captured logs, and stop_project reports the exit code',
-      ],
-    };
-  }
-
-  const nominalSession = Boolean(runner.activeSessionMode && runner.activeProjectPath);
-  if (!nominalSession) {
-    return { activeSession: false };
-  }
-
-  const sessionMode = runner.activeSessionMode;
-  const processExited =
-    sessionMode === 'spawned' && (!runner.activeProcess || runner.activeProcess.hasExited);
-
-  if (processExited) {
-    return {
-      activeSession: false,
-      sessionMode,
-      processExited: true,
-      diagnostics: [
-        'The spawned Godot process has exited; call stop_project, then run_project again',
-      ],
-    };
-  }
-
-  const runtime: Record<string, unknown> = {
-    activeSession: true,
-    sessionMode,
-    projectPath: runner.activeProjectPath,
+function describeLiveSession(info: RuntimeSessionInfo): Record<string, unknown> {
+  return {
+    projectPath: info.projectPath,
+    sessionMode: info.mode,
+    current: info.current,
+    bridgePort: info.bridgePort,
   };
+}
+
+function describeProjectSession(runner: GodotRunner, projectPath: string): Record<string, unknown> {
+  const info = runner.getSessionInfo(projectPath);
+  if (info === null) return { projectPath: resolve(projectPath), session: 'none', current: false };
+  return {
+    projectPath: info.projectPath,
+    session: info.live ? 'live' : 'exited',
+    current: info.current,
+    ...(info.mode !== null ? { sessionMode: info.mode } : {}),
+    ...(info.processExited ? { exitCode: info.exitCode } : {}),
+  };
+}
+
+/**
+ * Build the always-present `runtime` block for check_project. The top-level
+ * fields describe the current session, in the same liveness order the runtime
+ * tools gate on: a spawned process that has exited is not an active session,
+ * whether or not the session fields survived it. `projectPath` names the
+ * current project and `liveSessions` lists every live session; with an asked
+ * project, `project` reports that project's own session. Only the current live
+ * session is pinged, since the runner holds one bridge channel. The ping only
+ * runs when that session is live, so the no-session path costs nothing extra
+ * and a failed/timed-out ping never turns the call into an error - it only
+ * downgrades bridgeResponsive and adds a diagnostic.
+ */
+async function buildRuntimeReport(
+  runner: GodotRunner,
+  askedProjectPath: string | null,
+): Promise<Record<string, unknown>> {
+  const status = runner.getRuntimeSessionStatus();
+  const current = status.current;
   const diagnostics: string[] = [];
-
-  try {
-    // ping is exempt from the attached-mode disconnect probe (see
-    // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
-    // ping here reports bridgeResponsive:false without ending the session.
-    const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
-    let parsed: { status?: string } | undefined;
+  let runtime: Record<string, unknown>;
+  if (current === null) {
+    runtime = { activeSession: false };
+  } else if (status.state === 'live') {
+    runtime = { activeSession: true, sessionMode: current.mode };
     try {
-      parsed = JSON.parse(response) as { status?: string };
-    } catch {
-      diagnostics.push('Bridge returned a non-JSON ping response');
+      // ping is exempt from the attached-mode disconnect probe (see
+      // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
+      // ping here reports bridgeResponsive:false without ending the session.
+      const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+      let parsed: { status?: string } | undefined;
+      try {
+        parsed = JSON.parse(response) as { status?: string };
+      } catch {
+        diagnostics.push('Bridge returned a non-JSON ping response');
+      }
+      runtime.bridgeResponsive = parsed?.status === 'pong';
+      if (parsed && parsed.status !== 'pong') {
+        diagnostics.push('Bridge responded to ping with an unexpected payload');
+      }
+    } catch (error: unknown) {
+      runtime.bridgeResponsive = false;
+      diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
     }
-    runtime.bridgeResponsive = parsed?.status === 'pong';
-    if (parsed && parsed.status !== 'pong') {
-      diagnostics.push('Bridge responded to ping with an unexpected payload');
-    }
-  } catch (error: unknown) {
-    runtime.bridgeResponsive = false;
-    diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
+  } else if (current.mode === 'spawned') {
+    runtime = { activeSession: false, sessionMode: 'spawned', processExited: true };
+    diagnostics.push(
+      'The spawned Godot process has exited; call stop_project, then run_project again',
+    );
+  } else if (current.processExited) {
+    runtime = { activeSession: false, processExited: true, exitCode: current.exitCode };
+    diagnostics.push(
+      'The spawned Godot process has exited; call stop_project, then run_project again',
+      'get_debug_output still returns the captured logs, and stop_project reports the exit code',
+    );
+  } else {
+    runtime = { activeSession: false };
+    diagnostics.push(
+      'Only a finished profiler capture is retained for this project; stop_profiler can still read it and stop_project releases it',
+    );
   }
-
+  runtime.projectPath = current?.projectPath ?? null;
+  const liveSessions = runner.listLiveSessions();
+  runtime.liveSessions = liveSessions.map(describeLiveSession);
+  if (askedProjectPath !== null) runtime.project = describeProjectSession(runner, askedProjectPath);
+  if (status.state !== 'live' && liveSessions.length > 0) {
+    diagnostics.push(
+      'The runtime tools are not pointed at a live session while other sessions are live: call switch_project with a projectPath from liveSessions',
+    );
+  }
   if (diagnostics.length > 0) runtime.diagnostics = diagnostics;
   return runtime;
 }
@@ -634,15 +675,18 @@ export async function handleCheckProject(
 
   try {
     const version = await runner.getVersion();
-    const runtime = await buildRuntimeReport(runner);
 
     // If no project path, return just the Godot version plus runtime status.
     if (!args.projectPath) {
-      return createStructuredResponse({ godotVersion: version, runtime });
+      return createStructuredResponse({
+        godotVersion: version,
+        runtime: await buildRuntimeReport(runner, null),
+      });
     }
 
     const parsed = parseProjectArgs(args);
     if (!parsed.ok) return parsed;
+    const runtime = await buildRuntimeReport(runner, parsed.value.projectPath);
 
     const projectFile = projectGodotPath(parsed.value.projectPath);
     const projectStructure = getProjectStructure(parsed.value.projectPath);
