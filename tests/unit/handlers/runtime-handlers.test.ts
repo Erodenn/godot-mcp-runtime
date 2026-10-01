@@ -29,6 +29,7 @@ import {
   runtimeToolDefinitions,
 } from '../../../src/tools/runtime-tools.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { encodePng, solidRgba } from '../../helpers/png-fixtures.js';
 import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
 import { BridgeAttachConflictError } from '../../../src/utils/bridge-manager.js';
 import type {
@@ -2396,6 +2397,169 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
     expectErrorMatching(result, /preview path outside \.mcp\/godot-runtime\/screenshots\//i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleTakeScreenshot: pixel statistics
+// ---------------------------------------------------------------------------
+
+describe('handleTakeScreenshot pixel stats', () => {
+  const screenshotDef = runtimeToolDefinitions.find((t) => t.name === 'take_screenshot');
+  if (!screenshotDef || !('outputSchema' in screenshotDef)) {
+    throw new Error('take_screenshot outputSchema not found');
+  }
+  const validate = new Ajv({ strict: false }).compile(screenshotDef.outputSchema as object);
+
+  const BLACK: readonly [number, number, number, number] = [0, 0, 0, 255];
+  const FOUR_BY_FOUR = 4;
+  const TWO_BY_TWO = 2;
+  const MIXED_FRAME_CHROMATIC = 0.75;
+
+  let fake: RuntimeFake;
+  let projectPath: string;
+  let screenshotDir: string;
+
+  beforeEach(() => {
+    projectPath = tmp.make('mcp-project-');
+    screenshotDir = screenshotsDir(projectPath);
+    mkdirSync(screenshotDir, { recursive: true });
+    fake = createRuntimeFake();
+    fake.setSession({
+      mode: 'spawned',
+      projectPath,
+      process: makeRunningProcess(),
+    });
+  });
+
+  function writeFile(name: string, content: Buffer | string): string {
+    const path = join(screenshotDir, name);
+    writeFileSync(path, content);
+    return path;
+  }
+
+  function blackPng(): Buffer {
+    return encodePng(FOUR_BY_FOUR, FOUR_BY_FOUR, solidRgba(FOUR_BY_FOUR, FOUR_BY_FOUR, BLACK));
+  }
+
+  function payloadOf(result: unknown): Record<string, unknown> {
+    return unwrap(result).structuredContent as unknown as Record<string, unknown>;
+  }
+
+  function expectValid(payload: unknown): void {
+    expect(validate(payload), JSON.stringify(validate.errors)).toBe(true);
+  }
+
+  it.each(['full', 'preview', 'path_only'])('returns measured stats in %s mode', async (mode) => {
+    const screenshotPath = writeFile('screenshot.png', blackPng());
+    const bridgeResponse: Record<string, unknown> = {
+      path: screenshotPath,
+      width: FOUR_BY_FOUR,
+      height: FOUR_BY_FOUR,
+    };
+    if (mode === 'preview') {
+      bridgeResponse.preview_path = writeFile('preview.png', 'not a png');
+      bridgeResponse.preview_width = FOUR_BY_FOUR;
+      bridgeResponse.preview_height = FOUR_BY_FOUR;
+    }
+    fake.setBridgeResponse(JSON.stringify(bridgeResponse));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: mode });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toEqual({
+      width: FOUR_BY_FOUR,
+      height: FOUR_BY_FOUR,
+      chromatic: 0,
+      dominant: 1,
+      distinct: 1,
+      likelyBlank: true,
+    });
+    expect('warnings' in payload).toBe(false);
+    expectValid(payload);
+  });
+
+  it('reports a rendered frame as not blank', async () => {
+    const data = new Uint8Array([
+      255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ]);
+    const screenshotPath = writeFile('screenshot.png', encodePng(TWO_BY_TWO, TWO_BY_TWO, data));
+    fake.setBridgeResponse(
+      JSON.stringify({ path: screenshotPath, width: TWO_BY_TWO, height: TWO_BY_TWO }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const stats = payloadOf(result).stats as { likelyBlank: boolean; chromatic: number };
+    expect(stats.likelyBlank).toBe(false);
+    expect(stats.chromatic).toBe(MIXED_FRAME_CHROMATIC);
+  });
+
+  it('returns stats null with a leading warning when the saved PNG is corrupt', async () => {
+    const screenshotPath = writeFile('screenshot.png', 'these bytes are not a png');
+    const previewPath = writeFile('preview.png', 'preview-image');
+    fake.setBridgeResponse(
+      JSON.stringify({
+        path: screenshotPath,
+        preview_path: previewPath,
+        width: FOUR_BY_FOUR,
+        height: FOUR_BY_FOUR,
+      }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /^Pixel stats were not measured: could not decode the PNG/,
+    );
+    expect(unwrap(result).content.some((entry) => entry.type === 'image')).toBe(true);
+    expectValid(payload);
+  });
+
+  it('returns stats null with a leading warning when the saved PNG cannot be read', async () => {
+    const directoryPath = join(screenshotDir, 'not-a-file.png');
+    mkdirSync(directoryPath);
+    fake.setBridgeResponse(JSON.stringify({ path: directoryPath }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toBeNull();
+    expect((payload.warnings as string[])[0]).toMatch(/could not read the PNG file/);
+    expectValid(payload);
+  });
+
+  it('puts the stats warning ahead of runtime errors', async () => {
+    const screenshotPath = writeFile('screenshot.png', 'these bytes are not a png');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }), ['SCRIPT ERROR: boom']);
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const warnings = payloadOf(result).warnings as string[];
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/^Pixel stats were not measured: /);
+    expect(warnings[1]).toContain('SCRIPT ERROR: boom');
+  });
+
+  it('leads with runtime errors when stats were measured', async () => {
+    const screenshotPath = writeFile('screenshot.png', blackPng());
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }), ['SCRIPT ERROR: boom']);
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.stats).not.toBeNull();
+    expectValid(payload);
   });
 });
 

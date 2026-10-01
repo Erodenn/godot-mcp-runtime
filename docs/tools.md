@@ -28,6 +28,22 @@ Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejecte
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
 
+### `take_screenshot` pixel stats
+
+Every call returns a `stats` object next to `path` and `size`, in all three response modes. The server measures it from the full-resolution PNG the bridge saved, never from the downscaled preview, so a caller that cannot look at the image can still tell a rendered frame from a blank one.
+
+| Field             | Meaning                                                                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `width`, `height` | Dimensions of the measured PNG                                                                                                          |
+| `chromatic`       | Fraction of sampled pixels whose channel spread (max minus min of R, G, B) is above 8. Near 0 for a grayscale or empty frame            |
+| `dominant`        | Share of sampled pixels in the most common color, after quantizing each channel to 4 bits. 1 means one flat color                       |
+| `distinct`        | Number of distinct quantized colors among the sampled pixels                                                                            |
+| `likelyBlank`     | The one derived verdict: `false` when `chromatic >= 0.01` and `dominant < 0.98`, or failing that when `distinct >= 3`; otherwise `true` |
+
+The numbers are observations of one frame, sampled on a regular grid of about 4096 pixels, so a few small elements on a flat background can fall between samples. `likelyBlank` says the frame is close to one flat color. It does not say the frame is correct, and `false` is not proof that the right thing rendered. The thresholds are fixed; no parameter changes them.
+
+If the saved PNG cannot be read or decoded, the call still succeeds: `stats` is `null` and `warnings` leads the payload with the reason. `null` means not measured, never blank.
+
 ### `simulate_input`
 
 One call executes a batch of actions in order and returns one result entry per action, describing what the engine did rather than what was requested. Each action is injected, given one `process_frame` to settle, and only then read: `Input.parse_input_event` is buffered, so nothing has happened yet in the frame an event is submitted.

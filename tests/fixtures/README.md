@@ -9,6 +9,7 @@ Contents:
 - `main.tscn`: `Node2D` root with `Label` and `Sprite2D` children
 - `placeholder.gd`, `placeholder.png`: empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 - `input_probe.tscn`, `input_probe.gd` - sibling probe scene for the `simulate_input` integration tests: buttons that are plain, toggling, disabled, occluded, panel-opening, error-raising and self-freeing, plus a `LineEdit` and a `Node2D` moved by an `is_action_pressed` poll
+- `blank.tscn` - empty `Node` root that renders only the clear color; the blank case for the pixel statistics tests. Launched by rewriting `run/main_scene` in a temp copy
 
 `project.godot` also carries one InputMap action, `probe_move`, bound to W by `physical_keycode` (the Godot editor's default binding style). `tests/integration/simulate-input-observed.test.ts` launches the probe scene by rewriting `run/main_scene` in its own temp copy of the project, so `main.tscn` stays the main scene for everything else.
 

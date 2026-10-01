@@ -149,4 +149,4 @@ Files generated during runtime are stored under `.mcp/godot-runtime/` inside the
 - `responseMode: "path_only"`: skip the inline image entirely when another tool or human will inspect the saved file.
 - `previewMaxWidth` / `previewMaxHeight`: override the default 960x540 preview bounds (e.g. `{ "responseMode": "preview", "previewMaxWidth": 480, "previewMaxHeight": 270 }`).
 
-The response is a JSON text entry (`{ responseMode, path, size, previewPath?, previewSize?, warnings? }`) plus an inline `image` entry for `full` and `preview`.
+The response is a JSON text entry (`{ warnings?, responseMode, path, size, stats, previewPath?, previewSize? }`) plus an inline `image` entry for `full` and `preview`. `stats` is measured from the full PNG in every mode and is `null`, with a leading warning, when the PNG could not be measured.

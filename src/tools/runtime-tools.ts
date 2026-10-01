@@ -44,10 +44,14 @@ import {
   BridgeAutoloadCollisionError,
 } from '../utils/bridge-manager.js';
 import { runLaunchGate } from '../utils/launch-gate.js';
+import { measurePngFile } from '../utils/pixel-stats.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
 const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
+const STATS_NOT_MEASURED_WARNING_PREFIX = 'Pixel stats were not measured: ';
+const STATS_NOT_MEASURED_WARNING_SUFFIX =
+  '. The screenshot was saved; stats is null, which does not mean the frame is blank.';
 
 // Input batch caps, mirrored in src/scripts/mcp_bridge.gd. Enforced here so an
 // over-cap batch never reaches the bridge, and there so the bridge is safe on
@@ -224,7 +228,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport. responseMode: preview (default - saves full PNG, returns bounded inline preview at 960x540), full (full inline PNG; use for small text or pixel-level inspection), path_only (saved-path only, no inline image). Saved under .mcp/godot-runtime/screenshots/ (persists after stop_project). Returns: inline image block (full/preview modes), plus path and size of the saved PNG; previewPath/previewSize in preview mode; warnings for non-fatal runtime errors. Errors if no session or bridge times out (default 10000ms).',
+      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline preview bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -274,8 +278,21 @@ export const runtimeToolDefinitions = [
             height: { type: 'number' },
           },
         },
+        stats: {
+          type: ['object', 'null'],
+          properties: {
+            width: { type: 'number' },
+            height: { type: 'number' },
+            chromatic: { type: 'number' },
+            dominant: { type: 'number' },
+            distinct: { type: 'number' },
+            likelyBlank: { type: 'boolean' },
+          },
+          required: ['width', 'height', 'chromatic', 'dominant', 'distinct', 'likelyBlank'],
+        },
         warnings: { type: 'array', items: { type: 'string' } },
       },
+      required: ['responseMode', 'path', 'stats'],
     },
   },
   {
@@ -1368,10 +1385,15 @@ export async function handleTakeScreenshot(
       );
     }
 
+    const measured = measurePngFile(screenshotPath);
+
     const metadata: Record<string, unknown> = {
       responseMode,
       path: parsed.path,
       size: { width: parsed.width, height: parsed.height },
+      stats: measured.ok
+        ? { ...measured.value.stats, likelyBlank: measured.value.likelyBlank }
+        : null,
     };
 
     const content: Array<{ type: string; [key: string]: unknown }> = [];
@@ -1422,9 +1444,16 @@ export async function handleTakeScreenshot(
       metadata.previewSize = { width: parsed.preview_width, height: parsed.preview_height };
     }
 
-    attachRuntimeWarnings(metadata, runtimeErrors);
+    // A stats warning leads: a null stats must not be read as a blank frame.
+    const statsWarnings = measured.ok
+      ? []
+      : [STATS_NOT_MEASURED_WARNING_PREFIX + measured.error + STATS_NOT_MEASURED_WARNING_SUFFIX];
+    const warnings = [...statsWarnings, ...runtimeErrors].slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
 
-    return createStructuredResponse(metadata, content);
+    return createStructuredResponse(
+      { ...(warnings.length > 0 ? { warnings } : {}), ...metadata },
+      content,
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [

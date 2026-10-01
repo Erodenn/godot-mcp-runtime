@@ -20,6 +20,11 @@ describe('tests/fixtures/godot-project: fixture health', () => {
     expect(existsSync(join(fixturePath, 'main.tscn'))).toBe(true);
   });
 
+  // blank.tscn is the blank case for the take_screenshot pixel statistics tests.
+  it('blank.tscn exists alongside main.tscn', () => {
+    expect(existsSync(join(fixturePath, 'blank.tscn'))).toBe(true);
+  });
+
   // The three cases below guard the simulate_input probe fixture. Without them
   // a missing or renamed file surfaces only as opaque Godot failures inside
   // integration/simulate-input-observed.test.ts.
