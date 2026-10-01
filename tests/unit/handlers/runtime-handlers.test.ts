@@ -152,6 +152,7 @@ function createRuntimeFake(): RuntimeFake {
     projectPath: '/fake/project',
     output: [],
     errors: [],
+    cleanupProblems: [],
   };
   let godotPath = '';
   let editorPid: number | undefined = 4242;
@@ -314,7 +315,9 @@ function createRuntimeFake(): RuntimeFake {
       bridgeRuntimeErrors = runtimeErrors;
     },
     setStopResult(result) {
-      stopResult = result;
+      // The real runner always reports cleanupProblems. Default it here so a
+      // case that is not about cleanup does not have to spell it out.
+      stopResult = result === null ? null : { cleanupProblems: [], ...result };
     },
     setGodotPath(path: string) {
       godotPath = path;
@@ -934,6 +937,86 @@ describe('handleStopProject', () => {
     // banner pattern and never reach it.
     expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro']);
     expect(parsed.finalErrors).toEqual([]);
+  });
+
+  // The stop still happened, so these are successes. What they must not do is
+  // say the bridge was removed when a removal step was never confirmed.
+  it('stop_project leads with a warning when bridge cleanup was incomplete', async () => {
+    const problem =
+      'the McpBridge autoload entry could not be removed from project.godot (EPERM: operation not permitted)';
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      cleanupProblems: [problem],
+    });
+    const result = await handleStopProject(fake.asRunner);
+    const payload = expectMatchesOutputSchema('stop_project', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([`Bridge cleanup incomplete: ${problem}`]);
+    expect(payload.message).toMatch(/cleanup was incomplete/);
+  });
+
+  it('does not claim an exit-time cleanup that left a problem behind', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      alreadyExited: true,
+      exitCode: 1,
+      cleanupProblems: ['the bridge script could not be removed (EBUSY)'],
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect((payload.warnings as string[])[0]).toBe(
+      'Bridge cleanup incomplete: the bridge script could not be removed (EBUSY)',
+    );
+    expect(payload.message).not.toMatch(/was cleaned up at that time/);
+    expect(payload.message).toMatch(/cleanup at that time was incomplete/);
+  });
+
+  it('stop_project leads with a warning when the attached bridge did not acknowledge shutdown', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'attached',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      externalProcessPreserved: true,
+      shutdownAcknowledged: false,
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /did not acknowledge shutdown, so it keeps listening on its port/,
+    );
+  });
+
+  it('carries no shutdown warning when the attached bridge acknowledged', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'attached',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      externalProcessPreserved: true,
+      shutdownAcknowledged: true,
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(JSON.stringify(payload.warnings ?? [])).not.toMatch(/acknowledge/);
+    expect(payload.message).toBe('Attached project detached and MCP bridge state cleaned up');
   });
 });
 

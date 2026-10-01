@@ -16,6 +16,7 @@ import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 import { cleanStdout, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
+import { BridgeRegistryUnreadableError } from '../../src/utils/bridge-manager.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
@@ -373,6 +374,32 @@ describe('executeSceneOp', () => {
         { mutatesSceneFile: true },
       );
       expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(fake.calls.length).toBe(0);
+    });
+
+    // The guard asks "is another session running this project's game". A
+    // registry that cannot be read does not answer no.
+    it('an unreadable owner registry refuses the scene edit with the reason', async () => {
+      const fake = runnerWithLiveSession(null);
+      const reason = 'cannot list /proj/.mcp/godot-runtime/bridge/owners: EACCES';
+      const runner = fake.asRunner as GodotRunner & { otherLiveSessionsOnProject: () => never };
+      runner.otherLiveSessionsOnProject = () => {
+        throw new BridgeRegistryUnreadableError(reason);
+      };
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /Could not read this project's bridge owner registry/);
+      expectErrorMatching(result, /bridge\/owners: EACCES/);
+      expectErrorMatching(result, /unknown whether another MCP session is running its game/);
+      expectErrorMatching(result, /Refusing the scene edit/);
       expect(fake.calls.length).toBe(0);
     });
   });

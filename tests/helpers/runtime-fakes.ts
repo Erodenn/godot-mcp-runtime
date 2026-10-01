@@ -133,7 +133,13 @@ export function createRuntimeFake(): RuntimeFake {
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
-      return { mode: 'spawned', projectPath: '/fake/project', output: [], errors: [] };
+      return {
+        mode: 'spawned',
+        projectPath: '/fake/project',
+        output: [],
+        errors: [],
+        cleanupProblems: [],
+      };
     },
     getErrorCount: () => 0,
     beginActionErrorCapture: () => ({ marker: 0 }),

@@ -2,7 +2,7 @@ import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 import { createStructuredResponse, leadWithWarnings } from './structured-response.js';
-import type { BridgeOwnerInfo } from './bridge-manager.js';
+import { BridgeRegistryUnreadableError, type BridgeOwnerInfo } from './bridge-manager.js';
 import {
   extractOperationPayload,
   parseScriptDiagnostics,
@@ -299,7 +299,24 @@ function rejectIfLiveSessionOnProject(
   projectPath: string,
   extraSolutions: string[] = [],
 ): HandlerResult | null {
-  const live = findLiveSessionOnProject(runner, projectPath);
+  let live: LiveSessionOnProject | null;
+  try {
+    live = findLiveSessionOnProject(runner, projectPath);
+  } catch (error: unknown) {
+    // An owner registry that cannot be read is "unknown", and the guard exists
+    // for exactly the case it cannot rule out. Refuse, and say why.
+    if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
+    return err(
+      createErrorResponse(
+        `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing the scene edit.`,
+        [
+          'Retry: a registry file that another session was writing at that moment is readable again a moment later',
+          'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
+          ...extraSolutions,
+        ],
+      ),
+    );
+  }
   if (live === null) return null;
 
   if (live.owner === 'self') {

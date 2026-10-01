@@ -179,6 +179,13 @@ export interface RuntimeSession {
    * or stops this session. See `GodotRunner.beginSessionTransition`.
    */
   epoch: number;
+  /**
+   * What the exit-time bridge cleanup could not confirm, when the spawned
+   * process exited by itself. Nobody is on the line at that moment, so it is
+   * kept here for the `stop_project` that follows. Empty when the cleanup was
+   * complete or has not run.
+   */
+  exitCleanupProblems: string[];
 }
 
 /** Plain-data snapshot of one session, safe to hand to a tool handler. */
@@ -262,6 +269,33 @@ export interface RuntimeStopResult {
   alreadyExited?: boolean;
   /** Exit code captured by the auto-clear, when `alreadyExited`. */
   exitCode?: number | null;
+  /**
+   * Bridge cleanup steps that were attempted and not confirmed, as sentences
+   * (see `BridgeManager.cleanup`). For an `alreadyExited` stop these are the
+   * ones recorded when the process exited. Empty when cleanup was complete.
+   */
+  cleanupProblems: string[];
+  /**
+   * Attached stops only: whether the bridge inside the still-running Godot
+   * answered the `shutdown` command. False means it did not, so it is still
+   * listening on its port.
+   */
+  shutdownAcknowledged?: boolean;
+}
+
+/**
+ * True when a bridge reply to `shutdown` is an acknowledgement. The bridge
+ * answers every refusal (a wrong token, a frame it cannot read) with an
+ * `error` key, so a reply that parses and carries none is its shutdown handler
+ * having run. A reply arriving at all is not enough: a refusal is a reply too.
+ */
+function isShutdownAcknowledged(response: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(response);
+    return typeof parsed === 'object' && parsed !== null && !('error' in parsed);
+  } catch {
+    return false;
+  }
 }
 
 export interface GodotServerConfig {
@@ -917,6 +951,7 @@ export class GodotRunner {
       process: null,
       profiler: null,
       epoch: 0,
+      exitCleanupProblems: [],
     };
   }
 
@@ -1054,10 +1089,13 @@ export class GodotRunner {
     // BridgeDisconnectedError the spawned branch of sendCommandWithReconnect
     // already ignores.
     if (this.socketSession === session) this.closeConnection();
+    // Nobody is waiting on this exit, so what the cleanup could not confirm is
+    // kept on the record for the stop_project that reads it later.
     try {
-      this.bridge.cleanup(session.projectPath);
+      session.exitCleanupProblems = this.bridge.cleanup(session.projectPath);
     } catch (err) {
-      logDebug(`Bridge cleanup after process exit failed (ignored): ${err}`);
+      logDebug(`Bridge cleanup after process exit failed: ${err}`);
+      session.exitCleanupProblems = [`bridge cleanup failed outright (${String(err)})`];
     }
   }
 
@@ -1167,10 +1205,11 @@ export class GodotRunner {
       }
 
       // The process exited on its own and handleSpawnedProcessExit already
-      // closed the connection and removed the bridge artifacts. Nothing
-      // left to kill or clean — hand back the captured logs so stop_project
-      // stays idempotent. A capture that finished before the exit survives;
-      // only an unfinished one is torn down.
+      // closed the connection and ran the bridge cleanup. Nothing left to
+      // kill or clean: hand back the captured logs, and whatever that cleanup
+      // could not confirm, so stop_project stays idempotent and honest. A
+      // capture that finished before the exit survives; only an unfinished
+      // one is torn down.
       const exited = session.process;
       if (session.profiler !== null && !session.profiler.hasResult) {
         this.closeProfiler(session);
@@ -1186,21 +1225,31 @@ export class GodotRunner {
         errors: exited.errors,
         alreadyExited: true,
         exitCode: exited.exitCode,
+        cleanupProblems: session.exitCleanupProblems,
       };
     }
 
     if (session.mode === 'attached') {
       // Ask the bridge to shut down so the user's still-running Godot
-      // releases the port. A timeout here is non-fatal — same end state
-      // as today, the bridge dies when the user closes Godot.
+      // releases the port. A timeout here does not stop the detach: the
+      // bridge then dies when the user closes Godot. Whether it answered is
+      // read from the reply and reported, because until it does the bridge is
+      // still listening with this session's token.
+      let shutdownAcknowledged = false;
       try {
-        await this.sendCommandTo(session, 'shutdown', {}, BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS);
+        const reply = await this.sendCommandTo(
+          session,
+          'shutdown',
+          {},
+          BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS,
+        );
+        shutdownAcknowledged = isShutdownAcknowledged(reply);
       } catch (err) {
         logDebug(`Attached shutdown timed out or failed (continuing cleanup): ${err}`);
       }
       this.closeConnection();
       this.closeProfiler(session);
-      this.bridge.cleanup(session.projectPath);
+      const cleanupProblems = this.bridge.cleanup(session.projectPath);
       this.forgetSession(session);
       return {
         mode: 'attached',
@@ -1208,6 +1257,8 @@ export class GodotRunner {
         output: [],
         errors: [],
         externalProcessPreserved: true,
+        cleanupProblems,
+        shutdownAcknowledged,
       };
     }
 
@@ -1252,17 +1303,17 @@ export class GodotRunner {
       });
     }
 
-    const result: RuntimeStopResult = {
+    session.process = null;
+    const cleanupProblems = this.bridge.cleanup(session.projectPath);
+    this.forgetSession(session);
+
+    return {
       mode: 'spawned',
       projectPath: session.projectPath,
       output: tracked.output,
       errors: tracked.errors,
+      cleanupProblems,
     };
-    session.process = null;
-    this.bridge.cleanup(session.projectPath);
-    this.forgetSession(session);
-
-    return result;
   }
 
   /**

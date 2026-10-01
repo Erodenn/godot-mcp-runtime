@@ -14,6 +14,7 @@ import {
   renderToolDefinitions,
 } from '../../../src/tools/render-tools.js';
 import { moviesDir } from '../../../src/utils/artifact-paths.js';
+import { BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
 import { normalizeProjectKey } from '../../../src/utils/mcp-context.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import type { MovieProcessResult, RunMovieProcess } from '../../../src/utils/movie-process.js';
@@ -487,6 +488,22 @@ describe('render_movie refusals before any spawn', () => {
     const result = await handler(runner, { projectPath: dir }, NO_GATE);
     expectErrorMatching(result, new RegExp(`server pid ${OTHER_SESSION_PID}`));
     expectErrorMatching(result, /Wait for the other session to finish/);
+    expect(stub.calls.length).toBe(0);
+    expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
+  });
+
+  // "Is another session running this project" has no answer when the owner
+  // registry cannot be read, and no answer must not be taken as no.
+  it('refuses when the owner registry cannot be read, giving the reason', async () => {
+    const { dir, runner, stub, handler } = setup();
+    const unreadable = runner as GodotRunner & { otherLiveSessionsOnProject: () => never };
+    unreadable.otherLiveSessionsOnProject = () => {
+      throw new BridgeRegistryUnreadableError('cannot list the owners directory: EACCES');
+    };
+    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    expectErrorMatching(result, /Could not read this project's bridge owner registry/);
+    expectErrorMatching(result, /cannot list the owners directory: EACCES/);
+    expectErrorMatching(result, /Refusing to start a movie run/);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
   });

@@ -70,7 +70,31 @@ export class BridgeAttachConflictError extends Error {
   }
 }
 
+/**
+ * Thrown when the owner registry under `bridge/owners/` exists but could not
+ * be read: the directory could not be listed, or an owner file could not be
+ * opened. That is "unknown", which is not the same answer as "no live owner".
+ * A caller deciding whether another session is running a project's game must
+ * treat it as a refusal, and a caller about to remove the shared artifacts
+ * must leave them in place.
+ */
+export class BridgeRegistryUnreadableError extends Error {
+  constructor(readonly reason: string) {
+    super(`The bridge owner registry could not be read: ${reason}`);
+    this.name = 'BridgeRegistryUnreadableError';
+  }
+}
+
 const MCP_GITIGNORE_ENTRY = '.mcp/' as const;
+
+// What a caller can do about an McpBridge entry that cleanup could not remove
+// or could not confirm removed. The retry is real: the first headless
+// operation on a project with a stranded entry runs `repairOrphaned`.
+const BRIDGE_ENTRY_REMEDY =
+  'remove the McpBridge= line under [autoload] by hand, or run any headless tool on this project to retry';
+// A bridge script left on disk with no live owner is stranded in the same
+// sense, and is removed by the same retry.
+const REMOVAL_RETRY_NOTE = 'the next headless tool call on this project retries the removal';
 
 // Matches the baked-port marker line inserted in src/scripts/mcp_bridge.gd —
 // `const PORT := <int>` — so inject() can rewrite the integer per project.
@@ -116,6 +140,8 @@ export interface BridgeManagerOptions {
   isProcessAlive?: (pid: number) => boolean;
   hostname?: () => string;
   pid?: () => number;
+  /** Stands in for `removeAutoloadEntry`, so a test can make that one step fail. */
+  removeAutoloadEntry?: (projectFile: string, name: string) => boolean;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -128,6 +154,15 @@ function defaultIsProcessAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/** Text of a caught filesystem failure, for a problem a caller will read. */
+function describeFailure(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function failureCode(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException | null)?.code;
 }
 
 function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
@@ -185,6 +220,7 @@ export class BridgeManager {
   private readonly pid: number;
   private readonly hostnameFn: () => string;
   private readonly isProcessAliveFn: (pid: number) => boolean;
+  private readonly removeAutoloadEntryFn: (projectFile: string, name: string) => boolean;
 
   constructor(
     private bridgeScriptPath: string,
@@ -194,6 +230,7 @@ export class BridgeManager {
     this.pid = options.pid ? options.pid() : process.pid;
     this.hostnameFn = options.hostname ?? (() => osHostname());
     this.isProcessAliveFn = options.isProcessAlive ?? defaultIsProcessAlive;
+    this.removeAutoloadEntryFn = options.removeAutoloadEntry ?? removeAutoloadEntry;
   }
 
   /**
@@ -209,6 +246,9 @@ export class BridgeManager {
    * @throws {BridgeAttachConflictError} if `bakedToken` is supplied and
    *   another live attach session already owns this project. Thrown before
    *   any write.
+   * @throws {BridgeRegistryUnreadableError} if the owner registry exists and
+   *   cannot be read, because which attach owner to render for is then
+   *   unknown.
    */
   inject(projectPath: string, port: number, bakedToken?: string): void {
     const template = readFileSync(this.bridgeScriptPath, 'utf8');
@@ -274,7 +314,17 @@ export class BridgeManager {
 
     // Render from the live attach owner now on record (self included, since
     // the write above just registered it if this call is the attach one).
-    const attachOwner = this.liveAttachOwner(projectPath, false);
+    let attachOwner: BridgeOwnerInfo | undefined;
+    try {
+      attachOwner = this.liveAttachOwner(projectPath, false);
+    } catch (err) {
+      // The registry became unreadable after the owner file went in. Nothing
+      // else has been written yet, so withdraw the claim before failing, or it
+      // would hold sibling servers' edit guards closed for a bridge that was
+      // never injected.
+      this.unlinkQuietly(this.ownerFilePath(projectPath));
+      throw err;
+    }
     this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
 
     BridgeManager.ensureGitignored(projectPath);
@@ -325,20 +375,35 @@ export class BridgeManager {
    * handler, where there is no event loop left and nowhere to report a
    * failure to. Every step is independently try/caught and best-effort, as
    * the prior single-owner implementation was.
+   *
+   * Returns the steps that were attempted and not confirmed, as sentences a
+   * caller can show: empty when everything this session owed the project was
+   * removed. A caller with someone to tell (`stop_project`) reports them; the
+   * exit-time callers have nobody to tell and ignore the return value.
    */
-  cleanup(projectPath: string): void {
-    try {
-      this.unlinkQuietly(this.ownerFilePath(projectPath));
-    } catch (err) {
-      logDebug(`Non-fatal: Failed to remove own bridge owner file: ${err}`);
+  cleanup(projectPath: string): string[] {
+    const problems: string[] = [];
+    const ownerFileFailure = this.unlinkQuietly(this.ownerFilePath(projectPath));
+    if (ownerFileFailure !== null) {
+      problems.push(
+        `this session's bridge owner file could not be removed (${ownerFileFailure}), so the project still lists this session as running until this server process exits`,
+      );
     }
     this.repairedProjects.delete(projectPath);
 
-    let liveOwners: OwnerFileEntry[] = [];
+    let liveOwners: OwnerFileEntry[];
     try {
       liveOwners = this.readLiveOwners(projectPath);
     } catch (err) {
+      // Unknown is not empty: another session may still be relying on the
+      // shared script and autoload entry, so they stay where they are.
       logDebug(`Non-fatal: Failed to read bridge owner registry during cleanup: ${err}`);
+      const reason =
+        err instanceof BridgeRegistryUnreadableError ? err.reason : describeFailure(err);
+      problems.push(
+        `the bridge owner registry could not be read (${reason}), so the shared bridge script and the ${BRIDGE_AUTOLOAD_NAME} autoload entry were left in place; ${REMOVAL_RETRY_NOTE}`,
+      );
+      return problems;
     }
 
     if (liveOwners.length > 0) {
@@ -352,10 +417,11 @@ export class BridgeManager {
       logDebug(
         `${liveOwners.length} other live session(s) remain on this project; leaving shared bridge artifacts in place`,
       );
-      return;
+      return problems;
     }
 
-    this.removeBridgeArtifacts(projectPath);
+    problems.push(...this.removeBridgeArtifacts(projectPath));
+    return problems;
   }
 
   /**
@@ -400,7 +466,13 @@ export class BridgeManager {
       const entryPresent = content.includes(`${BRIDGE_AUTOLOAD_NAME}=`);
       const stranded = entryPresent || scriptPresent;
       if (stranded) {
-        this.removeBridgeArtifacts(projectPath);
+        const problems = this.removeBridgeArtifacts(projectPath);
+        if (problems.length > 0) {
+          // Not cached as clean: the next headless operation tries again,
+          // which is the retry `cleanup` promises a caller it reported to.
+          logDebug(`Stranded McpBridge artifacts were not fully removed: ${problems.join('; ')}`);
+          return;
+        }
         logDebug('Cleaned up stranded McpBridge artifacts');
       }
       this.repairedProjects.add(projectPath);
@@ -414,6 +486,9 @@ export class BridgeManager {
    * as a side effect (via the registry read below). Used by
    * `GodotRunner.otherLiveSessionsOnProject` to power the cross-server edit
    * guard.
+   *
+   * @throws {BridgeRegistryUnreadableError} if the registry exists and cannot
+   *   be read. The guard must refuse on that, not read it as "nobody".
    */
   listOtherLiveOwners(projectPath: string): BridgeOwnerInfo[] {
     return this.readLiveOwners(projectPath)
@@ -499,22 +574,42 @@ export class BridgeManager {
    * that is unparseable or dead. Returns only the live entries. This is the
    * single point that mutates the on-disk registry by pruning, so every
    * public method that needs "who is live" goes through it.
+   *
+   * Only an absent registry is an empty one. A directory that exists and
+   * cannot be listed, or an owner file that exists and cannot be opened, is a
+   * registry whose contents are unknown, and answering "no live owners" for
+   * it would let a headless edit race another session's game and let cleanup
+   * tear the shared artifacts down under it. Both throw instead. A file is
+   * pruned only when it was read and turned out invalid or dead: a file that
+   * could not be read may be a live owner's, caught mid-write by a sibling.
+   *
+   * @throws {BridgeRegistryUnreadableError} when the registry exists and
+   *   could not be read. Nothing is pruned for the unreadable part.
    */
   private readLiveOwners(projectPath: string): OwnerFileEntry[] {
     const dir = bridgeOwnersDir(projectPath);
     let fileNames: string[];
     try {
       fileNames = readdirSync(dir).filter((f) => f.endsWith('.json'));
-    } catch {
-      return [];
+    } catch (err) {
+      if (failureCode(err) === 'ENOENT') return [];
+      throw new BridgeRegistryUnreadableError(`cannot list ${dir}: ${describeFailure(err)}`);
     }
 
     const live: OwnerFileEntry[] = [];
     for (const fileName of fileNames) {
       const filePath = join(dir, fileName);
+      let raw: string;
+      try {
+        raw = readFileSync(filePath, 'utf8');
+      } catch (err) {
+        // Gone between the listing and this read: its owner just left.
+        if (failureCode(err) === 'ENOENT') continue;
+        throw new BridgeRegistryUnreadableError(`cannot read ${filePath}: ${describeFailure(err)}`);
+      }
       let info: BridgeOwnerInfo | null = null;
       try {
-        const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
+        const parsed: unknown = JSON.parse(raw);
         if (isValidOwnerInfo(parsed)) info = parsed;
       } catch {
         info = null;
@@ -571,35 +666,53 @@ export class BridgeManager {
    * ownership against, so a project-root file named exactly `mcp_bridge.gd`
    * (plus its `.uid`) is removed on the assumption it is ours. The blast
    * radius is that one filename at the project root and nothing else.
+   *
+   * Returns what was attempted and not confirmed. The two that matter are the
+   * autoload entry and the scripts: an entry left behind while its script is
+   * deleted breaks the user's own launches and lands in their repository if
+   * committed. A `.uid` sidecar or an empty directory left behind is harmless
+   * and is only logged.
    */
-  private removeBridgeArtifacts(projectPath: string): void {
+  private removeBridgeArtifacts(projectPath: string): string[] {
+    const problems: string[] = [];
     const projectFile = join(projectPath, 'project.godot');
     let userOwnsEntry = false;
     try {
-      const registeredPath = this.findBridgeAutoload(projectFile);
+      const registeredPath = this.readBridgeAutoload(projectFile);
       userOwnsEntry = registeredPath !== undefined && !isServerOwnedBridgePath(registeredPath);
       if (userOwnsEntry) {
         logDebug(
           `Left user-registered ${BRIDGE_AUTOLOAD_NAME} autoload at ${registeredPath} untouched`,
         );
-      } else if (
-        registeredPath !== undefined &&
-        removeAutoloadEntry(projectFile, BRIDGE_AUTOLOAD_NAME)
-      ) {
-        logDebug(`Removed ${BRIDGE_AUTOLOAD_NAME} autoload from project.godot`);
+      } else if (registeredPath !== undefined) {
+        const entryProblem = this.removeBridgeEntry(projectFile);
+        if (entryProblem !== null) problems.push(entryProblem);
       }
     } catch (err) {
-      logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
+      logDebug(`Non-fatal: Failed to read ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
+      problems.push(
+        `project.godot could not be read (${describeFailure(err)}), so it is not known whether its ${BRIDGE_AUTOLOAD_NAME} autoload entry is still registered: ${BRIDGE_ENTRY_REMEDY}`,
+      );
     }
 
-    this.unlinkQuietly(bridgeScriptAbsPath(projectPath));
+    const scriptFailure = this.unlinkQuietly(bridgeScriptAbsPath(projectPath));
+    if (scriptFailure !== null) {
+      problems.push(
+        `the bridge script could not be removed (${scriptFailure}); ${REMOVAL_RETRY_NOTE}`,
+      );
+    }
     this.unlinkQuietly(`${bridgeScriptAbsPath(projectPath)}.uid`);
 
     // Pre-namespace layout. Skipped when a user-owned entry is registered,
     // because a root mcp_bridge.gd under that entry is presumably theirs.
     if (!userOwnsEntry) {
       const legacyScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
-      this.unlinkQuietly(legacyScript);
+      const legacyFailure = this.unlinkQuietly(legacyScript);
+      if (legacyFailure !== null) {
+        problems.push(
+          `the project-root bridge script could not be removed (${legacyFailure}); ${REMOVAL_RETRY_NOTE}`,
+        );
+      }
       this.unlinkQuietly(`${legacyScript}.uid`);
     }
 
@@ -627,31 +740,73 @@ export class BridgeManager {
     } catch (err) {
       logDebug(`Non-fatal: Failed to remove the bridge/ directory: ${err}`);
     }
+    return problems;
+  }
+
+  /**
+   * Remove the server-owned `McpBridge` entry from project.godot and read the
+   * file back to confirm it is gone. The removal call returning is not the
+   * entry being removed, so the answer comes from the second read. Returns
+   * null when the entry is confirmed gone, otherwise the problem as a
+   * sentence. Never throws.
+   */
+  private removeBridgeEntry(projectFile: string): string | null {
+    try {
+      this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME);
+    } catch (err) {
+      logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
+      return `the ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be removed from project.godot (${describeFailure(err)}): ${BRIDGE_ENTRY_REMEDY}`;
+    }
+    try {
+      const remaining = this.readBridgeAutoload(projectFile);
+      if (remaining !== undefined && isServerOwnedBridgePath(remaining)) {
+        return `the ${BRIDGE_AUTOLOAD_NAME} autoload entry is still registered in project.godot after the removal: ${BRIDGE_ENTRY_REMEDY}`;
+      }
+    } catch (err) {
+      return `project.godot could not be read back (${describeFailure(err)}), so the removal of its ${BRIDGE_AUTOLOAD_NAME} autoload entry is not confirmed: ${BRIDGE_ENTRY_REMEDY}`;
+    }
+    logDebug(`Removed ${BRIDGE_AUTOLOAD_NAME} autoload from project.godot`);
+    return null;
   }
 
   /**
    * Registered path of the `McpBridge` autoload, normalized to `res://` form,
-   * or undefined when project.godot is missing, unreadable, or has no such
-   * entry.
+   * or undefined when project.godot is missing or has no such entry. A
+   * project.godot that exists and cannot be read throws: for a caller that is
+   * about to report whether the entry was removed, that is not "no entry".
+   */
+  private readBridgeAutoload(projectFilePath: string): string | undefined {
+    if (!existsSync(projectFilePath)) return undefined;
+    const entry = parseAutoloads(projectFilePath).find((a) => a.name === BRIDGE_AUTOLOAD_NAME);
+    return entry ? normalizeAutoloadPath(entry.path) : undefined;
+  }
+
+  /**
+   * As `readBridgeAutoload`, with an unreadable project.godot treated as
+   * having no entry. For the callers that only decide what to write next.
    */
   private findBridgeAutoload(projectFilePath: string): string | undefined {
-    if (!existsSync(projectFilePath)) return undefined;
     try {
-      const entry = parseAutoloads(projectFilePath).find((a) => a.name === BRIDGE_AUTOLOAD_NAME);
-      return entry ? normalizeAutoloadPath(entry.path) : undefined;
+      return this.readBridgeAutoload(projectFilePath);
     } catch {
       return undefined;
     }
   }
 
-  private unlinkQuietly(filePath: string): void {
+  /**
+   * Remove one file if it exists. Never throws. Returns null when the file is
+   * gone afterwards (removed, or never there), otherwise why it is not.
+   */
+  private unlinkQuietly(filePath: string): string | null {
     try {
       if (existsSync(filePath)) {
         unlinkSync(filePath);
         logDebug(`Removed ${filePath}`);
       }
+      return null;
     } catch (err) {
       logDebug(`Non-fatal: Failed to remove ${filePath}: ${err}`);
+      return describeFailure(err);
     }
   }
 

@@ -19,9 +19,13 @@ import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
 import { runLaunchGate } from '../utils/launch-gate.js';
-import { findLiveSessionOnProject } from '../utils/headless-op.js';
+import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
 import { liveSessionRemedy } from '../utils/session-report.js';
-import { BRIDGE_AUTOLOAD_NAME, BridgeManager } from '../utils/bridge-manager.js';
+import {
+  BRIDGE_AUTOLOAD_NAME,
+  BridgeManager,
+  BridgeRegistryUnreadableError,
+} from '../utils/bridge-manager.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
 import {
   MOVIE_FRAME_BASENAME,
@@ -897,7 +901,22 @@ export function createRenderMovieHandler(
     // a launch that cannot happen must never ask for confirmation.
     if (!deps.displayAvailable()) return err(refuseNoDisplay());
 
-    const live = findLiveSessionOnProject(runner, root);
+    let live: LiveSessionOnProject | null;
+    try {
+      live = findLiveSessionOnProject(runner, root);
+    } catch (error: unknown) {
+      // An unreadable owner registry is "unknown", never "nobody is running".
+      if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
+      return err(
+        createErrorResponse(
+          `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing to start a movie run.`,
+          [
+            'Retry: a registry file that another session was writing at that moment is readable again a moment later',
+            'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
+          ],
+        ),
+      );
+    }
     if (live !== null) {
       return err(
         live.owner === 'self'

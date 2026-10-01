@@ -273,7 +273,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Sessions on other projects keep running and none becomes current. Call it even after the game crashed or you closed its window: it frees the process slot and reports alreadyExited: true. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed). Errors when there is no session to stop.',
+      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed); warnings leads when cleanup was not confirmed. Errors if no session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -283,6 +283,7 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         projectPath: { type: 'string' },
         message: { type: 'string' },
         sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
@@ -1375,14 +1376,32 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
   }
 
   const alreadyExited = result.alreadyExited === true;
-  const base =
-    result.mode === 'attached'
+  // Each teardown step that was attempted and not confirmed leads the payload.
+  // The stop itself still happened, so this stays a success.
+  const warnings = result.cleanupProblems.map((problem) => CLEANUP_INCOMPLETE_PREFIX + problem);
+  if (result.mode === 'attached' && result.shutdownAcknowledged === false) {
+    warnings.push(SHUTDOWN_UNACKNOWLEDGED_WARNING);
+  }
+  // The message says the bridge was cleaned up only when every step was
+  // confirmed: with a problem on record it says so instead.
+  const cleanupComplete = result.cleanupProblems.length === 0;
+  let base: string;
+  if (result.mode === 'attached') {
+    base = cleanupComplete
       ? 'Attached project detached and MCP bridge state cleaned up'
-      : alreadyExited
-        ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
-        : 'Godot project stopped';
+      : 'Attached project detached; MCP bridge cleanup was incomplete (see warnings)';
+  } else if (alreadyExited) {
+    base = cleanupComplete
+      ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
+      : 'The Godot process had already exited; MCP bridge cleanup at that time was incomplete (see warnings) and the process slot is now free';
+  } else {
+    base = cleanupComplete
+      ? 'Godot project stopped'
+      : 'Godot project stopped; MCP bridge cleanup was incomplete (see warnings)';
+  }
   const remaining = otherLiveSessionsClause(runner.getRuntimeSessionStatus());
   return createStructuredResponse({
+    ...(warnings.length > 0 ? { warnings } : {}),
     projectPath: result.projectPath,
     message: remaining === '' ? base : `${base}.${remaining} Call switch_project to select one.`,
     sessionMode: result.mode,
@@ -1393,6 +1412,10 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     finalErrors: condenseProcessTail(result.errors, STOP_OUTPUT_MAX_LINES),
   });
 }
+
+const CLEANUP_INCOMPLETE_PREFIX = 'Bridge cleanup incomplete: ';
+const SHUTDOWN_UNACKNOWLEDGED_WARNING =
+  'The bridge inside the still-running Godot did not acknowledge shutdown, so it keeps listening on its port until that Godot process is closed.';
 
 // stop_project is routine housekeeping whose success result previously
 // re-dumped up to this many raw lines into the caller's context on every
