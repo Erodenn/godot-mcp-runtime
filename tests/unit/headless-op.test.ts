@@ -224,6 +224,45 @@ describe('executeSceneOp', () => {
       expect(fake.calls.length).toBe(0);
     });
 
+    it('tells the caller to switch first when the live session is not current', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/current' });
+      withExtraLiveSessions(fake, ['/proj']);
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /not the current one/);
+      const content = unwrap(result)
+        .content.map((block) => (block.type === 'text' ? block.text : ''))
+        .join('\n');
+      expect(content).toContain('switch_project');
+      expect(content).toContain('"/proj"');
+      expect(fake.calls.length).toBe(0);
+    });
+
+    it('keeps the plain stop_project remedy for the current session', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      const content = JSON.stringify(unwrap(result).content);
+      expect(content).toContain('Call stop_project, then retry the scene edit');
+      expect(content).not.toContain('switch_project');
+    });
+
     it('points the caller at stop_project as the remedy', async () => {
       const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
       const result = await executeSceneOp(

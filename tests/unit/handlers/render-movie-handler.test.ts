@@ -463,6 +463,15 @@ describe('render_movie refusals before any spawn', () => {
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
   });
 
+  it('tells the caller to switch first when the live session is not the current one', async () => {
+    const { dir, runner, stub, handler } = setup();
+    (runner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths = [dir];
+    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    expectErrorMatching(result, /not the current one/);
+    expect(JSON.stringify(unwrap(result).content)).toContain('switch_project');
+    expect(stub.calls.length).toBe(0);
+  });
+
   it('refuses while another MCP session owns the project, naming its pid and telling the caller to wait', async () => {
     const { dir, runner, stub, handler } = setup();
     (runner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [

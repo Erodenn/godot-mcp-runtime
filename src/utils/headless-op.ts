@@ -10,6 +10,7 @@ import {
   type StderrDiagnostic,
 } from './output-parsing.js';
 import { ok, err } from './result.js';
+import { liveSessionRemedy } from './session-report.js';
 
 /** Max stderr diagnostic entries surfaced in an early-exit error message. */
 const MAX_STDERR_DIAGNOSTIC_LINES = 5;
@@ -293,10 +294,11 @@ function rejectIfLiveSessionOnProject(
   if (live === null) return null;
 
   if (live.owner === 'self') {
+    const remedy = liveSessionRemedy(runner, projectPath, 'the scene edit');
     return err(
       createErrorResponse(
-        "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
-        ['Call stop_project, then retry the scene edit', ...extraSolutions],
+        `A Godot runtime session is active on this project.${remedy.note} The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.`,
+        [...remedy.solutions, ...extraSolutions],
       ),
     );
   }

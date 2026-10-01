@@ -20,6 +20,7 @@ import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
 import { runLaunchGate } from '../utils/launch-gate.js';
 import { findLiveSessionOnProject } from '../utils/headless-op.js';
+import { liveSessionRemedy } from '../utils/session-report.js';
 import { BRIDGE_AUTOLOAD_NAME, BridgeManager } from '../utils/bridge-manager.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
 import {
@@ -430,11 +431,12 @@ function refuseNoDisplay(): ToolResponse {
   );
 }
 
-function refuseOwnSession(): ToolResponse {
+function refuseOwnSession(runner: GodotRunner, root: string): ToolResponse {
+  const remedy = liveSessionRemedy(runner, root, 'render_movie');
   return createErrorResponse(
-    'render_movie cannot run while a runtime session is active on this project. The movie run is a second Godot process that would load the injected McpBridge autoload next to the live game.',
+    `render_movie cannot run while a runtime session is active on this project.${remedy.note} The movie run is a second Godot process that would load the injected McpBridge autoload next to the live game.`,
     [
-      'Call stop_project, then retry render_movie',
+      ...remedy.solutions,
       'To check rendering inside the live session, use take_screenshot: its stats report likelyBlank',
     ],
   );
@@ -899,7 +901,7 @@ export function createRenderMovieHandler(
     if (live !== null) {
       return err(
         live.owner === 'self'
-          ? refuseOwnSession()
+          ? refuseOwnSession(runner, root)
           : refuseOtherSession(live.info.pid, live.info.mode),
       );
     }
