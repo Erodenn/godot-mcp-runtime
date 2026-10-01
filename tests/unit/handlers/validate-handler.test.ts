@@ -110,16 +110,18 @@ describe('handleValidate', () => {
     expect(expectMatchesOutputSchema('validate', result)).toEqual({ valid: true, errors: [] });
   });
 
-  it('returns a result (not isError) when runner succeeds with invalid JSON stdout (treated as invalid script)', async () => {
-    // Non-JSON stdout is handled gracefully: valid=false but no isError
-    const fake = createFakeRunner({ stdout: 'not json at all' });
+  it('single mode with no result payload is an error response', async () => {
+    // Nothing was validated, so there is no verdict to report: the batch and
+    // combined branches already answer this with an error response.
+    const fake = createFakeRunner({
+      stdout: 'not json at all',
+      stderr: '[ERROR] validate_resource requires script_path or scene_path',
+    });
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
       source: 'extends Node',
     });
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.valid).toBe(false);
+    expectErrorMatching(result, /no result was emitted.*requires script_path or scene_path/);
   });
 
   it('returns valid:false when stdout reports valid:true but stderr contains parse errors', async () => {
@@ -432,5 +434,211 @@ describe('handleValidate inline-source temp files', () => {
     const batchPath = params.targets?.[0]?.script_path ?? '';
     expect(batchPath).toMatch(/^\.mcp\/godot-runtime\/validate\/validate_batch_/);
     expect(existsSync(join(projectPath, batchPath))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleValidate batch mode: attribution, unattributed diagnostics, check shapes
+// ---------------------------------------------------------------------------
+
+const BROKEN_SCRIPT_STDERR = [
+  'SCRIPT ERROR: Parse Error: Expected parameter name.',
+  '   at: GDScript::reload (res://broken.gd:3)',
+  'ERROR: Failed to load script "res://broken.gd" with error "Parse error".',
+  '   at: load (core/io/resource_loader.cpp:283)',
+].join('\n');
+
+/** The batch payload the handler returned, parsed from its text block. */
+function batchPayload(result: unknown): {
+  warnings?: string[];
+  results: Array<{ target: string; valid: boolean; errors: Array<Record<string, unknown>> }>;
+} {
+  return JSON.parse(unwrap(result).content[0].text);
+}
+
+describe('handleValidate batch attribution', () => {
+  it('batch attribution uses the path Godot resolved, not the raw target', async () => {
+    // The caller wrote ./broken.gd; Godot reports the simplified res://broken.gd.
+    // Keyed on the raw spelling the diagnostic matched nothing and the target
+    // stayed valid.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          { target: './broken.gd', resolvedPath: 'res://broken.gd', valid: true, errors: [] },
+        ],
+      }),
+      stderr: BROKEN_SCRIPT_STDERR,
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: './broken.gd' }],
+    });
+    expect(hasError(result)).toBe(false);
+    const payload = batchPayload(result);
+    expect(payload.results[0].target).toBe('./broken.gd');
+    expect(payload.results[0].valid).toBe(false);
+    expect(payload.results[0].errors[0].message).toContain('Expected parameter name');
+    expect(payload.results[0].errors[0].line).toBe(3);
+    expect(payload.results[0]).not.toHaveProperty('resolvedPath');
+    expect(payload.warnings).toBeUndefined();
+  });
+
+  it('a target Godot reports invalid stays invalid when no diagnostic could be attributed', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'odd.gd', resolvedPath: 'res://odd.gd', valid: false, errors: [] }],
+      }),
+      stderr: '',
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 'odd.gd' }],
+    });
+    expect(hasError(result)).toBe(false);
+    const entry = batchPayload(result).results[0];
+    expect(entry.valid).toBe(false);
+    expect(entry.errors).toHaveLength(1);
+    expect(String(entry.errors[0].message)).toMatch(/could not be attributed/);
+  });
+
+  it('diagnostics that belong to no target lead the batch payload as warnings', async () => {
+    // A script attached inside the validated scene has a parse error. The scene
+    // itself loads, so its target stays valid, but the diagnostic must not be lost.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          { target: 'main.tscn', resolvedPath: 'res://main.tscn', valid: true, errors: [] },
+        ],
+      }),
+      stderr: [
+        'SCRIPT ERROR: Parse Error: Expected parameter name.',
+        '   at: GDScript::reload (res://scripts/attached.gd:7)',
+        'Parse Error: Unexpected token at line 5',
+      ].join('\n'),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn' }],
+    });
+    expect(hasError(result)).toBe(false);
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      'res://scripts/attached.gd:7: Expected parameter name.',
+      'Unexpected token',
+    ]);
+    expect(batchPayload(result).results[0].valid).toBe(true);
+  });
+
+  it('caps the unattributed diagnostics and counts the rest', async () => {
+    const total = 12;
+    const stderr = Array.from(
+      { length: total },
+      (_, i) =>
+        `SCRIPT ERROR: Parse Error: problem ${i}\n   at: GDScript::reload (res://other.gd:${i + 1})`,
+    ).join('\n');
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'ok.gd', resolvedPath: 'res://ok.gd', valid: true, errors: [] }],
+      }),
+      stderr,
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 'ok.gd' }],
+    });
+    const warnings = batchPayload(result).warnings ?? [];
+    expect(warnings).toHaveLength(11);
+    expect(warnings[0]).toBe('res://other.gd:1: problem 0');
+    expect(warnings[10]).toBe('+2 more');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleValidate: shapes the checks[] array must have
+// ---------------------------------------------------------------------------
+
+describe('handleValidate check shapes', () => {
+  it("a batch target whose checks is an object is that target's error", async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath, checks: { type: 'signals' } }],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(0);
+    const entry = batchPayload(result).results[0];
+    expect(entry.valid).toBe(false);
+    expect(String(entry.errors[0].message)).toMatch(/Invalid checks: must be an array/);
+  });
+
+  it('an unknown key in a structure schema is rejected', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: fixtureScenePath,
+      checks: [{ type: 'structure', schema: { type: 'Node2D', hasPropery: 'shape' } }],
+    });
+    expectErrorMatching(result, /Invalid schema at schema: unknown key "hasPropery"/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('an unknown key in a nested schema node is rejected with its breadcrumb', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        {
+          scenePath: fixtureScenePath,
+          checks: [
+            {
+              type: 'structure',
+              schema: { type: 'Node2D', children: [{ type: 'Sprite2D', child: [] }] },
+            },
+          ],
+        },
+      ],
+    });
+    const entry = batchPayload(result).results[0];
+    expect(entry.valid).toBe(false);
+    expect(String(entry.errors[0].message)).toMatch(/schema\.children\[0\]: unknown key "child"/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('has_property is accepted as the snake_case spelling', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: 'main.tscn',
+      checks: [
+        {
+          type: 'structure',
+          schema: { type: 'Node2D', children: [{ has_property: 'texture' }] },
+        },
+      ],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('an unknown key on a check item is rejected', async () => {
+    const fake = createFakeRunner();
+    const signals = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: fixtureScenePath,
+      checks: [{ type: 'signals', nodepath: 'root/HUD' }],
+    });
+    expectErrorMatching(signals, /unknown key "nodepath" on a signals check/);
+    const structure = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: fixtureScenePath,
+      checks: [{ type: 'structure', schema: { type: 'Node2D' }, nodePath: 'root' }],
+    });
+    expectErrorMatching(structure, /unknown key "nodePath" on a structure check/);
+    expect(fake.calls).toHaveLength(0);
   });
 });

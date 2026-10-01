@@ -402,9 +402,11 @@ Validate before attaching or running. Catches syntax errors and missing resource
 
 A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds structural and signal-verification checks in the same validation call. With `scenePath + checks`, both the resource-integrity validation and the checks run; their errors are merged into one `errors` array, each check-attributed error carrying a `check` discriminator.
 
-A parse error carries a `line` only when Godot's stderr includes one, which is not always.
+A parse error carries a `line` only when Godot's stderr includes one, which is not always. A single-target call whose process emitted no result is an error response, not `valid: false`.
 
-**Returns.** One target returns `{ valid, errors }`. A `targets` array returns `{ results }`, one `{ target, valid, errors }` per target in input order. Every `errors` entry has a `message`. A parse error adds `line` when Godot reported one. A `checks` finding adds `check`; a signals finding also adds `node`, `signal`, `target`, `method` and `problem`, and a structure finding about one node adds `path`.
+Check shapes are strict: a `checks` value that is not an array is that target's own error in batch mode, a schema node accepts only `type`, `children` and `hasProperty` (`has_property` is accepted as the same key), a `structure` check accepts only `type` and `schema`, and a `signals` check only `type` and `nodePath`. Any other key is rejected naming the key, because a misspelled assertion would otherwise never run.
+
+**Returns.** One target returns `{ valid, errors }`. A `targets` array returns `{ results }`, one `{ target, valid, errors }` per target in input order. `valid` follows the engine's own verdict for the file: a script that loads but cannot be instantiated (a parse error) is invalid even when no diagnostic could be tied to its path, and then carries one `errors` entry saying so. Diagnostics are matched to a target by the `res://` path Godot resolved, so `./a.gd` and a directory name containing a space attribute correctly. A diagnostic that matches no target (a script attached inside a validated scene, or an engine line that names no file) leads the batch payload as `warnings`, each `<file>:<line>: <message>`, capped at ten with a `+N more` tail. Every `errors` entry has a `message`. A parse error adds `line` when Godot reported one. A `checks` finding adds `check`; a signals finding also adds `node`, `signal`, `target`, `method` and `problem`, and a structure finding about one node adds `path`.
 
 ```json
 {

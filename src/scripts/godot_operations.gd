@@ -2497,6 +2497,15 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 	return properties
 
 # Helper: validate a single target dict (script_path or scene_path)
+#
+# "valid" is the engine's own verdict, not a guess from the load result alone:
+# load() returns a non-null Script even for a GDScript with parse errors, so a
+# script is valid only when it can also be instantiated (an @abstract script
+# still is, as _check_script_attachable records), and a scene only when what
+# loaded is a PackedScene. "resolvedPath" is the normalized res:// path the
+# engine reports diagnostics against, which the TypeScript layer uses to match
+# stderr output to this target when the caller wrote the path another way
+# ("./a.gd", "dir\a.gd", a directory with a space).
 func _validate_single(target: Dictionary) -> Dictionary:
 	if target.has("script_path") and target.script_path != "":
 		var path = normalize_scene_path(target.script_path)
@@ -2506,7 +2515,10 @@ func _validate_single(target: Dictionary) -> Dictionary:
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.script_path}
 		var resource = load(path)
 		# Actual parse errors go to stderr and are parsed by TypeScript
-		return {"valid": resource != null, "errors": [], "target": target.script_path}
+		var script_valid: bool = resource != null
+		if script_valid and resource is GDScript:
+			script_valid = resource.can_instantiate()
+		return {"valid": script_valid, "errors": [], "target": target.script_path, "resolvedPath": path}
 	elif target.has("scene_path") and target.scene_path != "":
 		var path = normalize_scene_path(target.scene_path)
 		if path.is_empty():
@@ -2514,7 +2526,7 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.scene_path}
 		var scene = load(path)
-		return {"valid": scene != null, "errors": [], "target": target.scene_path}
+		return {"valid": scene is PackedScene, "errors": [], "target": target.scene_path, "resolvedPath": path}
 	else:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
 

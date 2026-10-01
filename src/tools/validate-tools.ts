@@ -13,7 +13,7 @@ import {
   stripOperationSentinel,
 } from '../utils/output-parsing.js';
 import { err } from '../utils/result.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
 
@@ -44,6 +44,19 @@ const CHECK_ITEM_SCHEMA = {
   required: ['type'],
 } as const;
 
+/** Most diagnostics that matched no target a batch result lists before it counts the rest. */
+const MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN = 10;
+
+/** The error a target gets when the engine called it invalid and no diagnostic could be tied to it. */
+const UNATTRIBUTED_FAILURE_MESSAGE =
+  'The file failed to load. Its diagnostics could not be attributed to this path; see warnings.';
+
+/** Keys a structure schema node accepts. `has_property` is the snake_case spelling of `hasProperty`. */
+const SCHEMA_NODE_KEYS: readonly string[] = ['type', 'children', 'hasProperty', 'has_property'];
+/** Keys a check item accepts, per check type. `node_path` is the snake_case spelling of `nodePath`. */
+const STRUCTURE_CHECK_KEYS: readonly string[] = ['type', 'schema'];
+const SIGNALS_CHECK_KEYS: readonly string[] = ['type', 'nodePath', 'node_path'];
+
 /** One entry of an `errors` array: a parse error, or a checks[] finding. */
 const VALIDATE_ERROR_SCHEMA = {
   type: 'object',
@@ -65,7 +78,7 @@ export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script to catch parse errors. Give exactly one of scriptPath, source or scenePath, or a targets array (one process). checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { results: [{ target, valid, errors }] } for targets; each error has message, plus line for a parse error or check and problem for a checks finding.",
+      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script to catch parse errors. Give exactly one of scriptPath, source or scenePath, or a targets array (one process). checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets (warnings: diagnostics matching no target); an error has message, plus line or problem.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -126,6 +139,12 @@ export const validateToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'targets only. Engine diagnostics that matched no target, as "<file>:<line>: <message>", capped with a "+N more" tail.',
+        },
         valid: { type: 'boolean', description: 'Single target only.' },
         errors: { type: 'array', description: 'Single target only.', items: VALIDATE_ERROR_SCHEMA },
         results: {
@@ -191,21 +210,49 @@ function writeTempGdScript(
   return { resPath: `${VALIDATE_RES_DIR}/${name}`, absPath };
 }
 
+/** A stderr diagnostic that named no res:// file. */
+interface UnpathedDiagnostic {
+  message: string;
+  line?: number;
+}
+
 /**
  * Group Godot stderr errors by their res:// file path.
- * Used for batch validation where multiple files produce output in one stderr stream.
+ * Used for batch validation where multiple files produce output in one stderr
+ * stream. Diagnostics that named no res:// file come back in `unpathed`, so a
+ * caller can count them instead of losing them.
  */
-function parseGodotErrorsByPath(stderr: string): Map<string, ValidationError[]> {
-  const result = new Map<string, ValidationError[]>();
+function parseGodotErrorsByPath(stderr: string): {
+  byPath: Map<string, ValidationError[]>;
+  unpathed: UnpathedDiagnostic[];
+} {
+  const byPath = new Map<string, ValidationError[]>();
+  const unpathed: UnpathedDiagnostic[] = [];
   for (const { message, line, filePath } of parseScriptDiagnostics(stderr)) {
-    if (filePath) {
-      if (!result.has(filePath)) result.set(filePath, []);
-      const err: ValidationError = { message };
-      if (line !== undefined) err.line = line;
-      result.get(filePath)!.push(err);
+    const err: ValidationError = { message };
+    if (line !== undefined) err.line = line;
+    if (!filePath) {
+      unpathed.push(err);
+      continue;
     }
+    if (!byPath.has(filePath)) byPath.set(filePath, []);
+    byPath.get(filePath)!.push(err);
   }
-  return result;
+  return { byPath, unpathed };
+}
+
+/** One unattributed diagnostic as a warning line: "<file>:<line>: <message>", or the message alone. */
+function formatUnattributedDiagnostic(file: string | undefined, error: ValidationError): string {
+  if (file === undefined) return error.message;
+  const where = error.line === undefined ? file : `${file}:${error.line}`;
+  return `${where}: ${error.message}`;
+}
+
+/** Cap a warning list at `MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN` entries and say how many were cut. */
+function capUnattributedWarnings(lines: string[]): string[] {
+  if (lines.length <= MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN) return lines;
+  const hidden = lines.length - MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN;
+  return [...lines.slice(0, MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN), `+${hidden} more`];
 }
 
 /**
@@ -256,7 +303,7 @@ export async function handleValidate(
       scriptPath?: string;
       source?: string;
       scenePath?: string;
-      checks?: unknown[];
+      checks?: unknown;
     }>;
     const tempFiles: string[] = [];
 
@@ -269,6 +316,10 @@ export async function handleValidate(
       const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
       for (const [i, t] of targets.entries()) {
+        // An empty array means no checks, as in single mode. Any other defined
+        // value that is not an array is not "no checks": it is a mistake that
+        // used to be dropped, leaving the target reported valid with its checks
+        // never run.
         const tChecks = Array.isArray(t.checks) && t.checks.length > 0 ? t.checks : undefined;
         // A target naming more than one mode is ambiguous, and the arms below
         // pick one and drop the rest - a scriptPath plus a scenePath plus checks
@@ -283,6 +334,16 @@ export async function handleValidate(
             ],
           });
           continue;
+        }
+        if (t.checks !== undefined && !Array.isArray(t.checks)) {
+          const shapeFailure = validateCheckItems(t.checks);
+          if (shapeFailure) {
+            preErrors.set(i, {
+              target: t.scenePath ?? t.scriptPath ?? '',
+              errors: [{ message: shapeFailure.message }],
+            });
+            continue;
+          }
         }
         // Checks run against an instantiated scene, so a target without a
         // scenePath has nothing to run them on. That is this target's own
@@ -381,6 +442,7 @@ export async function handleValidate(
       let batchParsed: {
         results: Array<{
           target: string;
+          resolvedPath?: string;
           valid: boolean;
           errors: ValidationError[];
           checkErrors?: CheckError[];
@@ -397,24 +459,52 @@ export async function handleValidate(
         );
       }
 
-      const errorsByPath = parseGodotErrorsByPath(stderr || '');
+      const { byPath: errorsByPath, unpathed } = parseGodotErrorsByPath(stderr || '');
 
       // Three error sources per target: Godot's stderr diagnostics (which
       // supersede the GDScript-reported parse errors when present), and the
       // per-target checks[] findings, which are additive because they describe
       // something else entirely. checkErrors is internal to this merge; the
       // tool keeps returning one flat errors array per target.
+      //
+      // The attribution key is the path Godot resolved (`resolvedPath`), the
+      // spelling its diagnostics use. The raw target is only a fallback for a
+      // payload without one: a path written "./a.gd", with a backslash, or under
+      // a directory containing a space never equals the engine's own spelling.
+      const claimedPaths = new Set<string>();
       const godotResults = batchParsed.results.map((r) => {
-        const key = r.target.startsWith('res://') ? r.target : `res://${r.target}`;
+        const key =
+          r.resolvedPath ?? (r.target.startsWith('res://') ? r.target : `res://${r.target}`);
+        claimedPaths.add(key);
+        claimedPaths.add(r.target);
         const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
         const parseErrors = stderrErrors.length > 0 ? stderrErrors : (r.errors ?? []);
         const checkErrors = Array.isArray(r.checkErrors) ? r.checkErrors : [];
+        const errors = [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>;
+        // The engine's own verdict was "invalid" and nothing explains it: say so
+        // instead of returning valid:false with an empty errors array.
+        if (r.valid === false && errors.length === 0) {
+          errors.push({ message: UNATTRIBUTED_FAILURE_MESSAGE });
+        }
         return {
           target: r.target,
           valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
-          errors: [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>,
+          errors,
         };
       });
+
+      // Diagnostics that belong to no target: a script attached inside a
+      // validated scene, or an `at:` line that named no file. Single mode takes
+      // every diagnostic; here they lead the payload so a clean-looking target
+      // is not the whole story.
+      const unattributed: string[] = [];
+      for (const [file, errors] of errorsByPath) {
+        if (claimedPaths.has(file)) continue;
+        for (const error of errors) unattributed.push(formatUnattributedDiagnostic(file, error));
+      }
+      for (const error of unpathed) {
+        unattributed.push(formatUnattributedDiagnostic(undefined, error));
+      }
 
       // Merge pre-validation failures back into their original positions so
       // output order matches input order. Pre-validation errors are ours, not
@@ -438,7 +528,9 @@ export async function handleValidate(
         }
       }
 
-      return createStructuredResponse({ results });
+      return createStructuredResponse(
+        leadWithWarnings({ warnings: capUnattributedWarnings(unattributed), results }),
+      );
     } catch (error: unknown) {
       return err(
         createErrorResponse(`Batch validation failed: ${getErrorMessage(error)}`, [
@@ -612,15 +704,33 @@ export async function handleValidate(
       if (Array.isArray(target.errors) && target.errors.length > 0) gdErrors = target.errors;
       if (Array.isArray(target.checkErrors)) checkErrors = target.checkErrors;
     } else {
+      // No payload, or one that is not a JSON object, means nothing was
+      // validated. That is a failed call, never a verdict: the batch and
+      // combined branches answer the same condition the same way.
+      let parsed: { valid?: unknown; errors?: unknown } | null = null;
       try {
-        const parsed = JSON.parse(extractOperationPayload(stdout) ?? '');
-        valid = parsed.valid === true;
-        if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-          gdErrors = parsed.errors;
+        const candidate: unknown = JSON.parse(extractOperationPayload(stdout) ?? '');
+        if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
+          parsed = candidate as { valid?: unknown; errors?: unknown };
         }
       } catch {
-        // stdout wasn't JSON - treat as invalid
-        valid = false;
+        parsed = null;
+      }
+      if (parsed === null) {
+        return err(
+          createErrorResponse(
+            `Validation failed: no result was emitted - ${extractGdError(stderr)}`,
+            [
+              'Check that the script or scene path is correct',
+              'Ensure Godot is installed correctly',
+              'Use get_debug_output or the project logs for the engine output',
+            ],
+          ),
+        );
+      }
+      valid = parsed.valid === true;
+      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+        gdErrors = parsed.errors as ValidationError[];
       }
     }
 
@@ -693,8 +803,29 @@ function validateSchemaNode(schema: unknown, path: string): CheckValidationFailu
       solutions,
     };
   }
-  const node = schema as { type?: unknown; children?: unknown; hasProperty?: unknown };
-  if (node.type === undefined && node.children === undefined && node.hasProperty === undefined) {
+  // A key outside the documented set is a misspelling that would assert
+  // nothing: a schema node with one recognized key and one typo'd one used to
+  // pass, with the typo'd assertion never evaluated.
+  for (const key of Object.keys(schema)) {
+    if (!SCHEMA_NODE_KEYS.includes(key)) {
+      return {
+        message: `Invalid schema at ${path}: unknown key "${key}" (allowed: type, children, hasProperty)`,
+        solutions,
+      };
+    }
+  }
+  const node = schema as {
+    type?: unknown;
+    children?: unknown;
+    hasProperty?: unknown;
+    has_property?: unknown;
+  };
+  if (
+    node.type === undefined &&
+    node.children === undefined &&
+    node.hasProperty === undefined &&
+    node.has_property === undefined
+  ) {
     return {
       message: `Invalid schema at ${path}: at least one of type, children, or hasProperty is required`,
       solutions,
@@ -745,6 +876,19 @@ function validateCheckItems(checks: unknown): CheckValidationFailure | null {
         message: `Invalid check type: ${String(t)} (expected "structure" or "signals")`,
         solutions: ['Supported types: "structure" (with schema) and "signals" (optional nodePath)'],
       };
+    }
+    const allowedKeys = t === 'structure' ? STRUCTURE_CHECK_KEYS : SIGNALS_CHECK_KEYS;
+    for (const key of Object.keys(check)) {
+      if (!allowedKeys.includes(key)) {
+        return {
+          message: `Invalid check: unknown key "${key}" on a ${t} check (allowed: ${allowedKeys.join(', ')})`,
+          solutions: [
+            t === 'structure'
+              ? 'A structure check takes type and schema'
+              : 'A signals check takes type and an optional nodePath',
+          ],
+        };
+      }
     }
     if (t === 'structure') {
       const schemaError = validateSchemaNode((check as { schema?: unknown }).schema, 'schema');
