@@ -576,7 +576,11 @@ describe('DebuggerProfiler incomplete captures', () => {
     const WINDOW_SECONDS = 1;
     const WINDOW_AND_TOTALS_TIMEOUT_MS = WINDOW_SECONDS * 1000 + TOTALS_TIMEOUT_ADVANCE_MS;
     const TIMERS_ONCE_WAITING_FOR_TOTALS = 2;
-    const MAX_IO_TURNS = 500;
+    const IO_WAIT_MS = 5000;
+    const IO_POLL_MS = 5;
+    // Taken before the clock is faked, so the wait for the socket below runs on
+    // real time. `performance.now` is not in the faked set either.
+    const realSetTimeout = setTimeout;
     const { profiler: p, peer: fake } = await connectedProfiler();
     const running = p.captureWindow(WINDOW_SECONDS, 10, 'selfMs', 512);
     // Observed below; this keeps a rejection from surfacing as unhandled first.
@@ -592,14 +596,16 @@ describe('DebuggerProfiler incomplete captures', () => {
       fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
       fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
       fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 2, 0.002, 0.004]])]);
-      // The frames arrive over a real socket. Yield to it until the capture
-      // holds its two timers: the window's auto-stop and the wait for totals.
-      for (
-        let turn = 0;
-        turn < MAX_IO_TURNS && vi.getTimerCount() < TIMERS_ONCE_WAITING_FOR_TOTALS;
-        turn++
+      // The frames arrive over a real socket, in real time. Wait for it until
+      // the capture holds its two timers: the window's auto-stop and the wait
+      // for totals. Bounded by the real clock, not by a count of loop turns:
+      // how many turns a loopback delivery takes differs by platform.
+      const ioDeadline = performance.now() + IO_WAIT_MS;
+      while (
+        vi.getTimerCount() < TIMERS_ONCE_WAITING_FOR_TOTALS &&
+        performance.now() < ioDeadline
       ) {
-        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => realSetTimeout(resolve, IO_POLL_MS));
       }
       expect(vi.getTimerCount()).toBe(TIMERS_ONCE_WAITING_FOR_TOTALS);
 
