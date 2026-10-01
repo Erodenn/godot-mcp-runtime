@@ -96,6 +96,25 @@ describe('project walkers report what they could not read', () => {
     expect(projects.projects).toHaveLength(1);
   });
 
+  it('search_project does not say an extension is absent from a project it could not read in full', async () => {
+    // hidden.gd sits in the unreadable directory, so "no .gdscript file exists
+    // under the project" is not something this walk can know.
+    const dir = makeProjectWithUnreadableDir();
+    const result = await handleSearchProject({
+      projectPath: dir,
+      pattern: 'needle',
+      fileTypes: ['gdscript'],
+    });
+    const parsed = parseText<{ warnings?: string[]; filesSearched: number }>(result);
+    expect(parsed.filesSearched).toBe(0);
+    expect(parsed.warnings).toHaveLength(2);
+    expect(parsed.warnings?.[0]).toMatch(
+      /No file with extension\(s\) gdscript was found in the part of the project that could be read/,
+    );
+    expect(parsed.warnings?.[0]).not.toMatch(/exists under the project/);
+    expect(parsed.warnings?.[1]).toMatch(UNREADABLE_DIR_WARNING);
+  });
+
   it('an unreadable file is reported by search_project', async () => {
     const dir = tmp.makeProject('mcp-walk-file-');
     writeFileSync(join(dir, `${UNREADABLE_FILE_MARKER}.gd`), 'var needle\n', 'utf8');

@@ -616,6 +616,22 @@ const SECTION_LINE_REGEX = /^\[.*\]$/;
 
 const NUMBER_VALUE_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 
+/** Outside a string, starts a comment that runs to the end of the line. */
+const COMMENT_START = ';';
+
+/**
+ * The section a statement line opens, or null when the line is not a header.
+ * A comment may follow the closing bracket, as Godot's own parser allows.
+ */
+function sectionNameOf(line: string): string | null {
+  const commentAt = line.indexOf(COMMENT_START);
+  if (commentAt !== -1) {
+    const statement = line.slice(0, commentAt).trimEnd();
+    if (SECTION_LINE_REGEX.test(statement)) return statement.slice(1, -1);
+  }
+  return SECTION_LINE_REGEX.test(line) ? line.slice(1, -1) : null;
+}
+
 interface RawValue {
   raw: string;
   /** Index of the line break that ended the value, or the content length. */
@@ -629,12 +645,18 @@ interface RawValue {
  * strings, and the value ends at the first line break at depth zero outside a
  * string. While inside brackets, a following line that is a section header ends
  * the value as unterminated, so a malformed file cannot swallow the rest of it.
+ * A `;` outside a string starts a comment that runs to the end of its line, as
+ * it does for Godot's own parser: the comment is left out of the value, and a
+ * quote or bracket inside it opens nothing.
  */
 function readRawValue(content: string, start: number): RawValue {
   const length = content.length;
   let depth = 0;
   let inString = false;
+  let kept = '';
+  let keptFrom = start;
   let i = start;
+  const valueUpTo = (end: number): string => (kept + content.slice(keptFrom, end)).trim();
   while (i < length) {
     const ch = content[i]!;
     if (inString) {
@@ -646,6 +668,13 @@ function readRawValue(content: string, start: number): RawValue {
       i++;
       continue;
     }
+    if (ch === COMMENT_START) {
+      kept += content.slice(keptFrom, i);
+      const commentEnd = content.indexOf('\n', i);
+      i = commentEnd === -1 ? length : commentEnd;
+      keptFrom = i;
+      continue;
+    }
     if (ch === '"') {
       inString = true;
     } else if (ch === '{' || ch === '[' || ch === '(') {
@@ -653,20 +682,16 @@ function readRawValue(content: string, start: number): RawValue {
     } else if ((ch === '}' || ch === ']' || ch === ')') && depth > 0) {
       depth--;
     } else if (ch === '\n') {
-      if (depth === 0) return { raw: content.slice(start, i).trim(), end: i, unterminated: false };
+      if (depth === 0) return { raw: valueUpTo(i), end: i, unterminated: false };
       const nextEnd = content.indexOf('\n', i + 1);
       const nextLine = content.slice(i + 1, nextEnd === -1 ? length : nextEnd).trim();
       if (SECTION_HEADER_REGEX.test(nextLine)) {
-        return { raw: content.slice(start, i).trim(), end: i, unterminated: true };
+        return { raw: valueUpTo(i), end: i, unterminated: true };
       }
     }
     i++;
   }
-  return {
-    raw: content.slice(start, length).trim(),
-    end: length,
-    unterminated: inString || depth > 0,
-  };
+  return { raw: valueUpTo(length), end: length, unterminated: inString || depth > 0 };
 }
 
 /**
@@ -697,12 +722,13 @@ function parseProjectSettings(projectFilePath: string): ParsedSettings {
     const lineEnd = newlineAt === -1 ? content.length : newlineAt;
     const rawLine = content.slice(pos, lineEnd);
     const line = rawLine.trim();
-    if (line === '' || line.startsWith(';') || line.startsWith('#')) {
+    if (line === '' || line.startsWith(COMMENT_START) || line.startsWith('#')) {
       pos = lineEnd + 1;
       continue;
     }
-    if (SECTION_LINE_REGEX.test(line)) {
-      currentSection = line.slice(1, -1);
+    const sectionName = sectionNameOf(line);
+    if (sectionName !== null) {
+      currentSection = sectionName;
       pos = lineEnd + 1;
       continue;
     }
@@ -1035,10 +1061,17 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
       maxResults,
       problems,
     );
+    // "Exists under the project" is only known when the whole tree was read.
+    // With an unreadable path or a link that was not followed, the claim is
+    // limited to what the walk reached.
+    const walkWasComplete = problems.unreadable.length === 0 && problems.links.length === 0;
+    const searchedTypes = fileTypes.length > 0 ? fileTypes.join(', ') : '(none given)';
     const warnings =
       result.typedFiles === 0
         ? [
-            `No file with extension(s) ${fileTypes.length > 0 ? fileTypes.join(', ') : '(none given)'} exists under the project, so nothing was searched`,
+            walkWasComplete
+              ? `No file with extension(s) ${searchedTypes} exists under the project, so nothing was searched`
+              : `No file with extension(s) ${searchedTypes} was found in the part of the project that could be read, so nothing was searched`,
           ]
         : [];
     warnings.push(...summarizeWalkProblems(problems));

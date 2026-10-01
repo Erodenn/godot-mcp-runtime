@@ -2,7 +2,7 @@
  * Integration tests for how batch validate ties an engine diagnostic to the
  * target that caused it. Godot reports a script's parse error against its
  * simplified res:// path, so a target the caller wrote another way ("./a.gd",
- * a directory containing a space) used to match no diagnostic and come back
+ * a backslash, a directory containing a space) used to match no diagnostic and come back
  * valid. These run the real handler against a tmp copy of the fixture project
  * and assert on parsed payloads only.
  *
@@ -78,6 +78,19 @@ describe('validate batch attribution against a real engine', () => {
       writeFileSync(join(projectPath, 'broken.gd'), BROKEN_SCRIPT);
       const entry = await validateScriptTarget('./broken.gd');
       expect(entry.target).toBe('./broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'the same script is invalid when its path is written with a backslash',
+    async () => {
+      mkdirSync(join(projectPath, 'sub'), { recursive: true });
+      writeFileSync(join(projectPath, 'sub', 'broken.gd'), BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('sub\\broken.gd');
+      expect(entry.target).toBe('sub\\broken.gd');
       expect(entry.valid).toBe(false);
       expect(entry.errors.length).toBeGreaterThan(0);
     },

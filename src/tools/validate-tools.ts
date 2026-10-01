@@ -47,9 +47,15 @@ const CHECK_ITEM_SCHEMA = {
 /** Most diagnostics that matched no target a batch result lists before it counts the rest. */
 const MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN = 10;
 
-/** The error a target gets when the engine called it invalid and no diagnostic could be tied to it. */
+/**
+ * The error a target gets when the engine called it invalid and no diagnostic
+ * could be tied to it. The first form points at `warnings`, so it is used only
+ * when the batch has unattributed diagnostics to show there.
+ */
 const UNATTRIBUTED_FAILURE_MESSAGE =
   'The file failed to load. Its diagnostics could not be attributed to this path; see warnings.';
+const UNEXPLAINED_FAILURE_MESSAGE =
+  'The file failed to load, and the engine printed no diagnostic that names it.';
 
 /** Keys a structure schema node accepts. `has_property` is the snake_case spelling of `hasProperty`. */
 const SCHEMA_NODE_KEYS: readonly string[] = ['type', 'children', 'hasProperty', 'has_property'];
@@ -472,6 +478,10 @@ export async function handleValidate(
       // payload without one: a path written "./a.gd", with a backslash, or under
       // a directory containing a space never equals the engine's own spelling.
       const claimedPaths = new Set<string>();
+      // The errors arrays of targets the engine called invalid with nothing to
+      // explain it. Their one entry is written after the unattributed
+      // diagnostics are known, because its wording depends on them.
+      const unexplainedFailures: Array<Array<ValidationError | CheckError>> = [];
       const godotResults = batchParsed.results.map((r) => {
         const key =
           r.resolvedPath ?? (r.target.startsWith('res://') ? r.target : `res://${r.target}`);
@@ -483,9 +493,7 @@ export async function handleValidate(
         const errors = [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>;
         // The engine's own verdict was "invalid" and nothing explains it: say so
         // instead of returning valid:false with an empty errors array.
-        if (r.valid === false && errors.length === 0) {
-          errors.push({ message: UNATTRIBUTED_FAILURE_MESSAGE });
-        }
+        if (r.valid === false && errors.length === 0) unexplainedFailures.push(errors);
         return {
           target: r.target,
           valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
@@ -505,6 +513,9 @@ export async function handleValidate(
       for (const error of unpathed) {
         unattributed.push(formatUnattributedDiagnostic(undefined, error));
       }
+      const unexplainedMessage =
+        unattributed.length > 0 ? UNATTRIBUTED_FAILURE_MESSAGE : UNEXPLAINED_FAILURE_MESSAGE;
+      for (const errors of unexplainedFailures) errors.push({ message: unexplainedMessage });
 
       // Merge pre-validation failures back into their original positions so
       // output order matches input order. Pre-validation errors are ours, not

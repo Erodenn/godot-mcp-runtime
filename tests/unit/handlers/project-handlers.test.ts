@@ -534,6 +534,12 @@ describe('handleGetProjectSettings: value lexing', () => {
         '',
         'custom/drives=["C:\\\\", "D:\\\\"]',
         'custom/after=7',
+        // One such string alone on a line with its closing bracket. A scan that
+        // reads the closing quote as escaped never sees the bracket, and nothing
+        // later on the line re-balances it the way a second string does above.
+        String.raw`custom/drive=["C:\\"]`,
+        String.raw`custom/root={"path": "C:\\"}`,
+        'custom/next=8',
         'custom/paths={',
         String.raw`"root": "C:\\",`,
         '"extra": ["a", "b"]',
@@ -548,6 +554,9 @@ describe('handleGetProjectSettings: value lexing', () => {
     );
     expect(parsed.settings.application['custom/drives']).toBe(String.raw`["C:\\", "D:\\"]`);
     expect(parsed.settings.application['custom/after']).toBe(7);
+    expect(parsed.settings.application['custom/drive']).toBe(String.raw`["C:\\"]`);
+    expect(parsed.settings.application['custom/root']).toBe(String.raw`{"path": "C:\\"}`);
+    expect(parsed.settings.application['custom/next']).toBe(8);
     expect(parsed.settings.application['custom/paths']).toBe(
       ['{', String.raw`"root": "C:\\",`, '"extra": ["a", "b"]', '}'].join('\n'),
     );
@@ -648,6 +657,76 @@ describe('handleGetProjectSettings: value lexing', () => {
   it('config_version is reported under __global__', async () => {
     const parsed = await readSettings('config_version=5\n\n[application]\n\nconfig/name="Game"\n');
     expect(parsed.settings.__global__).toEqual({ config_version: 5 });
+  });
+
+  it('a comment after a value is left out of it', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'run/max_fps=60 ; frame cap',
+        'config/name="Game" ; shown in the title bar',
+        'config/note="a ; b"',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application).toEqual({
+      'run/max_fps': 60,
+      'config/name': 'Game',
+      'config/note': 'a ; b',
+    });
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('a quote or bracket inside a comment does not swallow the keys after it', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        '',
+        'custom/map={',
+        '"a": 1, ; an "odd { remark',
+        '"b": 2',
+        '}',
+        'custom/after=7',
+        '',
+        '[display]',
+        '',
+        'window/size/viewport_width=1920',
+        '',
+      ].join('\n'),
+    );
+    const map = String(parsed.settings.application['custom/map']);
+    expect(map.startsWith('{')).toBe(true);
+    expect(map.endsWith('}')).toBe(true);
+    expect(map).toContain('"b": 2');
+    expect(map).not.toContain('remark');
+    expect(parsed.settings.application['custom/after']).toBe(7);
+    expect(parsed.settings.display['window/size/viewport_width']).toBe(1920);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('a section header followed by a comment is recognized', async () => {
+    const parsed = await readSettings(
+      [
+        'config_version=5',
+        '',
+        '[application] ; identity',
+        '',
+        'config/name="Game"',
+        '',
+        '[display] ; see [rendering] too',
+        '',
+        'window/size/viewport_width=1920',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.settings.application).toEqual({ 'config/name': 'Game' });
+    expect(parsed.settings.display).toEqual({ 'window/size/viewport_width': 1920 });
+    expect(parsed).not.toHaveProperty('warnings');
   });
 
   it('constructor values stay raw strings and numbers and booleans are typed', async () => {

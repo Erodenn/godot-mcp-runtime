@@ -495,10 +495,49 @@ describe('handleValidate batch attribution', () => {
       targets: [{ scriptPath: 'odd.gd' }],
     });
     expect(hasError(result)).toBe(false);
+    const payload = batchPayload(result);
+    const entry = payload.results[0];
+    expect(entry.valid).toBe(false);
+    expect(entry.errors).toHaveLength(1);
+    // Nothing was printed, so the entry must not send the caller to a
+    // warnings list that is not there.
+    expect(String(entry.errors[0].message)).toMatch(/printed no diagnostic that names it/);
+    expect(String(entry.errors[0].message)).not.toMatch(/see warnings/);
+    expect(payload).not.toHaveProperty('warnings');
+  });
+
+  it('an invalid target whose diagnostic named another spelling points at the warnings that hold it', async () => {
+    // A directory with a space: the engine prints the path, and the diagnostic
+    // parser keeps it only up to the blank, so it matches no target.
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          {
+            target: 'my scripts/broken.gd',
+            resolvedPath: 'res://my scripts/broken.gd',
+            valid: false,
+            errors: [],
+          },
+        ],
+      }),
+      stderr: [
+        'SCRIPT ERROR: Parse Error: Expected parameter name.',
+        '   at: GDScript::reload (res://my scripts/broken.gd:3)',
+        'ERROR: Failed to load script "res://my scripts/broken.gd" with error "Parse error".',
+        '   at: load (core/io/resource_loader.cpp:283)',
+      ].join('\n'),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 'my scripts/broken.gd' }],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toContain('Expected parameter name');
     const entry = batchPayload(result).results[0];
     expect(entry.valid).toBe(false);
     expect(entry.errors).toHaveLength(1);
-    expect(String(entry.errors[0].message)).toMatch(/could not be attributed/);
+    expect(String(entry.errors[0].message)).toMatch(/could not be attributed.*see warnings/);
   });
 
   it('diagnostics that belong to no target lead the batch payload as warnings', async () => {
