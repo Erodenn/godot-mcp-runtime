@@ -222,7 +222,7 @@ export const sceneToolDefinitions = [
   {
     name: 'batch_scene_operations',
     description:
-      "Run several scene mutations in one process, saving ~3s of startup per call; every mutated scene is saved at the end. Use instead of chaining add_node, load_sprite, set_node_properties or save_scene. Each item sets operation (save stands for save_scene) and takes that tool's params. abortOnError stops at the first failure. Returns: results[] in input order, each with operation, scenePath, success or error, plus that operation's own fields. Errors while a runtime session is live on this project.",
+      "Run several scene mutations in one process; every mutated scene is saved at the end. Use instead of chaining add_node, load_sprite, set_node_properties or save_scene. Each item sets operation (save stands for save_scene) and takes that tool's params. abortOnError stops at the first failure; later items return skipped: true. Returns: results[] in input order: operation, scenePath, success, error or skipped, plus the operation's own fields. Errors while a runtime session is live on this project.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -322,6 +322,10 @@ export const sceneToolDefinitions = [
               scenePath: { type: 'string' },
               success: { type: 'boolean' },
               error: { type: 'string' },
+              skipped: {
+                type: 'boolean',
+                description: 'True when abortOnError stopped the batch before this operation ran.',
+              },
               nodeName: { type: 'string', description: '[add_node] Name after the add.' },
               nodeType: { type: 'string', description: '[add_node, load_sprite]' },
               nodePath: { type: 'string', description: '[add_node, load_sprite]' },
@@ -337,6 +341,11 @@ export const sceneToolDefinitions = [
                     property: { type: 'string' },
                     success: { type: 'boolean' },
                     error: { type: 'string' },
+                    skipped: {
+                      type: 'boolean',
+                      description:
+                        'True when abortOnError stopped this operation before this update.',
+                    },
                   },
                 },
               },

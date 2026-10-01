@@ -916,6 +916,19 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 		if abort_on_error and result.has("error"):
 			break
 
+	# abort_on_error stops at the first failed update. The updates after it were
+	# never attempted, so each is listed as skipped instead of being left out of
+	# a results array that is otherwise one entry per update.
+	for skipped_index in range(results.size(), updates.size()):
+		var skipped_update = updates[skipped_index]
+		var skipped_entry := {"nodePath": "", "property": "", "skipped": true}
+		if typeof(skipped_update) == TYPE_DICTIONARY:
+			if typeof(skipped_update.get("node_path")) == TYPE_STRING:
+				skipped_entry["nodePath"] = skipped_update.get("node_path")
+			if typeof(skipped_update.get("property")) == TYPE_STRING:
+				skipped_entry["property"] = skipped_update.get("property")
+		results.append(skipped_entry)
+
 	return {"ok": true, "any_set": any_set, "error": "", "results": results, "warnings": warnings}
 
 func set_node_properties(params: Dictionary) -> void:
@@ -993,29 +1006,44 @@ func get_scene_tree(params):
 	if params.has("max_depth"):
 		max_depth = int(params.max_depth)
 
-	var tree = build_tree_recursive(tree_root, "", 0, max_depth)
+	# Counts the nodes whose children were left unlisted because of max_depth,
+	# so the payload can say the tree is not the whole scene.
+	var depth_cut := {"nodes": 0}
+	var tree = build_tree_recursive(tree_root, scene_root, 0, max_depth, depth_cut)
+	if depth_cut.nodes > 0:
+		tree["warnings"] = ["maxDepth %d cut the tree: %d node(s) have children null and a childCount" % [max_depth, depth_cut.nodes]]
 	emit_result(tree)
 
-func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: int = -1) -> Dictionary:
-	var node_path = path + "/" + node.name if not path.is_empty() else node.name
-
-	var children = []
-	if max_depth < 0 or depth < max_depth:
-		for child in node.get_children():
-			children.append(build_tree_recursive(child, node_path, depth + 1, max_depth))
-
+# Build one node of the get_scene_tree answer. "path" is the scene-root-relative
+# "root/..." form every node tool accepts, whether the tree starts at the scene
+# root or at a parent_path subtree. A node at the depth limit that has children
+# reports children null and a childCount (they were not listed, not absent); a
+# node at the limit with no children reports an empty list. depth_cut["nodes"]
+# is incremented once per node reported that way.
+func build_tree_recursive(node: Node, scene_root: Node, depth: int, max_depth: int, depth_cut: Dictionary) -> Dictionary:
 	var script_path = ""
 	var script = node.get_script()
 	if script and script.resource_path:
 		script_path = script.resource_path
 
-	return {
+	var entry := {
 		"name": node.name,
 		"type": node.get_class(),
-		"path": node_path,
+		"path": _relative_path(scene_root, node),
 		"script": script_path,
-		"children": children
 	}
+	if max_depth < 0 or depth < max_depth:
+		var children = []
+		for child in node.get_children():
+			children.append(build_tree_recursive(child, scene_root, depth + 1, max_depth, depth_cut))
+		entry["children"] = children
+	elif node.get_child_count() > 0:
+		entry["children"] = null
+		entry["childCount"] = node.get_child_count()
+		depth_cut["nodes"] += 1
+	else:
+		entry["children"] = []
+	return entry
 
 # True when `path` (a res:// path, normalized or not) names a C# script by
 # its extension. Shared by the no-C#-support check and _check_script_attachable's
@@ -2807,6 +2835,20 @@ func batch_scene_operations(params: Dictionary) -> void:
 				unsaved_results_by_scene[scene_key].append(results.size() - 1)
 		if abort_on_error and result.has("error"):
 			break
+
+	# abort_on_error stops the loop at the first failed operation. Every operation
+	# before it appended exactly one entry, so the operations after it start at
+	# results.size(); each is listed as skipped instead of being left out of a
+	# results array that is otherwise one entry per operation.
+	for skipped_index in range(results.size(), params.operations.size()):
+		var skipped_op = params.operations[skipped_index]
+		var skipped_entry := {"operation": "", "scenePath": "", "skipped": true}
+		if typeof(skipped_op) == TYPE_DICTIONARY:
+			if typeof(skipped_op.get("operation", "")) == TYPE_STRING:
+				skipped_entry["operation"] = skipped_op.get("operation", "")
+			if typeof(skipped_op.get("scene_path", "")) == TYPE_STRING:
+				skipped_entry["scenePath"] = skipped_op.get("scene_path", "")
+		results.append(skipped_entry)
 
 	# Auto-save any scenes that were mutated but not explicitly saved. A scene
 	# that cannot be written leaves its entries claiming work that exists only in

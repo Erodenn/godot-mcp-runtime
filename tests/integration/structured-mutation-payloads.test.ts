@@ -19,7 +19,12 @@ import { hasError } from '../helpers/assertions.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { handleAddNode, handleLoadSprite, handleSaveScene } from '../../src/tools/scene-tools.js';
+import {
+  handleAddNode,
+  handleBatchSceneOperations,
+  handleLoadSprite,
+  handleSaveScene,
+} from '../../src/tools/scene-tools.js';
 import {
   handleConnectSignal,
   handleDisconnectSignal,
@@ -27,6 +32,7 @@ import {
   handleGetNodeProperties,
   handleGetNodeSignals,
   handleGetSceneTree,
+  handleSetNodeProperties,
 } from '../../src/tools/node-tools.js';
 
 const SCENE = 'main.tscn';
@@ -262,5 +268,210 @@ describe('load_sprite reports the texture the node holds', () => {
       });
     },
     IMPORT_CASE_TIMEOUT_MS,
+  );
+});
+
+/** A get_scene_tree node as the payload shapes it, with the depth-cut fields. */
+interface DepthTreeNode {
+  name: string;
+  type: string;
+  path: string;
+  children: DepthTreeNode[] | null;
+  childCount?: number;
+}
+
+/** Add a node under `parentNodePath` and fail the case when the add did not land. */
+async function addTreeNode(
+  nodeType: string,
+  nodeName: string,
+  parentNodePath: string,
+): Promise<void> {
+  const result = await handleAddNode(runner, {
+    projectPath,
+    scenePath: SCENE,
+    nodeType,
+    nodeName,
+    parentNodePath,
+  });
+  expect(hasError(result), JSON.stringify(result)).toBe(false);
+}
+
+/** Every node of a tree, the root first. */
+function flattenTree(node: DepthTreeNode): DepthTreeNode[] {
+  return [node, ...(node.children ?? []).flatMap(flattenTree)];
+}
+
+/** Read several nodes in one get_node_properties call, entries in input order. */
+async function readNodes(nodePaths: string[]): Promise<Array<Record<string, unknown>>> {
+  const result = await handleGetNodeProperties(runner, {
+    projectPath,
+    scenePath: SCENE,
+    nodes: nodePaths.map((nodePath) => ({ nodePath })),
+  });
+  const payload = expectMatchesOutputSchema('get_node_properties', result);
+  return payload.results as Array<Record<string, unknown>>;
+}
+
+/** Read the scene tree through the handler, validated against its declared schema. */
+async function readTree(extra: Record<string, unknown> = {}): Promise<DepthTreeNode> {
+  const result = await handleGetSceneTree(runner, { projectPath, scenePath: SCENE, ...extra });
+  return expectMatchesOutputSchema('get_scene_tree', result) as unknown as DepthTreeNode;
+}
+
+describe('get_scene_tree reports paths that resolve and what it did not list', () => {
+  /** Main/Deep/Leaf/Inner on top of the fixture's Label and Sprite2D. */
+  async function buildDeepScene(): Promise<void> {
+    await addTreeNode('Node2D', 'Deep', 'root');
+    await addTreeNode('Node2D', 'Leaf', 'root/Deep');
+    await addTreeNode('Node2D', 'Inner', 'root/Deep/Leaf');
+  }
+
+  itGodot(
+    'get_scene_tree paths are in root form and resolve when passed back',
+    async () => {
+      await buildDeepScene();
+      const tree = await readTree();
+      expect(tree.path).toBe('root');
+
+      const nodes = flattenTree(tree);
+      const paths = nodes.map((node) => node.path);
+      expect(paths).toContain('root/Deep');
+      expect(paths).toContain('root/Deep/Leaf/Inner');
+
+      const read = await readNodes(paths);
+      expect(read).toHaveLength(nodes.length);
+      read.forEach((entry, index) => {
+        expect(entry, paths[index]).not.toHaveProperty('error');
+        expect(entry.nodeType).toBe(nodes[index]!.type);
+      });
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a parentPath subtree reports paths that resolve from the scene root',
+    async () => {
+      await buildDeepScene();
+      const subtree = await readTree({ parentPath: 'root/Deep' });
+      expect(subtree.name).toBe('Deep');
+      expect(subtree.path).toBe('root/Deep');
+
+      const nodes = flattenTree(subtree);
+      expect(nodes.map((node) => node.path)).toEqual([
+        'root/Deep',
+        'root/Deep/Leaf',
+        'root/Deep/Leaf/Inner',
+      ]);
+      const read = await readNodes(nodes.map((node) => node.path));
+      read.forEach((entry, index) => {
+        expect(entry, nodes[index]!.path).not.toHaveProperty('error');
+        expect(entry.nodeType).toBe(nodes[index]!.type);
+      });
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a node cut by maxDepth has children null, a childCount, and the payload leads with a warning',
+    async () => {
+      await buildDeepScene();
+      const result = await handleGetSceneTree(runner, {
+        projectPath,
+        scenePath: SCENE,
+        maxDepth: 1,
+      });
+      const tree = expectMatchesOutputSchema('get_scene_tree', result);
+      expect(Object.keys(tree)[0]).toBe('warnings');
+      const warnings = tree.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/maxDepth 1 cut the tree: 1 node\(s\)/);
+
+      const children = tree.children as DepthTreeNode[];
+      const deep = children.find((child) => child.name === 'Deep')!;
+      expect(deep.children).toBeNull();
+      expect(deep.childCount).toBe(1);
+      // A node at the limit that has no children is a leaf, not a cut.
+      const label = children.find((child) => child.name === 'Label')!;
+      expect(label.children).toEqual([]);
+      expect(label).not.toHaveProperty('childCount');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a leaf at the depth limit has an empty children array',
+    async () => {
+      // The fixture's Label and Sprite2D have no children, so nothing is cut.
+      const result = await handleGetSceneTree(runner, {
+        projectPath,
+        scenePath: SCENE,
+        maxDepth: 1,
+      });
+      const tree = expectMatchesOutputSchema('get_scene_tree', result);
+      expect(tree).not.toHaveProperty('warnings');
+      const children = tree.children as DepthTreeNode[];
+      expect(children.length).toBeGreaterThan(0);
+      for (const child of children) expect(child.children).toEqual([]);
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('abortOnError lists what it did not attempt', () => {
+  itGodot(
+    'abortOnError marks the updates it did not attempt as skipped',
+    async () => {
+      const result = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: SCENE,
+        abortOnError: true,
+        updates: [
+          { nodePath: 'root/Label', property: 'text', value: 'first' },
+          { nodePath: 'root/NoSuchNode', property: 'text', value: 'broken' },
+          { nodePath: 'root/Sprite2D', property: 'visible', value: false },
+          { nodePath: 'root/Label', property: 'text', value: 'last' },
+        ],
+      });
+      const payload = expectMatchesOutputSchema('set_node_properties', result);
+      const results = payload.results as Array<Record<string, unknown>>;
+      expect(results).toHaveLength(4);
+      expect(results[0]).toMatchObject({ nodePath: 'root/Label', success: true });
+      expect(results[1]).toHaveProperty('error');
+      expect(results[2]).toEqual({ nodePath: 'root/Sprite2D', property: 'visible', skipped: true });
+      expect(results[3]).toEqual({ nodePath: 'root/Label', property: 'text', skipped: true });
+
+      // The work before the failure landed and the skipped updates did not.
+      const [label] = await readNodes(['root/Label']);
+      expect((label!.properties as Record<string, unknown>).text).toBe('first');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a batch stopped by abortOnError marks the remaining operations as skipped',
+    async () => {
+      const result = await handleBatchSceneOperations(runner, {
+        projectPath,
+        abortOnError: true,
+        operations: [
+          { operation: 'add_node', scenePath: SCENE, nodeType: 'Node2D', nodeName: 'Landed' },
+          { operation: 'add_node', scenePath: SCENE, nodeType: 'NoSuchClass', nodeName: 'Broken' },
+          { operation: 'add_node', scenePath: SCENE, nodeType: 'Node2D', nodeName: 'NeverRan' },
+          { operation: 'save', scenePath: SCENE },
+        ],
+      });
+      const payload = expectMatchesOutputSchema('batch_scene_operations', result);
+      const results = payload.results as Array<Record<string, unknown>>;
+      expect(results).toHaveLength(4);
+      expect(results[0]).toMatchObject({ operation: 'add_node', success: true });
+      expect(results[1]).toHaveProperty('error');
+      expect(results[2]).toEqual({ operation: 'add_node', scenePath: SCENE, skipped: true });
+      expect(results[3]).toEqual({ operation: 'save', scenePath: SCENE, skipped: true });
+
+      const [landed, neverRan] = await readNodes(['root/Landed', 'root/NeverRan']);
+      expect(landed).not.toHaveProperty('error');
+      expect(neverRan).toHaveProperty('error');
+    },
+    CASE_TIMEOUT_MS,
   );
 });

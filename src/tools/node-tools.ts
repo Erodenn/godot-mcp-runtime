@@ -86,7 +86,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties in a scene in one Godot process. Always-array: pass one update for a one-off edit. Each value is checked against the property's declared type and errors instead of silently storing that type's zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success or error; warnings leads when a value was set but is not saved. Errors while a runtime session is live on this project.",
+      "Set node properties in a scene in one Godot process. Always-array: pass one update for a one-off edit. Each value is checked against the property's declared type and errors instead of storing a zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success, error or skipped (abortOnError); warnings leads when a value was set but is not saved. Errors while a runtime session is live on this project.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -141,6 +141,10 @@ export const nodeToolDefinitions = [
               property: { type: 'string' },
               success: { type: 'boolean' },
               error: { type: 'string' },
+              skipped: {
+                type: 'boolean',
+                description: 'True when abortOnError stopped processing before this update.',
+              },
             },
           },
         },
@@ -229,7 +233,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_scene_tree',
     description:
-      "Get a scene's node hierarchy as a nested tree. maxDepth: 1 lists only the direct children; the default -1 returns the whole tree. parentPath scopes the result to one subtree. Returns: the root node of the tree, { name, type, path, script, children[] }; every child has the same shape, and script is the attached script's res:// path or an empty string. Errors if the scene does not exist or parentPath is not found.",
+      "Get a scene's node hierarchy as a nested tree. maxDepth: 1 lists only direct children; the default -1 is the whole tree. parentPath scopes to one subtree. Returns: the root node { name, type, path, script, children[] }, every child the same shape; path is a root/... node path the node tools accept, script a res:// path or an empty string. A node cut by maxDepth has children null and a childCount, and warnings leads. Errors if the scene or parentPath is not found.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -251,14 +255,28 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Root node only. Present when maxDepth cut the tree.',
+        },
         name: { type: 'string' },
         type: { type: 'string' },
-        path: { type: 'string' },
+        path: {
+          type: 'string',
+          description:
+            'Node path from the scene root in the "root/..." form the node tools accept.',
+        },
         script: { type: 'string', description: 'res:// path of the attached script, or "".' },
         children: {
-          type: 'array',
-          description: 'Child nodes, each in this same shape.',
+          type: ['array', 'null'],
+          description:
+            'Child nodes, each in this same shape. Null when maxDepth stopped the listing at a node that has children; childCount says how many.',
           items: { type: 'object' },
+        },
+        childCount: {
+          type: 'number',
+          description: 'Only when children is null: how many children were not listed.',
         },
       },
       required: ['name', 'type', 'path', 'script', 'children'],
