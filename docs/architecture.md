@@ -34,6 +34,8 @@ src/
     ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
     ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
     ├── launch-gate.ts           # Pre-flight script scan + once-per-project launch confirmation, callable by any handler that launches a project
+    ├── png-decoder.ts           # Zero-dependency PNG decoder (8-bit RGB/RGBA) for pixel statistics
+    ├── pixel-stats.ts           # Pixel statistics and the likelyBlank verdict, measured from a decoded PNG
     ├── scene-parsing.ts         # .tscn / project.godot parsing for the run_project pre-flight scan (launch-scene resolution, ext_resource script extraction)
     ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
     └── logger.ts                # logDebug / logError helpers
