@@ -19,6 +19,7 @@ src/
 │   └── mcp_bridge.gd       # TCP autoload for runtime communication
 └── utils/
     ├── godot-runner.ts          # Process spawning, per-project runtime sessions, bridge TCP client
+    ├── godot-spawn-options.ts   # Spawn options per kind of Godot process (headless, run, editor)
     ├── output-parsing.ts        # Godot stdout parsing (extractOperationPayload, extractJson, cleanOutput, cleanStdout, normalizeForCompare)
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
     ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) - argument validators live in arg-parsing.ts
@@ -47,6 +48,8 @@ src/
 ```
 
 Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. That stdout is shared with the engine banner and with anything an autoload or scene script prints, so the result travels as one line prefixed with `MCP_OPERATION_RESULT:`, written by `emit_result` in `godot_operations.gd` and read by `extractOperationPayload`. Only the text after the prefix on that line is ever parsed as a payload; stdout with no such line is reported as an operation that exited before producing a result. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).
+
+On Windows, Godot attaches to its parent's console when it starts, so a Godot spawned by a server running under a terminal client can write straight onto that client's screen. Every spawn option is decided in `godotSpawnOptions` (`src/utils/godot-spawn-options.ts`): the headless spawns (version probe, headless operations, asset import) pass `windowsHide: true`, the game and the editor never do because their windows must show, and all of them keep piped stdio, which `launch_editor` drains since nothing reads the editor's output.
 
 ## Cold Asset Import
 

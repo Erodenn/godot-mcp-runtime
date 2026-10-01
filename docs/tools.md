@@ -31,7 +31,7 @@ Inside a listing of things that have a path of their own (files, scene tree node
 
 ### What the project and session tools return
 
-- `launch_editor`: `projectPath`, `pid` and `message`. `pid` is the editor process id, or `null` with a leading `warnings` entry when the process reported none, which usually means it did not start.
+- `launch_editor`: `projectPath`, `pid` and `message`. `pid` is the editor process id. A spawn that reports no pid did not start anything, so that is an error response, not a launch.
 - `run_project`: `projectPath`, `sessionMode`, `bridgePort` and `message`, led by `warnings` when the pre-flight scan flagged a script. Success already means the bridge answered, so there is no separate readiness flag.
 - `switch_project`: `projectPath`, `previousProjectPath`, `live`, `sessionMode`, `bridgePort`, `bridgeResponsive`, `message`, and `exitCode` for a session whose process exited.
 - `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`.

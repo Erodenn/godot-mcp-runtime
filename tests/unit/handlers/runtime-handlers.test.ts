@@ -610,15 +610,22 @@ describe('handleLaunchEditor payload', () => {
     });
   });
 
-  it('reports a null pid with a leading warning when the process has none', async () => {
+  // A spawn that fails (bad executable) reports no pid and raises 'error'
+  // later. Nothing was launched, so nothing may be reported as launched.
+  it('launch_editor is an error when the spawn reports no pid', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setEditorPid(undefined);
     const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
-    const payload = expectMatchesOutputSchema('launch_editor', result);
-    expect(payload.pid).toBeNull();
-    expect(Object.keys(payload)[0]).toBe('warnings');
-    expect((payload.warnings as string[])[0]).toMatch(/no pid/);
+    expectErrorMatching(result, /editor process did not start \(the spawn reported no pid\)/);
+    expect(unwrap(result).content[1]?.text ?? '').toMatch(/GODOT_PATH/);
+  });
+
+  it('declares the editor pid as a plain number, with no warnings channel', () => {
+    const definition = runtimeToolDefinitions.find((tool) => tool.name === 'launch_editor');
+    const schema = definition?.outputSchema as { properties: Record<string, unknown> };
+    expect(schema.properties.pid).toMatchObject({ type: 'number' });
+    expect(schema.properties).not.toHaveProperty('warnings');
   });
 });
 

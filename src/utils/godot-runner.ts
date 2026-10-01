@@ -24,6 +24,7 @@ import type { OperationParams } from '../mcp.types.js';
 import { cleanStdout, normalizeForCompare, normalizeExitCode } from './output-parsing.js';
 import { checkDisplayAvailable, validateSubPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
+import { godotSpawnOptions } from './godot-spawn-options.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -419,7 +420,7 @@ export class GodotRunner {
     timeoutMs: number = 10000,
   ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(cmd, args, { stdio: 'pipe' });
+      const proc = spawn(cmd, args, godotSpawnOptions('headless'));
       let stdout = '';
       let stderr = '';
       const timer = setTimeout(() => {
@@ -667,7 +668,18 @@ export class GodotRunner {
         'No Godot executable resolved. Set GODOT_PATH to a Godot 4.x binary, or pass godotPath via config.',
       );
     }
-    return spawn(this.godotPath, ['-e', '--path', projectPath], { stdio: 'pipe' });
+    const editor = spawn(
+      this.godotPath,
+      ['-e', '--path', projectPath],
+      godotSpawnOptions('editor'),
+    );
+    // Nothing reads the editor's output, but the pipes stay open on purpose
+    // (see godotSpawnOptions). An unread pipe fills, and a writer blocked on a
+    // full pipe is a frozen editor, so both streams are put into flowing mode
+    // and their data discarded.
+    editor.stdout?.resume();
+    editor.stderr?.resume();
+    return editor;
   }
 
   /**
@@ -802,7 +814,7 @@ export class GodotRunner {
       const sessionToken = randomBytes(16).toString('hex');
       session.token = sessionToken;
       const spawnOptions: SpawnOptions = {
-        stdio: 'pipe',
+        ...godotSpawnOptions('run'),
         env: {
           ...process.env,
           MCP_SESSION_TOKEN: sessionToken,

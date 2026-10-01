@@ -116,7 +116,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project, for the human user. Use only when the user asks to open the editor; for agent-driven work use the headless scene and node tools (add_node, set_node_properties, etc.), since the editor cannot be controlled programmatically. Returns: projectPath, the editor process pid and message; pid is null with a leading warnings entry when the process reported none. Errors if projectPath has no project.godot.',
+      'Open the Godot editor GUI for a project, for the human user. Use only when the user asks to open the editor; for agent-driven work use the headless scene and node tools (add_node, set_node_properties, etc.), since the editor cannot be controlled programmatically. Returns: projectPath, the editor process pid and message. Errors if projectPath has no project.godot or the editor process does not start.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,12 +130,8 @@ export const runtimeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        warnings: { type: 'array', items: { type: 'string' } },
         projectPath: { type: 'string' },
-        pid: {
-          type: ['number', 'null'],
-          description: 'Process id of the editor. Null when the process reported none.',
-        },
+        pid: { type: 'number', description: 'Process id of the editor.' },
         message: { type: 'string' },
       },
       required: ['projectPath', 'pid', 'message'],
@@ -796,8 +792,6 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
 const BRIDGE_PORT_UNAVAILABLE_WARNING =
   'Bridge port unavailable: the session ended as the bridge became ready.';
 
-const EDITOR_NO_PID_WARNING =
-  'The editor process reported no pid, so it may not have started. Check that GODOT_PATH points at a Godot executable.';
 const EDITOR_LAUNCH_MESSAGE =
   'Godot editor launched. It is a GUI application and cannot be controlled programmatically: use the headless scene and node tools (add_node, set_node_properties, etc.) to change the project.';
 
@@ -913,12 +907,19 @@ export async function handleLaunchEditor(
     });
 
     // The pid is the only thing the spawn reports synchronously. A spawn that
-    // fails (bad executable path) leaves it undefined and raises 'error' later.
-    const pid = typeof process.pid === 'number' ? process.pid : null;
+    // fails (bad executable path) leaves it undefined and raises 'error' later,
+    // so no pid means nothing was launched: an error, never a launch message.
+    if (typeof process.pid !== 'number') {
+      return err(
+        createErrorResponse('The Godot editor process did not start (the spawn reported no pid).', [
+          'Check that GODOT_PATH points at a Godot 4.x executable, not its installation folder',
+          'Check that the file is executable and matches this machine (permissions, architecture)',
+        ]),
+      );
+    }
     return createStructuredResponse({
-      ...(pid === null ? { warnings: [EDITOR_NO_PID_WARNING] } : {}),
       projectPath: resolve(parsed.value.projectPath),
-      pid,
+      pid: process.pid,
       message: EDITOR_LAUNCH_MESSAGE,
     });
   } catch (error: unknown) {

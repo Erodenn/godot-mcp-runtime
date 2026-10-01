@@ -463,3 +463,89 @@ describe('attached-mode bridge disconnect', () => {
     DISCONNECT_CASE_TIMEOUT_MS,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Spawn options at the three spawn sites
+// ---------------------------------------------------------------------------
+
+describe('spawn options reach child_process.spawn', () => {
+  const EDITOR_PID = 4242;
+  /** Index of the options argument in a `spawn(cmd, args, options)` call. */
+  const SPAWN_OPTIONS_ARG = 2;
+  /** Fixed bridge port for the runProject case; no socket is opened there. */
+  const SPAWN_CASE_BRIDGE_PORT = 19988;
+  let savedDisplay: string | undefined;
+
+  beforeEach(() => {
+    savedDisplay = process.env.DISPLAY;
+    if (process.platform === 'linux' && !process.env.DISPLAY) process.env.DISPLAY = ':0';
+    spawnMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (savedDisplay === undefined) delete process.env.DISPLAY;
+    else process.env.DISPLAY = savedDisplay;
+  });
+
+  function spawnOptions(): Record<string, unknown> {
+    return spawnMock.mock.calls[0]![SPAWN_OPTIONS_ARG] as Record<string, unknown>;
+  }
+
+  it('launchEditor drains both pipes', () => {
+    const child = {
+      pid: EDITOR_PID,
+      stdout: { resume: vi.fn() },
+      stderr: { resume: vi.fn() },
+      on: vi.fn(),
+    };
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    const returned = runner.launchEditor('/some/project');
+
+    expect(returned).toBe(child);
+    expect(child.stdout.resume).toHaveBeenCalledTimes(1);
+    expect(child.stderr.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('launchEditor keeps piped stdio and never asks for a hidden window', () => {
+    spawnMock.mockReturnValue({
+      pid: EDITOR_PID,
+      stdout: { resume: vi.fn() },
+      stderr: { resume: vi.fn() },
+      on: vi.fn(),
+    });
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    runner.launchEditor('/some/project');
+
+    expect(spawnOptions()).toEqual({ stdio: 'pipe' });
+  });
+
+  it('runProject keeps piped stdio and never asks for a hidden window', async () => {
+    spawnMock.mockReturnValue(makeFakeChildProcess());
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+
+    const projectPath = tmp.makeProject('godot-mcp-spawn-');
+    await runner.runProject(projectPath, undefined, false, SPAWN_CASE_BRIDGE_PORT);
+
+    const options = spawnOptions();
+    expect(options.stdio).toBe('pipe');
+    expect(options).not.toHaveProperty('windowsHide');
+    expect(options.env).toMatchObject({ MCP_BRIDGE_PORT: String(SPAWN_CASE_BRIDGE_PORT) });
+  });
+
+  it('a headless spawn hides its console window', async () => {
+    const proc = makeFakeChildProcess();
+    spawnMock.mockReturnValue(proc);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    const pending = runner.getVersion();
+    proc.stdout.emit('data', Buffer.from('4.7.2.stable.official\n'));
+    proc.emit('close', 0);
+
+    expect(await pending).toBe('4.7.2.stable.official');
+    expect(spawnOptions()).toEqual({ stdio: 'pipe', windowsHide: true });
+  });
+});
