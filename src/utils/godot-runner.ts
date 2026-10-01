@@ -44,7 +44,7 @@ const __dirname = dirname(__filename);
 
 // Bridge readiness polling
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
-// Ceiling on how long attach_project waits with no evidence the bridge is
+// Ceiling on how long attach mode waits with no evidence the bridge is
 // even listening yet. Exported so the readiness-budget tests can assert the
 // relationship to BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS below.
 export const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 20000;
@@ -60,7 +60,7 @@ export const BRIDGE_WAIT_ATTACHED_TIMEOUT_MS = 20000;
  * A client that attached no progressToken gets no heartbeats, so a wait past
  * that ceiling is aborted client-side and the server's own structured error -
  * the port-race diagnostic and its solutions - never reaches the agent. The
- * remaining headroom covers handleAttachProject's stopProject teardown.
+ * remaining headroom covers the attach path's stopProject teardown.
  */
 export const BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS = 45000;
 /**
@@ -224,10 +224,6 @@ export class GodotRunner {
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
   public activeBridgePort: number | null = null;
-  // Set once by attachProject and never cleared, so detach_project can tell
-  // "an attached session existed and ended" from "this server never attached
-  // to anything" after activeSessionMode has already gone back to null.
-  public hasEverAttached = false;
   // Debugger receiver for `run_project({ profiling: true })`. Bound before the
   // spawn so `--remote-debug` has a port to dial, and torn down with the
   // session. Null in attached mode — the channel is set at launch or never.
@@ -879,7 +875,6 @@ export class GodotRunner {
     this.activeProjectPath = projectPath;
     this.activeSessionMode = 'attached';
     this.activeProcess = null;
-    this.hasEverAttached = true;
   }
 
   async stopProject(): Promise<RuntimeStopResult | null> {

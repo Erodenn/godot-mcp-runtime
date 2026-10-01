@@ -177,7 +177,7 @@ The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-f
 Token delivery differs by session mode, because the channel available differs:
 
 - **Spawned (`run_project`)**: Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode: the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
-- **Attached (`attach_project`)**: Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
+- **Attached (`run_project` with `attach: true`)**: Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
 
 A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all - the standalone script run outside the MCP server (manual debugging, `validate`).
 
@@ -193,7 +193,7 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 **Errors still do not pause the game.** A connected debugger normally halts the engine on a script error or `breakpoint`. Every `debug_enter` is answered immediately with `continue`, so profiling mode preserves the behaviour documented under "Runtime errors and `breakpoint`" - the engine runs past errors, `SCRIPT ERROR` output keeps reaching stderr, and `breakpoint` remains a no-op. Verified empirically against a project with a deliberate runtime error: stderr was byte-identical with and without `--remote-debug`, and the game ran on past the fault.
 
-**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch - it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
+**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch - it cannot be added to a running session, and an attached session never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` in either mode, and by the server's own shutdown handlers. It never outlives the server process.
 
 **Not covered by strict mode.** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate (both skipped when `GODOT_MCP_DISABLE_SECURITY` is set), but none of the three flags separately refuses to open the debugger port.
 
@@ -266,6 +266,8 @@ Findings are aggregated and:
 - **Default mode**: surfaced as `warnings: string[]` on the success response. The project still launches.
 - **Strict mode**: any Tier 1 finding hard-rejects before launch.
 
+With `attach: true` the same scan runs over the autoloads and `run/main_scene` before the bridge is injected, and findings are handled the same way: `warnings` in default mode, and in strict mode a Tier 1 finding refuses to inject. Attach mode has no confirmation prompt, because MCP launches nothing there.
+
 Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides - see "What this does NOT do."
 
 ### Session-confirmation gate
@@ -334,4 +336,4 @@ This section exists because the doctrine at the top of this document demands it:
 - No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` (all process-global, read once at start).
 - **`GODOT_MCP_DISABLE_SECURITY` removes Tier 1 too.** Every other escape hatch in this document (`GODOT_MCP_DISABLE_ELICITATION`, `GODOT_MCP_STRICT`'s absence) leaves Tier 1 hard blocks standing. This one does not: see "Disabling the entire gate." Enabling it is a full opt-out, not a UX convenience.
 - No retroactive scanning of scripts already in the project: `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
-- `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.
+- `run_project` with `attach: true` inherits whatever the externally launched Godot is doing. The pre-flight scan can warn, or in strict mode refuse to inject the bridge, but it cannot stop a Godot you start yourself. Scripts executed via `run_script` against an attached process still go through the gate.

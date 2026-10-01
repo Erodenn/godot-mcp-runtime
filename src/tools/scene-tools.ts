@@ -23,7 +23,7 @@ export const sceneToolDefinitions = [
   {
     name: 'create_scene',
     description:
-      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D - pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D - pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -48,7 +48,7 @@ export const sceneToolDefinitions = [
   {
     name: 'add_node',
     description:
-      "Add a node to a Godot scene. Saves automatically. position, rotation, scale, visible, modulate are top-level params; anything else goes in properties. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Returns plain-text confirmation of the new node and type. Errors and adds nothing if nodeType is not a registered class, the parent is missing, or a property name or value is invalid. Errors while a Godot runtime session is active; stop_project or detach_project clears it.",
+      "Add a node to a Godot scene. Saves automatically. position, rotation, scale, visible, modulate are top-level params; anything else goes in properties. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Returns plain-text confirmation of the new node and type. Errors and adds nothing if nodeType is not a registered class, the parent is missing, or a property name or value is invalid. Errors while a Godot runtime session is active; stop_project clears it.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -103,7 +103,7 @@ export const sceneToolDefinitions = [
   {
     name: 'load_sprite',
     description:
-      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. For new nodes, pass texture via add_node properties instead. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. For new nodes, pass texture via add_node properties instead. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -126,7 +126,7 @@ export const sceneToolDefinitions = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -145,7 +145,7 @@ export const sceneToolDefinitions = [
   {
     name: 'export_mesh_library',
     description:
-      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. For grid-based 3D tile palettes only, not 2D scenes. Source scene must contain MeshInstance3D children. Pass meshItemNames for a subset, or omit for all. Saves to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. For grid-based 3D tile palettes only, not 2D scenes. Source scene must contain MeshInstance3D children. Pass meshItemNames for a subset, or omit for all. Saves to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -168,7 +168,7 @@ export const sceneToolDefinitions = [
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes - runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes - runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

@@ -47,7 +47,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 
-**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
+**Runtime bridge.** When `run_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (a free port is auto-selected when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
 - **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
@@ -57,12 +57,12 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 **Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen (positioned at `(-9999, -9999)`) with physical input blocked: borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
 
-**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `attach_project` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Use `detach_project` when done.
+**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `run_project` with `attach: true` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Call `stop_project` when done: it removes the bridge and leaves your Godot process running.
 
 > [!IMPORTANT]
-> `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Use `run_project` if you need the debug stream.
+> `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Let `run_project` spawn the game if you need the debug stream.
 
-The bridge cleans itself up automatically - on `stop_project` or `detach_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
+The bridge cleans itself up automatically - on `stop_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
 
 ## How It Compares
 

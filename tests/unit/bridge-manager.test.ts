@@ -695,7 +695,7 @@ describe('BridgeManager with concurrent sessions on one project', () => {
   });
 
   describe('attach mode: single-attach-owner rule', () => {
-    it('a second attach_project on the same project is refused with no writes', () => {
+    it('a second attach session on the same project is refused with no writes', () => {
       const { projectPath, bridgeSourcePath } = setupProject();
       const managerA = new BridgeManager(bridgeSourcePath);
       managerA.inject(projectPath, TEST_PORT, 'token-a');

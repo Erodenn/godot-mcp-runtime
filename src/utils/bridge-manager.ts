@@ -150,7 +150,7 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
  * under `.mcp/godot-runtime/bridge/owners/`, the `[autoload]` entry in
  * project.godot, the `.mcp/.gdignore` marker, and the `.gitignore`
  * augmentation. GodotRunner delegates to this for inject/cleanup during
- * run_project / attach_project / stop_project flows. Path composition lives
+ * run_project (spawned and attach mode) / stop_project flows. Path composition lives
  * in `utils/artifact-paths.ts`.
  *
  * Designed for N concurrent server processes sharing one project. Every entry
@@ -243,7 +243,8 @@ export class BridgeManager {
           `Another MCP session (server pid ${conflicting.pid}, attached mode) is already ` +
             `attached to this project. Only one attach session per project is supported, ` +
             `because attach mode bakes its port and token into the one shared bridge ` +
-            `script. Detach that session first, then retry attach_project.`,
+            `script. Stop that session first (stop_project there), then retry run_project ` +
+            `with attach: true.`,
           conflicting,
         );
       }

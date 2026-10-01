@@ -168,50 +168,9 @@ export const runtimeToolDefinitions = [
     },
   },
   {
-    name: 'attach_project',
-    description:
-      'Inject the MCP bridge into a Godot process you launch yourself, then wait up to 20s for the bridge to start listening and up to 45s total once it has, so a large project\'s cold start is absorbed; a port that listens but answers no ping gives up sooner. Call BEFORE Godot launches - Godot reads autoloads only at process start, so a late call returns "bridge did not respond." Recommended pattern: kick off the Godot launch in parallel with this call so the wait absorbs startup. Prefer run_project unless MCP must not spawn Godot. Only one attach session is supported per project at a time (attach mode has no env-var channel, so port and token must be baked into the one shared script); a second attach_project on a project another session already attached to is refused, naming that session. Returns plain-text status with the resolved bridge port. Call detach_project or stop_project when done.',
-    annotations: { destructiveHint: true },
-    inputSchema: {
-      type: 'object',
-      properties: {
-        projectPath: {
-          type: 'string',
-          description: 'Path to the Godot project directory',
-        },
-        bridgePort: {
-          type: 'number',
-          minimum: 1,
-          maximum: 65535,
-          description:
-            "TCP port for the MCP bridge. Omit to auto-select a free port (recommended). The chosen port is baked into the project's `mcp_bridge.gd` at inject time, so the running Godot listens on exactly this port.",
-        },
-      },
-      required: ['projectPath'],
-    },
-  },
-  {
-    name: 'detach_project',
-    description:
-      'Clear attached-mode runtime state and remove the injected McpBridge autoload. Does NOT stop the manually launched Godot process - that stays running. Use after attach_project when you are done driving the game from MCP. For spawned sessions (run_project), use stop_project instead. Mostly optional now: when the bridge disconnects (you closed Godot), the next runtime tool call probes once and ends the attached session itself, removing the autoload. Calling it afterwards still succeeds idempotently, wording the message to distinguish "an attached session existed and already ended" from "this server never attached to a project". Returns: message confirming detach plus externalProcessPreserved (always true here - that is the point of detach vs stop_project). Errors only when a spawned session is what is active; use stop_project for those.',
-    annotations: { destructiveHint: true },
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-    outputSchema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string' },
-        externalProcessPreserved: { type: 'boolean' },
-      },
-    },
-  },
-  {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires run_project (not attach_project; attached mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
+      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires a spawned session (attach mode does not capture output). Returns: output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -238,7 +197,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'Stop the spawned Godot project and clean up bridge state. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Attached sessions detach without killing the external process. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
+      'End the runtime session and clean up bridge state. A spawned Godot is stopped; an attached one (run_project attach: true) is detached and left running, never killed. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Returns: message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -505,7 +464,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_ui_elements',
     description:
-      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project or attach_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
+      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -796,7 +755,7 @@ function ensureRuntimeSession(
         `No active runtime session. A project must be running or attached to ${actionDescription}.`,
         [
           'Use run_project to start a Godot project first',
-          'Or use attach_project before launching Godot manually',
+          'Or pass attach: true to run_project before launching Godot yourself',
         ],
       ),
     );
@@ -1072,7 +1031,7 @@ async function startSpawnedSession(
     if (errorMessage.includes('No display server available')) {
       return err(
         createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
-          'Use attach_project with an externally launched Godot process',
+          'Use run_project with attach: true and launch Godot yourself',
           'Set DISPLAY or WAYLAND_DISPLAY environment variables',
           'Run from a graphical shell session',
         ]),
@@ -1173,134 +1132,6 @@ async function startAttachedSession(
   }
 }
 
-export async function handleAttachProject(
-  runner: GodotRunner,
-  args: OperationParams,
-): Promise<HandlerResult> {
-  args = normalizeParameters(args);
-
-  const parsed = parseProjectArgs(args);
-  if (!parsed.ok) return parsed;
-  const { projectPath } = parsed.value;
-
-  const attachBridgePort = optionalNumber(args, 'bridgePort');
-  if (!attachBridgePort.ok) return attachBridgePort;
-  if (attachBridgePort.value !== undefined) {
-    if (
-      !Number.isInteger(attachBridgePort.value) ||
-      attachBridgePort.value < 1 ||
-      attachBridgePort.value > 65535
-    ) {
-      return err(
-        createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(attachBridgePort.value)})`,
-          [
-            'Omit bridgePort to auto-select a free port',
-            'Pass a valid TCP port number matching the externally launched Godot',
-          ],
-        ),
-      );
-    }
-  }
-
-  try {
-    await runner.attachProject(projectPath, attachBridgePort.value);
-
-    const bridgeResult = await runner.waitForBridgeAttached();
-
-    if (!bridgeResult.ready) {
-      const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
-      // Tear down the attached-mode session state so retrying with
-      // attach_project (or run_project) works without a manual detach first.
-      await runner.stopProject();
-      const solutions = [
-        'If you are launching Godot yourself, run the launch in parallel with attach_project next time so the wait absorbs the startup - do not sequentialize',
-        'If a human is launching Godot, retry attach_project once they have launched - bridge.inject is idempotent',
-        'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
-        `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
-      ];
-      const registeredLine = bridgeRegistered
-        ? ''
-        : '\nproject.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project).';
-      return err(
-        createErrorResponse(
-          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}${registeredLine}`,
-          solutions,
-        ),
-      );
-    }
-
-    const attachedPort = runner.activeBridgePort;
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: [
-            `Project attached and MCP bridge is ready (port ${attachedPort}).`,
-            '- Runtime tools (take_screenshot, simulate_input, get_ui_elements, run_script) are available now',
-            '- get_debug_output is unavailable in attached mode because MCP did not spawn the process',
-            '- Use detach_project or stop_project when done to clean up the injected bridge state',
-          ].join('\n'),
-        },
-      ],
-    });
-  } catch (error: unknown) {
-    if (error instanceof BridgeAttachConflictError) {
-      return err(
-        createErrorResponse(`Failed to attach project: ${error.message}`, [
-          `Detach the other session first (server pid ${error.conflictingOwner.pid}), then retry attach_project`,
-          'Only one attach session per project is supported',
-        ]),
-      );
-    }
-    const solutions =
-      error instanceof BridgeAutoloadCollisionError
-        ? [
-            'Rename the existing McpBridge autoload in project.godot, then retry attach_project',
-            'Use list_autoloads to see what the project currently registers',
-          ]
-        : [
-            'Check if project.godot is accessible',
-            'Ensure MCP can write the bridge autoload into the project',
-          ];
-    return err(
-      createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, solutions),
-    );
-  }
-}
-
-export async function handleDetachProject(runner: GodotRunner): Promise<HandlerResult> {
-  // An attached session whose bridge disconnected clears itself, so
-  // detach_project is optional rather than required. Report that idempotently
-  // instead of erroring. Narrowed to `!activeProcess` so a spawned session
-  // that auto-cleared on exit still gets pointed at stop_project, which is the
-  // call that frees its retained process slot.
-  if (!runner.activeSessionMode && !runner.activeProcess) {
-    return createStructuredResponse({
-      message: runner.hasEverAttached
-        ? 'No attached session to detach: it had already ended and the MCP bridge state was cleaned up then'
-        : 'No attached session to detach: this server never attached to a project',
-      externalProcessPreserved: true,
-    });
-  }
-
-  if (runner.activeSessionMode !== 'attached') {
-    return err(
-      createErrorResponse('No attached project to detach.', [
-        'Use attach_project first for manual-launch workflows',
-        'If MCP launched the game, use stop_project instead',
-      ]),
-    );
-  }
-
-  const result = (await runner.stopProject())!;
-
-  return createStructuredResponse({
-    message: 'Detached attached project and cleaned MCP bridge state',
-    externalProcessPreserved: result.externalProcessPreserved === true,
-  });
-}
-
 export function handleGetDebugOutput(
   runner: GodotRunner,
   args: OperationParams = {},
@@ -1314,7 +1145,7 @@ export function handleGetDebugOutput(
     return err(
       createErrorResponse('No active runtime session.', [
         'Use run_project to start a Godot project first',
-        'Or use attach_project before launching Godot manually',
+        'Or pass attach: true to run_project before launching Godot yourself',
       ]),
     );
   }
@@ -1334,7 +1165,7 @@ export function handleGetDebugOutput(
     return err(
       createErrorResponse('No active spawned process is available for debug output.', [
         'Use run_project to start a Godot project first',
-        'Or use attach_project only when stdout/stderr capture is not needed',
+        'Attach mode (run_project with attach: true) does not capture stdout/stderr',
       ]),
     );
   }

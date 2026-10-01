@@ -17,7 +17,6 @@ import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import {
-  handleDetachProject,
   handleGetDebugOutput,
   handleStopProject,
   handleTakeScreenshot,
@@ -26,7 +25,6 @@ import {
   handleGetUiElements,
   handleRunScript,
   handleRunProject,
-  handleAttachProject,
   handleLaunchEditor,
   runtimeToolDefinitions,
 } from '../../../src/tools/runtime-tools.js';
@@ -107,9 +105,6 @@ interface RuntimeFake {
     mode: RuntimeSessionMode | null;
     projectPath?: string | null;
     process?: Partial<GodotProcess> | null;
-    /** Mirrors GodotRunner.hasEverAttached. Defaults to true when mode is
-     *  'attached', preserved otherwise unless explicitly overridden. */
-    hasEverAttached?: boolean;
   }): void;
   setBridgeResponse(response: string, runtimeErrors?: string[]): void;
   setStopResult(result: RuntimeStopResult | null): void;
@@ -184,9 +179,7 @@ function createRuntimeFake(): RuntimeFake {
     activeSessionMode: RuntimeSessionMode | null;
     activeProjectPath: string | null;
     activeProcess: GodotProcess | null;
-    hasEverAttached: boolean;
   } = {
-    hasEverAttached: false,
     activeSessionMode: null,
     activeProjectPath: null,
     activeProcess: null,
@@ -201,9 +194,6 @@ function createRuntimeFake(): RuntimeFake {
     },
     get activeProcess() {
       return state.activeProcess;
-    },
-    get hasEverAttached() {
-      return state.hasEverAttached;
     },
     async sendCommandWithErrors(
       command: string,
@@ -300,15 +290,10 @@ function createRuntimeFake(): RuntimeFake {
     attachProjectCalls() {
       return attachProjectCallCount;
     },
-    setSession({ mode, projectPath = null, process = null, hasEverAttached }) {
+    setSession({ mode, projectPath = null, process = null }) {
       state.activeSessionMode = mode;
       state.activeProjectPath = projectPath;
       state.activeProcess = process as GodotProcess | null;
-      if (hasEverAttached !== undefined) {
-        state.hasEverAttached = hasEverAttached;
-      } else if (mode === 'attached') {
-        state.hasEverAttached = true;
-      }
     },
     setBridgeResponse(response, runtimeErrors = []) {
       bridgeResponse = response;
@@ -384,7 +369,7 @@ function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
 }
 
 // ---------------------------------------------------------------------------
-// Validation paths for handleRunProject / handleAttachProject / handleLaunchEditor
+// Validation paths for handleRunProject / handleLaunchEditor
 // ---------------------------------------------------------------------------
 
 describe('handleRunProject validation', () => {
@@ -424,7 +409,7 @@ describe('handleRunProject validation', () => {
     expect(solutionsText).toMatch(/GODOT_PATH/);
   });
 
-  it('returns display-unavailable error with attach_project suggestion', async () => {
+  it('returns display-unavailable error suggesting attach mode', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setRunProjectError(
@@ -440,7 +425,7 @@ describe('handleRunProject validation', () => {
     );
     expectErrorMatching(result, /No display server available/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
-    expect(solutionsText).toMatch(/attach_project/);
+    expect(solutionsText).toMatch(/attach: true/);
   });
 
   it('cleans up bridge artifacts when process exits before bridge readiness', async () => {
@@ -481,20 +466,6 @@ describe('handleRunProject bridge port', () => {
     expect(payload.bridgePort).toBe(19900);
     expect(payload.sessionMode).toBe('spawned');
     expect(payload.bridgeReady).toBe(true);
-  });
-});
-
-describe('handleAttachProject bridge port', () => {
-  it('includes the assigned bridge port in the success response', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(true);
-    const result = await handleAttachProject(fake.asRunner, {
-      projectPath: fixtureProjectPath,
-      bridgePort: 12345,
-    });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/port 12345/);
   });
 });
 
@@ -552,45 +523,6 @@ describe('handleRunProject bridge failure paths', () => {
     const message = unwrap(result).content[0]?.text ?? '';
     expect(message).not.toContain('early _ready error');
     expect(fake.stopCalls()).toBe(1);
-  });
-});
-
-describe('handleAttachProject bridge failure paths', () => {
-  it('returns "bridge is not ready" error and tears down when bridge wait fails', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(false, 'attach timeout');
-    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
-    expectErrorMatching(result, /bridge is not ready/);
-    expect(fake.stopCalls()).toBe(1);
-  });
-
-  it('reports the missing-autoload diagnosis when the entry never made it in', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(false, 'attach timeout');
-    fake.setBridgeAutoloadRegistered(false);
-    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
-    expectErrorMatching(result, /project\.godot has no McpBridge autoload entry/);
-    expect(fake.stopCalls()).toBe(1);
-  });
-});
-
-describe('handleAttachProject validation', () => {
-  it('rejects missing projectPath', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, {});
-    expectErrorMatching(result, /projectPath/i);
-  });
-
-  it('rejects projectPath containing ..', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, { projectPath: '../evil' });
-    expectErrorMatching(result, /invalid project path/i);
-  });
-
-  it('rejects nonexistent project', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, { projectPath: '/ghost' });
-    expectErrorMatching(result, /not a valid godot project/i);
   });
 });
 
@@ -887,78 +819,6 @@ describe('handleStopProject', () => {
     // banner pattern and never reach it.
     expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro']);
     expect(parsed.finalErrors).toEqual([]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// handleDetachProject
-// ---------------------------------------------------------------------------
-
-describe('handleDetachProject', () => {
-  // Detach is optional: an attached session whose bridge disconnected
-  // clears itself, so a follow-up detach_project must succeed idempotently
-  // rather than erroring.
-  it('succeeds idempotently when the session already ended', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({ mode: null, hasEverAttached: true });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/already ended/i);
-    expect(fake.stopCalls()).toBe(0);
-  });
-
-  // Distinct from the "already ended" case above: this server never called
-  // attach_project at all, so there is no prior session to report as ended.
-  it('says this server never attached when it never has, distinctly from "already ended"', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({ mode: null, hasEverAttached: false });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/never attached/i);
-    expect(parsed.message).not.toMatch(/already ended/i);
-    expect(fake.stopCalls()).toBe(0);
-  });
-
-  it('still points a spawned session that auto-cleared at stop_project', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({
-      mode: null,
-      projectPath: null,
-      process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
-    });
-    const result = await handleDetachProject(fake.asRunner);
-    expectErrorMatching(result, /No attached project to detach/i);
-    expect(unwrap(result).content[1]?.text ?? '').toMatch(/stop_project/);
-  });
-
-  it('rejects when an active session is spawned (must use stop_project)', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
-    const result = await handleDetachProject(fake.asRunner);
-    expectErrorMatching(result, /No attached project to detach/i);
-    // Solutions block points at stop_project for the spawned case.
-    const solutionsText = unwrap(result).content[1]?.text ?? '';
-    expect(solutionsText).toMatch(/stop_project/);
-  });
-
-  it('detaches and reports externalProcessPreserved when mode is attached', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({ mode: 'attached', projectPath: '/p' });
-    fake.setStopResult({
-      mode: 'attached',
-      output: [],
-      errors: [],
-      externalProcessPreserved: true,
-    });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/Detached attached project/i);
   });
 });
 

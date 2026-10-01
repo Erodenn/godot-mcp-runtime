@@ -28,7 +28,7 @@ export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root - that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root - that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -66,7 +66,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active; stop_project or detach_project clears it.",
+      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active; stop_project clears it.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -156,7 +156,7 @@ export const nodeToolDefinitions = [
   {
     name: 'attach_script',
     description:
-      "Attach a GDScript or C# script to a node in a scene. Use after writing and validating it via the validate tool. C# needs the Godot .NET build with the class compiled into the project assembly. Replaces any previous script. Saves automatically. Returns: success with nodePath and scriptPath. Errors if the script can't be instantiated (parse errors, @abstract, or an unbuilt C# class), scriptPath doesn't exist, or nodePath isn't found. Errors while a Godot runtime session is active; stop_project (or detach_project) clears it.",
+      "Attach a GDScript or C# script to a node in a scene. Use after writing and validating it via the validate tool. C# needs the Godot .NET build with the class compiled into the project assembly. Replaces any previous script. Saves automatically. Returns: success with nodePath and scriptPath. Errors if the script can't be instantiated (parse errors, @abstract, or an unbuilt C# class), scriptPath doesn't exist, or nodePath isn't found. Errors while a Godot runtime session is active; stop_project clears it.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -207,7 +207,7 @@ export const nodeToolDefinitions = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives. Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success with originalPath and the newPath where the duplicate now lives. Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -283,7 +283,7 @@ export const nodeToolDefinitions = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns a plain-text confirmation naming source, signal, target, and method. Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -309,7 +309,7 @@ export const nodeToolDefinitions = [
   {
     name: 'disconnect_signal',
     description:
-      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns a plain-text confirmation naming the disconnected signal and target. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

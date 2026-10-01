@@ -274,10 +274,7 @@ function rejectIfLiveSessionOnProject(
       return err(
         createErrorResponse(
           "A Godot runtime session is active on this project. The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.",
-          [
-            'Call stop_project (or detach_project for attached sessions), then retry the scene edit',
-            ...extraSolutions,
-          ],
+          ['Call stop_project, then retry the scene edit', ...extraSolutions],
         ),
       );
     }
@@ -295,8 +292,8 @@ function rejectIfLiveSessionOnProject(
         `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
           "project's game. That game belongs to the other session, not this one, and only it can " +
           "stop it. A running game can write this project's scene files at any time, so a " +
-          'headless edit now would race it. Wait for the other session to finish (stop_project / ' +
-          'detach_project there), then retry.',
+          'headless edit now would race it. Wait for the other session to finish (stop_project ' +
+          'there), then retry.',
         [
           'Wait and retry once the other MCP session has stopped or detached its game',
           "check_project on this project shows this session's own state, not the other session's",

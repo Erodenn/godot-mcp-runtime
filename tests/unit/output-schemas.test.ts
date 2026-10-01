@@ -49,7 +49,6 @@ describe('outputSchema: expected coverage', () => {
     'check_project',
     'create_scene',
     'delete_nodes',
-    'detach_project',
     'duplicate_node',
     'get_debug_output',
     'get_node_signals',

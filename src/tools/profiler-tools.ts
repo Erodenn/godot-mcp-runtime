@@ -208,7 +208,7 @@ function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResp
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
         'Call run_project with profiling: true - the debugger channel is set at launch and cannot be added later',
-        'Attached sessions cannot profile; use run_project instead of attach_project',
+        'Attached sessions cannot profile; call run_project without attach: true',
       ]),
     );
   }

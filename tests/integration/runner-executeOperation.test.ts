@@ -90,7 +90,7 @@ describe('GodotRunner.executeOperation', () => {
         expect(info).toHaveProperty('path', fixtureProjectPath);
         expect(info).toHaveProperty('godotVersion');
         expect(typeof info.godotVersion).toBe('string');
-        // No run_project/attach_project was called against this runner, so
+        // No run_project was called against this runner, so
         // the always-present runtime block reports no active session.
         expect(info.runtime).toEqual({ activeSession: false });
       },

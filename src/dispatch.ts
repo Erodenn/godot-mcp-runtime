@@ -21,8 +21,6 @@ import { isOk } from './utils/result.js';
 import {
   handleLaunchEditor,
   handleRunProject,
-  handleAttachProject,
-  handleDetachProject,
   handleGetDebugOutput,
   handleStopProject,
   handleTakeScreenshot,
@@ -80,8 +78,6 @@ export const toolDispatch = {
   // Project tools
   launch_editor: handleLaunchEditor,
   run_project: handleRunProject,
-  attach_project: handleAttachProject,
-  detach_project: handleDetachProject,
   get_debug_output: handleGetDebugOutput,
   stop_project: handleStopProject,
   list_projects: (_runner, args) => handleListProjects(args),
