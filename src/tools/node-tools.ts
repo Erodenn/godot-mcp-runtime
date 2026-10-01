@@ -288,6 +288,7 @@ export const nodeToolDefinitions = [
         nodePath: { type: 'string' },
         newNodePath: { type: 'string' },
       },
+      required: ['success', 'nodePath', 'newNodePath'],
     },
   },
   {

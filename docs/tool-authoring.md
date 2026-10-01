@@ -52,7 +52,7 @@ These are complementary, not alternatives. They speak to different consumers and
 - **`outputSchema`** is the machine-readable contract for programmatic clients (validators, type generators, IDE tooling). JSON Schema, same shape as `inputSchema`. Top-level `type` must be `"object"` (MCP SDK constraint), and every tool declares one: a collection is wrapped in a named field (`{ projects: [...] }`), never returned as a bare array, and a shape that varies declares each variant's fields as optional. Clients currently do not surface `outputSchema` to the LLM: it is invisible to the agent reading the tool.
 - **`Returns:` sentence in the description** is the agent-facing summary. It names the key fields and adds what the schema can't express: when fields are present, what values imply, how the agent should use them. One short sentence; the description budget (§1) is tight.
 
-When both are present, they must be consistent - same field names, same semantics - but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
+The two must be consistent - same field names, same semantics - but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
 
 ### `structuredContent` is mandatory when `outputSchema` is declared
 
@@ -66,7 +66,7 @@ A payload is observed, not echoed: a mutation reports what the engine did, read 
 
 Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` - including every per-property `description` - into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.
 
-When a tool is too complex to cover in the top-level description budget (~500 chars), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
+When a tool is too complex to cover in the top-level description budget (500 characters), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
 
 ---
 

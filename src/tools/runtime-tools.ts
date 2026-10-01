@@ -11,7 +11,7 @@ import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } fro
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
   optionalString,
@@ -260,6 +260,7 @@ export const runtimeToolDefinitions = [
         exitCode: { type: ['number', 'null'] },
         tip: { type: 'string' },
       },
+      required: ['projectPath', 'sessionMode', 'output', 'errors', 'running'],
     },
   },
   {
@@ -284,6 +285,15 @@ export const runtimeToolDefinitions = [
         finalOutput: { type: 'array', items: { type: 'string' } },
         finalErrors: { type: 'array', items: { type: 'string' } },
       },
+      required: [
+        'projectPath',
+        'message',
+        'sessionMode',
+        'externalProcessPreserved',
+        'alreadyExited',
+        'finalOutput',
+        'finalErrors',
+      ],
     },
   },
   {
@@ -360,7 +370,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      'Send input actions to the running project in order and report what each did. Action types are listed in the `actions` schema. For key, mouse_button and action, omit `pressed` to tap; set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success and results[] per action: ok, Control hit, signals fired, UI `changes`, `watch` samples, handler `errors`. An invalid batch injects nothing; a runtime failure skips the rest.',
+      'Send input actions to the running project in order and report what each did. Action types: see the `actions` schema. For key, mouse_button and action, omit `pressed` to tap; set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success, results[] per action: ok, Control hit, signals fired, UI `changes`, `watch` samples, handler `errors` (spawned only). An invalid batch injects nothing; a runtime failure skips the rest.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -1872,7 +1882,7 @@ export async function handleGetUiElements(
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return createStructuredResponse(payload);
+    return createStructuredResponse(leadWithWarnings(payload));
   } catch (error: unknown) {
     return err(
       runtimeCommandFailure(
@@ -2077,7 +2087,7 @@ export async function handleRunScript(
         ],
         tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
       };
-      return createStructuredResponse(nullPayload);
+      return createStructuredResponse(leadWithWarnings(nullPayload));
     }
 
     const payload: Record<string, unknown> = {
@@ -2091,7 +2101,7 @@ export async function handleRunScript(
       payload.warnings = combinedWarnings.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
     }
 
-    return createStructuredResponse(payload);
+    return createStructuredResponse(leadWithWarnings(payload));
   } catch (error: unknown) {
     return err(
       runtimeCommandFailure(

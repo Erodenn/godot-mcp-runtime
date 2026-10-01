@@ -248,6 +248,7 @@ export const projectToolDefinitions = [
           },
         },
       },
+      required: ['scenePath', 'dependencies'],
     },
   },
   {

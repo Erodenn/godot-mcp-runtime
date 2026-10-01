@@ -13,7 +13,7 @@ The same thing has the same name in every payload:
 - `nodePath`: scene-tree path of a node, in the `root/...` form the node tools accept. A second node path ends in `NodePath`, as in `targetNodePath` and `newNodePath`.
 - `sessionMode`: `spawned` or `attached`.
 - `warnings`: an array of strings, first in the payload, present only when there is something to report. A value that could not be measured is `null` with a `warnings` entry, never a made-up number.
-- `results`: one entry per input item, in input order, for the tools that take an array. Each entry has `success: true` or `error`.
+- `results`: one entry per input item, in input order, for the tools that take an array. An entry of a mutating tool has `success: true` or `error`. The two reading tools put their own fields there: a `get_node_properties` entry carries `properties` or `error`, and a `validate` entry carries `valid` and `errors`.
 
 Inside a listing of things that have a path of their own (files, scene tree nodes, UI elements, scene dependencies, autoloads) the entry's field is plain `path`.
 

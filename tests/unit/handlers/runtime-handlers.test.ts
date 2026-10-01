@@ -816,7 +816,12 @@ describe('handleGetDebugOutput', () => {
 describe('handleStopProject', () => {
   it('returns the spawned-stopped message when stopProject reports mode:spawned', async () => {
     const fake = createRuntimeFake();
-    fake.setStopResult({ mode: 'spawned', output: ['o1'], errors: ['e1'] });
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: ['o1'],
+      errors: ['e1'],
+    });
     const result = await handleStopProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse(unwrap(result).content[0].text);
@@ -1274,6 +1279,15 @@ describe('handleGetUiElements', () => {
     await handleGetUiElements(fake.asRunner, {});
     expect(fake.bridgeCalls[0].params).not.toHaveProperty('type_filter');
   });
+
+  it('puts warnings first when the query raised runtime errors', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), ['SCRIPT ERROR: boom']);
+    const result = await handleGetUiElements(fake.asRunner, {});
+    const payload = expectMatchesOutputSchema('get_ui_elements', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual(['SCRIPT ERROR: boom']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1355,7 @@ describe('handleRunScript', () => {
     expect(parsed.result).toBeNull();
     expect(Array.isArray(parsed.warnings)).toBe(true);
     expect(parsed.warnings[0]).toMatch(/GDScript does not propagate exceptions/);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
   });
 
   it('returns success without escalation when attached + result:null (stderr not captured)', async () => {
@@ -1368,6 +1383,7 @@ describe('handleRunScript', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.result).toBe(42);
     expect(parsed.warnings).toEqual(['SCRIPT ERROR: stale ref']);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
   });
 
   it('writes the script to .mcp/godot-runtime/scripts/{timestamp}.gd for forensic replay', async () => {

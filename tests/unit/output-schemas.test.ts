@@ -224,3 +224,35 @@ describe('check_project: every declared response shape validates and carries str
     expect(payload.runtime).not.toHaveProperty('sessionMode');
   });
 });
+
+describe('renamed response fields: the old names no longer satisfy the schema', () => {
+  // Each payload below is what the tool returned before its fields were
+  // renamed, complete except for the new name. A schema without a `required`
+  // list would accept every one of them.
+  const retiredPayloads: Array<[string, Record<string, unknown>]> = [
+    ['duplicate_node', { success: true, originalPath: 'root/A', newPath: 'root/A2' }],
+    ['get_scene_dependencies', { scene: 'main.tscn', dependencies: [] }],
+    [
+      'get_debug_output',
+      { projectPath: '/p', output: [], errors: [], running: null, attached: true },
+    ],
+    [
+      'stop_project',
+      {
+        projectPath: '/p',
+        message: 'Godot project stopped',
+        mode: 'spawned',
+        externalProcessPreserved: false,
+        alreadyExited: false,
+        finalOutput: [],
+        finalErrors: [],
+      },
+    ],
+  ];
+
+  it.each(retiredPayloads)('%s rejects its pre-rename payload', (name, payload) => {
+    const definition = toolsWithOutputSchema.find(([toolName]) => toolName === name)?.[1];
+    if (!definition) throw new Error(`${name} outputSchema not found`);
+    expect(ajv.compile(definition.outputSchema as object)(payload)).toBe(false);
+  });
+});
