@@ -3,21 +3,13 @@ import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 import { createStructuredResponse } from './structured-response.js';
 import {
-  extractJson,
+  extractOperationPayload,
   normalizeForCompare,
   parseScriptDiagnostics,
+  stripOperationSentinel,
   type StderrDiagnostic,
 } from './output-parsing.js';
 import { ok, err } from './result.js';
-
-/**
- * Godot engine exit-noise line shapes: RID-leak warnings, the version
- * banner, and debug/info status lines that print on quit(1) before a
- * payload is ever emitted. Mirrors the prefixes `cleanOutput` filters
- * elsewhere in this codebase.
- */
-const STDOUT_NOISE_LINE_PATTERN =
-  /^(ERROR|WARNING|SCRIPT ERROR|USER SCRIPT ERROR):|^Godot Engine v|^\[DEBUG\]|^\[INFO\]/;
 
 /** Max stderr diagnostic entries surfaced in an early-exit error message. */
 const MAX_STDERR_DIAGNOSTIC_LINES = 5;
@@ -35,36 +27,6 @@ const STDERR_TAIL_LINES = 5;
  * structurally at one retry (see `executeSceneOp`).
  */
 export const IMPORT_NEEDED_MARKER = '[IMPORT_NEEDED]';
-
-/**
- * Heuristic: does this non-JSON stdout look like the operation quit(1) before
- * emitting its payload? Canonical shape: a script compile error makes the
- * headless operation exit early, so stdout contains ONLY engine exit noise —
- * RID-leak warnings are the usual content. Bracket presence alone can't
- * classify this: exit noise routinely contains a stray `[` or `{` (e.g. a
- * `[Resource file res://x:4]` location suffix), and a genuinely JSON-shaped
- * but broken payload can look just as bracket-free or bracket-heavy either
- * way. Classify by line shape instead: early quit unless some line is
- * positive evidence of a payload attempt — a JSON opener on a line that
- * isn't recognized engine noise.
- *
- * The asymmetry is deliberate. A whitelist ("every line is known noise")
- * would send any unrecognized line — a stray `print()` before the script
- * died, a message shape a future Godot adds — back to the invalid-JSON
- * blame this function exists to prevent. Requiring evidence for the
- * emission-bug verdict instead means unknown output degrades to the
- * early-exit message, which carries the raw stdout tail and stays
- * self-correcting.
- */
-function stdoutLooksLikeEarlyQuitNoise(stdout: string): boolean {
-  const lines = stdout
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  const looksLikePayloadAttempt = (line: string): boolean =>
-    !STDOUT_NOISE_LINE_PATTERN.test(line) && (line.includes('{') || line.includes('['));
-  return !lines.some(looksLikePayloadAttempt);
-}
 
 /**
  * Render one parsed stderr diagnostic, preserving the file+line location
@@ -116,14 +78,14 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
  * first, and it keys on the payload rather than the operation name so any
  * future multi-step operation inherits it.
  *
- * Unparseable stdout answers false: an operation that never emitted a payload
- * never reported applied work, and the retry is exactly what it needs.
+ * Stdout without a payload line answers false: an operation that never
+ * emitted a payload never reported applied work, and the retry is exactly what it needs.
  */
 function reportsAppliedWork(stdout: string): boolean {
-  const trimmed = stdout.trim();
-  if (!trimmed) return false;
+  const candidate = extractOperationPayload(stdout);
+  if (!candidate) return false;
   try {
-    const payload = JSON.parse(extractJson(trimmed)) as { results?: unknown };
+    const payload = JSON.parse(candidate) as { results?: unknown };
     if (!Array.isArray(payload.results)) return false;
     return payload.results.some(
       (entry) =>
@@ -157,37 +119,34 @@ function interpretOperationResult(
       createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
     );
   }
+  const payload = extractOperationPayload(stdout);
   if (options.parseStdoutAsJson) {
-    // extractJson already strips leading/trailing engine noise around a
-    // payload (GodotRunner.executeOperation normally routes stdout through
-    // cleanStdout/extractJson before handlers ever see it — this call is
-    // belt-and-braces for callers that bypass that, e.g. fake runners in
-    // tests). No separate leading-noise stripper needed here.
-    const jsonCandidate = extractJson(stdout.trim());
+    if (payload === null) {
+      // No line carried the result sentinel: the operation exited before it
+      // could emit a payload (early quit on error), and everything on stdout
+      // is engine or user noise. Nothing here is ever parsed as a payload.
+      // stderr carries the actual failure (compile errors print to stderr in
+      // Godot's canonical format).
+      const parts = [
+        `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
+      ];
+      const stderrPart = renderStderrForEarlyExit(stderr);
+      if (stderrPart) parts.push(stderrPart);
+      const stdoutTail = stripOperationSentinel(stdout.trim())
+        .split('\n')
+        .slice(-STDOUT_TAIL_LINES)
+        .join('\n');
+      if (stdoutTail) parts.push(`stdout (last lines): ${stdoutTail}`);
+      return err(
+        createErrorResponse(parts.join('\n'), [
+          'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
+          'Check get_debug_output for the raw output',
+        ]),
+      );
+    }
     try {
-      const payload = JSON.parse(jsonCandidate) as Record<string, unknown>;
-      return createStructuredResponse(payload);
+      return createStructuredResponse(JSON.parse(payload) as Record<string, unknown>);
     } catch (parseErr) {
-      if (stdoutLooksLikeEarlyQuitNoise(stdout)) {
-        // The operation exited before emitting its JSON payload (early
-        // quit on error): stdout contains only engine exit noise. Surface
-        // the offending output instead of blaming the operation script's
-        // JSON emission. stderr carries the actual failure (compile
-        // errors print to stderr in Godot's canonical format).
-        const parts = [
-          `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
-        ];
-        const stderrPart = renderStderrForEarlyExit(stderr);
-        if (stderrPart) parts.push(stderrPart);
-        const stdoutTail = stdout.trim().split('\n').slice(-STDOUT_TAIL_LINES).join('\n');
-        if (stdoutTail) parts.push(`stdout (last lines): ${stdoutTail}`);
-        return err(
-          createErrorResponse(parts.join('\n'), [
-            'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
-            'Check get_debug_output for the raw output',
-          ]),
-        );
-      }
       return err(
         createErrorResponse(
           `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
@@ -199,7 +158,7 @@ function interpretOperationResult(
       );
     }
   }
-  return ok({ content: [{ type: 'text', text: stdout }] });
+  return ok({ content: [{ type: 'text', text: payload ?? stripOperationSentinel(stdout) }] });
 }
 
 /**
@@ -245,7 +204,7 @@ export async function executeSceneOp(
       if (reportsAppliedWork(stdout)) {
         return err(
           createErrorResponse(
-            `${failurePrefix}: an asset still needed importing after part of this operation had already been applied and saved. Refusing the automatic import-and-retry, which would apply those steps a second time.\nreported by this run: ${stdout.trim()}`,
+            `${failurePrefix}: an asset still needed importing after part of this operation had already been applied and saved. Refusing the automatic import-and-retry, which would apply those steps a second time.\nreported by this run: ${stripOperationSentinel(stdout.trim())}`,
             [
               'The steps reported as successful above have been applied and saved - do not re-run them',
               'Import the project assets (any tool call on this project once the asset is imported will do), then re-run only the steps that failed',

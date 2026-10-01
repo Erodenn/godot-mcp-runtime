@@ -20,7 +20,7 @@ import {
   MAX_FRAME_BYTES,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
-import { normalizeForCompare } from '../../src/utils/output-parsing.js';
+import { normalizeForCompare, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const bridgeSource = readFileSync(
   new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
@@ -53,5 +53,45 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     const resPath = gdConst('SCREENSHOT_DIR_RES_PATH').replace(/^"|"$/g, '');
     const projectRelative = resPath.replace('res://', '');
     expect(normalizeForCompare(screenshotsDir('/project'))).toBe(`/project/${projectRelative}`);
+  });
+});
+
+/**
+ * The headless-operation result sentinel is the same kind of two-sided
+ * contract: godot_operations.gd prints it, output-parsing.ts reads it. A
+ * drifted marker leaves every operation printing a payload nobody extracts.
+ */
+describe('godot_operations.gd agrees with the TypeScript result sentinel', () => {
+  const operationsSource = readFileSync(
+    new URL('../../src/scripts/godot_operations.gd', import.meta.url),
+    'utf8',
+  );
+
+  it('declares the same operation-result sentinel', () => {
+    const match = operationsSource.match(
+      /^const OPERATION_RESULT_SENTINEL\s*:=\s*(.+?)\s*(?:#.*)?$/m,
+    );
+    expect(
+      match,
+      'godot_operations.gd must declare const OPERATION_RESULT_SENTINEL',
+    ).not.toBeNull();
+    expect(match![1]).toBe(`"${OPERATION_RESULT_SENTINEL}"`);
+  });
+
+  it('keeps the sentinel distinct from the stderr action-boundary sentinel', () => {
+    expect(OPERATION_RESULT_SENTINEL.startsWith(ACTION_BOUNDARY_SENTINEL)).toBe(false);
+    expect(ACTION_BOUNDARY_SENTINEL.startsWith(OPERATION_RESULT_SENTINEL)).toBe(false);
+  });
+
+  it('keeps the sentinel ASCII', () => {
+    expect(OPERATION_RESULT_SENTINEL).toMatch(/^[\x20-\x7e]+$/);
+  });
+
+  it('prints results only through the emitter helper', () => {
+    expect(operationsSource).not.toContain('print(JSON.stringify');
+    const printsSentinel = operationsSource
+      .split('\n')
+      .filter((line) => line.includes('print(OPERATION_RESULT_SENTINEL'));
+    expect(printsSentinel).toHaveLength(1);
   });
 });

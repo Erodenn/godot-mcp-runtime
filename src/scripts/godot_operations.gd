@@ -9,6 +9,18 @@ var debug_mode = false
 # whole operation, which is only safe while nothing has been written yet.
 var import_marker_armed = true
 
+# Prefix of the single stdout line that carries an operation's JSON result.
+# stdout is shared with the engine banner and with any print() an autoload or
+# scene script makes, so the Node side reads only the line that carries this
+# marker and parses only what follows it. KEEP IN SYNC with
+# OPERATION_RESULT_SENTINEL in src/utils/output-parsing.ts.
+const OPERATION_RESULT_SENTINEL := "MCP_OPERATION_RESULT:"
+
+# The one emitter for an operation's JSON result. Every operation that returns
+# a JSON payload goes through here; never print a result line directly.
+func emit_result(payload) -> void:
+	print(OPERATION_RESULT_SENTINEL + JSON.stringify(payload))
+
 func _init():
 	var args = OS.get_cmdline_args()
 
@@ -110,11 +122,12 @@ func _init():
 	return
 
 # Logging functions.
-# Every one of these writes to stderr. stdout is the JSON channel for a headless
-# operation and the handlers strict-parse it, so a debug line there is not noise
-# the parser skips: it puts a '[' at column 0, extractJson latches onto it, and
-# the whole payload comes back as an unparseable string. DEBUG=true must never
-# change what a tool returns.
+# Every one of these writes to stderr. stdout carries the operation's result:
+# the sentinel-framed JSON line from emit_result, or for the operations that
+# report in prose, the sentence itself, which the handler returns as it stands.
+# Anything else printed there is noise the Node side has to filter out, and
+# next to a prose result it cannot always tell the two apart. DEBUG=true must
+# never change what a tool returns.
 func log_debug(message):
 	if debug_mode:
 		printerr("[DEBUG] " + message)
@@ -441,7 +454,7 @@ func create_scene(params):
 		return
 
 	if save_scene_to_path(scene_root, full_scene_path):
-		print(JSON.stringify({"success": true, "scenePath": params.scene_path}))
+		emit_result({"success": true, "scenePath": params.scene_path})
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		quit(1)
@@ -733,10 +746,10 @@ func delete_nodes(params):
 
 	if any_deleted:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after deleting nodes", "results": results}))
+			emit_result({"error": "Failed to save scene after deleting nodes", "results": results})
 			return
 
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Make a property override on `target` (a node inside an instanced child)
 # survive PackedScene.pack(). Nodes inside an instanced scene are not owned
@@ -803,22 +816,22 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 func set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		emit_result({"error": "Failed to load scene: " + params.scene_path, "results": []})
 		return
 
 	var applied = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
 	if applied.any_set:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after updates", "results": applied.results}))
+			emit_result({"error": "Failed to save scene after updates", "results": applied.results})
 			return
 
-	print(JSON.stringify({"results": applied.results}))
+	emit_result({"results": applied.results})
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		emit_result({"error": "Failed to load scene: " + params.scene_path, "results": []})
 		return
 
 	var results: Array = []
@@ -842,7 +855,7 @@ func get_node_properties(params: Dictionary) -> void:
 		if inst:
 			inst.free()
 
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Get full hierarchical tree structure of a scene
 func get_scene_tree(params):
@@ -866,7 +879,7 @@ func get_scene_tree(params):
 		max_depth = int(params.max_depth)
 
 	var tree = build_tree_recursive(tree_root, "", 0, max_depth)
-	print(JSON.stringify(tree))
+	emit_result(tree)
 
 func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: int = -1) -> Dictionary:
 	var node_path = path + "/" + node.name if not path.is_empty() else node.name
@@ -1013,11 +1026,11 @@ func attach_script(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({
+		emit_result({
 			"success": true,
 			"nodePath": params.node_path,
 			"scriptPath": params.script_path
-		}))
+		})
 	else:
 		log_error("Failed to save scene after attaching script")
 		quit(1)
@@ -1083,11 +1096,11 @@ func duplicate_node(params):
 		new_path = parent_relative_path + "/" + String(duplicate.name)
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({
+		emit_result({
 			"success": true,
 			"originalPath": params.node_path,
 			"newPath": new_path
-		}))
+		})
 	else:
 		log_error("Failed to save scene after duplicating node")
 		quit(1)
@@ -1133,11 +1146,11 @@ func get_node_signals(params):
 			"connections": connections
 		})
 
-	print(JSON.stringify({
+	emit_result({
 		"nodePath": params.node_path,
 		"nodeType": node.get_class(),
 		"signals": signals
-	}))
+	})
 
 # Verify signal wiring across a scene (or a single node subtree) by checking
 # four things per connection: the target node is reachable from the scene
@@ -1441,7 +1454,7 @@ func validate_resource(params):
 		quit(1)
 		return
 	var result = _validate_single(params)
-	print(JSON.stringify({"valid": result.valid, "errors": result.errors}))
+	emit_result({"valid": result.valid, "errors": result.errors})
 
 # Validate a scene file against a structural schema. Schema: { type?: string, children?: Schema[], hasProperty?: string }.
 # Returns { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }.
@@ -1458,7 +1471,7 @@ func validate_checks(params):
 		log_error(outcome.error)
 		quit(1)
 		return
-	print(JSON.stringify({"valid": outcome.errors.is_empty(), "errors": outcome.errors}))
+	emit_result({"valid": outcome.errors.is_empty(), "errors": outcome.errors})
 
 # Runs the checks[] array against one scene and returns
 # {"ok": bool, "error": String, "errors": Array}. ok=false means the scene
@@ -2211,7 +2224,7 @@ func validate_batch(params: Dictionary) -> void:
 			else:
 				result["checkErrors"] = []
 		results.append(result)
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Recursively collect every res:// string inside a JSON-sourced property value.
 # A value can be a bare path, an inline resource spec that nests one ("shader"
@@ -2445,4 +2458,4 @@ func batch_scene_operations(params: Dictionary) -> void:
 	for scene_path in scene_cache:
 		save_scene_to_path(scene_cache[scene_path], scene_path)
 
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})

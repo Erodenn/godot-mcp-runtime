@@ -18,6 +18,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -65,7 +66,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.valid).toBe(true);
       expect(result.errors).toEqual([]);
     },
@@ -87,7 +88,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.valid).toBe(false);
       expect(result.errors.length).toBeGreaterThan(0);
       expect(String(result.errors[0]?.message)).toContain('Control');
@@ -135,7 +136,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.valid).toBe(true);
       expect(result.errors).toEqual([]);
     },
@@ -179,7 +180,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.valid).toBe(false);
       expect(result.errors.some((e: { message: string }) => e.message.includes('shape'))).toBe(
         true,
@@ -203,7 +204,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.errors).toEqual([
         {
           check: 'structure',
@@ -235,7 +236,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.errors).toEqual([
         {
           check: 'structure',
@@ -265,7 +266,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       expect(result.valid).toBe(false);
       expect(result.errors).toHaveLength(1);
       expect(String(result.errors[0].message)).toMatch(/^Invalid schema entry:/);
@@ -288,7 +289,7 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      const result = JSON.parse(stdout);
+      const result = JSON.parse(extractJson(stdout));
       // Should not fail on root type since we didn't specify it
       expect(result.errors).toEqual([]);
     },

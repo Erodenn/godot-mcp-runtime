@@ -7,7 +7,11 @@ import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validateSubPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
-import { parseScriptDiagnostics } from '../utils/output-parsing.js';
+import {
+  extractOperationPayload,
+  parseScriptDiagnostics,
+  stripOperationSentinel,
+} from '../utils/output-parsing.js';
 import { ok, err } from '../utils/result.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
@@ -343,12 +347,13 @@ export async function handleValidate(
         }>;
       };
       try {
-        batchParsed = JSON.parse(stdout.trim());
+        batchParsed = JSON.parse(extractOperationPayload(stdout) ?? '');
       } catch {
         return err(
-          createErrorResponse(`Invalid response from validate_batch: ${stdout}`, [
-            'Ensure Godot is installed correctly',
-          ]),
+          createErrorResponse(
+            `Invalid response from validate_batch: ${stripOperationSentinel(stdout)}`,
+            ['Ensure Godot is installed correctly'],
+          ),
         );
       }
 
@@ -550,16 +555,17 @@ export async function handleValidate(
         }>;
       };
       try {
-        batchParsed = JSON.parse(stdout.trim());
+        batchParsed = JSON.parse(extractOperationPayload(stdout) ?? '');
       } catch {
         batchParsed = {};
       }
       const target = batchParsed.results?.[0];
       if (!target) {
         return err(
-          createErrorResponse(`Invalid response from validate_batch: ${stdout}`, [
-            'Ensure Godot is installed correctly',
-          ]),
+          createErrorResponse(
+            `Invalid response from validate_batch: ${stripOperationSentinel(stdout)}`,
+            ['Ensure Godot is installed correctly'],
+          ),
         );
       }
       valid = target.valid === true;
@@ -567,7 +573,7 @@ export async function handleValidate(
       if (Array.isArray(target.checkErrors)) checkErrors = target.checkErrors;
     } else {
       try {
-        const parsed = JSON.parse(stdout.trim());
+        const parsed = JSON.parse(extractOperationPayload(stdout) ?? '');
         valid = parsed.valid === true;
         if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
           gdErrors = parsed.errors;

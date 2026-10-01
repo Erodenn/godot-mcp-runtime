@@ -13,7 +13,7 @@ import { executeSceneOp } from '../../src/utils/headless-op.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
-import { cleanStdout } from '../../src/utils/output-parsing.js';
+import { cleanStdout, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
@@ -440,6 +440,10 @@ describe('executeSceneOp cold-import retry', () => {
     expectErrorMatching(result, /second time/i);
     // The caller has to know what did land, or it cannot resume safely.
     expectErrorMatching(result, /add_node/);
+    // The quoted payload is shown without its stdout framing.
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).not.toContain(OPERATION_RESULT_SENTINEL);
+    expect(message).toContain(`reported by this run: ${partialBatch}`);
   });
 
   it('still imports and retries when the marked run reported no applied step', async () => {
@@ -543,8 +547,11 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
     expect(messageText).toContain('no JSON payload was emitted');
   });
 
-  it('keeps the generic invalid-JSON message when stdout is JSON-shaped (true op bug, no disguise)', async () => {
-    const fake = createFakeRunner({ stdout: 'not json { but has braces }', stderr: '' });
+  it('keeps the generic invalid-JSON message when a sentinel line carries unparseable JSON (true op bug, no disguise)', async () => {
+    const fake = createFakeRunner({
+      stdout: `${OPERATION_RESULT_SENTINEL}not json { but has braces }`,
+      stderr: '',
+    });
     const result = await executeSceneOp(
       fake.asRunner,
       'attach_script',
@@ -560,7 +567,7 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
 
   it('does not mask a mid-stdout JSON parse failure (truncated payload after leading noise)', async () => {
     const fake = createFakeRunner({
-      stdout: 'WARNING: noise\n{"results": [{"ok": tru',
+      stdout: `WARNING: noise\n${OPERATION_RESULT_SENTINEL}{"results": [{"ok": tru`,
       stderr: '',
     });
     const result = await executeSceneOp(
@@ -578,7 +585,7 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
 
   it('parses a valid payload preceded by leading ERROR/WARNING engine noise', async () => {
     const fake = createFakeRunner({
-      stdout: 'WARNING: upload timing\nERROR: transient probe\n{"results": [{"ok": true}]}\n',
+      stdout: `WARNING: upload timing\nERROR: transient probe\n${OPERATION_RESULT_SENTINEL}{"results": [{"ok": true}]}\n`,
       stderr: '',
     });
     const result = await executeSceneOp(
@@ -709,11 +716,37 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
       { parseStdoutAsJson: true },
     );
     const message = unwrap(result).content[0]?.text ?? '';
+    // Every line of this stdout is banner or [DEBUG] status, which cleanStdout
+    // drops, so the run arrives as empty output and gets the same diagnosis
+    // the run produces without DEBUG: the operation's own [ERROR] line from
+    // stderr, with the handler's solutions. Pinned exactly, so a change that
+    // sends this case anywhere else (the no-payload message, or a JSON
+    // emission blame) fails here.
+    expect(message).toBe(`${TEST_FAILURE_PREFIX}: Node not found: NoSuchNode`);
+    expect(unwrap(result).content[1]?.text ?? '').toContain(EMPTY_SOLUTIONS[0]);
+  });
+
+  it('classifies the same captured stdout as no-payload when it reaches the parser uncleaned', async () => {
+    // Not a shape GodotRunner.executeOperation can hand over (it always
+    // cleans). This holds the interpreter itself to the rule: bracket-heavy
+    // text with no sentinel line is "no payload", never a parse attempt.
+    const fake = createFakeRunner({
+      stdout: CAPTURED_DEBUG_EARLY_EXIT_STDOUT,
+      stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'attach_script',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
     expect(message).toContain('no JSON payload was emitted');
     expect(message).not.toContain('bug in godot_operations.gd');
-    // The actual cause. parseScriptDiagnostics does not match the bracketed
-    // [ERROR] form the operation script emits, so this arrives via the raw
-    // stderr tail -- which is exactly why that fallback has to exist.
     expect(message).toContain('Node not found: NoSuchNode');
   });
 });
@@ -721,8 +754,8 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
 /**
  * stdout is the JSON channel for a headless operation and both validate check
  * paths strict-parse it, so a debug line there is not noise the parser skips:
- * it puts a `[` at column 0, extractJson latches onto it, and the whole payload
- * comes back as an unparseable string. Asserted against the script source
+ * it puts a `[` at column 0 of the very stream the payload shares, and nothing
+ * but the sentinel framing keeps the two apart. Asserted against the script source
  * because only a real Godot run would otherwise catch it, and DEBUG=true is not
  * a mode the suite runs in.
  */
@@ -737,5 +770,69 @@ describe('godot_operations.gd logging channel', () => {
     const logDebugBody = afterDeclaration.split('func ')[0] ?? '';
     expect(logDebugBody).toContain('printerr("[DEBUG] "');
     expect(logDebugBody).not.toMatch(/(^|[^r])print\("\[DEBUG\]/);
+  });
+});
+
+// Engine banner, the payload, and any print() from an autoload or a scene
+// script share stdout. Brackets in that noise used to make the payload
+// extraction pick the wrong span and report "invalid JSON".
+describe('executeSceneOp reads only the sentinel line as the payload', () => {
+  const PAYLOAD = { results: [{ success: true }] };
+  const PAYLOAD_LINE = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(PAYLOAD)}`;
+
+  async function runWithStdout(stdout: string) {
+    const fake = createFakeRunner({ stdout, stderr: '' });
+    return executeSceneOp(
+      fake.asRunner,
+      'set_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+  }
+
+  const noisyShapes: Array<[string, string]> = [
+    ['a bracketed line before the payload', `[Autoload] ready\n${PAYLOAD_LINE}`],
+    ['a bracketed line after the payload', `${PAYLOAD_LINE}\n[Audio] shutdown`],
+    ['a printed dictionary on each side', `{"a": 1}\n${PAYLOAD_LINE}\n{"b": 2}`],
+    ['a JSON-looking array after the payload', `${PAYLOAD_LINE}\n[1, 2]`],
+  ];
+
+  for (const [label, noise] of noisyShapes) {
+    it(`returns the payload despite ${label}`, async () => {
+      const result = await runWithStdout(`Godot Engine v4.6.2.stable\n${noise}\n`);
+      expect(hasError(result)).toBe(false);
+      expect(unwrap(result).structuredContent).toEqual(PAYLOAD);
+    });
+  }
+
+  it('reports no payload, never invalid JSON, when bracketed noise has no sentinel line', async () => {
+    const result = await runWithStdout(
+      'Godot Engine v4.6.2.stable\n[Audio] ready\n{"unrelated": true}\n[1, 2]\n',
+    );
+    expect(hasError(result)).toBe(true);
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).not.toContain('invalid JSON');
+    expect(message).toContain('[Audio] ready');
+  });
+
+  it('never shows the sentinel when the raw text of a payload is returned', async () => {
+    const fake = createFakeRunner({ stdout: PAYLOAD_LINE, stderr: '' });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    const text = unwrap(result).content[0]?.text ?? '';
+    expect(text).not.toContain(OPERATION_RESULT_SENTINEL);
+    expect(JSON.parse(text)).toEqual(PAYLOAD);
   });
 });

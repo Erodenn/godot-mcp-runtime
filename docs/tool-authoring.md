@@ -58,7 +58,7 @@ When `outputSchema` is impractical (oneOf variants, bare-array, recursive trees,
 
 ### `structuredContent` is mandatory when `outputSchema` is declared
 
-MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` - it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON, pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
+MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` - it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON (through `emit_result` in `godot_operations.gd`, never a bare `print`), pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
 
 ### Harness visibility - what the agent actually sees
 

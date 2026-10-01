@@ -12,7 +12,11 @@ import {
   isUnderDir,
 } from '../../src/utils/path-validation.js';
 import { extractGdError, createErrorResponse } from '../../src/utils/error-response.js';
-import { extractJson, cleanStdout } from '../../src/utils/output-parsing.js';
+import {
+  extractJson,
+  cleanStdout,
+  OPERATION_RESULT_SENTINEL,
+} from '../../src/utils/output-parsing.js';
 
 describe('normalizeParameters', () => {
   it('converts known snake_case keys to camelCase', () => {
@@ -414,41 +418,45 @@ describe('createErrorResponse', () => {
 });
 
 describe('extractJson', () => {
-  it('strips Godot version banner before JSON object', () => {
-    const out = 'Godot Engine v4.5.stable\n{"ok": true}';
+  it('strips Godot version banner before a sentinel payload line', () => {
+    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
     expect(JSON.parse(extractJson(out))).toEqual({ ok: true });
   });
 
-  it('strips banner before JSON array', () => {
-    const out = 'Godot Engine v4.5.stable\n[1, 2, 3]';
+  it('returns an array payload from a sentinel line', () => {
+    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}[1, 2, 3]`;
     expect(JSON.parse(extractJson(out))).toEqual([1, 2, 3]);
   });
 
-  it('returns input unchanged when no JSON present', () => {
+  it('returns input unchanged when no sentinel line is present', () => {
     expect(extractJson('just text, no json')).toBe('just text, no json');
   });
 
-  it('parses cleanly when no bracket-noise precedes the JSON', () => {
-    const out = 'INFO: starting up\n{"ok": true}';
+  it('parses cleanly when no bracket-noise surrounds the payload', () => {
+    const out = `INFO: starting up\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
     expect(JSON.parse(extractJson(out))).toEqual({ ok: true });
   });
 });
 
 describe('cleanStdout', () => {
-  it('routes JSON-object output through extractJson (strips banner)', () => {
-    const out = 'Godot Engine v4.5.stable\nINFO line\n{"ok": true}';
-    expect(JSON.parse(cleanStdout(out))).toEqual({ ok: true });
+  it('reduces output with a sentinel line to that line (strips banner and noise)', () => {
+    const out = `Godot Engine v4.5.stable\nINFO line\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
+    expect(JSON.parse(extractJson(cleanStdout(out)))).toEqual({ ok: true });
   });
 
-  it('routes JSON-array output through extractJson (no `{` present)', () => {
-    const out = 'Godot Engine v4.5.stable\n[1, 2, 3]';
-    expect(JSON.parse(cleanStdout(out))).toEqual([1, 2, 3]);
+  it('keeps a sentinel array payload (no `{` present)', () => {
+    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}[1, 2, 3]`;
+    expect(JSON.parse(extractJson(cleanStdout(out)))).toEqual([1, 2, 3]);
   });
 
-  it('routes plain non-JSON output through cleanOutput (drops banner)', () => {
-    // No `{` or `[` anywhere: takes the cleanOutput branch.
+  it('routes output without a sentinel line through cleanOutput (drops banner)', () => {
     const out = 'Godot Engine v4.5.stable\nplain success';
     expect(cleanStdout(out)).toBe('plain success');
+  });
+
+  it('does not treat bracketed lines without a sentinel as a payload', () => {
+    const out = 'Godot Engine v4.5.stable\n[Audio] ready\n{"a": 1}';
+    expect(cleanStdout(out)).toBe('[Audio] ready\n{"a": 1}');
   });
 
   it('handles empty stdout', () => {

@@ -22,6 +22,28 @@
 import type { GodotRunner, OperationResult } from '../../src/utils/godot-runner.js';
 import type { OperationParams } from '../../src/mcp.types.js';
 import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
+import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+
+/**
+ * What the real runner hands back for an operation that emitted a JSON
+ * result: the sentinel line godot_operations.gd prints. A fixture whose whole
+ * stdout is one bare JSON object or array is framed the same way, so a test
+ * can write the payload without repeating the framing. Anything else (noise,
+ * several lines, text that is not valid JSON, text already carrying the
+ * sentinel) passes through untouched, which is how a test expresses "no
+ * payload line" or a payload that is not valid JSON.
+ */
+function frameBareJsonResult(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return stdout;
+  if (trimmed.includes(OPERATION_RESULT_SENTINEL)) return stdout;
+  try {
+    JSON.parse(trimmed);
+  } catch {
+    return stdout;
+  }
+  return OPERATION_RESULT_SENTINEL + trimmed;
+}
 
 export interface FakeRunnerCall {
   operation: string;
@@ -94,7 +116,7 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       const override = responses[callIndex] ?? {};
       const merged = { ...defaults, ...override };
       if (merged.throws) throw merged.throws;
-      return { stdout: merged.stdout ?? '', stderr: merged.stderr ?? '' };
+      return { stdout: frameBareJsonResult(merged.stdout ?? ''), stderr: merged.stderr ?? '' };
     },
     async importAssets(projectPath: string): Promise<void> {
       importCalls.push(projectPath);
