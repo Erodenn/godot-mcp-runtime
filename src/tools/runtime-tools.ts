@@ -89,6 +89,17 @@ const INPUT_SETTLE_FRAMES_PER_ACTION = 1;
 const INPUT_TAP_HOLD_FRAMES = 2;
 const INPUT_TEXT_PER_CHAR_MS = 1;
 
+/** Bridge timeout for one screenshot command when the caller passes no `timeout`. */
+export const SCREENSHOT_DEFAULT_TIMEOUT_MS = 10000;
+/**
+ * KEEP IN SYNC: `FRAME_RENDER_BUDGET_MS` in src/scripts/mcp_bridge.gd is the
+ * twin of this constant. How long the bridge waits for one rendered frame
+ * before it answers a screenshot with an error. It has to stay under
+ * SCREENSHOT_DEFAULT_TIMEOUT_MS: past it the command timeout fires first, and
+ * the caller gets a generic timeout in place of the bridge's own diagnosis.
+ */
+export const SCREENSHOT_FRAME_RENDER_BUDGET_MS = 5000;
+
 // Valid TCP port range for the MCP bridge. Declared above the tool definitions
 // because the run_project input schema and parseBridgePortArg share it.
 const BRIDGE_PORT_MIN = 1;
@@ -295,14 +306,14 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline, bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
+      'Save a PNG of the running viewport under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline, max 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session, no frame renders, or the bridge times out.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         timeout: {
           type: 'number',
-          description: 'Timeout in milliseconds to wait for the screenshot (default: 10000)',
+          description: `Timeout in milliseconds to wait for the screenshot (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}). The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
         },
         responseMode: {
           type: 'string',
@@ -554,7 +565,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_ui_elements',
     description:
-      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: projectPath and elements[] with path/type/rect/visible plus optional text/disabled/tooltip.',
+      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: projectPath and elements[] with path/type/rect/visible plus optional text/disabled/tooltip. Errors if filter is not a Control class name.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -566,7 +577,8 @@ export const runtimeToolDefinitions = [
         },
         filter: {
           type: 'string',
-          description: 'Filter by Control node type (e.g. "Button", "Label", "LineEdit")',
+          description:
+            'Filter by native Control class name (e.g. "Button", "Label", "LineEdit"); subclasses match. A name that is not a Control class, including a script class_name, is an error.',
         },
       },
       required: [],
@@ -1420,7 +1432,7 @@ export async function handleTakeScreenshot(
 
   const timeoutResult = optionalNumber(args, 'timeout');
   if (!timeoutResult.ok) return timeoutResult;
-  const timeout = timeoutResult.value ?? 10000;
+  const timeout = timeoutResult.value ?? SCREENSHOT_DEFAULT_TIMEOUT_MS;
   const responseMode = parseScreenshotResponseMode(args.responseMode);
   if (responseMode === null) {
     return err(
@@ -1461,6 +1473,7 @@ export async function handleTakeScreenshot(
       return err(
         createErrorResponse(`Screenshot server error: ${parsed.error}`, [
           'Ensure the project has a viewport (a headless project with no display server cannot render)',
+          'If the game window is minimized or fully covered, restore it and retry',
           'Check disk space and permissions on the project directory (.mcp/godot-runtime/screenshots/)',
         ]),
       );
@@ -1871,7 +1884,7 @@ export async function handleGetUiElements(
     if (parsed.error) {
       return err(
         createErrorResponse(`UI element query error: ${parsed.error}`, [
-          'Ensure the game has a UI with Control nodes',
+          'Pass a native Control class name (Button, Label, LineEdit), or omit filter',
         ]),
       );
     }

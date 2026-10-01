@@ -52,7 +52,9 @@ Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejecte
 | `get_ui_elements` | Get all visible Control nodes with positions, types, and text                                                                           |
 | `run_script`      | Execute arbitrary GDScript at runtime with full SceneTree access                                                                        |
 
-`take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image.
+`take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image. The game waits up to 5 s for a frame to render before it captures; a window that renders nothing in that time (minimized, or fully covered on a platform that stops drawing occluded windows) is an error response saying so, never a screenshot of an older frame.
+
+`get_ui_elements` takes an optional `filter`, a native Control class name such as `Button` or `Label`; subclasses match. A name that is not a Control class, a script `class_name` included, is an error naming the filter, so an empty `elements` list always means the scene has no such control.
 
 ### Several projects at once
 

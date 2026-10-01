@@ -21,6 +21,10 @@ import {
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
 import { normalizeForCompare, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import {
+  SCREENSHOT_DEFAULT_TIMEOUT_MS,
+  SCREENSHOT_FRAME_RENDER_BUDGET_MS,
+} from '../../src/tools/runtime-tools.js';
 
 const bridgeSource = readFileSync(
   new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
@@ -53,6 +57,19 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     const resPath = gdConst('SCREENSHOT_DIR_RES_PATH').replace(/^"|"$/g, '');
     const projectRelative = resPath.replace('res://', '');
     expect(normalizeForCompare(screenshotsDir('/project'))).toBe(`/project/${projectRelative}`);
+  });
+
+  // The budget is how long the bridge waits for a frame before it answers a
+  // screenshot with its own error. At or past the command timeout, that error
+  // could never arrive: the caller would get a generic timeout instead.
+  it('the screenshot frame budget matches its TypeScript twin and stays under the default screenshot timeout', () => {
+    expect(gdConst('FRAME_RENDER_BUDGET_MS')).toBe(String(SCREENSHOT_FRAME_RENDER_BUDGET_MS));
+    expect(SCREENSHOT_FRAME_RENDER_BUDGET_MS).toBeLessThan(SCREENSHOT_DEFAULT_TIMEOUT_MS);
+  });
+
+  it('waits for a rendered frame on a bounded loop, never on the signal itself', () => {
+    expect(bridgeSource).not.toContain('await RenderingServer.frame_post_draw');
+    expect(bridgeSource).toContain('< FRAME_RENDER_BUDGET_MS');
   });
 });
 

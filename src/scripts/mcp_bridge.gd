@@ -26,6 +26,12 @@ const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
 # script cannot import TypeScript, so the path is spelled in both places and
 # the two MUST move together.
 const SCREENSHOT_DIR_RES_PATH := "res://.mcp/godot-runtime/screenshots"
+# KEEP IN SYNC: SCREENSHOT_FRAME_RENDER_BUDGET_MS in src/tools/runtime-tools.ts
+# is the twin of this constant. How long a screenshot waits for one rendered
+# frame before it answers with an error. It MUST stay under the Node side's
+# default screenshot command timeout, or the caller gets a generic timeout in
+# place of this script's own error.
+const FRAME_RENDER_BUDGET_MS := 5000
 const MAX_FRAME_BYTES := 16 * 1024 * 1024
 const FRAME_HEADER_BYTES := 4
 # KEEP IN SYNC: ACTION_BOUNDARY_SENTINEL in src/utils/bridge-protocol.ts is the
@@ -275,7 +281,10 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 # --- Screenshot ---
 
 func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
-	await _ensure_frame_rendered()
+	var frame_rendered: bool = await _ensure_frame_rendered()
+	if not frame_rendered:
+		_send_response(peer, {"error": "No frame was rendered within %d ms. The window is likely minimized or fully covered, so a screenshot would show a stale frame." % FRAME_RENDER_BUDGET_MS})
+		return
 
 	var viewport := get_viewport()
 	if viewport == null:
@@ -329,36 +338,45 @@ func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
 
 	_send_response(peer, response)
 
-# Waits until a freshly rendered frame is available for capture.
+# Waits until a freshly rendered frame is available for capture. Returns
+# false when none arrived inside FRAME_RENDER_BUDGET_MS, so the caller can
+# answer with an error instead of capturing a frame that may be stale.
 #
 # Normal path: the engine's render loop is presenting every frame, so the
 # next frame_post_draw is imminent. Occluded path (macOS-only today): a
 # background-mode window parked off-screen fails NSWindowOcclusionState
 # visibility, DisplayServer.window_can_draw() goes false, and the engine
 # main loop stops calling RenderingServer.draw() entirely, so
-# frame_post_draw never fires and the await would deadlock the peer.
-# Recover by driving one render manually: force_draw(false) renders every
-# viewport into its render target but skips the swapchain blit that hangs
-# while occluded. See issue #24.
-func _ensure_frame_rendered() -> void:
-	if DisplayServer.window_can_draw():
-		await RenderingServer.frame_post_draw
-		return
+# frame_post_draw never fires by itself. Recover by driving one render
+# manually: force_draw(false) renders every viewport into its render target
+# but skips the swapchain blit that hangs while occluded. See issue #24.
+#
+# The wait is never an await on the signal itself: a window the engine stops
+# drawing without reporting it through window_can_draw() would leave the peer
+# waiting forever. It is a process_frame loop against the wall clock, which
+# keeps running at time_scale 0 and while the tree is paused, where a
+# SceneTreeTimer would not fire.
+func _ensure_frame_rendered() -> bool:
 	# GDScript lambdas capture locals by value; use an Array so the
 	# mutation inside the lambda is visible out here.
 	var draw_state := [false]
 	var on_draw := func() -> void: draw_state[0] = true
 	# Connect BEFORE force_draw(): with single-threaded rendering (the
 	# default), frame_post_draw fires synchronously inside force_draw(),
-	# before an await here could start listening.
+	# before a wait here could start listening.
 	RenderingServer.frame_post_draw.connect(on_draw, CONNECT_ONE_SHOT)
-	RenderingServer.force_draw(false, 0.0)
-	if not draw_state[0]:
-		# Threaded rendering: the signal is emitted deferred on the main
-		# thread; resume when it lands.
-		await RenderingServer.frame_post_draw
-	elif RenderingServer.frame_post_draw.is_connected(on_draw):
+	if not DisplayServer.window_can_draw():
+		RenderingServer.force_draw(false, 0.0)
+	var wait_started_ms := Time.get_ticks_msec()
+	while not draw_state[0] and Time.get_ticks_msec() - wait_started_ms < FRAME_RENDER_BUDGET_MS:
+		await get_tree().process_frame
+	if draw_state[0]:
+		return true
+	# Budget spent with no frame drawn. The one-shot observer never fired, so
+	# it is still connected and has to be removed here.
+	if RenderingServer.frame_post_draw.is_connected(on_draw):
 		RenderingServer.frame_post_draw.disconnect(on_draw)
+	return false
 
 # --- Input Simulation ---
 
@@ -1029,6 +1047,16 @@ func _current_scene_path() -> String:
 func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 	var visible_only: bool = payload.get("visible_only", true)
 	var type_filter: String = payload.get("type_filter", "")
+	# is_class() below matches native class names only, so a name that is not
+	# a Control class can never match. Answering that with an empty list would
+	# read as "this scene has no such controls".
+	if type_filter != "":
+		if not ClassDB.class_exists(type_filter):
+			_send_response(peer, {"error": "Unknown class for filter: '%s'. filter matches native Godot class names such as Button or Label; a script class_name is not matched." % type_filter})
+			return
+		if type_filter != "Control" and not ClassDB.is_parent_class(type_filter, "Control"):
+			_send_response(peer, {"error": "filter '%s' is not a Control class" % type_filter})
+			return
 	var root := get_tree().root
 	var elements: Array[Dictionary] = []
 	_collect_control_nodes(root, elements, visible_only, type_filter)
