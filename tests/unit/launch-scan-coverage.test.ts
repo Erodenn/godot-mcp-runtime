@@ -285,6 +285,80 @@ describe('launch scan: scripts and scenes it cannot read', () => {
   });
 });
 
+describe('launch scan: layouts Godot reads that are not how it writes', () => {
+  const SCRIPT_HEADER = '[ext_resource type="Script" path="res://late.gd" id="1"]';
+
+  it('a quote inside a ; comment does not hide the headers after it', () => {
+    // Two comment lines with one quote each: read as a string, they would
+    // swallow the header between them without leaving an unterminated string.
+    const scene = ['[gd_scene format=3]', '; it"s a note', SCRIPT_HEADER, '; another"', ''].join(
+      '\n',
+    );
+    const scan = sceneParsing.scanTscn(scene);
+    expect(scan.headers.map((h) => h.tag)).toEqual(['gd_scene', 'ext_resource']);
+    expect(scan.malformed).toEqual([]);
+    const dir = projectWithMainScene('scan-comment-quote-', scene);
+    const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
+    expect(collected.scripts).toEqual([join(dir, 'late.gd')]);
+  });
+
+  it('a string value followed by a ; comment is still read as that string', async () => {
+    const scene = [
+      '[gd_scene format=3]',
+      '',
+      '[sub_resource type="GDScript" id="GDScript_n"]',
+      'script/source = "extends Node\\nfunc f():\\n\\tOS.execute(\\"x\\", [])\\n" ; a "note"',
+      '',
+      '[node name="Main" type="Node"]',
+      '',
+    ].join('\n');
+    const dir = projectWithMainScene('scan-trailing-comment-', scene);
+    const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
+    expect(collected.unscanned).toEqual([]);
+    expect(collected.inlineScripts).toHaveLength(1);
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/GDScript_n\]:3 OS\.execute/);
+  });
+
+  it('a semicolon inside a string value is part of the string', () => {
+    const scene = [
+      '[gd_scene format=3]',
+      '[node name="Main" type="Node"]',
+      'note = "a; b"',
+      '',
+    ].join('\n');
+    const node = sceneParsing.scanTscn(scene).headers.find((h) => h.tag === 'node');
+    expect(node?.stringProps.get('note')).toBe('a; b');
+  });
+
+  it('an indented header is still a header', () => {
+    const scene = ['[gd_scene format=3]', `  \t${SCRIPT_HEADER}`, ''].join('\n');
+    const dir = projectWithMainScene('scan-indented-', scene);
+    const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
+    expect(collected.scripts).toEqual([join(dir, 'late.gd')]);
+  });
+
+  it('reads a header attribute written with a blank after the equals sign', () => {
+    // The form Godot itself writes for a connection that binds arguments.
+    const connection =
+      '[connection signal="pressed" from="A" to="." method="_on_pressed" binds= [7, "x"]]';
+    const scan = sceneParsing.scanTscn(`[gd_scene format=3]\n${connection}\n`);
+    expect(scan.malformed).toEqual([]);
+    const header = scan.headers.find((h) => h.tag === 'connection');
+    expect(header?.attrs.get('binds')).toBe('[7, "x"]');
+    expect(header?.attrs.get('method')).toBe('_on_pressed');
+  });
+
+  it('reads a header attribute written with blanks on both sides of the equals sign', () => {
+    const scene =
+      '[gd_scene format=3]\n[ext_resource type = "Script" path = "res://late.gd" id="1"]\n';
+    const dir = projectWithMainScene('scan-spaced-attrs-', scene);
+    const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
+    expect(collected.scripts).toEqual([join(dir, 'late.gd')]);
+    expect(collected.unscanned).toEqual([]);
+  });
+});
+
 describe('launch scan: autoloads', () => {
   it('a scene autoload has its scripts scanned', async () => {
     const dir = tmp.makeProject(
@@ -337,6 +411,27 @@ describe('launch scan: autoloads', () => {
     expect(warnings[warnings.length - 1]).toBe(
       `+${EXTRA_NOT_SCANNED_COUNT} more files were not scanned`,
     );
+  });
+
+  it('the unconfirmed-launch notice survives a not-scanned list longer than its cap', async () => {
+    const count = MAX_SCAN_INCOMPLETE_SHOWN + EXTRA_NOT_SCANNED_COUNT;
+    const lines = Array.from({ length: count }, (_, n) => `Native${n}="res://n${n}.cs"`);
+    const dir = projectWithMainScene(
+      'scan-confirmation-cap-',
+      SCRIPTLESS_SCENE,
+      `\n[autoload]\n${lines.join('\n')}\n`,
+    );
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, toolName: 'run_project' },
+      makeContext({ disableElicitation: true }),
+    );
+    if (!result.ok) throw new Error(`expected an ok outcome, got: ${JSON.stringify(result.error)}`);
+    const warnings = result.value.warnings;
+    expect(warnings).toHaveLength(MAX_SCAN_INCOMPLETE_SHOWN + 2);
+    expect(warnings[MAX_SCAN_INCOMPLETE_SHOWN]).toBe(
+      `+${EXTRA_NOT_SCANNED_COUNT} more files were not scanned`,
+    );
+    expect(warnings[warnings.length - 1]).toMatch(/launching without user confirmation/);
   });
 
   it('an unparsed autoload line is reported by the launch gate', async () => {

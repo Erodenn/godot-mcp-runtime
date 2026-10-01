@@ -169,10 +169,14 @@ function parseHeader(content: string, start: number, lineEnd: number): HeaderPar
     const keyStart = i;
     while (i < lineEnd && content[i] !== '=' && content[i] !== ']' && !isBlank(content[i])) i++;
     const key = content.slice(keyStart, i);
+    // Blanks on either side of the `=` belong to neither the key nor the value.
+    // Godot's own writer leaves one after it: `binds= [7]` on a connection.
+    while (i < lineEnd && isBlank(content[i])) i++;
     if (key === '' || content[i] !== '=') {
       return { ok: false, reason: `attribute ${key === '' ? '' : key + ' '}has no value` };
     }
     i++;
+    while (i < lineEnd && isBlank(content[i])) i++;
     if (content[i] === '"') {
       const quoted = readQuoted(content, i, lineEnd);
       if (quoted === null) return { ok: false, reason: 'unterminated string in header' };
@@ -203,10 +207,18 @@ function parseHeader(content: string, start: number, lineEnd: number): HeaderPar
 }
 
 /**
- * Read a `.tscn` / `.tres` text in one linear pass. A line that starts with
- * `[` opens a header; any other line is a property of the most recent header,
- * and a string in its value runs to the closing quote across newlines, so
- * nothing inside a string is ever read as structure.
+ * Read a `.tscn` / `.tres` text in one linear pass. A line whose first
+ * non-blank character is `[` opens a header; any other line is a property of
+ * the most recent header, and a string in its value runs to the closing quote
+ * across newlines, so nothing inside a string is ever read as structure. A `;`
+ * outside a string starts a comment that runs to the end of its line, as it
+ * does for Godot's own parser, so a quote inside a comment opens nothing.
+ *
+ * The scanner reads one statement per line, the layout Godot writes. Godot's
+ * own reader is not line-bound, so a file edited by hand to put two statements
+ * on one line (a header followed by another header or by a property, or a
+ * property followed by a header) loads there while the second statement is not
+ * read here. `docs/security.md` lists this with the scan's other limits.
  */
 export function scanTscn(content: string): TscnScan {
   const headers: TscnHeader[] = [];
@@ -217,11 +229,14 @@ export function scanTscn(content: string): TscnScan {
   let current: TscnHeader | null = null;
 
   while (i < length) {
-    if (content[i] === '[') {
-      const newlineAt = content.indexOf('\n', i);
+    // Godot skips blanks before a statement, so an indented header is still one.
+    let headerAt = i;
+    while (headerAt < length && isBlank(content[headerAt])) headerAt++;
+    if (content[headerAt] === '[') {
+      const newlineAt = content.indexOf('\n', headerAt);
       const lineEnd = newlineAt === -1 ? length : newlineAt;
-      const parsed = parseHeader(content, i, lineEnd);
-      const raw = snippet(content.slice(i, lineEnd));
+      const parsed = parseHeader(content, headerAt, lineEnd);
+      const raw = snippet(content.slice(headerAt, lineEnd));
       if (parsed.ok) {
         current = { tag: parsed.tag, attrs: parsed.attrs, line, raw, stringProps: new Map() };
         headers.push(current);
@@ -236,9 +251,16 @@ export function scanTscn(content: string): TscnScan {
 
     let j = i;
     let equalsAt = -1;
+    let commentAt = -1;
     let unterminated = false;
     while (j < length && content[j] !== '\n') {
       const c = content[j]!;
+      if (c === ';') {
+        commentAt = j;
+        const newlineAt = content.indexOf('\n', j);
+        j = newlineAt === -1 ? length : newlineAt;
+        break;
+      }
       if (c === '"') {
         const quoted = readQuoted(content, j, length);
         if (quoted === null) {
@@ -258,11 +280,12 @@ export function scanTscn(content: string): TscnScan {
       j++;
     }
     if (current !== null && equalsAt !== -1 && !unterminated) {
+      const valueEnd = commentAt === -1 ? j : commentAt;
       let valueStart = equalsAt + 1;
-      while (valueStart < j && isBlank(content[valueStart])) valueStart++;
+      while (valueStart < valueEnd && isBlank(content[valueStart])) valueStart++;
       if (content[valueStart] === '"') {
         const quoted = readQuoted(content, valueStart, length);
-        if (quoted !== null && content.slice(quoted.end, j).trim() === '') {
+        if (quoted !== null && content.slice(quoted.end, valueEnd).trim() === '') {
           current.stringProps.set(content.slice(i, equalsAt).trim(), quoted.value);
         }
       }

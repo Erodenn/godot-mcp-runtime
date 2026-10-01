@@ -37,9 +37,9 @@ const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */
 export const MAX_SCAN_WARNINGS_SHOWN = 10;
 /**
- * Cap on the scan and confirmation warnings (what could not be scanned, what
- * was skipped) a gate outcome carries, counted apart from the findings so a
- * long list of findings never pushes an incomplete-scan notice out of the answer.
+ * Cap on the scan warnings (what could not be scanned, what was skipped) a gate
+ * outcome carries, counted apart from the findings so a long list of findings
+ * never pushes an incomplete-scan notice out of the answer.
  */
 export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
@@ -59,9 +59,9 @@ export interface LaunchGateRequest {
 export interface LaunchGateOutcome {
   /**
    * Scan findings first, capped at `MAX_SCAN_WARNINGS_SHOWN` entries plus a
-   * `+N more` entry; then the scan and confirmation warnings, capped at
+   * `+N more` entry; then the scan warnings, capped at
    * `MAX_SCAN_INCOMPLETE_SHOWN` entries plus a `+N more files were not scanned`
-   * entry.
+   * entry; then the confirmation warning, when there is one, which no cap cuts.
    */
   warnings: string[];
 }
@@ -139,6 +139,9 @@ export async function runLaunchGate(
   // scene"); both flow into the response warnings array.
   // Strict mode + any Tier 1 finding → hard reject before launch.
   const scanWarnings: string[] = [];
+  // What the caller is told about the confirmation step. Kept apart from the
+  // scan warnings so their cap can never cut it.
+  const confirmationWarnings: string[] = [];
   const scanFindings: ScanFinding[] = [];
   const absProjectPath = resolve(request.projectPath);
 
@@ -256,7 +259,7 @@ export async function runLaunchGate(
       // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION). Skip the
       // blanket confirmation gate and launch with a recorded warning. The
       // tiered scan above is the real security boundary; the gate is UX.
-      scanWarnings.push(
+      confirmationWarnings.push(
         'Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); launching without user confirmation.',
       );
       ctx.sessionState.runProjectConfirmed.add(projectKey);
@@ -292,7 +295,7 @@ export async function runLaunchGate(
         }
         // Elicitation unsupported — fall through with a recorded warning. The
         // tiered scan above is the real security boundary; the gate is UX.
-        scanWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
+        confirmationWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
         elicitResult = { action: 'accept', content: { confirm: true } };
       }
       if (!isElicitAccepted(elicitResult)) {
@@ -321,13 +324,16 @@ export async function runLaunchGate(
   if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
     warnings.push(`+${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
   }
-  // Scan and confirmation warnings are capped apart from the findings, so a
-  // long list of findings cannot push the "this scan was incomplete" notices out.
+  // Scan warnings are capped apart from the findings, so a long list of
+  // findings cannot push the "this scan was incomplete" notices out.
   warnings.push(...scanWarnings.slice(0, MAX_SCAN_INCOMPLETE_SHOWN));
   if (scanWarnings.length > MAX_SCAN_INCOMPLETE_SHOWN) {
     warnings.push(
       `+${scanWarnings.length - MAX_SCAN_INCOMPLETE_SHOWN} more files were not scanned`,
     );
   }
+  // At most one entry, and it says something no other entry does (the launch
+  // went ahead unconfirmed), so it is never counted against either cap.
+  warnings.push(...confirmationWarnings);
   return ok({ warnings });
 }
