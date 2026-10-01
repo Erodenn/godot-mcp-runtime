@@ -1,7 +1,7 @@
 import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
-import { createStructuredResponse } from './structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from './structured-response.js';
 import type { BridgeOwnerInfo } from './bridge-manager.js';
 import {
   extractOperationPayload,
@@ -146,7 +146,9 @@ function interpretOperationResult(
       );
     }
     try {
-      return createStructuredResponse(JSON.parse(payload) as Record<string, unknown>);
+      return createStructuredResponse(
+        leadWithWarnings(JSON.parse(payload) as Record<string, unknown>),
+      );
     } catch (parseErr) {
       return err(
         createErrorResponse(

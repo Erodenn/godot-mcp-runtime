@@ -19,3 +19,15 @@ export function createStructuredResponse<T extends Record<string, unknown>>(
     structuredContent: payload,
   });
 }
+
+/**
+ * Put a non-empty `warnings` array first and drop an empty one. GDScript's
+ * JSON.stringify sorts keys, so a payload that crossed from
+ * godot_operations.gd arrives with `warnings` last; the contract is that it
+ * leads the payload whenever it is present.
+ */
+export function leadWithWarnings(payload: Record<string, unknown>): Record<string, unknown> {
+  const { warnings, ...rest } = payload;
+  if (!Array.isArray(warnings)) return payload;
+  return warnings.length > 0 ? { warnings, ...rest } : rest;
+}

@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
+import { leadWithWarnings } from '../../src/utils/structured-response.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
@@ -898,6 +899,59 @@ describe('executeSceneOp reads only the sentinel line as the payload', () => {
     const text = unwrap(result).content[0]?.text ?? '';
     expect(text).not.toContain(OPERATION_RESULT_SENTINEL);
     expect(JSON.parse(text)).toEqual(PAYLOAD);
+  });
+});
+
+describe('executeSceneOp puts warnings first', () => {
+  async function runWithPayload(payload: Record<string, unknown>) {
+    const fake = createFakeRunner({
+      stdout: `${OPERATION_RESULT_SENTINEL}${JSON.stringify(payload)}`,
+      stderr: '',
+    });
+    return executeSceneOp(
+      fake.asRunner,
+      'set_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+  }
+
+  it('moves a non-empty warnings array to the front', async () => {
+    // Keys arrive sorted, so warnings is last in the emitted JSON.
+    const result = await runWithPayload({ results: [], warnings: ['w'] });
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload).toEqual({ warnings: ['w'], results: [] });
+  });
+
+  it('drops an empty warnings array', async () => {
+    const result = await runWithPayload({ results: [], warnings: [] });
+    expect(unwrap(result).structuredContent).toEqual({ results: [] });
+  });
+
+  it('leaves a payload without warnings unchanged', async () => {
+    const result = await runWithPayload({ results: [] });
+    expect(unwrap(result).structuredContent).toEqual({ results: [] });
+  });
+});
+
+describe('leadWithWarnings', () => {
+  it('moves a non-empty warnings array first', () => {
+    const led = leadWithWarnings({ results: [], warnings: ['w'] });
+    expect(Object.keys(led)).toEqual(['warnings', 'results']);
+  });
+
+  it('drops an empty warnings array', () => {
+    expect(leadWithWarnings({ results: [], warnings: [] })).toEqual({ results: [] });
+  });
+
+  it('leaves a non-array warnings value untouched', () => {
+    const payload = { results: [], warnings: 'x' };
+    expect(leadWithWarnings(payload)).toBe(payload);
   });
 });
 
