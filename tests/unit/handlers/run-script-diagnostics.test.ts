@@ -18,6 +18,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
+import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 
 interface FakeRunnerOverrides {
   response: string;
@@ -26,10 +27,14 @@ interface FakeRunnerOverrides {
 }
 
 function makeFakeRunner(o: FakeRunnerOverrides): GodotRunner {
+  const projectPath = '/fake/project';
+  const mode = o.sessionMode ?? 'spawned';
+  const proc = { hasExited: false };
   const fake = {
-    activeProjectPath: '/fake/project',
-    activeSessionMode: o.sessionMode ?? 'spawned',
-    activeProcess: { hasExited: false },
+    activeProjectPath: projectPath,
+    activeSessionMode: mode,
+    activeProcess: proc,
+    ...fakeSessionApi(() => ({ current: { mode, projectPath, process: proc } })),
     async sendCommandWithErrors(): Promise<{
       response: string;
       runtimeErrors: string[];

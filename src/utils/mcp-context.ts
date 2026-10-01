@@ -37,6 +37,16 @@ export interface ElicitorRequest {
  */
 export type Elicitor = (request: ElicitorRequest) => Promise<ElicitorResult>;
 
+/**
+ * True only for an explicit accept. An `accept` that carries a `confirm` field
+ * set to anything but `true` is a denial, the same as `decline` or `cancel`.
+ */
+export function isElicitAccepted(result: ElicitorResult): boolean {
+  return (
+    result.action === 'accept' && (result.content === undefined || result.content.confirm === true)
+  );
+}
+
 export interface SessionState {
   /**
    * Set of absolute project paths for which the user has already approved
@@ -112,6 +122,45 @@ export function resolveDisableSecurity(
 ): DisableSecurityResolution {
   const disableSecurity = rawValue === 'true';
   return { disableSecurity, strictIgnored: disableSecurity && strictMode };
+}
+
+/** The flags that turn on only for the exact string `true`, and what each being off means. */
+const BOOLEAN_FLAG_OFF_EFFECTS: ReadonlyArray<readonly [name: string, effect: string]> = [
+  ['GODOT_MCP_STRICT', 'strict mode is OFF'],
+  ['GODOT_MCP_DISABLE_ELICITATION', 'confirmation prompts stay ON'],
+  ['GODOT_MCP_DISABLE_SECURITY', 'the security gate stays ON'],
+];
+
+const HEX_RADIX = 16;
+const UNICODE_ESCAPE_DIGITS = 4;
+
+/**
+ * JSON-quote a value for a stderr line, with every character outside printable
+ * ASCII written as a `\uXXXX` escape. The value comes from the environment, and
+ * a console that is not UTF-8 would print anything else as noise.
+ */
+function quoteAsAscii(value: string): string {
+  return JSON.stringify(value).replace(
+    /[^\x20-\x7e]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(HEX_RADIX).padStart(UNICODE_ESCAPE_DIGITS, '0')}`,
+  );
+}
+
+/**
+ * One startup line per security flag that is set to something other than
+ * `true` or `false`. Each flag is read as the exact string `true`, so a value
+ * such as `1` or `TRUE` leaves the flag off without any other sign; naming it
+ * on stderr is the only way the operator finds out. Unset and empty values are
+ * not reported: they are how a flag is normally left off.
+ */
+export function describeIgnoredFlagValues(env: Record<string, string | undefined>): string[] {
+  const lines: string[] = [];
+  for (const [name, effect] of BOOLEAN_FLAG_OFF_EFFECTS) {
+    const value = env[name];
+    if (value === undefined || value === '' || value === 'true' || value === 'false') continue;
+    lines.push(`[SERVER] ${name}=${quoteAsAscii(value)} is not "true" and was ignored: ${effect}`);
+  }
+  return lines;
 }
 
 /**

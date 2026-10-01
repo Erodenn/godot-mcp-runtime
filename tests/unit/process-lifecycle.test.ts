@@ -22,6 +22,7 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { bridgeDir, bridgeScriptAbsPath, mcpDir } from '../../src/utils/artifact-paths.js';
 import { projectGodotPath } from '../../src/utils/path-validation.js';
 import { useTmpDirs } from '../helpers/tmp.js';
+import { installSession } from '../helpers/session-install.js';
 
 type Listener = (...args: never[]) => void;
 
@@ -136,7 +137,7 @@ describe('registerProcessLifecycle', () => {
       'config_version=5\n\n[autoload]\n\nMcpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
       'utf8',
     );
-    (runner as unknown as { activeProjectPath: string }).activeProjectPath = projectPath;
+    installSession(runner, { mode: 'attached', projectPath });
 
     proc.emit('exit');
 
@@ -144,6 +145,30 @@ describe('registerProcessLifecycle', () => {
     expect(existsSync(bridgeDir(projectPath))).toBe(false);
     // Only bridge/ is session-scoped; the importer marker stays put.
     expect(existsSync(mcpDir(projectPath))).toBe(true);
+  });
+
+  it("removes the bridge artifacts of every session from the 'exit' handler", () => {
+    const projects = [tmp.makeProject('godot-mcp-exit-a-'), tmp.makeProject('godot-mcp-exit-b-')];
+    for (const projectPath of projects) {
+      mkdirSync(bridgeDir(projectPath), { recursive: true });
+      writeFileSync(bridgeScriptAbsPath(projectPath), 'extends Node\n', 'utf8');
+      writeFileSync(
+        projectGodotPath(projectPath),
+        'config_version=5\n\n[autoload]\n\nMcpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
+        'utf8',
+      );
+      // Only the last one installed is the current session; the handler has
+      // to reach the other one too.
+      installSession(runner, { mode: 'attached', projectPath });
+    }
+
+    proc.emit('exit');
+
+    for (const projectPath of projects) {
+      expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+      expect(existsSync(bridgeDir(projectPath))).toBe(false);
+      expect(existsSync(mcpDir(projectPath))).toBe(true);
+    }
   });
 
   it("does not throw from the 'exit' handler when there is no active project", () => {

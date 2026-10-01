@@ -21,8 +21,7 @@ import { isOk } from './utils/result.js';
 import {
   handleLaunchEditor,
   handleRunProject,
-  handleAttachProject,
-  handleDetachProject,
+  handleSwitchProject,
   handleGetDebugOutput,
   handleStopProject,
   handleTakeScreenshot,
@@ -74,14 +73,15 @@ import {
   handleStopProfiler,
 } from './tools/profiler-tools.js';
 
+import { handleRenderMovie } from './tools/render-tools.js';
+
 import { handleValidate } from './tools/validate-tools.js';
 
 export const toolDispatch = {
   // Project tools
   launch_editor: handleLaunchEditor,
   run_project: handleRunProject,
-  attach_project: handleAttachProject,
-  detach_project: handleDetachProject,
+  switch_project: handleSwitchProject,
   get_debug_output: handleGetDebugOutput,
   stop_project: handleStopProject,
   list_projects: (_runner, args) => handleListProjects(args),
@@ -98,6 +98,9 @@ export const toolDispatch = {
   search_project: (_runner, args) => handleSearchProject(args),
   get_scene_dependencies: (_runner, args) => handleGetSceneDependencies(args),
   get_project_settings: (_runner, args) => handleGetProjectSettings(args),
+
+  // Render tools
+  render_movie: handleRenderMovie,
 
   // Scene tools
   create_scene: handleCreateScene,

@@ -5,6 +5,7 @@ import type { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import type { nodeToolDefinitions } from './tools/node-tools.js';
 import type { profilerToolDefinitions } from './tools/profiler-tools.js';
 import type { projectToolDefinitions } from './tools/project-tools.js';
+import type { renderToolDefinitions } from './tools/render-tools.js';
 import type { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import type { sceneToolDefinitions } from './tools/scene-tools.js';
 import type { validateToolDefinitions } from './tools/validate-tools.js';
@@ -74,6 +75,7 @@ export type ToolName = (
   | typeof nodeToolDefinitions
   | typeof profilerToolDefinitions
   | typeof projectToolDefinitions
+  | typeof renderToolDefinitions
   | typeof runtimeToolDefinitions
   | typeof sceneToolDefinitions
   | typeof validateToolDefinitions

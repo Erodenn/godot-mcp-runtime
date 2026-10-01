@@ -20,7 +20,7 @@ A lightweight [MCP](https://modelcontextprotocol.io/) server that gives AI agent
 <br>
 
 - **Headless editing**: scenes, nodes, scripts, signals, validation, no editor window
-- **Runtime control**: screenshots, input simulation, UI discovery, live GDScript, and function profiling against the running game
+- **Runtime control**: screenshots, input simulation, UI discovery, live GDScript, and profiling (functions, FPS, monitors, render stages) against the running game
 - **Zero footprint**: no Godot addon, no project commits, auto-cleanup on shutdown
 
 **No addon required.** Most Godot MCP servers that offer runtime support ship as a Godot addon, something you install into your project, commit to version control, and manage as a dependency. Use npx and there's no install or setup needed.
@@ -43,26 +43,30 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 > This server is the perfect tool kit for AI assisted game development with Godot. It provides a comprehensive suite of tools that allows agents to create scenes, nodes, scripts, and more. The runtime tool set provides the capabilities to check work by running the game and interacting with it in real time, all without becoming a cumbersome dependency on your project.
 
-**Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along.
+**Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along. All 39 tools return one JSON object with a declared output schema, and a value the server could not measure comes back as `null` with a warning rather than a made-up number.
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 
-**Runtime bridge.** When `run_project` or `attach_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (both auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
+**Runtime bridge.** When `run_project` is called, the server injects `McpBridge` as an autoload. This opens a localhost-only TCP listener (a free port is auto-selected when `bridgePort` is omitted; pass `bridgePort` to pin a specific port) and enables:
 
-- **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk
+- **Screenshots:** Capture the viewport. By default this returns a 960x540 preview inline plus the full PNG on disk, and every call also returns pixel statistics (`stats`, with a `likelyBlank` verdict) measured from the full PNG, so a caller that cannot look at the image can still tell a rendered frame from a blank one
 - **Input simulation:** Batched sequences of key presses, mouse clicks, mouse motion, UI element clicks by name or path, Godot action events, text typed into the focused Control, and timed waits. Each action reports what it did: the Control it hit, the signals it fired, and what changed on screen
 - **UI discovery:** Walk the live scene tree and collect every visible Control node with its position, type, text content, and disabled state
 - **Live script execution:** Compile and run arbitrary GDScript with full SceneTree access while the game is running
-- **Function profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages
+- **Profiling:** With `profiling: true` at launch, capture Godot's own profiler and rank the most expensive GDScript functions by own or inclusive time, with source locations and per-frame averages. Every capture also reports FPS, frames over a target frame rate, and engine monitors (draw calls, memory, node counts); `visual: true` adds the Visual Profiler's CPU and GPU time per render stage, and `timeline: true` the same over time, with the player position (`track`) on each interval, to find where a walk through the level drops frames
 
 **Background mode.** Pass `background: true` to `run_project` and the Godot window moves off-screen (positioned at `(-9999, -9999)`) with physical input blocked: borderless, unfocusable, mouse-passthrough. Programmatic input, screenshots, and all runtime tools work exactly the same. Useful for automated agent-driven testing where the window shouldn't be visible or interactive.
 
-**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `attach_project` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Use `detach_project` when done.
+**Manual attach mode.** When something other than MCP launches the game (a CI pipeline, an external debugger, your own shell), call `run_project` with `attach: true` first. It injects the bridge and marks the project active without spawning Godot, so when you launch the game manually, runtime tools work against it. Call `stop_project` when done: it removes the bridge and leaves your Godot process running.
+
+**Render check.** `render_movie` renders a fixed number of frames in a separate short Godot run under the engine's movie writer and reports what rendered: blank or not, moving or not. It injects no bridge, simulates no input and starts no session, so it works as a cheap checkpoint before a full `run_project`. It needs a display, asks for the same launch confirmation as `run_project`, and is refused while a runtime session is live on the same project.
+
+**Several projects at once.** `run_project` on a second project adds a session instead of ending the first, which helps when a game and a small repro project run side by side. The runtime tools act on the current session and name it in every response as `projectPath`; `switch_project` moves them to another one. Nothing falls back silently: if the current session ends, the next call errors and lists the sessions still live.
 
 > [!IMPORTANT]
-> `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Use `run_project` if you need the debug stream.
+> `get_debug_output` has nothing to return in attached mode. stdout and stderr only flow through processes MCP started itself, so for an externally launched Godot its `output`, `errors` and `running` are `null` with a warning, never empty lists. Let `run_project` spawn the game if you need the debug stream.
 
-The bridge cleans itself up automatically - on `stop_project` or `detach_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
+The bridge cleans itself up automatically - on `stop_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
 
 ## How It Compares
 

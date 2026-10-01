@@ -5,6 +5,7 @@ import {
   BridgeAttachConflictError,
   BridgeAutoloadCollisionError,
   BridgeManager,
+  BridgeRegistryUnreadableError,
 } from '../../src/utils/bridge-manager.js';
 import type { BridgeManagerOptions } from '../../src/utils/bridge-manager.js';
 import {
@@ -695,7 +696,7 @@ describe('BridgeManager with concurrent sessions on one project', () => {
   });
 
   describe('attach mode: single-attach-owner rule', () => {
-    it('a second attach_project on the same project is refused with no writes', () => {
+    it('a second attach session on the same project is refused with no writes', () => {
       const { projectPath, bridgeSourcePath } = setupProject();
       const managerA = new BridgeManager(bridgeSourcePath);
       managerA.inject(projectPath, TEST_PORT, 'token-a');
@@ -745,5 +746,238 @@ describe('BridgeManager with concurrent sessions on one project', () => {
       );
       expect(ownerFileNames(projectPath).length).toBe(1);
     });
+  });
+});
+
+describe('BridgeManager.ensureArtifactRoot', () => {
+  it('creates .mcp/.gdignore and the .gitignore entry without touching project.godot', () => {
+    const { projectPath } = setupProject();
+    const projectGodotPath = join(projectPath, 'project.godot');
+    const before = readFileSync(projectGodotPath);
+
+    BridgeManager.ensureArtifactRoot(projectPath);
+
+    expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+    expect(readFileSync(join(projectPath, '.gitignore'), 'utf8')).toContain('.mcp/');
+    expect(readFileSync(projectGodotPath).equals(before)).toBe(true);
+  });
+
+  it('is idempotent and keeps an existing .gdignore', () => {
+    const { projectPath } = setupProject();
+    const gdignorePath = join(projectPath, '.mcp', '.gdignore');
+    mkdirSync(join(projectPath, '.mcp'), { recursive: true });
+    writeFileSync(gdignorePath, 'user content\n', 'utf8');
+
+    BridgeManager.ensureArtifactRoot(projectPath);
+    BridgeManager.ensureArtifactRoot(projectPath);
+
+    expect(readFileSync(gdignorePath, 'utf8')).toBe('user content\n');
+    const gitignore = readFileSync(join(projectPath, '.gitignore'), 'utf8');
+    expect(gitignore.split('.mcp/').length - 1).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanup reports the steps it could not confirm. It still never throws, and
+// what it deletes, and in what order, is unchanged.
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager.cleanup reports what it could not confirm', () => {
+  const projectGodotOf = (projectPath: string): string =>
+    readFileSync(join(projectPath, 'project.godot'), 'utf8');
+
+  it('returns no problems when every artifact was removed', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(manager.cleanup(projectPath)).toEqual([]);
+    expect(projectGodotOf(projectPath)).not.toContain('McpBridge=');
+  });
+
+  it('returns no problems for a project it never injected into', () => {
+    const { projectPath, manager } = setupProject();
+    expect(manager.cleanup(projectPath)).toEqual([]);
+  });
+
+  // A locked or read-only project.godot is the costly case: the script goes,
+  // the entry stays, and the project's own launches then fail on it.
+  it('cleanup reports an autoload entry it could not remove', () => {
+    const { projectPath, manager } = setupProject({
+      managerOptions: {
+        removeAutoloadEntry: () => {
+          throw new Error('EPERM: operation not permitted, rename project.godot');
+        },
+      },
+    });
+    manager.inject(projectPath, TEST_PORT);
+
+    const problems = manager.cleanup(projectPath);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain(
+      'the McpBridge autoload entry could not be removed from project.godot (EPERM: operation not permitted, rename project.godot)',
+    );
+    expect(problems[0]).toContain('remove the McpBridge= line under [autoload] by hand');
+    expect(problems[0]).toContain('run any headless tool on this project to retry');
+    // What is deleted is unchanged: the script still goes, the entry stays.
+    expect(projectGodotOf(projectPath)).toContain('McpBridge=');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+  });
+
+  it('reads project.godot back instead of trusting a removal that returned', () => {
+    const { projectPath, manager } = setupProject({
+      // Claims success and changes nothing.
+      managerOptions: { removeAutoloadEntry: () => true },
+    });
+    manager.inject(projectPath, TEST_PORT);
+
+    const problems = manager.cleanup(projectPath);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('is still registered in project.godot after the removal');
+    expect(projectGodotOf(projectPath)).toContain('McpBridge=');
+  });
+
+  it('a stranded entry that could not be removed is retried by the next repairOrphaned', () => {
+    let failRemoval = true;
+    const { projectPath, manager } = setupProject({
+      managerOptions: {
+        removeAutoloadEntry: (projectFile, name) => {
+          if (failRemoval) throw new Error('EBUSY: resource busy or locked');
+          return removeAutoloadEntry(projectFile, name);
+        },
+      },
+    });
+    manager.inject(projectPath, TEST_PORT);
+    expect(manager.cleanup(projectPath)).toHaveLength(1);
+
+    // Still failing: the project must not be remembered as clean.
+    manager.repairOrphaned(projectPath);
+    expect(projectGodotOf(projectPath)).toContain('McpBridge=');
+
+    failRemoval = false;
+    manager.repairOrphaned(projectPath);
+    expect(projectGodotOf(projectPath)).not.toContain('McpBridge=');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The owner registry: only a missing directory is an empty registry. One that
+// exists and cannot be read is unknown, and unknown must not read as "nobody
+// is running this project".
+//
+// Portable triggers, no permission bits involved: a regular file where the
+// owners directory should be makes the listing fail, and a directory named
+// like an owner file makes that one read fail.
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager owner registry read failures', () => {
+  const UNREADABLE_OWNER_FILE = 'unreadable-owner.json';
+
+  /** Put a regular file where `bridge/owners/` should be. */
+  function blockOwnersDirectory(projectPath: string): void {
+    mkdirSync(bridgeDir(projectPath), { recursive: true });
+    writeFileSync(bridgeOwnersDir(projectPath), 'not a directory\n', 'utf8');
+  }
+
+  /** Add an entry to the registry that is listed but cannot be read as a file. */
+  function addUnreadableOwnerFile(projectPath: string): string {
+    const path = join(bridgeOwnersDir(projectPath), UNREADABLE_OWNER_FILE);
+    mkdirSync(path, { recursive: true });
+    return path;
+  }
+
+  it('a missing owners directory is still an empty registry', () => {
+    const { projectPath, manager } = setupProject();
+    expect(existsSync(bridgeOwnersDir(projectPath))).toBe(false);
+    expect(manager.listOtherLiveOwners(projectPath)).toEqual([]);
+  });
+
+  it('an owners path that cannot be listed is not an empty registry', () => {
+    const { projectPath, manager } = setupProject();
+    blockOwnersDirectory(projectPath);
+
+    let thrown: unknown;
+    try {
+      manager.listOtherLiveOwners(projectPath);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(BridgeRegistryUnreadableError);
+    expect((thrown as BridgeRegistryUnreadableError).reason).toMatch(/^cannot list /);
+  });
+
+  it('an owner file that cannot be read is neither pruned nor ignored', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const managerA = new BridgeManager(bridgeSourcePath);
+    managerA.inject(projectPath, TEST_PORT);
+    const unreadable = addUnreadableOwnerFile(projectPath);
+
+    const managerB = new BridgeManager(bridgeSourcePath);
+    let thrown: unknown;
+    try {
+      managerB.listOtherLiveOwners(projectPath);
+    } catch (err) {
+      thrown = err;
+    }
+
+    // Not ignored: the answer is "unknown", not a list that leaves it out.
+    expect(thrown).toBeInstanceOf(BridgeRegistryUnreadableError);
+    expect((thrown as BridgeRegistryUnreadableError).reason).toMatch(/^cannot read /);
+    // Not pruned: the entry, and the live owner beside it, are still there.
+    expect(existsSync(unreadable)).toBe(true);
+    expect(ownerFileNames(projectPath)).toHaveLength(2);
+  });
+
+  it('still prunes an owner file that was read and is not valid', () => {
+    const { projectPath, manager } = setupProject();
+    mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
+    const garbage = join(bridgeOwnersDir(projectPath), 'garbage.json');
+    writeFileSync(garbage, '{ not json', 'utf8');
+
+    expect(manager.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(existsSync(garbage)).toBe(false);
+  });
+
+  it('cleanup leaves the shared script and entry in place when the registry cannot be read', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+    addUnreadableOwnerFile(projectPath);
+
+    const problems = manager.cleanup(projectPath);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('the bridge owner registry could not be read');
+    expect(problems[0]).toContain('were left in place');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain(
+      `McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`,
+    );
+    // Its own claim is still withdrawn: that step does not depend on the read.
+    expect(ownerFileNames(projectPath)).toEqual([UNREADABLE_OWNER_FILE]);
+  });
+
+  it('repairOrphaned leaves the artifacts alone when the registry cannot be read', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const managerA = new BridgeManager(bridgeSourcePath);
+    managerA.inject(projectPath, TEST_PORT);
+    addUnreadableOwnerFile(projectPath);
+
+    const managerB = new BridgeManager(bridgeSourcePath, { isProcessAlive: () => false });
+    expect(() => managerB.repairOrphaned(projectPath)).not.toThrow();
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('McpBridge=');
+  });
+
+  it('inject fails on an unreadable registry without leaving its own owner file behind', () => {
+    const { projectPath, manager } = setupProject();
+    addUnreadableOwnerFile(projectPath);
+
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(BridgeRegistryUnreadableError);
+
+    expect(ownerFileNames(projectPath)).toEqual([UNREADABLE_OWNER_FILE]);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
   });
 });

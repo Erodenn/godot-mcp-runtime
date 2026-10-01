@@ -29,7 +29,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const TEST_SHADER = `shader_type canvas_item;
 uniform float glow = 1.0;
@@ -95,7 +95,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toContain('[sub_resource type="ShaderMaterial"');
@@ -186,7 +186,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toMatch(/shader_parameter\/glow = 2\.5/);
     },

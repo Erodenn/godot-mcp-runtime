@@ -24,6 +24,7 @@ const TEST_TIMEOUT_MS = 60000;
 
 interface BatchResult {
   target: string;
+  resolvedPath?: string;
   valid: boolean;
   errors: Array<{ message?: string }>;
   checkErrors?: Array<{ check?: string; path?: string; message?: string }>;
@@ -88,9 +89,15 @@ describe('validate - batch targets with checks', () => {
 
       const parsed = JSON.parse(extractJson(stdout)) as { results: BatchResult[] };
       expect(parsed.results).toHaveLength(3);
-      expect(parsed.results[0]).toEqual({ target: 'placeholder.gd', valid: true, errors: [] });
+      expect(parsed.results[0]).toEqual({
+        target: 'placeholder.gd',
+        resolvedPath: 'res://placeholder.gd',
+        valid: true,
+        errors: [],
+      });
       expect(parsed.results[1]).toEqual({
         target: 'main.tscn',
+        resolvedPath: 'res://main.tscn',
         valid: true,
         errors: [],
         checkErrors: [],
@@ -131,6 +138,7 @@ describe('validate - batch targets with checks', () => {
       expect(parsed.results).toHaveLength(2);
       expect(parsed.results[0]).toEqual({
         target: 'main.tscn',
+        resolvedPath: 'res://main.tscn',
         valid: true,
         errors: [],
         checkErrors: [],
@@ -139,7 +147,12 @@ describe('validate - batch targets with checks', () => {
         target: 'ghost.tscn',
         valid: false,
         errors: [{ message: 'File not found: res://ghost.tscn' }],
-        checkErrors: [{ message: 'Scene checks skipped: could not load scene ghost.tscn' }],
+        checkErrors: [
+          {
+            message:
+              'Scene checks skipped: could not load scene ghost.tscn (Scene file does not exist: res://ghost.tscn)',
+          },
+        ],
       });
     },
     TEST_TIMEOUT_MS,

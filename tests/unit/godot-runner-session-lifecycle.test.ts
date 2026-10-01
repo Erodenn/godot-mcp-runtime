@@ -15,6 +15,8 @@ import type { AddressInfo } from 'net';
 import type * as childProcess from 'child_process';
 import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
 import { useTmpDirs } from '../helpers/tmp.js';
+import { currentRecord, installSession } from '../helpers/session-install.js';
+import type { RuntimeSession } from '../../src/utils/godot-runner.js';
 
 const spawnMock = vi.fn();
 vi.mock('child_process', async (importOriginal) => {
@@ -48,17 +50,20 @@ function makeFakeChildProcess(): FakeChildProcess {
 interface BridgeRecorder {
   cleanupCalls: string[];
   injectCalls: string[];
+  /** What `cleanup` reports as not confirmed. Empty models a complete cleanup. */
+  cleanupProblems: string[];
 }
 
 /** Swap the runner's BridgeManager for a recorder. Touches no filesystem. */
 function stubBridge(runner: Runner): BridgeRecorder {
-  const rec: BridgeRecorder = { cleanupCalls: [], injectCalls: [] };
+  const rec: BridgeRecorder = { cleanupCalls: [], injectCalls: [], cleanupProblems: [] };
   (runner as unknown as { bridge: unknown }).bridge = {
     inject: (projectPath: string) => {
       rec.injectCalls.push(projectPath);
     },
     cleanup: (projectPath: string) => {
       rec.cleanupCalls.push(projectPath);
+      return [...rec.cleanupProblems];
     },
     isBridgeAutoloadRegistered: () => false,
     listOtherLiveOwners: () => [],
@@ -123,7 +128,7 @@ describe('spawned-process exit auto-clear', () => {
     const captured = runner.activeProcess!;
     proc.stdout.emit('data', Buffer.from('hello from the game\n'));
     const profiler = { hasResult: true, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
 
     proc.emit('exit', 3);
 
@@ -153,7 +158,10 @@ describe('spawned-process exit auto-clear', () => {
     // before assigning the new `activeProcess`. Throughout that window the old
     // process is still `activeProcess`, so an identity guard does not fire -
     // only the epoch distinguishes the sessions.
-    (runner as unknown as { beginSessionTransition(): number }).beginSessionTransition();
+    const internals = runner as unknown as {
+      beginSessionTransition(session: RuntimeSession): number;
+    };
+    internals.beginSessionTransition(currentRecord(runner));
     expect(runner.activeProcess).toBe(captured);
 
     proc.emit('exit', 0);
@@ -191,10 +199,55 @@ describe('spawned-process exit auto-clear', () => {
     expect(proc.kill).not.toHaveBeenCalled();
   });
 
+  // Nobody is listening when a game exits by itself, so what that cleanup
+  // could not confirm has to survive until the stop that reports it.
+  it('a cleanup problem at process exit is kept for the later stop', async () => {
+    const problem = 'the McpBridge autoload entry could not be removed from project.godot (EPERM)';
+    await start();
+    bridge.cleanupProblems = [problem];
+    proc.emit('exit', 1);
+    // The stop does not clean again, so a later change must not reach its result.
+    bridge.cleanupProblems = [];
+
+    const result = await runner.stopProject();
+
+    expect(result!.alreadyExited).toBe(true);
+    expect(result!.cleanupProblems).toEqual([problem]);
+    expect(bridge.cleanupCalls).toEqual([projectPath]);
+  });
+
+  it('an exit whose cleanup was complete leaves no problem for the later stop', async () => {
+    await start();
+    proc.emit('exit', 0);
+
+    const result = await runner.stopProject();
+
+    expect(result!.cleanupProblems).toEqual([]);
+  });
+
+  it('a stop of a running process carries what its own cleanup could not confirm', async () => {
+    const problem = 'the bridge script could not be removed (EBUSY)';
+    await start();
+    bridge.cleanupProblems = [problem];
+    // A process that exits as soon as it is asked to, so the stop does not
+    // sit out its kill grace period.
+    proc.kill.mockImplementation(() => {
+      proc.emit('exit', 0);
+      return true;
+    });
+
+    const result = await runner.stopProject();
+
+    expect(result!.mode).toBe('spawned');
+    expect(result!.alreadyExited).toBeUndefined();
+    expect(result!.cleanupProblems).toEqual([problem]);
+    expect(bridge.cleanupCalls).toEqual([projectPath]);
+  });
+
   it('keeps a finished profiler capture across the already-exited stop', async () => {
     await start();
     const profiler = { hasResult: true, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
     proc.emit('exit', 0);
 
     await runner.stopProject();
@@ -203,10 +256,38 @@ describe('spawned-process exit auto-clear', () => {
     expect(runner.activeProfiler).toBe(profiler);
   });
 
+  // What is left after that stop is a record holding only the capture. The
+  // next stop releases it, which is a stop that did something: a result, not
+  // the null that reads as "nothing to stop".
+  it('a second stop releases the retained capture and reports that it did', async () => {
+    await start();
+    const profiler = { hasResult: true, close: vi.fn() };
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
+    proc.emit('exit', 0);
+    await runner.stopProject();
+
+    const second = await runner.stopProject();
+
+    expect(second).toEqual({
+      mode: 'spawned',
+      projectPath: expect.any(String),
+      output: null,
+      errors: null,
+      alreadyExited: true,
+      cleanupProblems: [],
+      releasedCaptureOnly: true,
+    });
+    expect(profiler.close).toHaveBeenCalledTimes(1);
+    expect(runner.activeProfiler).toBeNull();
+    expect(runner.listSessions()).toEqual([]);
+    // Nothing is left: a third stop has nothing to act on.
+    expect(await runner.stopProject()).toBeNull();
+  });
+
   it('closes an unfinished profiler capture across the already-exited stop', async () => {
     await start();
     const profiler = { hasResult: false, close: vi.fn() };
-    (runner as unknown as { activeProfiler: unknown }).activeProfiler = profiler;
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
     proc.emit('exit', 0);
 
     await runner.stopProject();
@@ -225,6 +306,20 @@ describe('spawned-process exit auto-clear', () => {
 
     await expect(start()).rejects.toBeInstanceOf(BridgeAutoloadCollisionError);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // An owner registry that cannot be read makes inject refuse. Launching anyway
+  // would start a game with no bridge and end as a bridge timeout that blames
+  // something else, so this one is surfaced too, before anything is spawned.
+  it('rethrows an unreadable owner registry instead of launching without a bridge', async () => {
+    const { BridgeRegistryUnreadableError } = await import('../../src/utils/bridge-manager.js');
+    (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
+      throw new BridgeRegistryUnreadableError('cannot read owners/1-a.json: EBUSY');
+    };
+
+    await expect(start()).rejects.toBeInstanceOf(BridgeRegistryUnreadableError);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(runner.activeSessionMode).toBeNull();
   });
 
   it('returns null from stopProject when there is no session and no process', async () => {
@@ -265,8 +360,8 @@ describe('spawned-process exit auto-clear', () => {
     // rest of the session state, so point them at the scripted bridge only
     // after the exit - mirroring how a caller would still be able to reach a
     // bridge command after the session cleared (activeProcess survives).
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = scripted.port;
-    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'test-token';
+    currentRecord(runner).bridgePort = scripted.port;
+    currentRecord(runner).token = 'test-token';
 
     // Marker capture inside sendCommandWithErrors happens synchronously before
     // it awaits the round-trip, so emitting the stderr line right after the
@@ -337,6 +432,10 @@ async function startScriptedBridge(
 
 const PONG = '{"status":"pong"}';
 const OK = '{"ok":true}';
+/** What the bridge answers a `shutdown` it accepted with. */
+const SHUTTING_DOWN = '{"status":"shutting_down"}';
+/** What the bridge answers any command carrying the wrong token with. */
+const UNAUTHORIZED = '{"error":"Unauthorized: invalid or missing session token"}';
 
 describe('attached-mode bridge disconnect', () => {
   let runner: Runner;
@@ -357,16 +456,12 @@ describe('attached-mode bridge disconnect', () => {
   });
 
   function attach(port: number): void {
-    const r = runner as unknown as {
-      activeSessionMode: string;
-      activeProjectPath: string;
-      activeBridgePort: number;
-      activeSessionToken: string;
-    };
-    r.activeSessionMode = 'attached';
-    r.activeProjectPath = projectPath;
-    r.activeBridgePort = port;
-    r.activeSessionToken = 'test-token';
+    installSession(runner, {
+      mode: 'attached',
+      projectPath,
+      bridgePort: port,
+      token: 'test-token',
+    });
   }
 
   it(
@@ -461,4 +556,224 @@ describe('attached-mode bridge disconnect', () => {
     },
     DISCONNECT_CASE_TIMEOUT_MS,
   );
+
+  // The detach goes ahead either way. What the stop must not do is imply the
+  // bridge inside the still-running Godot stopped listening when it never
+  // said so.
+  it(
+    'an attached stop records an unacknowledged shutdown',
+    async () => {
+      scripted = await startScriptedBridge(() => ({ kind: 'drop' }));
+      attach(scripted.port);
+
+      const result = await runner.stopProject();
+
+      expect(scripted.seen).toEqual(['shutdown']);
+      expect(result).toMatchObject({ mode: 'attached', shutdownAcknowledged: false });
+      expect(bridge.cleanupCalls).toEqual([projectPath]);
+      expect(runner.activeSessionMode).toBeNull();
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+
+  it(
+    'an attached stop records an acknowledged shutdown',
+    async () => {
+      scripted = await startScriptedBridge(() => ({ kind: 'reply', payload: SHUTTING_DOWN }));
+      attach(scripted.port);
+
+      const result = await runner.stopProject();
+
+      expect(result).toMatchObject({
+        mode: 'attached',
+        shutdownAcknowledged: true,
+        cleanupProblems: [],
+      });
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+
+  it(
+    'a refusal from the bridge is a reply, not an acknowledgement',
+    async () => {
+      scripted = await startScriptedBridge(() => ({ kind: 'reply', payload: UNAUTHORIZED }));
+      attach(scripted.port);
+
+      const result = await runner.stopProject();
+
+      expect(result).toMatchObject({ mode: 'attached', shutdownAcknowledged: false });
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+
+  it(
+    'an attached stop carries what its cleanup could not confirm',
+    async () => {
+      const problem = 'the bridge owner registry could not be read (EACCES)';
+      scripted = await startScriptedBridge(() => ({ kind: 'reply', payload: SHUTTING_DOWN }));
+      attach(scripted.port);
+      bridge.cleanupProblems = [problem];
+
+      const result = await runner.stopProject();
+
+      expect(result!.cleanupProblems).toEqual([problem]);
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+
+  // The disconnect clear deletes the record, so no later stop_project can
+  // report what its cleanup left behind. The error is the last place to say it.
+  it(
+    'a disconnect that ends the session puts an incomplete cleanup on the error it throws',
+    async () => {
+      const problem =
+        'the McpBridge autoload entry could not be removed from project.godot (EPERM)';
+      scripted = await startScriptedBridge(() => ({ kind: 'drop' }));
+      attach(scripted.port);
+      bridge.cleanupProblems = [problem];
+
+      const failure = await runner.sendCommandWithErrors('run_script', {}).catch((e: unknown) => e);
+
+      expect(failure).toBeInstanceOf(BridgeDisconnectedError);
+      expect((failure as Error).message).toContain('Bridge cleanup was incomplete');
+      expect((failure as Error).message).toContain(problem);
+      expect(runner.activeSessionMode).toBeNull();
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+});
+
+describe('an attach whose bridge injection fails', () => {
+  const ATTACH_PORT = 19988;
+  let runner: Runner;
+  let bridge: BridgeRecorder;
+  let projectPath: string;
+
+  beforeEach(() => {
+    runner = new GodotRunner({ godotPath: 'godot' });
+    bridge = stubBridge(runner);
+    projectPath = tmp.makeProject('godot-mcp-attach-fail-');
+  });
+
+  function failInject(message: string): void {
+    (runner as unknown as { bridge: { inject: (path: string) => void } }).bridge.inject = (
+      path: string,
+    ) => {
+      bridge.injectCalls.push(path);
+      throw new Error(message);
+    };
+  }
+
+  // inject writes its owner file before it touches .gitignore and
+  // project.godot, so one that throws there has left a live owner claim behind.
+  // With no cleanup, every other server is told a session is running here
+  // until this server exits.
+  it('withdraws what the injection left on the project, with no earlier session', async () => {
+    failInject('EPERM: operation not permitted, open project.godot');
+
+    await expect(runner.attachProject(projectPath, ATTACH_PORT)).rejects.toThrow(/EPERM/);
+
+    expect(bridge.injectCalls).toEqual([projectPath]);
+    expect(bridge.cleanupCalls).toEqual([projectPath]);
+    expect(runner.listSessions()).toEqual([]);
+    expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  it('says so on the error when that cleanup could not be confirmed', async () => {
+    const problem = "this session's bridge owner file could not be removed (EBUSY)";
+    failInject('EPERM: operation not permitted, open project.godot');
+    bridge.cleanupProblems = [problem];
+
+    const failure = await runner.attachProject(projectPath, ATTACH_PORT).catch((e: unknown) => e);
+
+    expect((failure as Error).message).toMatch(/EPERM/);
+    expect((failure as Error).message).toContain('Bridge cleanup was incomplete');
+    expect((failure as Error).message).toContain(problem);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Spawn options at the three spawn sites
+// ---------------------------------------------------------------------------
+
+describe('spawn options reach child_process.spawn', () => {
+  const EDITOR_PID = 4242;
+  /** Index of the options argument in a `spawn(cmd, args, options)` call. */
+  const SPAWN_OPTIONS_ARG = 2;
+  /** Fixed bridge port for the runProject case; no socket is opened there. */
+  const SPAWN_CASE_BRIDGE_PORT = 19988;
+  let savedDisplay: string | undefined;
+
+  beforeEach(() => {
+    savedDisplay = process.env.DISPLAY;
+    if (process.platform === 'linux' && !process.env.DISPLAY) process.env.DISPLAY = ':0';
+    spawnMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (savedDisplay === undefined) delete process.env.DISPLAY;
+    else process.env.DISPLAY = savedDisplay;
+  });
+
+  function spawnOptions(): Record<string, unknown> {
+    return spawnMock.mock.calls[0]![SPAWN_OPTIONS_ARG] as Record<string, unknown>;
+  }
+
+  it('launchEditor drains both pipes', () => {
+    const child = {
+      pid: EDITOR_PID,
+      stdout: { resume: vi.fn() },
+      stderr: { resume: vi.fn() },
+      on: vi.fn(),
+    };
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    const returned = runner.launchEditor('/some/project');
+
+    expect(returned).toBe(child);
+    expect(child.stdout.resume).toHaveBeenCalledTimes(1);
+    expect(child.stderr.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('launchEditor keeps piped stdio and never asks for a hidden window', () => {
+    spawnMock.mockReturnValue({
+      pid: EDITOR_PID,
+      stdout: { resume: vi.fn() },
+      stderr: { resume: vi.fn() },
+      on: vi.fn(),
+    });
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    runner.launchEditor('/some/project');
+
+    expect(spawnOptions()).toEqual({ stdio: 'pipe' });
+  });
+
+  it('runProject keeps piped stdio and never asks for a hidden window', async () => {
+    spawnMock.mockReturnValue(makeFakeChildProcess());
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+
+    const projectPath = tmp.makeProject('godot-mcp-spawn-');
+    await runner.runProject(projectPath, undefined, false, SPAWN_CASE_BRIDGE_PORT);
+
+    const options = spawnOptions();
+    expect(options.stdio).toBe('pipe');
+    expect(options).not.toHaveProperty('windowsHide');
+    expect(options.env).toMatchObject({ MCP_BRIDGE_PORT: String(SPAWN_CASE_BRIDGE_PORT) });
+  });
+
+  it('a headless spawn hides its console window', async () => {
+    const proc = makeFakeChildProcess();
+    spawnMock.mockReturnValue(proc);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    const pending = runner.getVersion();
+    proc.stdout.emit('data', Buffer.from('4.7.2.stable.official\n'));
+    proc.emit('close', 0);
+
+    expect(await pending).toBe('4.7.2.stable.official');
+    expect(spawnOptions()).toEqual({ stdio: 'pipe', windowsHide: true });
+  });
 });

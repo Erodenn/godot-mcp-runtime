@@ -177,7 +177,7 @@ The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-f
 Token delivery differs by session mode, because the channel available differs:
 
 - **Spawned (`run_project`)**: Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode: the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
-- **Attached (`attach_project`)**: Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
+- **Attached (`run_project` with `attach: true`)**: Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
 
 A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all - the standalone script run outside the MCP server (manual debugging, `validate`).
 
@@ -189,11 +189,11 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 **This channel has no token.** The bridge authenticates every frame because both ends are ours. Godot defines the debugger protocol, there is no field to carry a secret, and the engine would not check one. The listener therefore accepts the first connection that arrives and destroys every later one. That is the same trust assumption the bridge token already concedes it cannot exceed: a process able to scan the local TCP table and win the race between bind and the engine's dial-back can equally read `MCP_SESSION_TOKEN` out of the spawned engine's environment and drive the _authenticated_ bridge, which is strictly more powerful. The missing token here does not open a door that a same-user process did not already have.
 
-**What a hostile peer could do, and where it stops.** It is confined to the profiler. The receiver acts on five message names - `set_pid`, `debug_enter`, `servers:function_signature`, `servers:profile_frame` and `servers:profile_total` - and drops everything else. None of them reaches script execution, the filesystem, process control, or any other tool's behaviour; the profiler's state is read only by the three profiling tools. The realistic ceiling is fabricated profiling numbers and denial of profiling for the rest of the session. A peer that connects but never speaks the protocol surfaces as a `profile_timeout` within five seconds, and the engine's own "unable to connect" lands in `get_debug_output`. A peer that _does_ speak it can return plausible-looking measurements with no signal. Treat profiler output as measurement data, not as a trusted assertion about your project.
+**What a hostile peer could do, and where it stops.** It is confined to the profiler. The receiver acts on nine message names - `set_pid`, `debug_enter`, `servers:function_signature`, `servers:profile_frame`, `servers:profile_total`, `visual:hardware_info`, `visual:profile_frame`, `performance:profile_names` and `performance:profile_frame` - and drops everything else. It sends only `profiler:servers`, `profiler:visual` and `continue`. None of them reaches script execution, the filesystem, process control, or any other tool's behaviour; the profiler's state is read only by the three profiling tools. The names in a capture (functions, render stages, custom monitors, hardware) are strings the peer supplied. The realistic ceiling is fabricated profiling numbers and denial of profiling for the rest of the session. A peer that connects but never speaks the protocol surfaces as a `profile_timeout` within five seconds, and the engine's own "unable to connect" lands in `get_debug_output`. A peer that _does_ speak it can return plausible-looking measurements with no signal. Treat profiler output as measurement data, not as a trusted assertion about your project.
 
 **Errors still do not pause the game.** A connected debugger normally halts the engine on a script error or `breakpoint`. Every `debug_enter` is answered immediately with `continue`, so profiling mode preserves the behaviour documented under "Runtime errors and `breakpoint`" - the engine runs past errors, `SCRIPT ERROR` output keeps reaching stderr, and `breakpoint` remains a no-op. Verified empirically against a project with a deliberate runtime error: stderr was byte-identical with and without `--remote-debug`, and the game ran on past the fault.
 
-**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch - it cannot be added to a running session, and `attach_project` never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` or `attach_project`, and by the server's own shutdown handlers. It never outlives the server process.
+**Lifetime.** The listener is bound only for spawned sessions, and only when `profiling: true` was passed at launch - it cannot be added to a running session, and an attached session never has one. It is closed by `stop_project` (including when the spawn failed and no process exists), by a failed spawn, by the next `run_project` on the same project in either mode (a `run_project` on another project leaves it open), and by the server's own shutdown handlers. It never outlives the server process.
 
 **Not covered by strict mode.** `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` govern what GDScript may run; they say nothing about this channel. `profiling: true` is a parameter on `run_project` and inherits that tool's pre-flight scan and session-confirmation gate (both skipped when `GODOT_MCP_DISABLE_SECURITY` is set), but none of the three flags separately refuses to open the debugger port.
 
@@ -201,7 +201,7 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 ## Strict mode
 
-`GODOT_MCP_STRICT=true` is read once at process start. When enabled:
+`GODOT_MCP_STRICT=true` is read once at process start. Only the exact string `true` enables it. Any other value except `false` or an empty one (`1`, `TRUE`, `yes`) leaves it off and is reported on stderr at startup. When enabled:
 
 - Every Tier 2 match becomes Tier 1 (hard reject). No elicitation prompt is sent.
 - `run_project` becomes a hard reject if any autoload script or the launched scene's attached scripts contain a Tier 1 primitive.
@@ -214,7 +214,7 @@ Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on 
 
 ## Disabling elicitation
 
-`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients - notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) - advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
+`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start, and only the exact string `true` enables it. Any other value except `false` or an empty one is reported on stderr at startup and leaves confirmation prompts on. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients - notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) - advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
 
 When enabled, the interactive confirmation is skipped and treated as accepted (**fail-open**):
 
@@ -230,7 +230,7 @@ Only enable this when you trust the project and the agent driving it - it remove
 
 ## Disabling the entire gate
 
-`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar - for both handlers.
+`GODOT_MCP_DISABLE_SECURITY=true` is read once at process start, and only the exact string `true` enables it. Any other value except `false` or an empty one is reported on stderr at startup and leaves the gate on. It is a complete no-op switch for the `run_script` / `run_project` security gate: with it set, there is no static-analysis scan, no Tier 1/2/3 decision, no elicitation, no `warnings`, and no `.policy.json` audit sidecar - for both handlers.
 
 Specifically, this flag skips:
 
@@ -258,19 +258,36 @@ This exists for experienced users who do not need the gate: developers who accep
 
 `run_project` runs the same scanner over:
 
-1. Every `[autoload]` entry in `project.godot` whose path ends in `.gd`.
-2. Every `[ext_resource type="Script" path="res://…"]` attached to the launched scene, recursing transitively into every `[ext_resource type="PackedScene"]` it instances (cycle-safe). The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only).
+1. Every `[autoload]` entry in `project.godot` whose path ends in `.gd` or `.tscn` (case-insensitive). A scene autoload is scanned the way the launched scene is, as in item 2.
+2. Every `.gd` file an `[ext_resource path="res://…"]` of the launched scene names, and the source of every inline `[sub_resource type="GDScript"]` it embeds, recursing transitively into every scene it references (cycle-safe). A reference is classified by its path as well as by its `type` attribute: the engine loads the file the path names, and `type` is a hint a hand-edited scene can set to anything, so a `.gd` path is scanned and a `.tscn` or `.scn` path is walked whatever `type` says. The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only). A script an instanced node or an instance override attaches is always an ext_resource or an inline sub-resource of the same scene file, so it is covered by the same two forms. Inline findings are labelled `<scene>[GDScript <id>]:<line>`, with the line counted inside the inline source.
+
+The `scene` argument has to be a scene file, a path ending in `.tscn` or `.scn` in lower case, and the call is refused otherwise. Godot runs a command-line scene only when it carries such an extension and runs `run/main_scene` for anything else, so an argument like `icon.svg` or `scenes/level` would have had the scan read one file while the engine launched another.
 
 Findings are aggregated and:
 
 - **Default mode**: surfaced as `warnings: string[]` on the success response. The project still launches.
-- **Strict mode**: any Tier 1 finding hard-rejects before launch.
+- **Strict mode**: any Tier 1 finding hard-rejects before launch. So does a scan that failed on a file it reads: a `.gd` script or a `.tscn` scene that exists and could not be read (a permission error, a directory in its place), or a scan step that threw.
 
-Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides - see "What this does NOT do."
+With `attach: true` the same scan runs over the autoloads and `run/main_scene` before the bridge is injected, and findings are handled the same way: `warnings` in default mode, and in strict mode a Tier 1 finding refuses to inject. Attach mode has no confirmation prompt, because MCP launches nothing there.
+
+What the scan cannot read is reported, not skipped. Still not scanned: scripts that are not GDScript (a C# script, an autoload that is neither `.gd` nor `.tscn`), binary `.scn` scenes, scripts carried by non-scene resources a scene references (`.tres` / `.res`), and references with no `res://` path, such as one by `uid://` alone. Each one the scan meets is listed in `warnings` as `Not scanned: <scene>: <reason>` (or an `Autoload ... was not scanned` entry), as is an `[autoload]` line the parser could not read. A resource file is listed once, however many scenes reference it. Findings and these notices are capped separately (10 each, with a `+N more` tail), so a long list of findings never pushes a not-scanned notice out of the answer.
+
+Strict mode separates two kinds of incomplete scan:
+
+| What was not scanned                                                                                   | Default mode | Strict mode                |
+| ------------------------------------------------------------------------------------------------------ | ------------ | -------------------------- |
+| A `.gd` script or `.tscn` scene that exists and could not be read, or a scan step that threw           | Warned       | The launch is refused      |
+| A file of a kind the scan never reads: a C# script, a binary `.scn` scene, a `.tres` / `.res` resource | Warned       | Warned, the launch goes on |
+| A script or scene a reference names that is not on disk, a reference with no `res://` path             | Warned       | Warned, the launch goes on |
+| A malformed header or an unterminated string inside a scene that was read                              | Warned       | Warned, the launch goes on |
+
+The first row is a scan that set out to read a file and failed, so what it would have found is unknown. The others are known limits of what the scan covers. Whether strict mode should refuse on those too is an open question: refusing on every one would block every C# project and every project with a binary scene or a resource file. See "What this does NOT do."
 
 ### Session-confirmation gate
 
 The first `run_project` call against a given `projectPath` in a session prompts one elicitation: "Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?" Subsequent calls in the same session against the same project skip. A `cancel` response (client dismissed the prompt without a choice, or auto-cancelled it) is reported distinctly from an explicit `decline` and points the user at `GODOT_MCP_DISABLE_ELICITATION`. When that flag is set, this gate is skipped entirely (see "Disabling elicitation").
+
+`render_movie` launches the project too, so it runs this same pre-flight scan and shares the once-per-session launch confirmation with `run_project`: confirming either one covers both for that project. Strict mode and `GODOT_MCP_DISABLE_SECURITY` apply to it exactly as they do to `run_project`.
 
 ---
 
@@ -326,7 +343,7 @@ This section exists because the doctrine at the top of this document demands it:
 - **Loopback is not a boundary in every host configuration.** Both listeners bind `127.0.0.1` and are unreachable from the network, but a Linux process under WSL2 in mirrored networking mode shares the Windows host's loopback. The bridge is token-protected there; the profiler channel is not.
 - **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.
 - **Identifier aliasing / dataflow is invisible.** `var f = FileAccess; f.open(...)`, or any indirection through a local variable, defeats every chain-based rule, because the scanner is token-level, not a dataflow analysis. This is a structural limit of tokenizer-level matching, not something the next rule addition can close.
-- **Inline scene scripts and instance overrides are not scanned by `run_project`'s pre-flight.** `[sub_resource type="GDScript"]` embeds GDScript source directly inside a `.tscn`; `[instance]` property overrides can also carry code-bearing values. Neither is chased. (Subscene _ext_resource_ recursion, meaning scripts attached to a referenced PackedScene, IS scanned as of this release; see "`run_project` pre-flight".)
+- **Some scripts a launch brings in are not scanned by `run_project`'s pre-flight.** Inline `[sub_resource type="GDScript"]` source and scripts attached to instanced scenes are scanned (see "`run_project` pre-flight"). Not scanned: non-GDScript scripts, binary `.scn` scenes, scripts carried by `.tres` / `.res` resources a scene references, and `uid://`-only references. The scan reports each of these it meets in `warnings`, but it does not refuse a launch over them, even in strict mode; strict mode refuses only when a script or text scene it does read exists and could not be read, or the scan itself failed. One mismatch is not reported at all: an `ext_resource` that carries both a `uid` and a `path` is read by its `path`, while the engine prefers the `uid`, so a stale `path` that names a harmless file hides the script the `uid` resolves to. The scene reader also expects one statement per line, the layout Godot writes. In a scene edited by hand to put two statements on one line (a section header followed by another header or by a property, or a property followed by a header), the second statement is not read, so a script it brings in is not scanned.
 - **Bypassable by anyone who reads the open-source rule table and obfuscates.** This is the central, load-bearing limitation: the catalogue above is deliberately auditable, which means an adversary who wants to bypass it can read exactly what triggers each tier and construct GDScript that doesn't. That's accepted as inherent to a best-effort filter aimed at unobfuscated primitives, not a defect to be patched away.
 - **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
 - No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch: mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
@@ -334,4 +351,4 @@ This section exists because the doctrine at the top of this document demands it:
 - No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`, `GODOT_MCP_DISABLE_ELICITATION`, and `GODOT_MCP_DISABLE_SECURITY` (all process-global, read once at start).
 - **`GODOT_MCP_DISABLE_SECURITY` removes Tier 1 too.** Every other escape hatch in this document (`GODOT_MCP_DISABLE_ELICITATION`, `GODOT_MCP_STRICT`'s absence) leaves Tier 1 hard blocks standing. This one does not: see "Disabling the entire gate." Enabling it is a full opt-out, not a UX convenience.
 - No retroactive scanning of scripts already in the project: `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
-- `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.
+- `run_project` with `attach: true` inherits whatever the externally launched Godot is doing. The pre-flight scan can warn, or in strict mode refuse to inject the bridge, but it cannot stop a Godot you start yourself. Scripts executed via `run_script` against an attached process still go through the gate.

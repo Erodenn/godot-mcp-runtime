@@ -26,6 +26,12 @@ const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
 # script cannot import TypeScript, so the path is spelled in both places and
 # the two MUST move together.
 const SCREENSHOT_DIR_RES_PATH := "res://.mcp/godot-runtime/screenshots"
+# KEEP IN SYNC: SCREENSHOT_FRAME_RENDER_BUDGET_MS in src/tools/runtime-tools.ts
+# is the twin of this constant. How long a screenshot waits for one rendered
+# frame before it answers with an error. It MUST stay under the Node side's
+# default screenshot command timeout, or the caller gets a generic timeout in
+# place of this script's own error.
+const FRAME_RENDER_BUDGET_MS := 5000
 const MAX_FRAME_BYTES := 16 * 1024 * 1024
 const FRAME_HEADER_BYTES := 4
 # KEEP IN SYNC: ACTION_BOUNDARY_SENTINEL in src/utils/bridge-protocol.ts is the
@@ -44,6 +50,20 @@ const MAX_HOLD_MS := 10000
 const MAX_TEXT_LENGTH := 1000
 const MAX_WATCH_ENTRIES := 16
 const MAX_UI_DELTA_ENTRIES := 20
+
+# Profiler track caps. KEEP IN SYNC: MAX_TRACK_ENTRIES and MIN_TRACK_INTERVAL_MS
+# with TRACK_MAX_ENTRIES and TRACK_MIN_INTERVAL_MS in src/tools/profiler-tools.ts. A
+# track samples NodePath:property values from _process on its own clock, so a
+# profiler timeline can place them by engine frame number while other commands
+# (a long input batch) hold this peer.
+const MAX_TRACK_ENTRIES := 4
+const MAX_TRACK_SAMPLES := 2000
+const MIN_TRACK_INTERVAL_MS := 50
+const MAX_TRACK_DURATION_MS := 180000
+# What track_start falls back to when interval_ms or max_ms is left out. The
+# server always sends both, so these only meet a bridge driven by hand.
+const DEFAULT_TRACK_INTERVAL_MS := 250
+const DEFAULT_TRACK_DURATION_MS := 60000
 
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
@@ -113,6 +133,17 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 # beginActionErrorCapture clears them before the next batch reads any.
 var _input_batch_generation: int = 0
 
+# Active profiler track: the specs to sample, the sampling clock, and the
+# samples taken so far. _track_active holds from track_start to track_stop;
+# _track_watch empties once sampling ends (max_ms or a full buffer), so
+# _process stops polling while the samples wait for track_stop.
+var _track_active: bool = false
+var _track_watch: Array = []
+var _track_interval_ms: int = 0
+var _track_next_ms: int = 0
+var _track_until_ms: int = 0
+var _track_samples: Array = []
+
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
@@ -139,6 +170,8 @@ func _ready() -> void:
 		print("McpBridge: Background mode active - window hidden, physical input blocked")
 
 func _process(_delta: float) -> void:
+	if not _track_watch.is_empty():
+		_poll_track()
 	if tcp_server == null or not tcp_server.is_listening():
 		return
 
@@ -267,6 +300,10 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			await _handle_screenshot(peer, payload)
 		"shutdown":
 			await _handle_shutdown(peer)
+		"track_start":
+			_handle_track_start(peer, payload)
+		"track_stop":
+			_handle_track_stop(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
 		_:
@@ -275,7 +312,10 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 # --- Screenshot ---
 
 func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
-	await _ensure_frame_rendered()
+	var frame_rendered: bool = await _ensure_frame_rendered()
+	if not frame_rendered:
+		_send_response(peer, {"error": "No frame was rendered within %d ms. The window is likely minimized or fully covered, so a screenshot would show a stale frame." % FRAME_RENDER_BUDGET_MS})
+		return
 
 	var viewport := get_viewport()
 	if viewport == null:
@@ -329,36 +369,45 @@ func _handle_screenshot(peer: PeerState, payload: Dictionary = {}) -> void:
 
 	_send_response(peer, response)
 
-# Waits until a freshly rendered frame is available for capture.
+# Waits until a freshly rendered frame is available for capture. Returns
+# false when none arrived inside FRAME_RENDER_BUDGET_MS, so the caller can
+# answer with an error instead of capturing a frame that may be stale.
 #
 # Normal path: the engine's render loop is presenting every frame, so the
 # next frame_post_draw is imminent. Occluded path (macOS-only today): a
 # background-mode window parked off-screen fails NSWindowOcclusionState
 # visibility, DisplayServer.window_can_draw() goes false, and the engine
 # main loop stops calling RenderingServer.draw() entirely, so
-# frame_post_draw never fires and the await would deadlock the peer.
-# Recover by driving one render manually: force_draw(false) renders every
-# viewport into its render target but skips the swapchain blit that hangs
-# while occluded. See issue #24.
-func _ensure_frame_rendered() -> void:
-	if DisplayServer.window_can_draw():
-		await RenderingServer.frame_post_draw
-		return
+# frame_post_draw never fires by itself. Recover by driving one render
+# manually: force_draw(false) renders every viewport into its render target
+# but skips the swapchain blit that hangs while occluded. See issue #24.
+#
+# The wait is never an await on the signal itself: a window the engine stops
+# drawing without reporting it through window_can_draw() would leave the peer
+# waiting forever. It is a process_frame loop against the wall clock, which
+# keeps running at time_scale 0 and while the tree is paused, where a
+# SceneTreeTimer would not fire.
+func _ensure_frame_rendered() -> bool:
 	# GDScript lambdas capture locals by value; use an Array so the
 	# mutation inside the lambda is visible out here.
 	var draw_state := [false]
 	var on_draw := func() -> void: draw_state[0] = true
 	# Connect BEFORE force_draw(): with single-threaded rendering (the
 	# default), frame_post_draw fires synchronously inside force_draw(),
-	# before an await here could start listening.
+	# before a wait here could start listening.
 	RenderingServer.frame_post_draw.connect(on_draw, CONNECT_ONE_SHOT)
-	RenderingServer.force_draw(false, 0.0)
-	if not draw_state[0]:
-		# Threaded rendering: the signal is emitted deferred on the main
-		# thread; resume when it lands.
-		await RenderingServer.frame_post_draw
-	elif RenderingServer.frame_post_draw.is_connected(on_draw):
+	if not DisplayServer.window_can_draw():
+		RenderingServer.force_draw(false, 0.0)
+	var wait_started_ms := Time.get_ticks_msec()
+	while not draw_state[0] and Time.get_ticks_msec() - wait_started_ms < FRAME_RENDER_BUDGET_MS:
+		await get_tree().process_frame
+	if draw_state[0]:
+		return true
+	# Budget spent with no frame drawn. The one-shot observer never fired, so
+	# it is still connected and has to be removed here.
+	if RenderingServer.frame_post_draw.is_connected(on_draw):
 		RenderingServer.frame_post_draw.disconnect(on_draw)
+	return false
 
 # --- Input Simulation ---
 
@@ -990,6 +1039,65 @@ func _sample_one_watch(spec: Variant) -> Variant:
 		return null
 	return _serialize_value(node.get_indexed(NodePath(str(parts[1]))))
 
+# --- Profiler track ---
+
+# Samples the given NodePath:property specs every interval_ms until track_stop
+# or max_ms, replacing any track already running. Each sample carries the engine
+# process frame, the same counter the profiler's frames are numbered by, so the
+# Node side can place it on a capture's timeline exactly. Sampling runs from
+# _process, so it keeps going while an input batch holds the peer.
+func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
+	var watch = payload.get("watch", [])
+	if typeof(watch) != TYPE_ARRAY or (watch as Array).is_empty():
+		_send_response(peer, {"error": "watch must be a non-empty array of NodePath:property strings"})
+		return
+	var watch_list: Array = watch
+	if watch_list.size() > MAX_TRACK_ENTRIES:
+		_send_response(peer, {"error": "track accepts at most %d entries (got %d)" % [MAX_TRACK_ENTRIES, watch_list.size()]})
+		return
+	for i in watch_list.size():
+		if _split_watch_spec(watch_list[i]).is_empty():
+			_send_response(peer, {"error": "track[%d]: expected NodePath:property (got '%s')" % [i, str(watch_list[i])]})
+			return
+	var interval = payload.get("interval_ms", DEFAULT_TRACK_INTERVAL_MS)
+	var duration = payload.get("max_ms", DEFAULT_TRACK_DURATION_MS)
+	if not _is_number(interval) or not _is_number(duration):
+		_send_response(peer, {"error": "interval_ms and max_ms must be numbers"})
+		return
+	var now := Time.get_ticks_msec()
+	_track_active = true
+	_track_watch = watch_list.duplicate()
+	_track_interval_ms = maxi(int(interval), MIN_TRACK_INTERVAL_MS)
+	_track_next_ms = now
+	_track_until_ms = now + clampi(int(duration), MIN_TRACK_INTERVAL_MS, MAX_TRACK_DURATION_MS)
+	_track_samples = []
+	_send_response(peer, {"status": "tracking"})
+
+# Hands the samples over once. A second track_stop, or one after another call
+# replaced the track, is an error rather than an empty list, so a capture
+# whose track was lost says so instead of looking like nothing was sampled.
+func _handle_track_stop(peer: PeerState) -> void:
+	if not _track_active:
+		_send_response(peer, {"error": "No track is running: it was stopped or replaced by another profiler call before this capture collected it"})
+		return
+	var samples := _track_samples
+	_track_active = false
+	_track_watch = []
+	_track_samples = []
+	_send_response(peer, {"samples": samples})
+
+# Past max_ms, or once the buffer is full, the samples are kept for track_stop
+# and nothing new is taken: a track nobody stops cannot grow without bound.
+func _poll_track() -> void:
+	var now := Time.get_ticks_msec()
+	if now >= _track_until_ms or _track_samples.size() >= MAX_TRACK_SAMPLES:
+		_track_watch = []
+		return
+	if now < _track_next_ms:
+		return
+	_track_next_ms = now + _track_interval_ms
+	_track_samples.append({"frame": Engine.get_process_frames(), "values": _sample_watch(_track_watch)})
+
 # The Control under the mouse after the settle frame. Reached through call() so
 # this script still parses on 4.x builds that predate the method; has_method
 # gates whether it runs at all, and callers omit `hit` when this returns null.
@@ -1029,6 +1137,16 @@ func _current_scene_path() -> String:
 func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 	var visible_only: bool = payload.get("visible_only", true)
 	var type_filter: String = payload.get("type_filter", "")
+	# is_class() below matches native class names only, so a name that is not
+	# a Control class can never match. Answering that with an empty list would
+	# read as "this scene has no such controls".
+	if type_filter != "":
+		if not ClassDB.class_exists(type_filter):
+			_send_response(peer, {"error": "Unknown class for filter: '%s'. filter matches native Godot class names such as Button or Label; a script class_name is not matched." % type_filter})
+			return
+		if type_filter != "Control" and not ClassDB.is_parent_class(type_filter, "Control"):
+			_send_response(peer, {"error": "filter '%s' is not a Control class" % type_filter})
+			return
 	var root := get_tree().root
 	var elements: Array[Dictionary] = []
 	_collect_control_nodes(root, elements, visible_only, type_filter)
@@ -1180,6 +1298,11 @@ func _serialize_value(value: Variant) -> Variant:
 				result.append(_serialize_value(item))
 			return result
 		TYPE_OBJECT:
+			# A freed Object is not null, and `is` raises on one. A profiler track
+			# samples from _process, where that would raise on every tick. The
+			# text is what str() gives a freed Object.
+			if not is_instance_valid(value):
+				return "<Freed Object>"
 			if value is Node:
 				var node: Node = value
 				return {"class": node.get_class(), "name": String(node.name), "path": str(node.get_path())}

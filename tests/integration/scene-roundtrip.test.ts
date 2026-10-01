@@ -18,7 +18,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 // --- tmp project helpers ---
 
@@ -111,7 +111,7 @@ describe('add_node round-trip', () => {
       // Stdout then read as success and the parent-not-found stderr was
       // discarded. The fix is `return` after every `quit(1)` in
       // godot_operations.gd; this test pins the contract that failed
-      // headless ops MUST NOT emit a "added successfully" line.
+      // headless ops MUST NOT emit a result line.
       const originalTscn = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
 
       let stdoutSeen = '';
@@ -135,8 +135,8 @@ describe('add_node round-trip', () => {
       }
 
       // Either the runner rejected, or it returned stdout the handler would
-      // classify as failure (no "added successfully" marker).
-      expect(stdoutSeen).not.toContain('added successfully');
+      // classify as failure (no result line).
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       // The Godot side should have reported the parent-not-found error to stderr.
       expect(stderrSeen.toLowerCase()).toContain('parent node not found');
 

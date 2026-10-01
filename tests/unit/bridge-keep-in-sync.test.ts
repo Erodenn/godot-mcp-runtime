@@ -20,7 +20,12 @@ import {
   MAX_FRAME_BYTES,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
-import { normalizeForCompare } from '../../src/utils/output-parsing.js';
+import { TRACK_MAX_ENTRIES, TRACK_MIN_INTERVAL_MS } from '../../src/tools/profiler-tools.js';
+import { normalizeForCompare, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import {
+  SCREENSHOT_DEFAULT_TIMEOUT_MS,
+  SCREENSHOT_FRAME_RENDER_BUDGET_MS,
+} from '../../src/tools/runtime-tools.js';
 
 const bridgeSource = readFileSync(
   new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
@@ -49,9 +54,76 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(gdConst('ACTION_BOUNDARY_SENTINEL')).toBe(`"${ACTION_BOUNDARY_SENTINEL}"`);
   });
 
+  it('declares the same profiler track caps', () => {
+    expect(gdConst('MAX_TRACK_ENTRIES')).toBe(String(TRACK_MAX_ENTRIES));
+    expect(gdConst('MIN_TRACK_INTERVAL_MS')).toBe(String(TRACK_MIN_INTERVAL_MS));
+  });
+
   it('writes screenshots where the containment check looks for them', () => {
     const resPath = gdConst('SCREENSHOT_DIR_RES_PATH').replace(/^"|"$/g, '');
     const projectRelative = resPath.replace('res://', '');
     expect(normalizeForCompare(screenshotsDir('/project'))).toBe(`/project/${projectRelative}`);
+  });
+
+  // The budget is how long the bridge waits for a frame before it answers a
+  // screenshot with its own error. At or past the command timeout, that error
+  // could never arrive: the caller would get a generic timeout instead.
+  it('the screenshot frame budget matches its TypeScript twin and stays under the default screenshot timeout', () => {
+    expect(gdConst('FRAME_RENDER_BUDGET_MS')).toBe(String(SCREENSHOT_FRAME_RENDER_BUDGET_MS));
+    expect(SCREENSHOT_FRAME_RENDER_BUDGET_MS).toBeLessThan(SCREENSHOT_DEFAULT_TIMEOUT_MS);
+  });
+
+  it('waits for a rendered frame on a bounded loop, never on the signal itself', () => {
+    expect(bridgeSource).not.toContain('await RenderingServer.frame_post_draw');
+    expect(bridgeSource).toContain('< FRAME_RENDER_BUDGET_MS');
+  });
+});
+
+/**
+ * The headless-operation result sentinel is the same kind of two-sided
+ * contract: godot_operations.gd prints it, output-parsing.ts reads it. A
+ * drifted marker leaves every operation printing a payload nobody extracts.
+ */
+describe('godot_operations.gd agrees with the TypeScript result sentinel', () => {
+  const operationsSource = readFileSync(
+    new URL('../../src/scripts/godot_operations.gd', import.meta.url),
+    'utf8',
+  );
+
+  it('declares the same operation-result sentinel', () => {
+    const match = operationsSource.match(
+      /^const OPERATION_RESULT_SENTINEL\s*:=\s*(.+?)\s*(?:#.*)?$/m,
+    );
+    expect(
+      match,
+      'godot_operations.gd must declare const OPERATION_RESULT_SENTINEL',
+    ).not.toBeNull();
+    expect(match![1]).toBe(`"${OPERATION_RESULT_SENTINEL}"`);
+  });
+
+  it('keeps the sentinel distinct from the stderr action-boundary sentinel', () => {
+    expect(OPERATION_RESULT_SENTINEL.startsWith(ACTION_BOUNDARY_SENTINEL)).toBe(false);
+    expect(ACTION_BOUNDARY_SENTINEL.startsWith(OPERATION_RESULT_SENTINEL)).toBe(false);
+  });
+
+  it('keeps the sentinel ASCII', () => {
+    expect(OPERATION_RESULT_SENTINEL).toMatch(/^[\x20-\x7e]+$/);
+  });
+
+  it('prints results only through the emitter helper', () => {
+    expect(operationsSource).not.toContain('print(JSON.stringify');
+    const printsSentinel = operationsSource
+      .split('\n')
+      .filter((line) => line.includes('print(OPERATION_RESULT_SENTINEL'));
+    expect(printsSentinel).toHaveLength(1);
+  });
+
+  it('writes nothing to stdout except the framed result', () => {
+    const stdoutPrints = operationsSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .filter((line) => /(^|[^A-Za-z_])print\(/.test(line));
+    expect(stdoutPrints).toHaveLength(1);
+    expect(stdoutPrints[0]).toContain('print(OPERATION_RESULT_SENTINEL');
   });
 });

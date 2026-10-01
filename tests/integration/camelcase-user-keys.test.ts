@@ -23,7 +23,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const TEST_SHADER = `shader_type canvas_item;
 uniform float glowAmount = 1.0;
@@ -87,7 +87,7 @@ describe('camelCase keys inside user-authored properties/value dicts', () => {
         30000,
       );
 
-      expect(addResult.stdout).toContain('added successfully');
+      expect(addResult.stdout).toContain(OPERATION_RESULT_SENTINEL);
       let sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toMatch(/shader_parameter\/glowAmount = 2\.5/);
 

@@ -9,12 +9,14 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
-import { executeSceneOp } from '../../src/utils/headless-op.js';
+import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
+import { leadWithWarnings } from '../../src/utils/structured-response.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
-import { cleanStdout } from '../../src/utils/output-parsing.js';
+import { cleanStdout, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
+import { BridgeRegistryUnreadableError } from '../../src/utils/bridge-manager.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
 const EMPTY_SOLUTIONS = ['empty: a', 'empty: b'];
@@ -44,6 +46,12 @@ function runnerWithLiveSession(session: LiveSession | null): FakeRunner {
   runner.activeProcess =
     session?.mode === 'spawned' ? { hasExited: session.hasExited ?? false } : null;
   return fake;
+}
+
+/** Give the fake live sessions on projects other than its current one. */
+function withExtraLiveSessions(fake: FakeRunner, projectPaths: string[]): void {
+  (fake.asRunner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths =
+    projectPaths;
 }
 
 describe('executeSceneOp', () => {
@@ -114,7 +122,31 @@ describe('executeSceneOp', () => {
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
-    expectErrorMatching(result, /see get_debug_output for details/);
+    expectErrorMatching(result, /gave no reason \(it printed no \[ERROR\] line\)/);
+    // With no reason from the script, what stderr does hold is shown, and the
+    // message names no log to go and read: a headless run keeps none.
+    expectErrorMatching(result, /just some banner output/);
+    expect(unwrap(result).content[0]?.text ?? '').not.toContain('get_debug_output');
+  });
+
+  it('shows the engine diagnostics when the script itself stopped without an [ERROR] line', async () => {
+    // A runtime error inside godot_operations.gd: SCRIPT ERROR lines, no
+    // payload and no [ERROR] line. The diagnostics are the only account of it.
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr:
+        "SCRIPT ERROR: Invalid assignment of property or key 'name' with value of type 'float'.\n   at: _apply_add_node (res://godot_operations.gd:537)",
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'batch_scene_operations',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expectErrorMatching(result, /Invalid assignment of property or key 'name'/);
   });
 
   it('wraps a thrown runner error with failurePrefix and exceptionSolutions', async () => {
@@ -197,6 +229,64 @@ describe('executeSceneOp', () => {
       );
       expect(hasError(result)).toBe(false);
       expect(fake.calls.length).toBe(1);
+    });
+
+    it('refuses a scene mutation on a project whose live session is not current', async () => {
+      // The current session is on another project; /proj is still being run
+      // by this server, so its engine is still a second writer.
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/current' });
+      withExtraLiveSessions(fake, ['/proj']);
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(fake.calls.length).toBe(0);
+    });
+
+    it('tells the caller to switch first when the live session is not current', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/current' });
+      withExtraLiveSessions(fake, ['/proj']);
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /not the current one/);
+      const content = unwrap(result)
+        .content.map((block) => (block.type === 'text' ? block.text : ''))
+        .join('\n');
+      expect(content).toContain('switch_project');
+      expect(content).toContain('"/proj"');
+      expect(fake.calls.length).toBe(0);
+    });
+
+    it('keeps the plain stop_project remedy for the current session', async () => {
+      const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/proj' });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      const content = JSON.stringify(unwrap(result).content);
+      expect(content).toContain('Call stop_project, then retry the scene edit');
+      expect(content).not.toContain('switch_project');
     });
 
     it('points the caller at stop_project as the remedy', async () => {
@@ -308,6 +398,32 @@ describe('executeSceneOp', () => {
         { mutatesSceneFile: true },
       );
       expectErrorMatching(result, /active.*session|session.*active/i);
+      expect(fake.calls.length).toBe(0);
+    });
+
+    // The guard asks "is another session running this project's game". A
+    // registry that cannot be read does not answer no.
+    it('an unreadable owner registry refuses the scene edit with the reason', async () => {
+      const fake = runnerWithLiveSession(null);
+      const reason = 'cannot list /proj/.mcp/godot-runtime/bridge/owners: EACCES';
+      const runner = fake.asRunner as GodotRunner & { otherLiveSessionsOnProject: () => never };
+      runner.otherLiveSessionsOnProject = () => {
+        throw new BridgeRegistryUnreadableError(reason);
+      };
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /Could not read this project's bridge owner registry/);
+      expectErrorMatching(result, /bridge\/owners: EACCES/);
+      expectErrorMatching(result, /unknown whether another MCP session is running its game/);
+      expectErrorMatching(result, /Refusing the scene edit/);
       expect(fake.calls.length).toBe(0);
     });
   });
@@ -440,6 +556,10 @@ describe('executeSceneOp cold-import retry', () => {
     expectErrorMatching(result, /second time/i);
     // The caller has to know what did land, or it cannot resume safely.
     expectErrorMatching(result, /add_node/);
+    // The quoted payload is shown without its stdout framing.
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).not.toContain(OPERATION_RESULT_SENTINEL);
+    expect(message).toContain(`reported by this run: ${partialBatch}`);
   });
 
   it('still imports and retries when the marked run reported no applied step', async () => {
@@ -470,6 +590,93 @@ describe('executeSceneOp cold-import retry', () => {
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
       { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    expect(hasError(result)).toBe(false);
+  });
+
+  // A single-step operation emits its payload after it has saved. Replaying
+  // one adds the node a second time: Godot renames the copy, and the caller
+  // gets a success for the copy while the first node is never reported.
+  describe('an operation that emitted its result is never replayed', () => {
+    const ADDED = JSON.stringify({ nodeName: 'Hud', nodeType: 'Label', nodePath: 'root/Hud' });
+
+    async function addNodeWith(stderr: string): Promise<{ fake: FakeRunner; result: unknown }> {
+      const fake = createFakeRunner({ stdout: ADDED, stderr });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { parseStdoutAsJson: true, mutatesSceneFile: true },
+      );
+      return { fake, result };
+    }
+
+    it('when DEBUG=true echoes a parameter that holds the marker text', async () => {
+      // What log_debug writes to stderr for add_node with a Label text of
+      // "[IMPORT_NEEDED] soon": the marker text, quoted, on a line of its own kind.
+      const { fake, result } = await addNodeWith(
+        '[INFO] Operation: add_node\n[DEBUG] Params JSON: {"scene_path":"main.tscn","properties":{"text":"[IMPORT_NEEDED] soon"}}\n',
+      );
+      expect(fake.importCalls).toEqual([]);
+      expect(fake.calls).toHaveLength(1);
+      expect(hasError(result)).toBe(false);
+      expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADDED));
+    });
+
+    it('when a script in the project prints a marker line of its own', async () => {
+      const { fake, result } = await addNodeWith('[IMPORT_NEEDED] autoload: res://x.png\n');
+      expect(fake.importCalls).toEqual([]);
+      expect(fake.calls).toHaveLength(1);
+      expect(hasError(result)).toBe(false);
+    });
+  });
+
+  it('does not treat the marker text quoted mid-line as a request for an import', async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr:
+        '[DEBUG] Params JSON: {"node_name":"[IMPORT_NEEDED] x"}\n[ERROR] Parent node not found: root/X\n',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /Parent node not found: root\/X/);
+  });
+
+  it('recognizes the marker in the form the script prints it, behind its [ERROR] prefix', async () => {
+    const fake = createFakeRunner({
+      responses: [
+        {
+          stdout: '',
+          stderr:
+            '[INFO] Operation: get_scene_tree\n[ERROR] [IMPORT_NEEDED] main.tscn: res://assets/tex.png\n',
+        },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
     );
     expect(fake.importCalls).toEqual(['/proj']);
     expect(fake.calls).toHaveLength(2);
@@ -543,8 +750,11 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
     expect(messageText).toContain('no JSON payload was emitted');
   });
 
-  it('keeps the generic invalid-JSON message when stdout is JSON-shaped (true op bug, no disguise)', async () => {
-    const fake = createFakeRunner({ stdout: 'not json { but has braces }', stderr: '' });
+  it('keeps the generic invalid-JSON message when a sentinel line carries unparseable JSON (true op bug, no disguise)', async () => {
+    const fake = createFakeRunner({
+      stdout: `${OPERATION_RESULT_SENTINEL}not json { but has braces }`,
+      stderr: '',
+    });
     const result = await executeSceneOp(
       fake.asRunner,
       'attach_script',
@@ -560,7 +770,7 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
 
   it('does not mask a mid-stdout JSON parse failure (truncated payload after leading noise)', async () => {
     const fake = createFakeRunner({
-      stdout: 'WARNING: noise\n{"results": [{"ok": tru',
+      stdout: `WARNING: noise\n${OPERATION_RESULT_SENTINEL}{"results": [{"ok": tru`,
       stderr: '',
     });
     const result = await executeSceneOp(
@@ -578,7 +788,7 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
 
   it('parses a valid payload preceded by leading ERROR/WARNING engine noise', async () => {
     const fake = createFakeRunner({
-      stdout: 'WARNING: upload timing\nERROR: transient probe\n{"results": [{"ok": true}]}\n',
+      stdout: `WARNING: upload timing\nERROR: transient probe\n${OPERATION_RESULT_SENTINEL}{"results": [{"ok": true}]}\n`,
       stderr: '',
     });
     const result = await executeSceneOp(
@@ -709,11 +919,72 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
       { parseStdoutAsJson: true },
     );
     const message = unwrap(result).content[0]?.text ?? '';
+    // Every line of this stdout is banner or [DEBUG] status, which cleanStdout
+    // drops, so the run arrives as empty output and gets the same diagnosis
+    // the run produces without DEBUG: the operation's own [ERROR] line from
+    // stderr, with the handler's solutions. Pinned exactly, so a change that
+    // sends this case anywhere else (the no-payload message, or a JSON
+    // emission blame) fails here.
+    expect(message).toBe(`${TEST_FAILURE_PREFIX}: Node not found: NoSuchNode`);
+    expect(unwrap(result).content[1]?.text ?? '').toContain(EMPTY_SOLUTIONS[0]);
+  });
+
+  // A project whose autoload prints to stdout sends every failed operation
+  // down the no-payload path. The operation's own reason is on stderr behind
+  // the engine's exit-time lines, and those used to be all that was shown.
+  it("leads with the operation's own reason when engine diagnostics are also on stderr", async () => {
+    const fake = createFakeRunner({
+      stdout: '[Audio] ready',
+      stderr: [
+        '[INFO] Operation: add_node',
+        '[ERROR] Parent node not found: root/X',
+        'ERROR: 1 resources still in use at exit.',
+        '   at: clear (core/io/resource.cpp:1)',
+      ].join('\n'),
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).toContain('reason: Parent node not found: root/X');
+    // The engine line and the project's stdout are still shown, after it.
+    expect(message.indexOf('Parent node not found')).toBeLessThan(
+      message.indexOf('resources still in use'),
+    );
+    expect(message).toContain('[Audio] ready');
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).not.toMatch(/Check get_debug_output/);
+  });
+
+  it('classifies the same captured stdout as no-payload when it reaches the parser uncleaned', async () => {
+    // Not a shape GodotRunner.executeOperation can hand over (it always
+    // cleans). This holds the interpreter itself to the rule: bracket-heavy
+    // text with no sentinel line is "no payload", never a parse attempt.
+    const fake = createFakeRunner({
+      stdout: CAPTURED_DEBUG_EARLY_EXIT_STDOUT,
+      stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'attach_script',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
     expect(message).toContain('no JSON payload was emitted');
     expect(message).not.toContain('bug in godot_operations.gd');
-    // The actual cause. parseScriptDiagnostics does not match the bracketed
-    // [ERROR] form the operation script emits, so this arrives via the raw
-    // stderr tail -- which is exactly why that fallback has to exist.
     expect(message).toContain('Node not found: NoSuchNode');
   });
 });
@@ -721,8 +992,8 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
 /**
  * stdout is the JSON channel for a headless operation and both validate check
  * paths strict-parse it, so a debug line there is not noise the parser skips:
- * it puts a `[` at column 0, extractJson latches onto it, and the whole payload
- * comes back as an unparseable string. Asserted against the script source
+ * it puts a `[` at column 0 of the very stream the payload shares, and nothing
+ * but the sentinel framing keeps the two apart. Asserted against the script source
  * because only a real Godot run would otherwise catch it, and DEBUG=true is not
  * a mode the suite runs in.
  */
@@ -737,5 +1008,162 @@ describe('godot_operations.gd logging channel', () => {
     const logDebugBody = afterDeclaration.split('func ')[0] ?? '';
     expect(logDebugBody).toContain('printerr("[DEBUG] "');
     expect(logDebugBody).not.toMatch(/(^|[^r])print\("\[DEBUG\]/);
+  });
+});
+
+// Engine banner, the payload, and any print() from an autoload or a scene
+// script share stdout. Brackets in that noise used to make the payload
+// extraction pick the wrong span and report "invalid JSON".
+describe('executeSceneOp reads only the sentinel line as the payload', () => {
+  const PAYLOAD = { results: [{ success: true }] };
+  const PAYLOAD_LINE = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(PAYLOAD)}`;
+
+  async function runWithStdout(stdout: string) {
+    const fake = createFakeRunner({ stdout, stderr: '' });
+    return executeSceneOp(
+      fake.asRunner,
+      'set_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+  }
+
+  const noisyShapes: Array<[string, string]> = [
+    ['a bracketed line before the payload', `[Autoload] ready\n${PAYLOAD_LINE}`],
+    ['a bracketed line after the payload', `${PAYLOAD_LINE}\n[Audio] shutdown`],
+    ['a printed dictionary on each side', `{"a": 1}\n${PAYLOAD_LINE}\n{"b": 2}`],
+    ['a JSON-looking array after the payload', `${PAYLOAD_LINE}\n[1, 2]`],
+  ];
+
+  for (const [label, noise] of noisyShapes) {
+    it(`returns the payload despite ${label}`, async () => {
+      const result = await runWithStdout(`Godot Engine v4.6.2.stable\n${noise}\n`);
+      expect(hasError(result)).toBe(false);
+      expect(unwrap(result).structuredContent).toEqual(PAYLOAD);
+    });
+  }
+
+  it('reports no payload, never invalid JSON, when bracketed noise has no sentinel line', async () => {
+    const result = await runWithStdout(
+      'Godot Engine v4.6.2.stable\n[Audio] ready\n{"unrelated": true}\n[1, 2]\n',
+    );
+    expect(hasError(result)).toBe(true);
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).not.toContain('invalid JSON');
+    expect(message).toContain('[Audio] ready');
+  });
+
+  it('never shows the sentinel when the raw text of a payload is returned', async () => {
+    const fake = createFakeRunner({ stdout: PAYLOAD_LINE, stderr: '' });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    const text = unwrap(result).content[0]?.text ?? '';
+    expect(text).not.toContain(OPERATION_RESULT_SENTINEL);
+    expect(JSON.parse(text)).toEqual(PAYLOAD);
+  });
+});
+
+describe('executeSceneOp puts warnings first', () => {
+  async function runWithPayload(payload: Record<string, unknown>) {
+    const fake = createFakeRunner({
+      stdout: `${OPERATION_RESULT_SENTINEL}${JSON.stringify(payload)}`,
+      stderr: '',
+    });
+    return executeSceneOp(
+      fake.asRunner,
+      'set_node_properties',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+  }
+
+  it('moves a non-empty warnings array to the front', async () => {
+    // Keys arrive sorted, so warnings is last in the emitted JSON.
+    const result = await runWithPayload({ results: [], warnings: ['w'] });
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload).toEqual({ warnings: ['w'], results: [] });
+  });
+
+  it('drops an empty warnings array', async () => {
+    const result = await runWithPayload({ results: [], warnings: [] });
+    expect(unwrap(result).structuredContent).toEqual({ results: [] });
+  });
+
+  it('leaves a payload without warnings unchanged', async () => {
+    const result = await runWithPayload({ results: [] });
+    expect(unwrap(result).structuredContent).toEqual({ results: [] });
+  });
+});
+
+describe('leadWithWarnings', () => {
+  it('moves a non-empty warnings array first', () => {
+    const led = leadWithWarnings({ results: [], warnings: ['w'] });
+    expect(Object.keys(led)).toEqual(['warnings', 'results']);
+  });
+
+  it('drops an empty warnings array', () => {
+    expect(leadWithWarnings({ results: [], warnings: [] })).toEqual({ results: [] });
+  });
+
+  it('leaves a non-array warnings value untouched', () => {
+    const payload = { results: [], warnings: 'x' };
+    expect(leadWithWarnings(payload)).toBe(payload);
+  });
+});
+
+describe('findLiveSessionOnProject', () => {
+  const OTHER_PID = 4242;
+
+  it('returns null with no session and no other owner', () => {
+    const fake = runnerWithLiveSession(null);
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
+  });
+
+  it('reports self for a live session on the same project, ignoring case and separators', () => {
+    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: 'C:\\Games\\Proj\\' });
+    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+  });
+
+  it('returns null for a live session on a different project', () => {
+    const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/other' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
+  });
+
+  it('reports self for a live session on the project that is not the current session', () => {
+    const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/current' });
+    withExtraLiveSessions(fake, ['C:\\Games\\Proj\\']);
+    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/unrelated')).toBeNull();
+  });
+
+  it("reports the other owner's info", () => {
+    const fake = runnerWithLiveSession(null);
+    const info = {
+      pid: OTHER_PID,
+      instanceId: 'abc123',
+      hostname: 'some-host',
+      mode: 'spawned',
+      startedAt: new Date().toISOString(),
+      port: 9900,
+    };
+    (fake.asRunner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [info];
+    expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toEqual({ owner: 'other', info });
   });
 });

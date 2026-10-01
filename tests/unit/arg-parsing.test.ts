@@ -24,6 +24,7 @@ import {
   parseNodePath,
   parseRequiredNodePath,
   parseOptionalNodePath,
+  checkBatchOperationItems,
 } from '../../src/utils/arg-parsing.js';
 
 function expectOk(result: { ok: boolean }): void {
@@ -235,5 +236,77 @@ describe('parseOptionalNodePath', () => {
     const result = parseOptionalNodePath({}, 'key');
     expectOk(result);
     if (result.ok) expect(result.value).toBeUndefined();
+  });
+});
+
+// The script reads these fields into typed parameters and string comparisons.
+// A value of another type raises inside it and takes every other operation in
+// the batch down with it, so each is refused here with the index it sits at.
+describe('checkBatchOperationItems', () => {
+  function messageOf(result: { ok: boolean; error?: unknown }): string {
+    if (result.ok) return '';
+    const content = (result.error as { content: Array<{ text: string }> }).content;
+    return content[0]?.text ?? '';
+  }
+
+  const ADD_NODE = { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D' };
+
+  it('ok: accepts well-formed items in either key spelling', () => {
+    expectOk(
+      checkBatchOperationItems([
+        { ...ADD_NODE, nodeName: 'A', parentNodePath: 'root', properties: { visible: true } },
+        { operation: 'add_node', scene_path: 'main.tscn', node_type: 'Node2D', node_name: 'B' },
+        {
+          operation: 'load_sprite',
+          scenePath: 'main.tscn',
+          nodePath: 'root/S',
+          texturePath: 'a.png',
+        },
+        { operation: 'save', scenePath: 'main.tscn', newPath: 'copy.tscn' },
+        {
+          operation: 'set_node_properties',
+          scenePath: 'main.tscn',
+          updates: [],
+          abortOnError: true,
+        },
+      ]),
+    );
+  });
+
+  it.each([
+    ['nodeName', { ...ADD_NODE, nodeName: 5 }],
+    ['nodeName', { ...ADD_NODE, node_name: 5 }],
+    ['nodeType', { operation: 'add_node', scenePath: 'main.tscn', nodeType: ['Node2D'] }],
+    ['parentNodePath', { ...ADD_NODE, nodeName: 'A', parentNodePath: 3 }],
+    ['nodePath', { operation: 'load_sprite', scenePath: 'main.tscn', nodePath: {} }],
+    ['texturePath', { operation: 'load_sprite', scenePath: 'main.tscn', texture_path: 1 }],
+    ['newPath', { operation: 'save', scenePath: 'main.tscn', newPath: false }],
+  ])('err: refuses a non-string %s, naming the item', (field, item) => {
+    const result = checkBatchOperationItems([{ ...ADD_NODE, nodeName: 'First' }, item]);
+    expectErr(result);
+    expect(messageOf(result)).toBe(`operations[1].${field} must be a string when provided`);
+  });
+
+  it.each([
+    ['a string', 'x'],
+    ['an array', [1]],
+    ['null', null],
+  ])('err: refuses properties given as %s', (_label, properties) => {
+    const result = checkBatchOperationItems([{ ...ADD_NODE, nodeName: 'A', properties }]);
+    expectErr(result);
+    expect(messageOf(result)).toBe('operations[0].properties must be an object when provided');
+  });
+
+  it('err: refuses a non-boolean abortOnError on an item', () => {
+    const result = checkBatchOperationItems([
+      {
+        operation: 'set_node_properties',
+        scenePath: 'main.tscn',
+        updates: [],
+        abortOnError: 'yes',
+      },
+    ]);
+    expectErr(result);
+    expect(messageOf(result)).toBe('operations[0].abortOnError must be a boolean when provided');
   });
 });

@@ -35,7 +35,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -89,7 +89,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
       // The scene text must now contain a persisted sub_resource block.
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -166,7 +166,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/unknown class 'NotARealResourceClass'/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toMatch(/sub_resource/);
@@ -198,7 +198,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/is not a Resource/i);
     },
     60000,
@@ -229,7 +229,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/size/i);
       expect(stderrSeen).toMatch(/expected|type|incompatible/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -264,7 +264,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/expects|texture|RectangleShape2D/i);
     },
     60000,

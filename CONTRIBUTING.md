@@ -116,9 +116,9 @@ When adding a new tool that forwards GDScript to the bridge, route it through th
 
 ### MCP SDK: `Server` vs `McpServer`
 
-`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our ~30 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" - that's us.
+`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our 39 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" - that's us.
 
-The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is planned post-v3.
+The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is not scheduled.
 
 ## Adding a new tool
 
@@ -138,10 +138,11 @@ Tool descriptions ship on every handshake - they are the entire UI an agent sees
 
 ## Release process
 
-1. Bump version in `package.json` and `src/index.ts`
+1. Bump version in `package.json`, `src/index.ts` and `server.json` (both its top-level `version` and `packages[].version`)
 2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
-3. Commit and push to `main`
-4. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
+3. Write `.github/release-notes/vX.Y.Z.md` when the release has something a human should read (new tools, changed behavior, a migration). The publish job prepends it above the generated notes.
+4. Commit and push to `main`
+5. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
 Docker CI runs automatically on push and PR to `main`.
 

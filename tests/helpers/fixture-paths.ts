@@ -27,3 +27,15 @@ export const inputProbeScenePath = 'input_probe.tscn';
 
 /** Absolute path to the fixture's input_probe.tscn. */
 export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePath);
+
+/** Blank scene (empty Node root, renders only the clear color) for the pixel-statistics tests. */
+export const blankScenePath = 'blank.tscn';
+
+/** Absolute path to the fixture's blank.tscn. */
+export const blankSceneAbsPath = join(fixtureProjectPath, blankScenePath);
+
+/** Scene whose ColorRect moves every process frame, for the render_movie motion tests. */
+export const motionAnimatedScenePath = 'motion_animated.tscn';
+
+/** The same ColorRect with no script, so every frame of a movie run is identical. */
+export const motionStaticScenePath = 'motion_static.tscn';

@@ -29,49 +29,72 @@ export function normalizeForCompare(p: string): string {
 }
 
 /**
- * Extract JSON from Godot output by finding the first { or [ and matching to the end.
- * This strips debug logs, version banners, and other noise.
+ * Prefix of the one stdout line that carries a headless operation's JSON
+ * result. stdout is shared with the engine banner and with any print() an
+ * autoload or scene script makes, so the payload is whatever follows this
+ * marker on its line and nothing else. KEEP IN SYNC with
+ * OPERATION_RESULT_SENTINEL in src/scripts/godot_operations.gd.
+ */
+export const OPERATION_RESULT_SENTINEL = 'MCP_OPERATION_RESULT:';
+
+/**
+ * Return the text after the operation-result sentinel on the last line that
+ * carries it, or null when no line does. Never falls back to scanning for
+ * brackets: text that was not taken from a sentinel line is not a payload.
+ *
+ * The emitter writes the sentinel once, at the start of the payload. The text
+ * can still occur more than once on that line: inside the payload itself (a
+ * Label whose text quotes it, a requested node name echoed in a warning), or
+ * in front of it (an unterminated `printraw` from a project script). So the
+ * occurrences are tried left to right and the first one followed by valid
+ * JSON is the payload. Taking the last one would start inside a string value
+ * of a payload that quotes the sentinel, and report a finished operation as
+ * invalid JSON. When none parses, the text after the first is returned so the
+ * caller reports the parse failure against what the operation emitted.
+ */
+export function extractOperationPayload(output: string): string | null {
+  const lines = output.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? '';
+    let at = line.indexOf(OPERATION_RESULT_SENTINEL);
+    if (at === -1) continue;
+    const first = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+    while (at !== -1) {
+      const candidate = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+      if (isJsonText(candidate)) return candidate;
+      at = line.indexOf(OPERATION_RESULT_SENTINEL, at + OPERATION_RESULT_SENTINEL.length);
+    }
+    return first;
+  }
+  return null;
+}
+
+function isJsonText(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove the sentinel prefix from any stdout that is about to be shown to a
+ * user, so the framing never leaks into a response or error message.
+ */
+export function stripOperationSentinel(output: string): string {
+  return output.split(OPERATION_RESULT_SENTINEL).join('');
+}
+
+/**
+ * Pull an operation's JSON payload out of its stdout. Returns the sentinel
+ * line's payload, or the input unchanged when no sentinel line exists.
+ * Production code that must tell "no payload" apart from a payload uses
+ * `extractOperationPayload`; this form exists for callers (tests) that parse
+ * the result of `GodotRunner.executeOperation` directly.
  */
 export function extractJson(output: string): string {
-  // Find the first occurrence of { or [
-  const jsonStartBrace = output.indexOf('{');
-  const jsonStartBracket = output.indexOf('[');
-
-  let jsonStart = -1;
-  if (jsonStartBrace === -1 && jsonStartBracket === -1) {
-    return output; // No JSON found, return as-is
-  } else if (jsonStartBrace === -1) {
-    jsonStart = jsonStartBracket;
-  } else if (jsonStartBracket === -1) {
-    jsonStart = jsonStartBrace;
-  } else {
-    jsonStart = Math.min(jsonStartBrace, jsonStartBracket);
-  }
-
-  // Extract from JSON start to end
-  const jsonPart = output.substring(jsonStart);
-
-  // Try to parse to validate, if it fails return original
-  try {
-    JSON.parse(jsonPart.trim());
-    return jsonPart.trim();
-  } catch {
-    // If the extracted part isn't valid JSON, try to find the last } or ]
-    const lastBrace = jsonPart.lastIndexOf('}');
-    const lastBracket = jsonPart.lastIndexOf(']');
-    const lastEnd = Math.max(lastBrace, lastBracket);
-
-    if (lastEnd > 0) {
-      const extracted = jsonPart.substring(0, lastEnd + 1);
-      try {
-        JSON.parse(extracted);
-        return extracted;
-      } catch {
-        return output; // Return original if still can't parse
-      }
-    }
-    return output;
-  }
+  return extractOperationPayload(output) ?? output;
 }
 
 /**
@@ -95,9 +118,17 @@ export function cleanOutput(output: string): string {
   return cleanedLines.join('\n');
 }
 
+/**
+ * Reduce a headless operation's raw stdout to what the handlers need. When a
+ * sentinel line is present, only that line survives (still carrying its
+ * sentinel, so downstream code can tell a payload from noise); everything
+ * else is engine and user noise. Without one, banner and status lines are
+ * filtered and the rest passes through as a non-payload message.
+ */
 export function cleanStdout(stdout: string): string {
-  if (stdout.includes('{') || stdout.includes('[')) {
-    return extractJson(stdout);
+  const payload = extractOperationPayload(stdout);
+  if (payload !== null) {
+    return OPERATION_RESULT_SENTINEL + payload;
   }
   return cleanOutput(stdout);
 }

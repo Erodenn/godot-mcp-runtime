@@ -11,14 +11,20 @@ export function getErrorMessage(error: unknown): string {
 }
 
 /**
+ * What `extractGdError` answers when stderr holds no [ERROR] line. It names no
+ * tool to read more from: a headless operation keeps no log, and
+ * get_debug_output reads a runtime session, never one of these runs.
+ */
+export const NO_SCRIPT_ERROR_LINE_MESSAGE =
+  'the operation gave no reason (it printed no [ERROR] line)';
+
+/**
  * Extract the first [ERROR] message from GDScript stderr output.
  * Falls back to a generic message if no [ERROR] line is found.
  */
 export function extractGdError(stderr: string): string {
   const errLine = stderr.split('\n').find((l) => l.includes('[ERROR]'));
-  return errLine
-    ? errLine.replace(/.*\[ERROR\]\s*/, '').trim()
-    : 'see get_debug_output for details';
+  return errLine ? errLine.replace(/.*\[ERROR\]\s*/, '').trim() : NO_SCRIPT_ERROR_LINE_MESSAGE;
 }
 
 export function createErrorResponse(

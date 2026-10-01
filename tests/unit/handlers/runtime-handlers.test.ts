@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import {
-  handleDetachProject,
   handleGetDebugOutput,
   handleStopProject,
   handleTakeScreenshot,
@@ -25,11 +25,16 @@ import {
   handleGetUiElements,
   handleRunScript,
   handleRunProject,
-  handleAttachProject,
   handleLaunchEditor,
+  runtimeToolDefinitions,
 } from '../../../src/tools/runtime-tools.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { encodePng, solidRgba } from '../../helpers/png-fixtures.js';
 import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
+import {
+  BridgeAttachConflictError,
+  BridgeRegistryUnreadableError,
+} from '../../../src/utils/bridge-manager.js';
 import type {
   GodotRunner,
   GodotProcess,
@@ -37,7 +42,9 @@ import type {
   RuntimeStopResult,
 } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
+import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
 // ---------------------------------------------------------------------------
@@ -96,19 +103,25 @@ interface RuntimeFake {
   bridgeCalls: BridgeCall[];
   /** Number of times stopProject() has been invoked. */
   stopCalls(): number;
+  /** Number of times runProject() has been invoked (the spawn path). */
+  runProjectCalls(): number;
+  /** Number of times attachProject() has been invoked (the attach path). */
+  attachProjectCalls(): number;
   setSession(opts: {
     mode: RuntimeSessionMode | null;
     projectPath?: string | null;
     process?: Partial<GodotProcess> | null;
-    /** Mirrors GodotRunner.hasEverAttached. Defaults to true when mode is
-     *  'attached', preserved otherwise unless explicitly overridden. */
-    hasEverAttached?: boolean;
   }): void;
   setBridgeResponse(response: string, runtimeErrors?: string[]): void;
   setStopResult(result: RuntimeStopResult | null): void;
   setGodotPath(path: string): void;
+  setEditorPid(pid: number | undefined): void;
   setBridgeReady(ready: boolean, error?: string): void;
+  /** Runs inside waitForBridge / waitForBridgeAttached, before the result is
+   *  returned: models session state changing while readiness is being decided. */
+  setBridgeWaitHook(hook: (() => void) | null): void;
   setRunProjectError(error: Error | null): void;
+  setAttachProjectError(error: Error | null): void;
   /** Hook called after runProject sets session state but before returning. */
   setRunProjectAfterHook(hook: ((projectPath: string) => void) | null): void;
   setStopProjectError(error: Error | null): void;
@@ -142,17 +155,24 @@ function createRuntimeFake(): RuntimeFake {
   let bridgeRuntimeErrors: string[] = [];
   let stopResult: RuntimeStopResult | null = {
     mode: 'spawned',
+    projectPath: '/fake/project',
     output: [],
     errors: [],
+    cleanupProblems: [],
   };
   let godotPath = '';
+  let editorPid: number | undefined = 4242;
   let bridgeReady = true;
   let bridgeError: string | undefined;
+  let bridgeWaitHook: (() => void) | null = null;
   let runProjectError: Error | null = null;
+  let attachProjectError: Error | null = null;
   let stopProjectError: Error | null = null;
   let runProjectAfterHook: ((projectPath: string) => void) | null = null;
   let bridgeHook: (() => void) | null = null;
   let stopCallCount = 0;
+  let runProjectCallCount = 0;
+  let attachProjectCallCount = 0;
   let actionErrorBuckets: string[][] = [];
   let actionErrorTrailing: string[] = [];
   let actionSentinelTimedOut = false;
@@ -173,9 +193,7 @@ function createRuntimeFake(): RuntimeFake {
     activeSessionMode: RuntimeSessionMode | null;
     activeProjectPath: string | null;
     activeProcess: GodotProcess | null;
-    hasEverAttached: boolean;
   } = {
-    hasEverAttached: false,
     activeSessionMode: null,
     activeProjectPath: null,
     activeProcess: null,
@@ -191,9 +209,13 @@ function createRuntimeFake(): RuntimeFake {
     get activeProcess() {
       return state.activeProcess;
     },
-    get hasEverAttached() {
-      return state.hasEverAttached;
-    },
+    ...fakeSessionApi(() => ({
+      current: {
+        mode: state.activeSessionMode,
+        projectPath: state.activeProjectPath,
+        process: state.activeProcess,
+      },
+    })),
     async sendCommandWithErrors(
       command: string,
       params: Record<string, unknown> = {},
@@ -207,11 +229,12 @@ function createRuntimeFake(): RuntimeFake {
       stopCallCount++;
       if (stopProjectError) throw stopProjectError;
       // Bridge-failure paths in handleRunProject tear down the session before
-      // returning the error, so reset the mode/project state to mirror the
-      // real runner's stopProject behavior.
+      // returning the error, so reset the mode/project/port state to mirror
+      // the real runner's stopProject behavior.
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
+      fake.activeBridgePort = null;
       return stopResult;
     },
     closeConnection() {},
@@ -222,7 +245,7 @@ function createRuntimeFake(): RuntimeFake {
       return godotPath;
     },
     launchEditor(_projectPath: string) {
-      const proc = { on: () => proc };
+      const proc = { on: () => proc, pid: editorPid };
       return proc as unknown as GodotProcess['process'];
     },
     activeBridgePort: null as number | null,
@@ -232,6 +255,7 @@ function createRuntimeFake(): RuntimeFake {
       _background?: boolean,
       bridgePort?: number,
     ) {
+      runProjectCallCount++;
       if (runProjectError) throw runProjectError;
       state.activeSessionMode = 'spawned';
       state.activeProjectPath = projectPath;
@@ -240,14 +264,18 @@ function createRuntimeFake(): RuntimeFake {
       if (runProjectAfterHook) runProjectAfterHook(projectPath);
     },
     async attachProject(projectPath: string, bridgePort?: number) {
+      attachProjectCallCount++;
+      if (attachProjectError) throw attachProjectError;
       state.activeSessionMode = 'attached';
       state.activeProjectPath = projectPath;
       fake.activeBridgePort = bridgePort ?? 19901;
     },
     async waitForBridge() {
+      if (bridgeWaitHook) bridgeWaitHook();
       return { ready: bridgeReady, error: bridgeError };
     },
     async waitForBridgeAttached() {
+      if (bridgeWaitHook) bridgeWaitHook();
       return { ready: bridgeReady, error: bridgeError };
     },
     getRecentErrors(_n: number): string[] {
@@ -280,32 +308,44 @@ function createRuntimeFake(): RuntimeFake {
     stopCalls() {
       return stopCallCount;
     },
-    setSession({ mode, projectPath = null, process = null, hasEverAttached }) {
+    runProjectCalls() {
+      return runProjectCallCount;
+    },
+    attachProjectCalls() {
+      return attachProjectCallCount;
+    },
+    setSession({ mode, projectPath = null, process = null }) {
       state.activeSessionMode = mode;
       state.activeProjectPath = projectPath;
       state.activeProcess = process as GodotProcess | null;
-      if (hasEverAttached !== undefined) {
-        state.hasEverAttached = hasEverAttached;
-      } else if (mode === 'attached') {
-        state.hasEverAttached = true;
-      }
     },
     setBridgeResponse(response, runtimeErrors = []) {
       bridgeResponse = response;
       bridgeRuntimeErrors = runtimeErrors;
     },
     setStopResult(result) {
-      stopResult = result;
+      // The real runner always reports cleanupProblems. Default it here so a
+      // case that is not about cleanup does not have to spell it out.
+      stopResult = result === null ? null : { cleanupProblems: [], ...result };
     },
     setGodotPath(path: string) {
       godotPath = path;
+    },
+    setEditorPid(pid: number | undefined) {
+      editorPid = pid;
     },
     setBridgeReady(ready: boolean, error?: string) {
       bridgeReady = ready;
       bridgeError = error;
     },
+    setBridgeWaitHook(hook) {
+      bridgeWaitHook = hook;
+    },
     setRunProjectError(error: Error | null) {
       runProjectError = error;
+    },
+    setAttachProjectError(error: Error | null) {
+      attachProjectError = error;
     },
     setRunProjectAfterHook(hook) {
       runProjectAfterHook = hook;
@@ -332,6 +372,19 @@ function createRuntimeFake(): RuntimeFake {
 
 const tmp = useTmpDirs();
 
+interface RunProjectPayload {
+  warnings?: string[];
+  projectPath: string;
+  sessionMode: string;
+  bridgePort: number | null;
+  message: string;
+}
+
+/** The structured payload of a run_project success, as a strict client reads it. */
+function runProjectPayload(result: unknown): RunProjectPayload {
+  return unwrap(result).structuredContent as unknown as RunProjectPayload;
+}
+
 function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
   return {
     // Intentionally unset: no covered handler reads `.process`. If a future handler calls
@@ -347,7 +400,7 @@ function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
 }
 
 // ---------------------------------------------------------------------------
-// Validation paths for handleRunProject / handleAttachProject / handleLaunchEditor
+// Validation paths for handleRunProject / handleLaunchEditor
 // ---------------------------------------------------------------------------
 
 describe('handleRunProject validation', () => {
@@ -387,7 +440,7 @@ describe('handleRunProject validation', () => {
     expect(solutionsText).toMatch(/GODOT_PATH/);
   });
 
-  it('returns display-unavailable error with attach_project suggestion', async () => {
+  it('returns display-unavailable error suggesting attach mode', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setRunProjectError(
@@ -403,7 +456,24 @@ describe('handleRunProject validation', () => {
     );
     expectErrorMatching(result, /No display server available/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
-    expect(solutionsText).toMatch(/attach_project/);
+    expect(solutionsText).toMatch(/attach: true/);
+  });
+
+  it('names an unreadable owner registry and tells the caller to retry', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setRunProjectError(
+      new BridgeRegistryUnreadableError('cannot read owners/1-a.json: EBUSY'),
+    );
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /bridge owner registry could not be read: cannot read owners/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toMatch(/Retry run_project/);
+    expect(solutionsText).not.toMatch(/GODOT_PATH/);
   });
 
   it('cleans up bridge artifacts when process exits before bridge readiness', async () => {
@@ -440,26 +510,16 @@ describe('handleRunProject bridge port', () => {
       acceptingContext(),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/port \d+/);
-  });
-});
-
-describe('handleAttachProject bridge port', () => {
-  it('includes the assigned bridge port in the success response', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(true);
-    const result = await handleAttachProject(fake.asRunner, {
-      projectPath: fixtureProjectPath,
-      bridgePort: 12345,
-    });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/port 12345/);
+    const payload = runProjectPayload(result);
+    expect(payload.bridgePort).toBe(19900);
+    expect(payload.sessionMode).toBe('spawned');
+    expect(payload).not.toHaveProperty('bridgeReady');
   });
 });
 
 describe('handleRunProject bridge failure paths', () => {
+  const PINNED_SPAWN_BRIDGE_PORT = 23456;
+
   it('returns "exited before MCP bridge could initialize" error when process exits during wait', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -499,6 +559,33 @@ describe('handleRunProject bridge failure paths', () => {
     expect(fake.stopCalls()).toBe(1);
   });
 
+  it('names the assigned bridge port in the timeout solutions, read before the teardown clears it', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'timeout after 5s');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, bridgePort: PINNED_SPAWN_BRIDGE_PORT },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /bridge did not respond/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain(`bridge port (${PINNED_SPAWN_BRIDGE_PORT})`);
+    expect(solutionsText).not.toContain('null');
+  });
+
+  it.each([0, 65536, 8080.5])('rejects the out-of-range bridgePort %s', async (port) => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, bridgePort: port },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /Invalid bridgePort/);
+    expect(fake.runProjectCalls()).toBe(0);
+  });
+
   it('reports the missing-autoload diagnosis instead of the stuck-process line when the entry never made it in', async () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -513,45 +600,6 @@ describe('handleRunProject bridge failure paths', () => {
     const message = unwrap(result).content[0]?.text ?? '';
     expect(message).not.toContain('early _ready error');
     expect(fake.stopCalls()).toBe(1);
-  });
-});
-
-describe('handleAttachProject bridge failure paths', () => {
-  it('returns "bridge is not ready" error and tears down when bridge wait fails', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(false, 'attach timeout');
-    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
-    expectErrorMatching(result, /bridge is not ready/);
-    expect(fake.stopCalls()).toBe(1);
-  });
-
-  it('reports the missing-autoload diagnosis when the entry never made it in', async () => {
-    const fake = createRuntimeFake();
-    fake.setBridgeReady(false, 'attach timeout');
-    fake.setBridgeAutoloadRegistered(false);
-    const result = await handleAttachProject(fake.asRunner, { projectPath: fixtureProjectPath });
-    expectErrorMatching(result, /project\.godot has no McpBridge autoload entry/);
-    expect(fake.stopCalls()).toBe(1);
-  });
-});
-
-describe('handleAttachProject validation', () => {
-  it('rejects missing projectPath', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, {});
-    expectErrorMatching(result, /projectPath/i);
-  });
-
-  it('rejects projectPath containing ..', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, { projectPath: '../evil' });
-    expectErrorMatching(result, /invalid project path/i);
-  });
-
-  it('rejects nonexistent project', async () => {
-    const fake = createRuntimeFake();
-    const result = await handleAttachProject(fake.asRunner, { projectPath: '/ghost' });
-    expectErrorMatching(result, /not a valid godot project/i);
   });
 });
 
@@ -579,6 +627,37 @@ describe('handleLaunchEditor validation', () => {
     fake.setGodotPath('');
     const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
     expectErrorMatching(result, /Could not find a valid Godot executable/i);
+  });
+});
+
+describe('handleLaunchEditor payload', () => {
+  it('returns the project path, the editor pid and a message', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
+    expect(expectMatchesOutputSchema('launch_editor', result)).toEqual({
+      projectPath: resolve(fixtureProjectPath),
+      pid: 4242,
+      message: expect.any(String),
+    });
+  });
+
+  // A spawn that fails (bad executable) reports no pid and raises 'error'
+  // later. Nothing was launched, so nothing may be reported as launched.
+  it('launch_editor is an error when the spawn reports no pid', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setEditorPid(undefined);
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /editor process did not start \(the spawn reported no pid\)/);
+    expect(unwrap(result).content[1]?.text ?? '').toMatch(/GODOT_PATH/);
+  });
+
+  it('declares the editor pid as a plain number, with no warnings channel', () => {
+    const definition = runtimeToolDefinitions.find((tool) => tool.name === 'launch_editor');
+    const schema = definition?.outputSchema as { properties: Record<string, unknown> };
+    expect(schema.properties.pid).toMatchObject({ type: 'number' });
+    expect(schema.properties).not.toHaveProperty('warnings');
   });
 });
 
@@ -650,19 +729,21 @@ describe('handleGetDebugOutput', () => {
     expectErrorMatching(result, /No active runtime session/i);
   });
 
-  it('returns synthetic attached payload (no process inspection)', () => {
+  // Nothing is captured in attach mode. Empty arrays would read as "no output
+  // and no errors", so the logs are null and the reason leads the payload.
+  it('get_debug_output in an attached session returns null logs and a leading warning', () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'attached', projectPath: '/p' });
     const result = handleGetDebugOutput(fake.asRunner, {});
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toEqual({
-      output: [],
-      errors: [],
+    const payload = expectMatchesOutputSchema('get_debug_output', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload).toEqual({
+      warnings: [expect.stringMatching(/captures no stdout or stderr.*null, not empty/)],
+      projectPath: '/p',
+      sessionMode: 'attached',
+      output: null,
+      errors: null,
       running: null,
-      attached: true,
-      tip: expect.stringMatching(/Attached mode does not capture/i),
     });
   });
 
@@ -687,10 +768,40 @@ describe('handleGetDebugOutput', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toEqual(['out7', 'out8', 'out9']);
     expect(parsed.errors).toEqual(['err7', 'err8', 'err9']);
+    expect(parsed.sessionMode).toBe('spawned');
     expect(parsed.running).toBe(true);
     expect(parsed.exitCode).toBeUndefined();
     expect(parsed.tip).toBeUndefined();
   });
+
+  it.each([
+    [
+      'Forward+/Mobile',
+      "ERROR: Tried capturing more timestamps than the configured maximum (256). You can increase this limit in the project settings under 'Debug/Settings' called 'Max Timestamp Query Elements'.",
+      '   at: capture_timestamp (servers/rendering/rendering_device.cpp:8705)',
+    ],
+    [
+      'Compatibility',
+      'ERROR: Condition "frames[frame].timestamp_count >= max_timestamp_query_elements" is true.',
+      '   at: capture_timestamp (drivers/gles3/storage/utilities.cpp:330)',
+    ],
+  ])(
+    'explains render timestamp overflow errors (%s) as a profiling side effect',
+    (_renderer, error, at) => {
+      const fake = createRuntimeFake();
+      fake.setSession({
+        mode: 'spawned',
+        projectPath: '/p',
+        process: makeRunningProcess({ errors: [error, at] }),
+      });
+
+      const parsed = JSON.parse(unwrap(handleGetDebugOutput(fake.asRunner, {})).content[0].text);
+      expect(parsed.tip).toMatch(/not from the game/);
+      expect(parsed.tip).toMatch(/earlier lines out of this log/);
+      expect(parsed.tip).toMatch(/max_timestamp_query_elements=4096/);
+      expect(parsed.tip).toMatch(/Compatibility/);
+    },
+  );
 
   it('defaults limit to 200 when no limit param is supplied', () => {
     const output = Array.from({ length: 250 }, (_, i) => `o${i}`);
@@ -741,8 +852,29 @@ describe('handleGetDebugOutput', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toEqual(['out']);
     expect(parsed.errors).toEqual(['SCRIPT ERROR: crashed']);
+    expect(parsed.sessionMode).toBe('spawned');
     expect(parsed.running).toBe(false);
     expect(parsed.exitCode).toBe(139);
+  });
+
+  it('validates an attached and a spawned payload against the declared schema', () => {
+    const attached = createRuntimeFake();
+    attached.setSession({ mode: 'attached', projectPath: '/p' });
+    expect(
+      expectMatchesOutputSchema('get_debug_output', handleGetDebugOutput(attached.asRunner, {}))
+        .sessionMode,
+    ).toBe('attached');
+
+    const spawned = createRuntimeFake();
+    spawned.setSession({
+      mode: 'spawned',
+      projectPath: '/p',
+      process: makeRunningProcess({ output: ['x'] }),
+    });
+    expect(
+      expectMatchesOutputSchema('get_debug_output', handleGetDebugOutput(spawned.asRunner, {}))
+        .sessionMode,
+    ).toBe('spawned');
   });
 });
 
@@ -753,12 +885,19 @@ describe('handleGetDebugOutput', () => {
 describe('handleStopProject', () => {
   it('returns the spawned-stopped message when stopProject reports mode:spawned', async () => {
     const fake = createRuntimeFake();
-    fake.setStopResult({ mode: 'spawned', output: ['o1'], errors: ['e1'] });
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: ['o1'],
+      errors: ['e1'],
+    });
     const result = await handleStopProject(fake.asRunner);
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Godot project stopped');
-    expect(parsed.mode).toBe('spawned');
+    expect(parsed.sessionMode).toBe('spawned');
+    expect(parsed).not.toHaveProperty('mode');
+    expectMatchesOutputSchema('stop_project', result);
     expect(parsed.externalProcessPreserved).toBe(false);
   });
 
@@ -773,8 +912,17 @@ describe('handleStopProject', () => {
     const result = await handleStopProject(fake.asRunner);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Attached project detached and MCP bridge state cleaned up');
-    expect(parsed.mode).toBe('attached');
+    expect(parsed.sessionMode).toBe('attached');
     expect(parsed.externalProcessPreserved).toBe(true);
+  });
+
+  it('names the stopped project', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({ mode: 'spawned', projectPath: '/p', output: [], errors: [] });
+    const result = await handleStopProject(fake.asRunner);
+    expect(hasError(result)).toBe(false);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.projectPath).toBe('/p');
   });
 
   it('returns isError when no session was active', async () => {
@@ -849,77 +997,107 @@ describe('handleStopProject', () => {
     expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro']);
     expect(parsed.finalErrors).toEqual([]);
   });
-});
 
-// ---------------------------------------------------------------------------
-// handleDetachProject
-// ---------------------------------------------------------------------------
-
-describe('handleDetachProject', () => {
-  // Detach is optional: an attached session whose bridge disconnected
-  // clears itself, so a follow-up detach_project must succeed idempotently
-  // rather than erroring.
-  it('succeeds idempotently when the session already ended', async () => {
+  // The stop still happened, so these are successes. What they must not do is
+  // say the bridge was removed when a removal step was never confirmed.
+  it('stop_project leads with a warning when bridge cleanup was incomplete', async () => {
+    const problem =
+      'the McpBridge autoload entry could not be removed from project.godot (EPERM: operation not permitted)';
     const fake = createRuntimeFake();
-    fake.setSession({ mode: null, hasEverAttached: true });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/already ended/i);
-    expect(fake.stopCalls()).toBe(0);
-  });
-
-  // Distinct from the "already ended" case above: this server never called
-  // attach_project at all, so there is no prior session to report as ended.
-  it('says this server never attached when it never has, distinctly from "already ended"', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({ mode: null, hasEverAttached: false });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/never attached/i);
-    expect(parsed.message).not.toMatch(/already ended/i);
-    expect(fake.stopCalls()).toBe(0);
-  });
-
-  it('still points a spawned session that auto-cleared at stop_project', async () => {
-    const fake = createRuntimeFake();
-    fake.setSession({
-      mode: null,
-      projectPath: null,
-      process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      cleanupProblems: [problem],
     });
-    const result = await handleDetachProject(fake.asRunner);
-    expectErrorMatching(result, /No attached project to detach/i);
-    expect(unwrap(result).content[1]?.text ?? '').toMatch(/stop_project/);
+    const result = await handleStopProject(fake.asRunner);
+    const payload = expectMatchesOutputSchema('stop_project', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([`Bridge cleanup incomplete: ${problem}`]);
+    expect(payload.message).toMatch(/cleanup was incomplete/);
   });
 
-  it('rejects when an active session is spawned (must use stop_project)', async () => {
+  it('does not claim an exit-time cleanup that left a problem behind', async () => {
     const fake = createRuntimeFake();
-    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
-    const result = await handleDetachProject(fake.asRunner);
-    expectErrorMatching(result, /No attached project to detach/i);
-    // Solutions block points at stop_project for the spawned case.
-    const solutionsText = unwrap(result).content[1]?.text ?? '';
-    expect(solutionsText).toMatch(/stop_project/);
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: [],
+      errors: [],
+      alreadyExited: true,
+      exitCode: 1,
+      cleanupProblems: ['the bridge script could not be removed (EBUSY)'],
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect((payload.warnings as string[])[0]).toBe(
+      'Bridge cleanup incomplete: the bridge script could not be removed (EBUSY)',
+    );
+    expect(payload.message).not.toMatch(/was cleaned up at that time/);
+    expect(payload.message).toMatch(/cleanup at that time was incomplete/);
   });
 
-  it('detaches and reports externalProcessPreserved when mode is attached', async () => {
+  it('stop_project leads with a warning when the attached bridge did not acknowledge shutdown', async () => {
     const fake = createRuntimeFake();
-    fake.setSession({ mode: 'attached', projectPath: '/p' });
     fake.setStopResult({
       mode: 'attached',
+      projectPath: '/p',
+      output: null,
+      errors: null,
+      externalProcessPreserved: true,
+      shutdownAcknowledged: false,
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /did not acknowledge shutdown, so it keeps listening on its port/,
+    );
+  });
+
+  it('stop_project of an attached session returns null finalOutput and finalErrors', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'attached',
+      projectPath: '/p',
+      output: null,
+      errors: null,
+      externalProcessPreserved: true,
+      shutdownAcknowledged: true,
+    });
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(payload.finalOutput).toBeNull();
+    expect(payload.finalErrors).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      expect.stringMatching(/captures no stdout or stderr.*null, not empty/),
+    ]);
+  });
+
+  it('carries no shutdown warning when the attached bridge acknowledged', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'attached',
+      projectPath: '/p',
       output: [],
       errors: [],
       externalProcessPreserved: true,
+      shutdownAcknowledged: true,
     });
-    const result = await handleDetachProject(fake.asRunner);
-    expect(hasError(result)).toBe(false);
-    const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.externalProcessPreserved).toBe(true);
-    expect(parsed.message).toMatch(/Detached attached project/i);
+    const payload = expectMatchesOutputSchema(
+      'stop_project',
+      await handleStopProject(fake.asRunner),
+    );
+    expect(JSON.stringify(payload.warnings ?? [])).not.toMatch(/acknowledge/);
+    expect(payload.message).toBe('Attached project detached and MCP bridge state cleaned up');
   });
 });
 
@@ -934,6 +1112,96 @@ describe('handleDetachProject', () => {
 const TIMEOUT_BUFFER_MS = 10000;
 /** Mirrors INPUT_PESSIMISTIC_FRAME_MS: a 10 fps floor, not a frame-rate guess. */
 const PESSIMISTIC_FRAME_MS = 100;
+
+describe('handleStopProject on a record that holds only a finished profiler capture', () => {
+  // switch_project and check_project both tell the caller that stop_project
+  // frees this record. It does, so the answer is the success it is.
+  it('reports the release as a success with null logs and a leading warning', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: null,
+      errors: null,
+      alreadyExited: true,
+      cleanupProblems: [],
+      releasedCaptureOnly: true,
+    });
+
+    const result = await handleStopProject(fake.asRunner);
+
+    expect(hasError(result)).toBe(false);
+    const payload = expectMatchesOutputSchema('stop_project', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /finalOutput and finalErrors are null, not empty/,
+    );
+    expect(payload.projectPath).toBe('/p');
+    expect(payload.message).toMatch(/Released the finished profiler capture/);
+    expect(payload.sessionMode).toBe('spawned');
+    expect(payload.alreadyExited).toBe(true);
+    expect(payload.externalProcessPreserved).toBe(false);
+    expect(payload.finalOutput).toBeNull();
+    expect(payload.finalErrors).toBeNull();
+    expect(payload).not.toHaveProperty('exitCode');
+  });
+});
+
+describe('a bridge frame missing what its command always sends is an error, not an empty success', () => {
+  const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1\n';
+
+  function activeSession(response: unknown): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify(response));
+    return fake;
+  }
+
+  it('simulate_input: a frame with no results array', async () => {
+    const fake = activeSession({ success: true });
+    const result = await handleSimulateInput(fake.asRunner, { actions: [{ type: 'wait', ms: 1 }] });
+    expectErrorMatching(result, /Invalid response from bridge \(simulate_input\)/);
+    expectErrorMatching(result, /what was injected is not known/);
+  });
+
+  it('simulate_input: a results entry that is not an object', async () => {
+    const fake = activeSession({ success: true, results: [{ index: 0, type: 'wait' }, 'oops'] });
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [
+        { type: 'wait', ms: 1 },
+        { type: 'wait', ms: 1 },
+      ],
+    });
+    expectErrorMatching(result, /Invalid response from bridge \(simulate_input\)/);
+  });
+
+  it('get_ui_elements: a frame with no elements array', async () => {
+    const fake = activeSession({ status: 'ok' });
+    const result = await handleGetUiElements(fake.asRunner, {});
+    expectErrorMatching(result, /Invalid response from bridge \(get_ui_elements\)/);
+  });
+
+  it('run_script: a frame with neither success nor an error', async () => {
+    const dir = tmp.makeProject('run-script-bad-frame-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ result: 5 }));
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    expectErrorMatching(result, /Invalid response from bridge \(run_script\)/);
+    expectErrorMatching(result, /not known whether the script ran/);
+  });
+
+  it('run_script: an invalid timeout is refused before the script is audited or sent', async () => {
+    const dir = tmp.makeProject('run-script-bad-timeout-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }));
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT, timeout: 'soon' });
+    expectErrorMatching(result, /timeout must be a finite number/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+    expect(existsSync(auditScriptsDir(dir))).toBe(false);
+  });
+});
 
 describe('computeInputTimeoutMs', () => {
   it('charges the buffer plus one settle frame per action when there are no waits', () => {
@@ -1229,7 +1497,86 @@ describe('handleSimulateInput', () => {
     });
     expect(hasError(result)).toBe(false);
     const payload = unwrap(result).structuredContent as Record<string, unknown>;
-    expect(Object.keys(payload).sort()).toEqual(['results', 'success']);
+    expect(Object.keys(payload).sort()).toEqual(['projectPath', 'results', 'success']);
+  });
+
+  it('simulate_input leads with a warning when error attribution was partial', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, results: [{ index: 0, type: 'key', ok: true }] }),
+    );
+    // The stderr drain ended before every action boundary had arrived.
+    fake.setActionErrorBuckets([[]], [], true);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [{ type: 'key', key: 'A' }],
+    });
+    const payload = expectMatchesOutputSchema('simulate_input', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      expect.stringMatching(/may be attributed to the wrong action or be missing/),
+    ]);
+    expect((payload.warnings as string[])[0]).toMatch(/get_debug_output/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime-error lists: a cut is counted, never silent
+// ---------------------------------------------------------------------------
+
+describe('runtime error lists end with a count of what was cut', () => {
+  const SHOWN_LINES = 30;
+  const CUT_LINES = 5;
+  const lines = Array.from(
+    { length: SHOWN_LINES + CUT_LINES },
+    (_unused, i) => `SCRIPT ERROR: failure ${i}`,
+  );
+  const CUT_ENTRY = `+${CUT_LINES} more runtime error lines (get_debug_output has the full log)`;
+
+  function activeFake(): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    return fake;
+  }
+
+  it('get_ui_elements warnings', async () => {
+    const fake = activeFake();
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), lines);
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    const warnings = payload.warnings as string[];
+    expect(warnings).toHaveLength(SHOWN_LINES + 1);
+    expect(warnings.slice(0, SHOWN_LINES)).toEqual(lines.slice(0, SHOWN_LINES));
+    expect(warnings[SHOWN_LINES]).toBe(CUT_ENTRY);
+  });
+
+  it('a simulate_input entry', async () => {
+    const fake = activeFake();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, results: [{ index: 0, type: 'click_element', ok: true }] }),
+    );
+    fake.setActionErrorBuckets([lines]);
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [{ type: 'click_element', element: 'Btn' }],
+    });
+    const results = (unwrap(result).structuredContent as Record<string, unknown>).results as Array<
+      Record<string, unknown>
+    >;
+    const errors = results[0].errors as string[];
+    expect(errors).toHaveLength(SHOWN_LINES + 1);
+    expect(errors[SHOWN_LINES]).toBe(CUT_ENTRY);
+  });
+
+  it('a list at the limit is returned whole, with no count entry', async () => {
+    const fake = activeFake();
+    const atLimit = lines.slice(0, SHOWN_LINES);
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), atLimit);
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    expect(payload.warnings).toEqual(atLimit);
   });
 });
 
@@ -1271,6 +1618,15 @@ describe('handleGetUiElements', () => {
     const fake = setupActive();
     await handleGetUiElements(fake.asRunner, {});
     expect(fake.bridgeCalls[0].params).not.toHaveProperty('type_filter');
+  });
+
+  it('puts warnings first when the query raised runtime errors', async () => {
+    const fake = setupActive();
+    fake.setBridgeResponse(JSON.stringify({ elements: [] }), ['SCRIPT ERROR: boom']);
+    const result = await handleGetUiElements(fake.asRunner, {});
+    const payload = expectMatchesOutputSchema('get_ui_elements', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual(['SCRIPT ERROR: boom']);
   });
 });
 
@@ -1339,6 +1695,7 @@ describe('handleRunScript', () => {
     expect(parsed.result).toBeNull();
     expect(Array.isArray(parsed.warnings)).toBe(true);
     expect(parsed.warnings[0]).toMatch(/GDScript does not propagate exceptions/);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
   });
 
   it('returns success without escalation when attached + result:null (stderr not captured)', async () => {
@@ -1348,6 +1705,33 @@ describe('handleRunScript', () => {
     fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), []);
     const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
     expect(hasError(result)).toBe(false);
+  });
+
+  // An attached session captures no stderr, so a script that raised and one
+  // that returned null are the same frame. The payload has to say so.
+  it('run_script in an attached session leads with a warning when the result is null', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'attached', projectPath: dir });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /returned null in an attached session\. Runtime errors cannot be observed there/,
+    );
+    expect(payload.result).toBeNull();
+  });
+
+  it('carries no attached-session warning when the attached script returned a value', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'attached', projectPath: dir });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 7 }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.result).toBe(7);
   });
 
   it('returns success and surfaces runtimeErrors as warnings when result is non-null', async () => {
@@ -1366,6 +1750,7 @@ describe('handleRunScript', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.result).toBe(42);
     expect(parsed.warnings).toEqual(['SCRIPT ERROR: stale ref']);
+    expect(Object.keys(parsed)[0]).toBe('warnings');
   });
 
   it('writes the script to .mcp/godot-runtime/scripts/{timestamp}.gd for forensic replay', async () => {
@@ -1641,9 +2026,9 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Security scan findings/);
-    expect(text).toMatch(/OS\.execute/);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings?.some((w) => /OS\.execute/.test(w))).toBe(true);
+    expect(Object.keys(payload)[0]).toBe('warnings');
   });
 
   it('strict mode hard-rejects when autoload contains Tier 1 primitives', async () => {
@@ -1684,9 +2069,7 @@ describe('handleRunProject security pre-flight', () => {
     );
     expect(hasError(result)).toBe(false);
     expect(elicitCalls).toBe(0);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/Security scan findings/);
-    expect(text).not.toMatch(/OS\.execute/);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
   });
 
   it("skips this server's own bridge autoload so a relaunch does not self-reject", async () => {
@@ -1714,9 +2097,9 @@ describe('handleRunProject security pre-flight', () => {
       acceptingContext({ strict: true }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/save_png/);
-    expect(text).not.toMatch(/make_dir_recursive_absolute/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).not.toMatch(/save_png/);
+    expect(warnings).not.toMatch(/make_dir_recursive_absolute/);
   });
 
   it('still scans an McpBridge autoload pointing at a path the server does not own', async () => {
@@ -1764,8 +2147,8 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/No launchable scene found/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/No launchable scene found/);
   });
 
   it('session gate elicits once and skips on subsequent calls', async () => {
@@ -1829,9 +2212,9 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: declineElicitor, disableElicitation: true }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Elicitation disabled \(GODOT_MCP_DISABLE_ELICITATION\)/);
-    expect(text).toMatch(/launching without user confirmation/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/Elicitation disabled \(GODOT_MCP_DISABLE_ELICITATION\)/);
+    expect(warnings).toMatch(/launching without user confirmation/);
   });
 
   it('session gate blocks the launch when accept carries content.confirm:false', async () => {
@@ -1872,9 +2255,9 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: throwingElicitor, strict: false }),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/Elicitation unavailable/);
-    expect(text).toMatch(/launching without explicit user confirmation/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/Elicitation unavailable/);
+    expect(warnings).toMatch(/launching without explicit user confirmation/);
   });
 
   it('scans the launched scene resolved from run/main_scene', async () => {
@@ -1897,8 +2280,8 @@ describe('handleRunProject security pre-flight', () => {
     fake.setBridgeReady(true);
     const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toMatch(/attack\.gd:3.*OS\.execute/);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/attack\.gd:3.*OS\.execute/);
   });
 
   it('explicit scene arg overrides main_scene during scan', async () => {
@@ -1928,8 +2311,433 @@ describe('handleRunProject security pre-flight', () => {
       acceptingContext(),
     );
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).not.toMatch(/OS\.execute/);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
+  });
+
+  // Godot runs a positional argument as the scene only when it ends in a scene
+  // extension; anything else is ignored and run/main_scene launches. The gate
+  // would then have scanned the named file while the main scene ran unscanned.
+  it.each([
+    ['a file that is not a scene', 'icon.svg'],
+    ['a scene path with its extension forgotten', 'scenes/level'],
+    ['an upper-case extension, which the engine does not match', 'Other.TSCN'],
+    ['a resource file', 'other.tres'],
+  ])('refuses %s as scene before the scan, the prompt and the launch', async (_label, scene) => {
+    const dir = tmp.makeProject(
+      'run-project-not-a-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(dir, 'attack.gd'), 'extends Node\nfunc _ready():\n\tOS.execute("x")\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n',
+    );
+    writeFileSync(join(dir, scene.replace('scenes/', '')), 'not a scene');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCalls = 0;
+    const counting: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene },
+      makeContext({ elicit: counting, strict: true }),
+    );
+
+    expectErrorMatching(result, /does not end in \.tscn or \.scn/);
+    expectErrorMatching(result, /main scene runs instead/);
+    expect(elicitCalls).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
+  });
+
+  it('accepts a .scn scene argument and reports that a binary scene is not scanned', async () => {
+    const dir = tmp.makeProject('run-project-scn-scene-', 'config_version=5\n');
+    writeFileSync(join(dir, 'level.scn'), 'RSCC binary scene bytes');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene: 'level.scn' },
+      acceptingContext(),
+    );
+
+    expect(hasError(result)).toBe(false);
+    expect((runProjectPayload(result).warnings ?? []).join('\n')).toMatch(
+      /Not scanned: level\.scn: not a text scene/,
+    );
+  });
+
+  // A launch that cannot happen must never ask for confirmation, and must not
+  // leave the project recorded as confirmed.
+  it.each([
+    ['an out-of-range bridgePort', { bridgePort: 70000 }, /Invalid bridgePort/],
+    ['a non-boolean background', { background: 'yes' }, /background must be a boolean/],
+    ['a non-boolean profiling', { profiling: 1 }, /profiling must be a boolean/],
+  ])('rejects %s before the confirmation prompt', async (_label, extra, pattern) => {
+    const dir = tmp.makeProject('run-project-args-before-gate-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCalls = 0;
+    const counting: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const ctx = makeContext({ elicit: counting });
+
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, ...extra }, ctx);
+
+    expectErrorMatching(result, pattern);
+    expect(elicitCalls).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleRunProject: attach mode (attach: true)
+// ---------------------------------------------------------------------------
+
+describe('handleRunProject attach mode', () => {
+  const PINNED_BRIDGE_PORT = 12345;
+  const CONFLICTING_SERVER_PID = 4242;
+  const TIER1_AUTOLOAD = 'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n';
+
+  function makeProjectWithAutoload(prefix: string, autoloadGd: string): string {
+    const dir = tmp.makeProject(
+      prefix,
+      'config_version=5\n\n[application]\n[autoload]\nMyAuto="res://auto.gd"\n',
+    );
+    writeFileSync(join(dir, 'auto.gd'), autoloadGd, 'utf8');
+    return dir;
+  }
+
+  /** A context whose elicitor counts its calls and would decline if consulted. */
+  function decliningCountingContext(opts: { strict?: boolean; disableSecurity?: boolean } = {}): {
+    ctx: McpContext;
+    elicitCalls: () => number;
+  } {
+    let calls = 0;
+    const elicit: Elicitor = async () => {
+      calls++;
+      return { action: 'decline' };
+    };
+    return { ctx: makeContext({ elicit, ...opts }), elicitCalls: () => calls };
+  }
+
+  it('reaches the attach path with no spawn and no Godot executable', async () => {
+    const fake = createRuntimeFake();
+    // godotPath stays empty: attach mode launches nothing, so it never needs one.
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      bridgePort: PINNED_BRIDGE_PORT,
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.attachProjectCalls()).toBe(1);
+    expect(fake.runProjectCalls()).toBe(0);
+    const payload = runProjectPayload(result);
+    expect(payload.sessionMode).toBe('attached');
+    expect(payload.bridgePort).toBe(PINNED_BRIDGE_PORT);
+  });
+
+  it.each([
+    ['scene', 'main.tscn'],
+    ['background', true],
+    ['profiling', true],
+  ])('rejects the spawn-only parameter %s instead of ignoring it', async (param, value) => {
+    const fake = createRuntimeFake();
+    const { ctx, elicitCalls } = decliningCountingContext();
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, attach: true, [param]: value },
+      ctx,
+    );
+    expectErrorMatching(result, new RegExp(`"${param}" applies only to a spawned session`));
+    expect(fake.attachProjectCalls()).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
+    expect(elicitCalls()).toBe(0);
+  });
+
+  it('accepts background: false and profiling: false, which are what attach mode does', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      background: false,
+      profiling: false,
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.attachProjectCalls()).toBe(1);
+  });
+
+  it('rejects a non-boolean attach', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: 'yes',
+    });
+    expectErrorMatching(result, /attach must be a boolean/);
+    expect(fake.attachProjectCalls()).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
+  });
+
+  it('runs the pre-flight scan and never asks for the launch confirmation', async () => {
+    const dir = makeProjectWithAutoload('attach-autoload-tier1-', TIER1_AUTOLOAD);
+    const fake = createRuntimeFake();
+    const { ctx, elicitCalls } = decliningCountingContext();
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, attach: true }, ctx);
+    expect(hasError(result)).toBe(false);
+    expect(runProjectPayload(result).warnings?.some((w) => /OS\.execute/.test(w))).toBe(true);
+    expect(elicitCalls()).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+  });
+
+  it('scans the scripts of run/main_scene', async () => {
+    const dir = tmp.makeProject(
+      'attach-main-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(dir, 'attack.gd'),
+      'extends Node\nfunc _ready():\n\tOS.execute("x")\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n\n[node name="Main" type="Node2D"]\n',
+      'utf8',
+    );
+    const fake = createRuntimeFake();
+    const { ctx } = decliningCountingContext();
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, attach: true }, ctx);
+    expect(hasError(result)).toBe(false);
+    const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
+    expect(warnings).toMatch(/attack\.gd:3.*OS\.execute/);
+  });
+
+  it('strict mode refuses before injecting when an autoload contains Tier 1 primitives', async () => {
+    const dir = makeProjectWithAutoload('attach-strict-tier1-', TIER1_AUTOLOAD);
+    const fake = createRuntimeFake();
+    const { ctx } = decliningCountingContext({ strict: true });
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, attach: true }, ctx);
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+    expect(fake.attachProjectCalls()).toBe(0);
+  });
+
+  it('GODOT_MCP_DISABLE_SECURITY: attaches with no scan and no elicitation', async () => {
+    const dir = makeProjectWithAutoload('attach-disable-security-', TIER1_AUTOLOAD);
+    const fake = createRuntimeFake();
+    const { ctx, elicitCalls } = decliningCountingContext({ disableSecurity: true });
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, attach: true }, ctx);
+    expect(hasError(result)).toBe(false);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
+    expect(elicitCalls()).toBe(0);
+    expect(fake.attachProjectCalls()).toBe(1);
+  });
+
+  it('rejects missing projectPath', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, { attach: true });
+    expectErrorMatching(result, /projectPath/i);
+  });
+
+  it('rejects projectPath containing ..', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, { projectPath: '../evil', attach: true });
+    expectErrorMatching(result, /invalid project path/i);
+  });
+
+  it('rejects nonexistent project', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, { projectPath: '/ghost', attach: true });
+    expectErrorMatching(result, /not a valid godot project/i);
+  });
+
+  it('returns "bridge is not ready" error and tears down when bridge wait fails', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+    });
+    expectErrorMatching(result, /bridge is not ready/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('names the assigned bridge port in the not-ready solutions, read before the teardown clears it', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      bridgePort: PINNED_BRIDGE_PORT,
+    });
+    expectErrorMatching(result, /bridge is not ready/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain(`bridge port (${PINNED_BRIDGE_PORT})`);
+    expect(solutionsText).not.toContain('null');
+  });
+
+  it.each([0, 65536, 8080.5])('rejects the out-of-range bridgePort %s', async (port) => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+      bridgePort: port,
+    });
+    expectErrorMatching(result, /Invalid bridgePort/);
+    expect(fake.attachProjectCalls()).toBe(0);
+  });
+
+  it('reports the missing-autoload diagnosis when the entry never made it in', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeReady(false, 'attach timeout');
+    fake.setBridgeAutoloadRegistered(false);
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+    });
+    expectErrorMatching(result, /project\.godot has no McpBridge autoload entry/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('refuses a second attach session on the project, naming the other server and stop_project', async () => {
+    const fake = createRuntimeFake();
+    fake.setAttachProjectError(
+      new BridgeAttachConflictError(
+        `Another MCP session (server pid ${CONFLICTING_SERVER_PID}, attached mode) is already attached to this project.`,
+        {
+          pid: CONFLICTING_SERVER_PID,
+          instanceId: 'other-instance',
+          hostname: 'other-host',
+          mode: 'attached',
+          startedAt: new Date(0).toISOString(),
+          port: PINNED_BRIDGE_PORT,
+        },
+      ),
+    );
+    const result = await handleRunProject(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      attach: true,
+    });
+    expectErrorMatching(result, /Failed to attach project/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain(String(CONFLICTING_SERVER_PID));
+    expect(solutionsText).toMatch(/stop_project/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run_project: the success payload against its declared outputSchema
+// ---------------------------------------------------------------------------
+
+describe('run_project outputSchema', () => {
+  const runProjectDef = runtimeToolDefinitions.find((t) => t.name === 'run_project');
+  if (!runProjectDef || !('outputSchema' in runProjectDef)) {
+    throw new Error('run_project outputSchema not found');
+  }
+  const validate = new Ajv({ strict: false }).compile(runProjectDef.outputSchema as object);
+
+  function expectValid(payload: unknown): void {
+    const valid = validate(payload);
+    expect(valid, JSON.stringify(validate.errors)).toBe(true);
+  }
+
+  it('validates a spawn success payload with no warnings', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      makeContext({ disableSecurity: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings).toBeUndefined();
+    expectValid(payload);
+  });
+
+  it('validates a spawn success payload that carries warnings', async () => {
+    const dir = tmp.makeProject('run-project-schema-warnings-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.warnings?.length).toBeGreaterThan(0);
+    expectValid(payload);
+  });
+
+  it('validates an attach success payload', async () => {
+    const fake = createRuntimeFake();
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, attach: true },
+      makeContext({ disableSecurity: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const payload = runProjectPayload(result);
+    expect(payload.sessionMode).toBe('attached');
+    expectValid(payload);
+  });
+
+  // A session that ended in the gap between the readiness check and the port
+  // read has no port because there is no session. That is not a success.
+  it('run_project is an error when the session ended as the bridge became ready', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeWaitHook(() => {
+      fake.asRunner.activeBridgePort = null;
+    });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      makeContext({ disableSecurity: true }),
+    );
+    expectErrorMatching(result, /session ended as the bridge became ready; no session is running/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('run_project with attach: true is an error when the session ended as the bridge became ready', async () => {
+    const fake = createRuntimeFake();
+    fake.setBridgeWaitHook(() => {
+      fake.asRunner.activeBridgePort = null;
+    });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath, attach: true },
+      makeContext({ disableSecurity: true }),
+    );
+    expectErrorMatching(result, /session ended as the bridge became ready; no session is running/);
+    expect(fake.stopCalls()).toBe(1);
+  });
+
+  it('rejects a payload whose bridgePort is null', () => {
+    expect(
+      validate({
+        projectPath: fixtureProjectPath,
+        sessionMode: 'spawned',
+        bridgePort: null,
+        message: 'Godot project started and the MCP bridge is ready.',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a payload missing sessionMode', () => {
+    expect(
+      validate({
+        projectPath: fixtureProjectPath,
+        bridgePort: 19900,
+        message: 'Godot project started and the MCP bridge is ready.',
+      }),
+    ).toBe(false);
   });
 });
 
@@ -2000,6 +2808,16 @@ describe('handleTakeScreenshot bridge response shapes', () => {
       previewPath,
       previewSize: { width: 960, height: 540 },
     });
+  });
+
+  it('names the session project in the payload', async () => {
+    const screenshotPath = writeScreenshot('screenshot.png', 'full-image');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, width: 1280, height: 720 }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    expect(parseMetadata(result).projectPath).toBe(projectPath);
   });
 
   it('returns full inline PNG when responseMode is full', async () => {
@@ -2150,6 +2968,169 @@ describe('handleTakeScreenshot bridge response shapes', () => {
     fake.setBridgeResponse(JSON.stringify({ path: screenshotPath, preview_path: '/etc/passwd' }));
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
     expectErrorMatching(result, /preview path outside \.mcp\/godot-runtime\/screenshots\//i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleTakeScreenshot: pixel statistics
+// ---------------------------------------------------------------------------
+
+describe('handleTakeScreenshot pixel stats', () => {
+  const screenshotDef = runtimeToolDefinitions.find((t) => t.name === 'take_screenshot');
+  if (!screenshotDef || !('outputSchema' in screenshotDef)) {
+    throw new Error('take_screenshot outputSchema not found');
+  }
+  const validate = new Ajv({ strict: false }).compile(screenshotDef.outputSchema as object);
+
+  const BLACK: readonly [number, number, number, number] = [0, 0, 0, 255];
+  const FOUR_BY_FOUR = 4;
+  const TWO_BY_TWO = 2;
+  const MIXED_FRAME_CHROMATIC = 0.75;
+
+  let fake: RuntimeFake;
+  let projectPath: string;
+  let screenshotDir: string;
+
+  beforeEach(() => {
+    projectPath = tmp.make('mcp-project-');
+    screenshotDir = screenshotsDir(projectPath);
+    mkdirSync(screenshotDir, { recursive: true });
+    fake = createRuntimeFake();
+    fake.setSession({
+      mode: 'spawned',
+      projectPath,
+      process: makeRunningProcess(),
+    });
+  });
+
+  function writeFile(name: string, content: Buffer | string): string {
+    const path = join(screenshotDir, name);
+    writeFileSync(path, content);
+    return path;
+  }
+
+  function blackPng(): Buffer {
+    return encodePng(FOUR_BY_FOUR, FOUR_BY_FOUR, solidRgba(FOUR_BY_FOUR, FOUR_BY_FOUR, BLACK));
+  }
+
+  function payloadOf(result: unknown): Record<string, unknown> {
+    return unwrap(result).structuredContent as unknown as Record<string, unknown>;
+  }
+
+  function expectValid(payload: unknown): void {
+    expect(validate(payload), JSON.stringify(validate.errors)).toBe(true);
+  }
+
+  it.each(['full', 'preview', 'path_only'])('returns measured stats in %s mode', async (mode) => {
+    const screenshotPath = writeFile('screenshot.png', blackPng());
+    const bridgeResponse: Record<string, unknown> = {
+      path: screenshotPath,
+      width: FOUR_BY_FOUR,
+      height: FOUR_BY_FOUR,
+    };
+    if (mode === 'preview') {
+      bridgeResponse.preview_path = writeFile('preview.png', 'not a png');
+      bridgeResponse.preview_width = FOUR_BY_FOUR;
+      bridgeResponse.preview_height = FOUR_BY_FOUR;
+    }
+    fake.setBridgeResponse(JSON.stringify(bridgeResponse));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: mode });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toEqual({
+      width: FOUR_BY_FOUR,
+      height: FOUR_BY_FOUR,
+      chromatic: 0,
+      dominant: 1,
+      distinct: 1,
+      likelyBlank: true,
+    });
+    expect('warnings' in payload).toBe(false);
+    expectValid(payload);
+  });
+
+  it('reports a rendered frame as not blank', async () => {
+    const data = new Uint8Array([
+      255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ]);
+    const screenshotPath = writeFile('screenshot.png', encodePng(TWO_BY_TWO, TWO_BY_TWO, data));
+    fake.setBridgeResponse(
+      JSON.stringify({ path: screenshotPath, width: TWO_BY_TWO, height: TWO_BY_TWO }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const stats = payloadOf(result).stats as { likelyBlank: boolean; chromatic: number };
+    expect(stats.likelyBlank).toBe(false);
+    expect(stats.chromatic).toBe(MIXED_FRAME_CHROMATIC);
+  });
+
+  it('returns stats null with a leading warning when the saved PNG is corrupt', async () => {
+    const screenshotPath = writeFile('screenshot.png', 'these bytes are not a png');
+    const previewPath = writeFile('preview.png', 'preview-image');
+    fake.setBridgeResponse(
+      JSON.stringify({
+        path: screenshotPath,
+        preview_path: previewPath,
+        width: FOUR_BY_FOUR,
+        height: FOUR_BY_FOUR,
+      }),
+    );
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'preview' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /^Pixel stats were not measured: could not decode the PNG/,
+    );
+    expect(unwrap(result).content.some((entry) => entry.type === 'image')).toBe(true);
+    expectValid(payload);
+  });
+
+  it('returns stats null with a leading warning when the saved PNG cannot be read', async () => {
+    const directoryPath = join(screenshotDir, 'not-a-file.png');
+    mkdirSync(directoryPath);
+    fake.setBridgeResponse(JSON.stringify({ path: directoryPath }));
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(payload.stats).toBeNull();
+    expect((payload.warnings as string[])[0]).toMatch(/could not read the PNG file/);
+    expectValid(payload);
+  });
+
+  it('puts the stats warning ahead of runtime errors', async () => {
+    const screenshotPath = writeFile('screenshot.png', 'these bytes are not a png');
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }), ['SCRIPT ERROR: boom']);
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const warnings = payloadOf(result).warnings as string[];
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/^Pixel stats were not measured: /);
+    expect(warnings[1]).toContain('SCRIPT ERROR: boom');
+  });
+
+  it('leads with runtime errors when stats were measured', async () => {
+    const screenshotPath = writeFile('screenshot.png', blackPng());
+    fake.setBridgeResponse(JSON.stringify({ path: screenshotPath }), ['SCRIPT ERROR: boom']);
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+
+    expect(hasError(result)).toBe(false);
+    const payload = payloadOf(result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.stats).not.toBeNull();
+    expectValid(payload);
   });
 });
 

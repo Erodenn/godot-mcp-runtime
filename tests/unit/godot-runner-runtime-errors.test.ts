@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import type { GodotProcess } from '../../src/utils/godot-runner.js';
 import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
+import { installSession } from '../helpers/session-install.js';
 
 function makeFakeProcess(opts: { errors?: string[]; totalErrorsWritten?: number }): GodotProcess {
   const errors = opts.errors ?? [];
@@ -88,19 +89,21 @@ describe('GodotRunner.getErrorsSince', () => {
   });
 
   it('returns [] when no new errors arrived since the marker', () => {
-    runner.activeProcess = makeFakeProcess({
+    const proc = makeFakeProcess({
       errors: ['old1', 'old2'],
       totalErrorsWritten: 2,
     });
+    installSession(runner, { process: proc });
     expect(runner.getErrorsSince(2)).toEqual([]);
     expect(runner.getErrorsSince(5)).toEqual([]); // marker > total → still []
   });
 
   it('returns the tail slice corresponding to the new errors', () => {
-    runner.activeProcess = makeFakeProcess({
+    const proc = makeFakeProcess({
       errors: ['e1', 'e2', 'e3', 'e4'],
       totalErrorsWritten: 4,
     });
+    installSession(runner, { process: proc });
     // Marker captured before e3 + e4 arrived.
     expect(runner.getErrorsSince(2)).toEqual(['e3', 'e4']);
   });
@@ -108,18 +111,20 @@ describe('GodotRunner.getErrorsSince', () => {
   it('returns the full window when delta exceeds the captured ring (post-truncation)', () => {
     // Simulates: ring buffer was trimmed (errors.length=3) but totalErrorsWritten=8.
     // Marker=4 → delta=4 > errors.length=3 → return full slice.
-    runner.activeProcess = makeFakeProcess({
+    const proc = makeFakeProcess({
       errors: ['e6', 'e7', 'e8'],
       totalErrorsWritten: 8,
     });
+    installSession(runner, { process: proc });
     expect(runner.getErrorsSince(4)).toEqual(['e6', 'e7', 'e8']);
   });
 
   it('filters blank lines from the result window', () => {
-    runner.activeProcess = makeFakeProcess({
+    const proc = makeFakeProcess({
       errors: ['e1', '', 'e2', '   ', 'e3'],
       totalErrorsWritten: 5,
     });
+    installSession(runner, { process: proc });
     expect(runner.getErrorsSince(0)).toEqual(['e1', 'e2', 'e3']);
   });
 });
@@ -211,7 +216,7 @@ describe('GodotRunner.collectActionErrors', () => {
   });
 
   it('buckets SCRIPT ERROR lines onto the right entry and drops non-matching lines', async () => {
-    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    installSession(runner, { process: makeFakeProcess({ errors: [], totalErrorsWritten: 0 }) });
     const capture = runner.beginActionErrorCapture();
     runner.ingestStderrChunk(
       runner.activeProcess,
@@ -230,7 +235,7 @@ describe('GodotRunner.collectActionErrors', () => {
   });
 
   it('reports sentinelTimedOut and attributes what is present when a sentinel never arrives', async () => {
-    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    installSession(runner, { process: makeFakeProcess({ errors: [], totalErrorsWritten: 0 }) });
     const capture = runner.beginActionErrorCapture();
     runner.ingestStderrChunk(
       runner.activeProcess,
@@ -259,7 +264,7 @@ describe('GodotRunner.collectActionErrors', () => {
   });
 
   it('attributes errors to the right action when the sentinel is split', async () => {
-    runner.activeProcess = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    installSession(runner, { process: makeFakeProcess({ errors: [], totalErrorsWritten: 0 }) });
     const capture = runner.beginActionErrorCapture();
     // Same scenario as 'buckets SCRIPT ERROR lines onto the right entry', cut
     // into two chunks mid-sentinel.

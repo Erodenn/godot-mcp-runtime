@@ -10,6 +10,7 @@ import {
 import { parseAutoloads } from '../../../src/utils/autoload-ini.js';
 import { hasError, expectErrorMatching } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 
 function readProjectGodot(dir: string): string {
@@ -58,6 +59,20 @@ describe('handleListAutoloads', () => {
   it('returns autoloads list for valid project', async () => {
     const result = await handleListAutoloads({ projectPath: fixtureProjectPath });
     expect(hasError(result)).toBe(false);
+  });
+
+  it('returns the registered autoloads wrapped in an autoloads field', async () => {
+    const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/test.gd');
+    const result = await handleListAutoloads({ projectPath: dir });
+    expect(expectMatchesOutputSchema('list_autoloads', result)).toEqual({
+      autoloads: [{ name: 'TestManager', path: 'res://scripts/test.gd', singleton: true }],
+    });
+  });
+
+  it('returns an empty autoloads array for a project with no [autoload] section', async () => {
+    const dir = makeTmpProject();
+    const result = await handleListAutoloads({ projectPath: dir });
+    expect(expectMatchesOutputSchema('list_autoloads', result)).toEqual({ autoloads: [] });
   });
 });
 
@@ -131,6 +146,31 @@ describe('handleAddAutoload', () => {
       path: 'res://scripts/test.gd',
       singleton: true,
     });
+  });
+
+  it('returns the entry read back from project.godot and a tip', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'TestManager',
+      autoloadPath: 'scripts/test.gd',
+    });
+    expect(expectMatchesOutputSchema('add_autoload', result)).toEqual({
+      autoload: { name: 'TestManager', path: 'res://scripts/test.gd', singleton: true },
+      tip: expect.any(String),
+    });
+  });
+
+  it('reports singleton: false in the returned entry when opted out', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'NotSingleton',
+      autoloadPath: 'b.gd',
+      singleton: false,
+    });
+    const payload = expectMatchesOutputSchema('add_autoload', result);
+    expect(payload.autoload).toMatchObject({ name: 'NotSingleton', singleton: false });
   });
 
   it('defaults singleton to true when the param is omitted', async () => {
@@ -217,6 +257,15 @@ describe('handleRemoveAutoload', () => {
     expect(readProjectGodot(dir)).not.toContain('TestManager');
     expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([]);
   });
+
+  it('returns the removed name and the entries that remain', async () => {
+    const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/test.gd');
+    const result = await handleRemoveAutoload({ projectPath: dir, autoloadName: 'TestManager' });
+    expect(expectMatchesOutputSchema('remove_autoload', result)).toEqual({
+      removed: 'TestManager',
+      autoloads: [],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -282,6 +331,18 @@ describe('handleUpdateAutoload', () => {
     ]);
   });
 
+  it('returns the entry read back after the edit', async () => {
+    const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/old.gd');
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'TestManager',
+      autoloadPath: 'scripts/new.gd',
+    });
+    expect(expectMatchesOutputSchema('update_autoload', result)).toEqual({
+      autoload: { name: 'TestManager', path: 'res://scripts/new.gd', singleton: true },
+    });
+  });
+
   it('flips singleton to false without touching the path when only singleton is provided', async () => {
     const dir = makeTmpProjectWithAutoload('TestManager', 'scripts/keep.gd');
     const result = await handleUpdateAutoload({
@@ -292,5 +353,54 @@ describe('handleUpdateAutoload', () => {
     expect(hasError(result)).toBe(false);
     expect(readProjectGodot(dir)).toContain('TestManager="res://scripts/keep.gd"');
     expect(readProjectGodot(dir)).not.toContain('TestManager="*');
+  });
+});
+
+describe('handleListAutoloads unparsed lines', () => {
+  it('list_autoloads leads with a warning for an unparsed line', async () => {
+    const dir = makeTmpProject();
+    writeFileSync(
+      join(dir, 'project.godot'),
+      'config_version=5\n\n[autoload]\nGood="*res://a.gd"\nmy-auto="res://b.gd"\n',
+      'utf8',
+    );
+    const result = await handleListAutoloads({ projectPath: dir });
+    const payload = expectMatchesOutputSchema('list_autoloads', result) as Record<string, unknown>;
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([
+      '[autoload] has 1 line(s) that could not be parsed and are not listed: my-auto="res://b.gd"',
+    ]);
+    expect(payload.autoloads).toEqual([{ name: 'Good', path: 'res://a.gd', singleton: true }]);
+  });
+
+  it('list_autoloads has no warnings key when every line parses', async () => {
+    const dir = makeTmpProjectWithAutoload('Ok', 'ok.gd');
+    const result = await handleListAutoloads({ projectPath: dir });
+    expect(expectMatchesOutputSchema('list_autoloads', result)).not.toHaveProperty('warnings');
+  });
+});
+
+describe('autoload tools accept the snake_case spellings of their parameters', () => {
+  it('update_autoload accepts autoload_path', async () => {
+    const dir = makeTmpProjectWithAutoload('Game', 'game.gd');
+    const result = await handleUpdateAutoload({
+      project_path: dir,
+      autoload_name: 'Game',
+      autoload_path: 'res://new_game.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Game="*res://new_game.gd"');
+    expect(readProjectGodot(dir)).not.toContain('res://game.gd');
+  });
+
+  it('add_autoload accepts autoload_name and autoload_path', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      project_path: dir,
+      autoload_name: 'Manager',
+      autoload_path: 'res://manager.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Manager="*res://manager.gd"');
   });
 });

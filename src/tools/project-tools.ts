@@ -1,12 +1,12 @@
-import { join, basename } from 'path';
-import { existsSync, readdirSync, readFileSync } from 'fs';
-import type { GodotRunner } from '../utils/godot-runner.js';
+import { join, basename, resolve } from 'path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import type { GodotRunner, RuntimeSessionInfo } from '../utils/godot-runner.js';
 import { BRIDGE_PING_TIMEOUT_MS } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
   parseSceneArgs,
@@ -16,8 +16,9 @@ import {
   optionalNumber,
   optionalStringArray,
 } from '../utils/arg-parsing.js';
-import { ok, err } from '../utils/result.js';
+import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
+import { readQuoted, scanTscn } from '../utils/scene-parsing.js';
 
 function fileExtension(name: string): string {
   const dotIdx = name.lastIndexOf('.');
@@ -26,11 +27,34 @@ function fileExtension(name: string): string {
 
 // --- Tool definitions ---
 
+/** One node of the get_project_files tree. Children repeat this shape. */
+const FILE_TREE_NODE_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    type: { type: 'string', enum: ['file', 'dir', 'link'] },
+    path: { type: 'string', description: 'Project-relative path; "." for the root.' },
+    extension: { type: 'string', description: 'Files only, lower case, no dot.' },
+    children: {
+      type: ['array', 'null'],
+      description:
+        'Directories only. Each child has this same shape. Null when the directory was not opened (maxDepth) or could not be read.',
+      items: { type: 'object' },
+    },
+    warnings: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Root node only: depth cuts, unreadable paths and links that were not followed.',
+    },
+  },
+  required: ['name', 'type', 'path'],
+} as const;
+
 export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use to discover available projects when the user has not specified one; for inspecting a known project, use check_project. recursive:true descends into subdirectories (skipping hidden ones); default false checks only the directory itself and its immediate children. Returns: [{ path, name }], empty array on no matches.',
+      'Find Godot projects under a directory by locating project.godot files. Use when the user has not named a project; to inspect a known one use check_project. recursive: true descends into subdirectories (skipping .git, .godot, .mcp, node_modules and the like); the default checks the directory and its immediate children. Returns: projects[], each { projectPath, name }; empty when none. warnings leads when a path could not be read or a link was not followed. Errors if directory is not a directory.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -46,11 +70,29 @@ export const projectToolDefinitions = [
       },
       required: ['directory'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        projects: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'name'],
+          },
+        },
+      },
+      required: ['projects'],
+    },
   },
   {
     name: 'check_project',
     description:
-      'Get project metadata (name, path, Godot version, structure summary) plus an always-present runtime block reporting whether a runtime session is active, its bridge is responsive, and its process is alive. Omit projectPath for just the Godot version and runtime status. Use as the first call before driving a running project. Never errors on the runtime probe itself. Returns: { name?, path?, structure?, godotVersion, runtime }. Errors if projectPath is set but lacks project.godot.',
+      "Get project metadata and the Godot version, plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session; runtime.projectPath names its project (null when none) and runtime.liveSessions lists all live sessions. With projectPath, runtime.project reports that project's session: live, exited or none. Returns: { name?, projectPath?, structure?, godotVersion, runtime }; warnings leads if structure is partial. Errors if projectPath lacks project.godot.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -66,8 +108,9 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         name: { type: 'string' },
-        path: { type: 'string' },
+        projectPath: { type: 'string' },
         godotVersion: { type: 'string' },
         structure: {
           type: 'object',
@@ -82,13 +125,38 @@ export const projectToolDefinitions = [
           type: 'object',
           properties: {
             activeSession: { type: 'boolean' },
+            projectPath: { type: ['string', 'null'] },
             sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
-            projectPath: { type: 'string' },
             processExited: { type: 'boolean' },
+            exitCode: { type: ['number', 'null'] },
             bridgeResponsive: { type: 'boolean' },
             diagnostics: { type: 'array', items: { type: 'string' } },
+            liveSessions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  projectPath: { type: 'string' },
+                  sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+                  current: { type: 'boolean' },
+                  bridgePort: { type: ['number', 'null'] },
+                },
+                required: ['projectPath', 'sessionMode', 'current', 'bridgePort'],
+              },
+            },
+            project: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string' },
+                session: { type: 'string', enum: ['live', 'exited', 'none'] },
+                current: { type: 'boolean' },
+                sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
+                exitCode: { type: ['number', 'null'] },
+              },
+              required: ['projectPath', 'session', 'current'],
+            },
           },
-          required: ['activeSession'],
+          required: ['activeSession', 'projectPath', 'liveSessions'],
         },
       },
       required: ['godotVersion', 'runtime'],
@@ -97,7 +165,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_files',
     description:
-      'Return a recursive file tree of a Godot project. Use to discover project structure when paths are unknown. Pass extensions to filter (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 unlimited). Skips hidden (dot-prefixed) entries and the .mcp directory. Returns: { name, type, path, extension?, children? } (nested tree).',
+      'Return the file tree of a Godot project. Use to discover project structure when paths are unknown. extensions filters files (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 is unlimited, else 0 or more). Skips dot-prefixed entries, .mcp included. Returns: the root node { name, type, path, children[] }; a child is a file, a directory, or a link (type "link", not followed). A directory not opened or not readable has children null; warnings leads then.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -116,11 +184,12 @@ export const projectToolDefinitions = [
       },
       required: ['projectPath'],
     },
+    outputSchema: FILE_TREE_NODE_SCHEMA,
   },
   {
     name: 'search_project',
     description:
-      'Plain-text (substring) search across project files. Use to find references, callers, or signatures across the codebase. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text) and truncated:true when maxResults was hit - consider raising it.',
+      'Plain-text (substring) search across project files. Use to find references, callers or signatures. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text), truncated, filesSearched and fileTypes. warnings leads when no file had a searched extension or a path could not be read. Errors if pattern holds a line break.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -140,6 +209,7 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         matches: {
           type: 'array',
           items: {
@@ -152,13 +222,20 @@ export const projectToolDefinitions = [
           },
         },
         truncated: { type: 'boolean' },
+        filesSearched: { type: 'number', description: 'Files read and searched.' },
+        fileTypes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'The extensions that were searched.',
+        },
       },
+      required: ['matches', 'truncated', 'filesSearched', 'fileTypes'],
     },
   },
   {
     name: 'get_scene_dependencies',
     description:
-      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to inspect what a scene depends on before refactoring or moving files. Returns: the queried scene path and dependencies[] from ext_resource refs (path, type, optional uid). Errors if scene file does not exist.',
+      'Parse a .tscn file for ext_resource references (scripts, textures, subscenes). Use to see what a scene depends on before refactoring or moving files. Returns: scenePath and dependencies[], one per ext_resource reference (path, type, optional uid). warnings leads when ext_resource lines could not be read. Errors if the file does not exist or is not a text scene or resource.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -175,7 +252,8 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        scene: { type: 'string' },
+        warnings: { type: 'array', items: { type: 'string' } },
+        scenePath: { type: 'string' },
         dependencies: {
           type: 'array',
           items: {
@@ -188,12 +266,13 @@ export const projectToolDefinitions = [
           },
         },
       },
+      required: ['scenePath', 'dependencies'],
     },
   },
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into structured JSON. Use to inspect configured display, input, rendering, etc. settings without launching Godot. Pass section to filter to one INI section (e.g. "display", "application"). Returns: { settings: { [section]: { [key]: value } } } or { settings: { [key]: value } } when section is given. Complex Godot types (including multi-line arrays/dicts, e.g. the full "[input]" action map) are returned as their complete raw string, not just the first line; keys outside any section appear under __global__.',
+      'Parse project.godot into JSON without launching Godot. Use to inspect display, input and rendering settings. Pass section for one INI section (e.g. "display"). Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section. Strings are unescaped, an empty value is null, complex values stay raw text. Keys before any section, config_version included, are under __global__. warnings leads when the section is absent, a value is unterminated or empty, or a line was skipped.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -207,6 +286,19 @@ export const projectToolDefinitions = [
       },
       required: ['projectPath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        section: { type: 'string', description: 'Present when a section filter was applied.' },
+        settings: {
+          type: 'object',
+          description:
+            'Without section: { [section]: { [key]: value } }. With section: { [key]: value }. A value is a string, number, boolean or null (an empty value).',
+        },
+      },
+      required: ['settings'],
+    },
   },
 ] as const satisfies readonly ToolDefinition[];
 
@@ -214,39 +306,97 @@ export const projectToolDefinitions = [
 
 const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules', '.svn', '.hg']);
 
+// --- Walk problems: what a directory walk could not read or did not follow ---
+
+/** Start of a header line the scene scanner could not read but that was meant as a dependency. */
+const EXT_RESOURCE_HEADER_PREFIX = '[ext_resource';
+
+/** The maxDepth value that lists every level. */
+const UNLIMITED_DEPTH = -1;
+
+/** Longest list of paths quoted in one walk warning; the rest is counted. */
+const MAX_WALK_PROBLEMS_SHOWN = 5;
+
+interface WalkProblems {
+  unreadable: Array<{ path: string; reason: string }>;
+  links: string[];
+}
+
+function newWalkProblems(): WalkProblems {
+  return { unreadable: [], links: [] };
+}
+
+function recordUnreadable(problems: WalkProblems, path: string, error: unknown): void {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  problems.unreadable.push({
+    path,
+    reason: typeof code === 'string' ? code : getErrorMessage(error),
+  });
+}
+
+function listWithCap(items: string[]): string {
+  const shown = items.slice(0, MAX_WALK_PROBLEMS_SHOWN).join(', ');
+  const hidden = items.length - MAX_WALK_PROBLEMS_SHOWN;
+  return hidden > 0 ? `${shown} +${hidden} more` : shown;
+}
+
+/** One warning per kind of problem; empty when the walk covered everything it met. */
+function summarizeWalkProblems(problems: WalkProblems): string[] {
+  const warnings: string[] = [];
+  if (problems.unreadable.length > 0) {
+    const named = problems.unreadable.map((entry) => `${entry.path} (${entry.reason})`);
+    warnings.push(
+      `${problems.unreadable.length} path(s) could not be read and are missing from this result: ${listWithCap(named)}`,
+    );
+  }
+  if (problems.links.length > 0) {
+    warnings.push(
+      `${problems.links.length} symbolic link(s) or junction(s) were not followed: ${listWithCap(problems.links)}`,
+    );
+  }
+  return warnings;
+}
+
 function findGodotProjects(
   directory: string,
   recursive: boolean,
+  problems: WalkProblems,
 ): Array<{ path: string; name: string }> {
   const projects: Array<{ path: string; name: string }> = [];
 
-  try {
-    const projectFile = projectGodotPath(directory);
-    if (existsSync(projectFile)) {
-      projects.push({
-        path: directory,
-        name: basename(directory),
-      });
-    }
+  if (existsSync(projectGodotPath(directory))) {
+    projects.push({ path: directory, name: basename(directory) });
+  }
 
-    const entries = readdirSync(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || PROJECT_SCAN_BLACKLIST.has(entry.name)) continue;
-      const subdir = join(directory, entry.name);
-      if (existsSync(projectGodotPath(subdir))) {
-        projects.push({ path: subdir, name: entry.name });
-      } else if (recursive) {
-        projects.push(...findGodotProjects(subdir, true));
-      }
-    }
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
   } catch (error) {
-    logDebug(`Error searching directory ${directory}: ${error}`);
+    recordUnreadable(problems, directory, error);
+    return projects;
+  }
+  for (const entry of entries) {
+    if (PROJECT_SCAN_BLACKLIST.has(entry.name)) continue;
+    const subdir = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      problems.links.push(subdir);
+      continue;
+    }
+    if (!entry.isDirectory()) continue;
+    if (existsSync(projectGodotPath(subdir))) {
+      projects.push({ path: subdir, name: entry.name });
+    } else if (recursive) {
+      projects.push(...findGodotProjects(subdir, true, problems));
+    }
   }
 
   return projects;
 }
 
-function getProjectStructure(projectPath: string): {
+function getProjectStructure(
+  projectPath: string,
+  problems: WalkProblems,
+): {
   scenes: number;
   scripts: number;
   assets: number;
@@ -259,41 +409,46 @@ function getProjectStructure(projectPath: string): {
     other: 0,
   };
 
-  const scanDirectory = (currentPath: string) => {
+  const scanDirectory = (currentPath: string, relativePath: string) => {
+    let entries;
     try {
-      const entries = readdirSync(currentPath, { withFileTypes: true });
+      entries = readdirSync(currentPath, { withFileTypes: true });
+    } catch (error) {
+      recordUnreadable(problems, relativePath || '.', error);
+      return;
+    }
 
-      for (const entry of entries) {
-        const entryPath = join(currentPath, entry.name);
+    for (const entry of entries) {
+      const entryPath = join(currentPath, entry.name);
+      const entryRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
 
-        if (entry.name.startsWith('.')) {
-          continue;
-        }
+      if (entry.name.startsWith('.')) {
+        continue;
+      }
 
-        if (entry.isDirectory()) {
-          scanDirectory(entryPath);
-        } else if (entry.isFile()) {
-          const ext = fileExtension(entry.name);
+      if (entry.isSymbolicLink()) {
+        problems.links.push(entryRelativePath);
+      } else if (entry.isDirectory()) {
+        scanDirectory(entryPath, entryRelativePath);
+      } else if (entry.isFile()) {
+        const ext = fileExtension(entry.name);
 
-          if (ext === 'tscn') {
-            structure.scenes++;
-          } else if (ext === 'gd' || ext === 'gdscript' || ext === 'cs') {
-            structure.scripts++;
-          } else if (
-            ['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'wav', 'mp3', 'ogg'].includes(ext || '')
-          ) {
-            structure.assets++;
-          } else {
-            structure.other++;
-          }
+        if (ext === 'tscn') {
+          structure.scenes++;
+        } else if (ext === 'gd' || ext === 'gdscript' || ext === 'cs') {
+          structure.scripts++;
+        } else if (
+          ['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'wav', 'mp3', 'ogg'].includes(ext || '')
+        ) {
+          structure.assets++;
+        } else {
+          structure.other++;
         }
       }
-    } catch (error) {
-      logDebug(`Error scanning directory ${currentPath}: ${error}`);
     }
   };
 
-  scanDirectory(projectPath);
+  scanDirectory(projectPath, '');
   return structure;
 }
 
@@ -301,10 +456,17 @@ function getProjectStructure(projectPath: string): {
 
 interface FileTreeNode {
   name: string;
-  type: 'file' | 'dir';
+  type: 'file' | 'dir' | 'link';
   path: string;
   extension?: string;
-  children?: FileTreeNode[];
+  /** Null when the directory was not opened (depth limit) or could not be read. */
+  children?: FileTreeNode[] | null;
+}
+
+interface TreeWalk {
+  problems: WalkProblems;
+  /** True once a directory was left unopened because of maxDepth. */
+  depthCut: boolean;
 }
 
 function buildFilesystemTree(
@@ -313,37 +475,46 @@ function buildFilesystemTree(
   maxDepth: number,
   currentDepth: number,
   extensions: string[] | null,
+  walk: TreeWalk,
 ): FileTreeNode {
   const name = basename(currentPath);
   const node: FileTreeNode = { name, type: 'dir', path: relativePath || '.' };
-  if (maxDepth !== -1 && currentDepth >= maxDepth) {
-    node.children = [];
+  if (maxDepth !== UNLIMITED_DEPTH && currentDepth >= maxDepth) {
+    node.children = null;
+    walk.depthCut = true;
+    return node;
+  }
+  let entries;
+  try {
+    entries = readdirSync(currentPath, { withFileTypes: true });
+  } catch (error) {
+    recordUnreadable(walk.problems, node.path, error);
+    node.children = null;
     return node;
   }
   const children: FileTreeNode[] = [];
-  try {
-    const entries = readdirSync(currentPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const childRelPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        children.push(
-          buildFilesystemTree(
-            join(currentPath, entry.name),
-            childRelPath,
-            maxDepth,
-            currentDepth + 1,
-            extensions,
-          ),
-        );
-      } else if (entry.isFile()) {
-        const ext = fileExtension(entry.name);
-        if (extensions && !extensions.includes(ext)) continue;
-        children.push({ name: entry.name, type: 'file', path: childRelPath, extension: ext });
-      }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const childRelPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+    if (entry.isSymbolicLink()) {
+      walk.problems.links.push(childRelPath);
+      children.push({ name: entry.name, type: 'link', path: childRelPath });
+    } else if (entry.isDirectory()) {
+      children.push(
+        buildFilesystemTree(
+          join(currentPath, entry.name),
+          childRelPath,
+          maxDepth,
+          currentDepth + 1,
+          extensions,
+          walk,
+        ),
+      );
+    } else if (entry.isFile()) {
+      const ext = fileExtension(entry.name);
+      if (extensions && !extensions.includes(ext)) continue;
+      children.push({ name: entry.name, type: 'file', path: childRelPath, extension: ext });
     }
-  } catch (err) {
-    logDebug(`buildFilesystemTree error at ${currentPath}: ${err}`);
   }
   node.children = children;
   return node;
@@ -363,17 +534,20 @@ function searchInFiles(
   fileTypes: string[],
   caseSensitive: boolean,
   maxResults: number,
-): { matches: SearchMatch[]; truncated: boolean } {
+  problems: WalkProblems,
+): { matches: SearchMatch[]; truncated: boolean; filesSearched: number; typedFiles: number } {
   const matches: SearchMatch[] = [];
   let truncated = false;
+  let filesSearched = 0;
+  let typedFiles = 0;
 
   const searchDir = (currentPath: string, relBase: string) => {
     if (truncated) return;
     let entries;
     try {
       entries = readdirSync(currentPath, { withFileTypes: true });
-    } catch (err) {
-      logDebug(`searchInFiles readdir error at ${currentPath}: ${err}`);
+    } catch (error) {
+      recordUnreadable(problems, relBase || '.', error);
       return;
     }
     for (const entry of entries) {
@@ -381,17 +555,22 @@ function searchInFiles(
       if (entry.name.startsWith('.')) continue;
       const childRelPath = relBase ? `${relBase}/${entry.name}` : entry.name;
       const fullPath = join(currentPath, entry.name);
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        problems.links.push(childRelPath);
+      } else if (entry.isDirectory()) {
         searchDir(fullPath, childRelPath);
       } else if (entry.isFile()) {
         const ext = fileExtension(entry.name);
         if (!fileTypes.includes(ext)) continue;
+        typedFiles++;
         let content: string;
         try {
           content = readFileSync(fullPath, 'utf8');
-        } catch {
+        } catch (error) {
+          recordUnreadable(problems, childRelPath, error);
           continue;
         }
+        filesSearched++;
         const lines = content.split('\n');
         const needle = caseSensitive ? pattern : pattern.toLowerCase();
         for (const [i, line] of lines.entries()) {
@@ -409,100 +588,183 @@ function searchInFiles(
   };
 
   searchDir(rootPath, '');
-  return { matches, truncated };
+  return { matches, truncated, filesSearched, typedFiles };
 }
 
 // --- Project helper: project settings parser ---
 
-type SettingsValue = string | number | boolean;
+type SettingsValue = string | number | boolean | null;
+
+interface ParsedSettings {
+  settings: Record<string, Record<string, SettingsValue>>;
+  warnings: string[];
+}
+
+/** Settings keys that precede every section header are reported under this name. */
+const GLOBAL_SECTION = '__global__';
+
+/** Longest slice of an unparsed line quoted in a warning. */
+const UNPARSED_LINE_SNIPPET_MAX = 120;
 
 // Godot section headers are a bare identifier-ish name in brackets on its own
 // line (e.g. "[input]"), never containing commas or spaces the way a
-// multi-line array/dict literal's closing lines can. Used both to detect a
-// real section boundary and to cap a runaway multi-line scan at one.
+// multi-line array/dict literal's closing lines can. Used only to cap a runaway
+// multi-line value at the next real section boundary.
 const SECTION_HEADER_REGEX = /^\[[A-Za-z0-9_/.]+\]$/;
 
+/** A statement-level header: any bracketed line, the test `walkIniSection` applies. */
+const SECTION_LINE_REGEX = /^\[.*\]$/;
+
+const NUMBER_VALUE_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/** Outside a string, starts a comment that runs to the end of the line. */
+const COMMENT_START = ';';
+
 /**
- * Net count of unmatched `{`/`[` in a single line, ignoring any such
- * character inside a double-quoted segment so a brace embedded in a string
- * value does not unbalance the scan.
+ * The section a statement line opens, or null when the line is not a header.
+ * A comment may follow the closing bracket, as Godot's own parser allows.
  */
-function scanBraceDelta(line: string): { curly: number; square: number } {
-  let curly = 0;
-  let square = 0;
-  let inQuote = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' && line[i - 1] !== '\\') {
-      inQuote = !inQuote;
-      continue;
-    }
-    if (inQuote) continue;
-    if (ch === '{') curly++;
-    else if (ch === '}') curly--;
-    else if (ch === '[') square++;
-    else if (ch === ']') square--;
+function sectionNameOf(line: string): string | null {
+  const commentAt = line.indexOf(COMMENT_START);
+  if (commentAt !== -1) {
+    const statement = line.slice(0, commentAt).trimEnd();
+    if (SECTION_LINE_REGEX.test(statement)) return statement.slice(1, -1);
   }
-  return { curly, square };
+  return SECTION_LINE_REGEX.test(line) ? line.slice(1, -1) : null;
 }
 
-function parseProjectSettings(
-  projectFilePath: string,
-): Record<string, Record<string, SettingsValue>> {
-  const content = readFileSync(projectFilePath, 'utf8');
-  const lines = content.split('\n');
-  const result: Record<string, Record<string, SettingsValue>> = {};
-  let currentSection = '__global__';
+interface RawValue {
+  raw: string;
+  /** Index of the line break that ended the value, or the content length. */
+  end: number;
+  unterminated: boolean;
+}
 
-  let i = 0;
-  while (i < lines.length) {
-    const line = (lines[i] ?? '').trim();
-    i++;
-    if (line === '' || line.startsWith(';') || line.startsWith('#')) continue;
-    if (line.startsWith('config_version')) continue; // header line
-    if (SECTION_HEADER_REGEX.test(line)) {
-      currentSection = line.slice(1, -1);
+/**
+ * Read one value starting at `start` (just after the `=`). Quoted strings keep
+ * their backslash escapes and may span lines; `{ [ (` depth is tracked outside
+ * strings, and the value ends at the first line break at depth zero outside a
+ * string. While inside brackets, a following line that is a section header ends
+ * the value as unterminated, so a malformed file cannot swallow the rest of it.
+ * A `;` outside a string starts a comment that runs to the end of its line, as
+ * it does for Godot's own parser: the comment is left out of the value, and a
+ * quote or bracket inside it opens nothing.
+ */
+function readRawValue(content: string, start: number): RawValue {
+  const length = content.length;
+  let depth = 0;
+  let inString = false;
+  let kept = '';
+  let keptFrom = start;
+  let i = start;
+  const valueUpTo = (end: number): string => (kept + content.slice(keptFrom, end)).trim();
+  while (i < length) {
+    const ch = content[i]!;
+    if (inString) {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      i++;
       continue;
     }
-    const eqIdx = line.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = line.slice(0, eqIdx).trim();
-    const rawVal = line.slice(eqIdx + 1).trim();
-    let value: SettingsValue;
-
-    if (rawVal.startsWith('{') || rawVal.startsWith('[')) {
-      // Multi-line array/dict literal: keep consuming lines until brace and
-      // bracket depth returns to zero, capping at the next section header (or
-      // EOF) so a malformed file cannot run away. The joined raw text is
-      // returned as-is; we do not attempt to parse Godot's Object(...) syntax.
-      const valueLines = [rawVal];
-      const delta = scanBraceDelta(rawVal);
-      let curly = delta.curly;
-      let square = delta.square;
-      while (curly !== 0 || square !== 0) {
-        const nextLine = lines[i];
-        if (nextLine === undefined || SECTION_HEADER_REGEX.test(nextLine.trim())) break;
-        valueLines.push(nextLine);
-        const nextDelta = scanBraceDelta(nextLine);
-        curly += nextDelta.curly;
-        square += nextDelta.square;
-        i++;
-      }
-      value = valueLines.join('\n').trim();
-    } else if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
-      value = rawVal.slice(1, -1);
-    } else if (rawVal === 'true') {
-      value = true;
-    } else if (rawVal === 'false') {
-      value = false;
-    } else {
-      const num = Number(rawVal);
-      value = isNaN(num) ? rawVal : num;
+    if (ch === COMMENT_START) {
+      kept += content.slice(keptFrom, i);
+      const commentEnd = content.indexOf('\n', i);
+      i = commentEnd === -1 ? length : commentEnd;
+      keptFrom = i;
+      continue;
     }
-    const section = (result[currentSection] ??= {});
-    section[key] = value;
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{' || ch === '[' || ch === '(') {
+      depth++;
+    } else if ((ch === '}' || ch === ']' || ch === ')') && depth > 0) {
+      depth--;
+    } else if (ch === '\n') {
+      if (depth === 0) return { raw: valueUpTo(i), end: i, unterminated: false };
+      const nextEnd = content.indexOf('\n', i + 1);
+      const nextLine = content.slice(i + 1, nextEnd === -1 ? length : nextEnd).trim();
+      if (SECTION_HEADER_REGEX.test(nextLine)) {
+        return { raw: valueUpTo(i), end: i, unterminated: true };
+      }
+    }
+    i++;
   }
-  return result;
+  return { raw: valueUpTo(length), end: length, unterminated: inString || depth > 0 };
+}
+
+/**
+ * Convert a trimmed, non-empty raw value. A lone quoted string is unescaped;
+ * `true`, `false` and plain numbers are typed; everything else (constructors
+ * such as `PackedStringArray(...)`, arrays, dictionaries) stays its raw text.
+ */
+function convertSettingsValue(raw: string): SettingsValue {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw.startsWith('"')) {
+    const quoted = readQuoted(raw, 0, raw.length);
+    return quoted !== null && quoted.end === raw.length ? quoted.value : raw;
+  }
+  return NUMBER_VALUE_REGEX.test(raw) ? Number(raw) : raw;
+}
+
+function parseProjectSettings(projectFilePath: string): ParsedSettings {
+  const content = readFileSync(projectFilePath, 'utf8');
+  const settings: ParsedSettings['settings'] = Object.create(null);
+  const warnings: string[] = [];
+  const unparsed: string[] = [];
+  let currentSection = GLOBAL_SECTION;
+
+  let pos = 0;
+  while (pos < content.length) {
+    const newlineAt = content.indexOf('\n', pos);
+    const lineEnd = newlineAt === -1 ? content.length : newlineAt;
+    const rawLine = content.slice(pos, lineEnd);
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith(COMMENT_START) || line.startsWith('#')) {
+      pos = lineEnd + 1;
+      continue;
+    }
+    const sectionName = sectionNameOf(line);
+    if (sectionName !== null) {
+      currentSection = sectionName;
+      pos = lineEnd + 1;
+      continue;
+    }
+    const equalsAt = rawLine.indexOf('=');
+    const key = equalsAt === -1 ? '' : rawLine.slice(0, equalsAt).trim();
+    if (key === '') {
+      unparsed.push(line);
+      pos = lineEnd + 1;
+      continue;
+    }
+
+    const value = readRawValue(content, pos + equalsAt + 1);
+    pos = value.end + 1;
+    const location = `${currentSection}/${key}`;
+    if (value.unterminated) {
+      warnings.push(
+        `Value of ${location} is unterminated and was returned as far as it could be read`,
+      );
+    }
+    let converted: SettingsValue = null;
+    if (value.raw === '') {
+      if (!value.unterminated) warnings.push(`Value of ${location} is empty and is null`);
+    } else {
+      converted = convertSettingsValue(value.raw);
+    }
+    const section = (settings[currentSection] ??= Object.create(null));
+    section[key] = converted;
+  }
+
+  if (unparsed.length > 0) {
+    warnings.push(
+      `${unparsed.length} line(s) could not be parsed and were skipped; first: ${unparsed[0]!.slice(0, UNPARSED_LINE_SNIPPET_MAX)}`,
+    );
+  }
+  return { settings, warnings };
 }
 
 // --- Handlers ---
@@ -530,14 +792,35 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
       );
     }
 
+    if (!statSync(directory.value).isDirectory()) {
+      return err(
+        createErrorResponse(`Not a directory: ${directory.value}`, [
+          'Provide the directory to search, not a file',
+        ]),
+      );
+    }
+
     const recursive = optionalBoolean(args, 'recursive');
     if (!recursive.ok) return recursive;
 
-    const projects = findGodotProjects(directory.value, recursive.value === true);
-
-    return ok({
-      content: [{ type: 'text', text: JSON.stringify(projects) }],
-    });
+    const problems = newWalkProblems();
+    const found = findGodotProjects(directory.value, recursive.value === true, problems);
+    const rootProblem = problems.unreadable.find((entry) => entry.path === directory.value);
+    if (rootProblem !== undefined) {
+      return err(
+        createErrorResponse(
+          `Could not read directory ${directory.value} (${rootProblem.reason}), so nothing was searched`,
+          ['Check that you have permission to read the directory'],
+        ),
+      );
+    }
+    const projects = found.map((project) => ({
+      projectPath: resolve(project.path),
+      name: project.name,
+    }));
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: summarizeWalkProblems(problems), projects }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to list projects: ${getErrorMessage(error)}`, [
@@ -548,80 +831,96 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
   }
 }
 
-/**
- * Build the always-present `runtime` block for check_project. Mirrors the
- * `ensureRuntimeSession` liveness rule from runtime-tools.ts, in the same
- * order: a spawned process that has exited is not an active session, whether
- * or not the session fields survived it. The bridge
- * ping only runs when a session is nominally active, so the no-session path
- * costs nothing extra and a failed/timed-out ping never turns the call into
- * an error - it only downgrades bridgeResponsive and adds a diagnostic.
- */
-async function buildRuntimeReport(runner: GodotRunner): Promise<Record<string, unknown>> {
-  // A spawned game that exits on its own clears activeSessionMode and
-  // activeProjectPath while deliberately retaining activeProcess, so this state
-  // has to be diagnosed before the nominal-session gate below - which is the
-  // order ensureRuntimeSession uses for the same reason. Without it the state
-  // check_project exists to report reads as byte-identical to a server that has
-  // never run anything.
-  if (!runner.activeSessionMode && runner.activeProcess?.hasExited) {
-    return {
-      activeSession: false,
-      processExited: true,
-      diagnostics: [
-        'The spawned Godot process has exited; call stop_project, then run_project again',
-        'get_debug_output still returns the captured logs, and stop_project reports the exit code',
-      ],
-    };
-  }
-
-  const nominalSession = Boolean(runner.activeSessionMode && runner.activeProjectPath);
-  if (!nominalSession) {
-    return { activeSession: false };
-  }
-
-  const sessionMode = runner.activeSessionMode;
-  const processExited =
-    sessionMode === 'spawned' && (!runner.activeProcess || runner.activeProcess.hasExited);
-
-  if (processExited) {
-    return {
-      activeSession: false,
-      sessionMode,
-      processExited: true,
-      diagnostics: [
-        'The spawned Godot process has exited; call stop_project, then run_project again',
-      ],
-    };
-  }
-
-  const runtime: Record<string, unknown> = {
-    activeSession: true,
-    sessionMode,
-    projectPath: runner.activeProjectPath,
+function describeLiveSession(info: RuntimeSessionInfo): Record<string, unknown> {
+  return {
+    projectPath: info.projectPath,
+    sessionMode: info.mode,
+    current: info.current,
+    bridgePort: info.bridgePort,
   };
+}
+
+function describeProjectSession(runner: GodotRunner, projectPath: string): Record<string, unknown> {
+  const info = runner.getSessionInfo(projectPath);
+  if (info === null) return { projectPath: resolve(projectPath), session: 'none', current: false };
+  return {
+    projectPath: info.projectPath,
+    session: info.live ? 'live' : 'exited',
+    current: info.current,
+    ...(info.mode !== null ? { sessionMode: info.mode } : {}),
+    ...(info.processExited ? { exitCode: info.exitCode } : {}),
+  };
+}
+
+/**
+ * Build the always-present `runtime` block for check_project. The top-level
+ * fields describe the current session, in the same liveness order the runtime
+ * tools gate on: a spawned process that has exited is not an active session,
+ * whether or not the session fields survived it. `projectPath` names the
+ * current project and `liveSessions` lists every live session; with an asked
+ * project, `project` reports that project's own session. Only the current live
+ * session is pinged, since the runner holds one bridge channel. The ping only
+ * runs when that session is live, so the no-session path costs nothing extra
+ * and a failed/timed-out ping never turns the call into an error - it only
+ * downgrades bridgeResponsive and adds a diagnostic.
+ */
+async function buildRuntimeReport(
+  runner: GodotRunner,
+  askedProjectPath: string | null,
+): Promise<Record<string, unknown>> {
+  const status = runner.getRuntimeSessionStatus();
+  const current = status.current;
   const diagnostics: string[] = [];
-
-  try {
-    // ping is exempt from the attached-mode disconnect probe (see
-    // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
-    // ping here reports bridgeResponsive:false without ending the session.
-    const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
-    let parsed: { status?: string } | undefined;
+  let runtime: Record<string, unknown>;
+  if (current === null) {
+    runtime = { activeSession: false };
+  } else if (status.state === 'live') {
+    runtime = { activeSession: true, sessionMode: current.mode };
     try {
-      parsed = JSON.parse(response) as { status?: string };
-    } catch {
-      diagnostics.push('Bridge returned a non-JSON ping response');
+      // ping is exempt from the attached-mode disconnect probe (see
+      // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
+      // ping here reports bridgeResponsive:false without ending the session.
+      const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+      let parsed: { status?: string } | undefined;
+      try {
+        parsed = JSON.parse(response) as { status?: string };
+      } catch {
+        diagnostics.push('Bridge returned a non-JSON ping response');
+      }
+      runtime.bridgeResponsive = parsed?.status === 'pong';
+      if (parsed && parsed.status !== 'pong') {
+        diagnostics.push('Bridge responded to ping with an unexpected payload');
+      }
+    } catch (error: unknown) {
+      runtime.bridgeResponsive = false;
+      diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
     }
-    runtime.bridgeResponsive = parsed?.status === 'pong';
-    if (parsed && parsed.status !== 'pong') {
-      diagnostics.push('Bridge responded to ping with an unexpected payload');
-    }
-  } catch (error: unknown) {
-    runtime.bridgeResponsive = false;
-    diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
+  } else if (current.mode === 'spawned') {
+    runtime = { activeSession: false, sessionMode: 'spawned', processExited: true };
+    diagnostics.push(
+      'The spawned Godot process has exited; call stop_project, then run_project again',
+    );
+  } else if (current.processExited) {
+    runtime = { activeSession: false, processExited: true, exitCode: current.exitCode };
+    diagnostics.push(
+      'The spawned Godot process has exited; call stop_project, then run_project again',
+      'get_debug_output still returns the captured logs, and stop_project reports the exit code',
+    );
+  } else {
+    runtime = { activeSession: false };
+    diagnostics.push(
+      'Only a finished profiler capture is retained for this project; stop_profiler can still read it and stop_project releases it',
+    );
   }
-
+  runtime.projectPath = current?.projectPath ?? null;
+  const liveSessions = runner.listLiveSessions();
+  runtime.liveSessions = liveSessions.map(describeLiveSession);
+  if (askedProjectPath !== null) runtime.project = describeProjectSession(runner, askedProjectPath);
+  if (status.state !== 'live' && liveSessions.length > 0) {
+    diagnostics.push(
+      'The runtime tools are not pointed at a live session while other sessions are live: call switch_project with a projectPath from liveSessions',
+    );
+  }
   if (diagnostics.length > 0) runtime.diagnostics = diagnostics;
   return runtime;
 }
@@ -634,18 +933,22 @@ export async function handleCheckProject(
 
   try {
     const version = await runner.getVersion();
-    const runtime = await buildRuntimeReport(runner);
 
     // If no project path, return just the Godot version plus runtime status.
     if (!args.projectPath) {
-      return createStructuredResponse({ godotVersion: version, runtime });
+      return createStructuredResponse({
+        godotVersion: version,
+        runtime: await buildRuntimeReport(runner, null),
+      });
     }
 
     const parsed = parseProjectArgs(args);
     if (!parsed.ok) return parsed;
+    const runtime = await buildRuntimeReport(runner, parsed.value.projectPath);
 
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const projectStructure = getProjectStructure(parsed.value.projectPath);
+    const structureProblems = newWalkProblems();
+    const projectStructure = getProjectStructure(parsed.value.projectPath, structureProblems);
 
     let projectName = basename(parsed.value.projectPath);
     try {
@@ -659,13 +962,16 @@ export async function handleCheckProject(
       logDebug(`Error reading project file: ${error}`);
     }
 
-    return createStructuredResponse({
-      name: projectName,
-      path: parsed.value.projectPath,
-      godotVersion: version,
-      structure: projectStructure,
-      runtime,
-    });
+    return createStructuredResponse(
+      leadWithWarnings({
+        warnings: summarizeWalkProblems(structureProblems),
+        name: projectName,
+        projectPath: resolve(parsed.value.projectPath),
+        godotVersion: version,
+        structure: projectStructure,
+        runtime,
+      }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to check project: ${getErrorMessage(error)}`, [
@@ -684,7 +990,14 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Hand
   try {
     const maxDepthResult = optionalNumber(args, 'maxDepth');
     if (!maxDepthResult.ok) return maxDepthResult;
-    const maxDepth = maxDepthResult.value ?? -1;
+    const maxDepth = maxDepthResult.value ?? UNLIMITED_DEPTH;
+    if (!Number.isInteger(maxDepth) || maxDepth < UNLIMITED_DEPTH) {
+      return err(
+        createErrorResponse(`maxDepth must be an integer of ${UNLIMITED_DEPTH} or more`, [
+          `Use ${UNLIMITED_DEPTH} for an unlimited listing, or 0 or more to limit the depth`,
+        ]),
+      );
+    }
 
     const extensionsResult = optionalStringArray(args, 'extensions');
     if (!extensionsResult.ok) return extensionsResult;
@@ -692,8 +1005,15 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Hand
       ? extensionsResult.value.map((e) => e.toLowerCase().replace(/^\./, ''))
       : null;
 
-    const tree = buildFilesystemTree(parsed.value.projectPath, '', maxDepth, 0, extensions);
-    return ok({ content: [{ type: 'text', text: JSON.stringify(tree) }] });
+    const walk: TreeWalk = { problems: newWalkProblems(), depthCut: false };
+    const tree = buildFilesystemTree(parsed.value.projectPath, '', maxDepth, 0, extensions, walk);
+    const warnings = [
+      ...(walk.depthCut
+        ? [`maxDepth ${maxDepth} cut the listing: directories at that depth have children null`]
+        : []),
+      ...summarizeWalkProblems(walk.problems),
+    ];
+    return createStructuredResponse(leadWithWarnings({ warnings, ...tree }));
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project files: ${getErrorMessage(error)}`, [
@@ -710,6 +1030,13 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
 
   const pattern = requireString(args, 'pattern');
   if (!pattern.ok) return pattern;
+  if (/[\r\n]/.test(pattern.value)) {
+    return err(
+      createErrorResponse('pattern must not contain a line break: the search matches one line', [
+        'Search for one line of the text, or run the search once per line',
+      ]),
+    );
+  }
 
   try {
     const fileTypesResult = optionalStringArray(args, 'fileTypes');
@@ -726,14 +1053,38 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
     if (!maxResultsResult.ok) return maxResultsResult;
     const maxResults = maxResultsResult.value ?? 100;
 
+    const problems = newWalkProblems();
     const result = searchInFiles(
       parsed.value.projectPath,
       pattern.value,
       fileTypes,
       caseSensitive,
       maxResults,
+      problems,
     );
-    return createStructuredResponse(result as unknown as Record<string, unknown>);
+    // "Exists under the project" is only known when the whole tree was read.
+    // With an unreadable path or a link that was not followed, the claim is
+    // limited to what the walk reached.
+    const walkWasComplete = problems.unreadable.length === 0 && problems.links.length === 0;
+    const searchedTypes = fileTypes.length > 0 ? fileTypes.join(', ') : '(none given)';
+    const warnings =
+      result.typedFiles === 0
+        ? [
+            walkWasComplete
+              ? `No file with extension(s) ${searchedTypes} exists under the project, so nothing was searched`
+              : `No file with extension(s) ${searchedTypes} was found in the part of the project that could be read, so nothing was searched`,
+          ]
+        : [];
+    warnings.push(...summarizeWalkProblems(problems));
+    return createStructuredResponse(
+      leadWithWarnings({
+        warnings,
+        matches: result.matches,
+        truncated: result.truncated,
+        filesSearched: result.filesSearched,
+        fileTypes,
+      }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to search project: ${getErrorMessage(error)}`, [
@@ -750,29 +1101,41 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
 
   try {
     const sceneFullPath = join(parsed.value.projectPath, parsed.value.scenePath);
-    const sceneContent = readFileSync(sceneFullPath, 'utf8');
-    const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
-    const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
-    let match;
-    while ((match = extResourcePattern.exec(sceneContent)) !== null) {
-      const [, attrs = ''] = match;
-      const typeMatch = attrs.match(/\btype="([^"]*)"/);
-      const pathMatch = attrs.match(/\bpath="([^"]*)"/);
-      const uidMatch = attrs.match(/\buid="([^"]*)"/);
-      if (pathMatch) {
-        const depPath = (pathMatch[1] ?? '').replace(/^res:\/\//, '');
-        const dep: { path: string; type: string; uid?: string } = {
-          path: depPath,
-          type: typeMatch?.[1] ?? 'Unknown',
-        };
-        if (uidMatch?.[1] !== undefined) dep.uid = uidMatch[1];
-        dependencies.push(dep);
-      }
+    const scan = scanTscn(readFileSync(sceneFullPath, 'utf8'));
+    if (!scan.isTextResource) {
+      return err(
+        createErrorResponse(`${parsed.value.scenePath} is not a text scene or resource file`, [
+          'Binary .scn and .res files cannot be read here; use a .tscn or .tres file',
+        ]),
+      );
     }
-    return createStructuredResponse({
-      scene: parsed.value.scenePath,
-      dependencies,
-    });
+    const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
+    const malformedDependencies = scan.malformed.filter((entry) =>
+      entry.raw.startsWith(EXT_RESOURCE_HEADER_PREFIX),
+    );
+    let unreadLines = malformedDependencies.length;
+    for (const header of scan.headers) {
+      if (header.tag !== 'ext_resource') continue;
+      const path = header.attrs.get('path');
+      if (path === undefined) {
+        unreadLines++;
+        continue;
+      }
+      const dep: { path: string; type: string; uid?: string } = {
+        path: path.replace(/^res:\/\//, ''),
+        type: header.attrs.get('type') ?? 'Unknown',
+      };
+      const uid = header.attrs.get('uid');
+      if (uid !== undefined) dep.uid = uid;
+      dependencies.push(dep);
+    }
+    const warnings =
+      unreadLines > 0
+        ? [`${unreadLines} ext_resource line(s) could not be read and are not listed`]
+        : [];
+    return createStructuredResponse(
+      leadWithWarnings({ warnings, scenePath: parsed.value.scenePath, dependencies }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get scene dependencies: ${getErrorMessage(error)}`, [
@@ -792,12 +1155,25 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const allSettings = parseProjectSettings(projectFile);
+    const { settings: allSettings, warnings: parseWarnings } = parseProjectSettings(projectFile);
     if (section.value) {
-      const sectionData = allSettings[section.value] ?? {};
-      return ok({ content: [{ type: 'text', text: JSON.stringify({ settings: sectionData }) }] });
+      const sectionData = Object.hasOwn(allSettings, section.value)
+        ? allSettings[section.value]
+        : undefined;
+      const warnings =
+        sectionData === undefined
+          ? [
+              `Section "${section.value}" is not present in project.godot, so settings is empty`,
+              ...parseWarnings,
+            ]
+          : parseWarnings;
+      return createStructuredResponse(
+        leadWithWarnings({ warnings, section: section.value, settings: sectionData ?? {} }),
+      );
     }
-    return ok({ content: [{ type: 'text', text: JSON.stringify({ settings: allSettings }) }] });
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: parseWarnings, settings: allSettings }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project settings: ${getErrorMessage(error)}`, [

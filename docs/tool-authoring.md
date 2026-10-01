@@ -13,13 +13,13 @@ Every tool description states, in this order:
 1. **Purpose**: what the tool does, in one sentence, in the agent's vocabulary (the outcome it achieves), not the implementation.
 2. **Behavior**: non-obvious side effects. Especially: auto-save behavior, overwrite policy, what happens when the target doesn't exist.
 3. **Parameter intent**: anything the schema can't express. Defaults, conditional requirements, parameter interactions, auto-conversions (e.g. Vector2/Color from `{x, y}` / `{r, g, b, a}`).
-4. **Returns**: explicit return shape. A `Returns:` sentence in the description for the agent, and an `outputSchema` field for programmatic clients (see §3). The two are complementary, not substitutes.
+4. **Returns**: explicit return shape. A `Returns:` sentence in the description for the agent, and an `outputSchema` for programmatic clients (see §3). Every tool has both.
 5. **Use when / prefer X when**: when an agent should pick this tool over a sibling. Especially important when the server has multiple tools that touch the same resource.
 6. **Error disclosure**: one short line per likely failure mode. "Errors if node not found." / "Overwrites silently." / "Returns empty array on no match."
 
 ### Description size budget
 
-Soft cap **~500 characters per tool** including newlines. Every tool description ships on every handshake; bloat directly steals from the agent's context budget. If a description grows beyond this, pull background into a `# Notes` section in `docs/tools.md` and link.
+Hard cap **500 characters per tool**, enforced by `tests/unit/tool-definitions.test.ts`. Every tool description ships on every handshake; bloat directly steals from the agent's context budget. If a description outgrows it, move field-specific guidance into the per-property descriptions (uncapped) and background into `docs/tools.md`.
 
 ### Examples in descriptions
 
@@ -49,22 +49,24 @@ Why this matters: clients ask for extra confirmation when a tool lacks a `readOn
 
 These are complementary, not alternatives. They speak to different consumers and convey different things:
 
-- **`outputSchema`** is the machine-readable contract for programmatic clients (validators, type generators, IDE tooling). JSON Schema, same shape as `inputSchema`. Top-level `type` must be `"object"` (MCP SDK constraint); bare-array or shape-variable returns omit it. Clients currently do not surface `outputSchema` to the LLM: it is invisible to the agent reading the tool.
+- **`outputSchema`** is the machine-readable contract for programmatic clients (validators, type generators, IDE tooling). JSON Schema, same shape as `inputSchema`. Top-level `type` must be `"object"` (MCP SDK constraint), and every tool declares one: a collection is wrapped in a named field (`{ projects: [...] }`), never returned as a bare array, and a shape that varies declares each variant's fields as optional. Clients currently do not surface `outputSchema` to the LLM: it is invisible to the agent reading the tool.
 - **`Returns:` sentence in the description** is the agent-facing summary. It names the key fields and adds what the schema can't express: when fields are present, what values imply, how the agent should use them. One short sentence; the description budget (§1) is tight.
 
-When both are present, they must be consistent - same field names, same semantics - but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
-
-When `outputSchema` is impractical (oneOf variants, bare-array, recursive trees, opaque values), the `Returns:` sentence is the only return-shape signal and carries the full load.
+The two must be consistent - same field names, same semantics - but the prose is not a verbatim transcription of the schema. Pure shape-transcription wastes bytes; semantic summary earns them.
 
 ### `structuredContent` is mandatory when `outputSchema` is declared
 
-MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` - it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON, pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
+MCP spec revision 2025-06-18: any tool that declares `outputSchema` must return a matching `structuredContent` field on success. Strict clients (LM Studio, Open Code, AnythingLLM) reject responses that omit it. Route success paths through `createStructuredResponse(payload, extraContent?)` from `src/utils/structured-response.ts` - it emits the payload both as a JSON text content block (for lenient clients) and as `structuredContent` (for strict clients). For headless GDScript ops whose script emits JSON (through `emit_result` in `godot_operations.gd`, never a bare `print`), pass `{ parseStdoutAsJson: true }` as the options arg to `executeSceneOp` and the helper does the wrapping. The payload shape must match `outputSchema`; if you change one, change the other.
+
+### Shared field names
+
+A payload is observed, not echoed: a mutation reports what the engine did, read back after the operation, and a value that could not be measured is `null` with a `warnings` entry. Use the names in the "Response conventions" section of `docs/tools.md` (`projectPath`, `scenePath`, `nodePath`, `sessionMode`, `warnings`, `results`) rather than inventing a synonym, and put `warnings` first. Do not add a field that is the same on every success, such as a constant `success: true` or a readiness flag.
 
 ### Harness visibility - what the agent actually sees
 
 Harnesses (Claude Code, MCP clients, etc.) inline `inputSchema` - including every per-property `description` - into the tool list the LLM reads. They typically **do not** inline `outputSchema`. This produces a useful asymmetry: per-property descriptions inside `inputSchema` are a high-value agent-facing surface, scoped to the field the agent is about to fill in.
 
-When a tool is too complex to cover in the top-level description budget (~500 chars), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
+When a tool is too complex to cover in the top-level description budget (500 characters), push field-specific guidance into the per-property descriptions instead of expanding the top-level. Examples that earn their bytes there: the exact form a parameter expects (e.g. "Godot `KEY_*` constant name without prefix"), non-obvious defaults or asymmetries between sibling enum values, anchoring units with a benchmark ("~16ms = one frame at 60fps"), or coordinate-system conventions. The top-level description stays for the cross-cutting story; per-property descriptions cover the footguns.
 
 ---
 
@@ -111,7 +113,7 @@ If your tool's `inputSchema` has:
 
 Any tool that forwards arbitrary GDScript to a running Godot process - `run_script` today, and any future sibling - MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
 
-For tools that launch a Godot project (`run_project`) or attach to one, the same module's helpers (`parseAutoloads`, `collectSceneScriptsRecursive`, `resolveLaunchScene`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1.
+For tools that launch a Godot project (`run_project`) or attach to one, the helpers `parseAutoloadSection` (`src/utils/autoload-ini.ts`), `collectSceneScripts` and `resolveLaunchScene` (`src/utils/scene-parsing.ts`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. The scan lives in `runLaunchGate` (`src/utils/launch-gate.ts`), which `run_project` and `render_movie` both call. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1, and on a script or text scene the scan could not read. A launcher that takes a `scene` argument rejects one that is not a scene file with `rejectNonSceneLaunchArg` before it calls the gate, because the engine ignores such an argument and runs the main scene, which the gate would not have scanned.
 
 If you add a new GDScript-executing tool, also extend the test suite in `tests/unit/handlers/runtime-handlers.test.ts` with Tier 1 / Tier 2 / Tier 3 / strict-mode coverage following the pattern there.
 
@@ -122,9 +124,9 @@ See `docs/security.md` for the full catalogue and tier rationale.
 For any PR that adds or changes a tool definition:
 
 - [ ] Description includes purpose, behavior, params intent, returns, "use when", error disclosure (§1)
-- [ ] Description under ~500 chars (§1)
+- [ ] Description at most 500 characters (§1, test-enforced)
 - [ ] `annotations` set correctly: `readOnlyHint` / `destructiveHint` / `idempotentHint` (§2)
-- [ ] `outputSchema` present, OR description has explicit `Returns: { … }` line (§3)
+- [ ] `outputSchema` present, a `Returns:` sentence in the description, and success returned through `createStructuredResponse` (§3)
 - [ ] Tool name follows verb-plurality rule (§4); no new `batch_*` unless §5 exception applies
 - [ ] Consolidation check: is there already a sibling tool with the same outcome at different cardinality? If so, fold (§5)
 - [ ] If discriminator: documented as load-bearing exception with rationale (§5)

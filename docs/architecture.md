@@ -7,18 +7,20 @@ src/
 ├── mcp.types.ts            # Shared MCP-contract types (OperationParams, ToolDefinition, ToolResponse, ToolHandler)
 ├── tools/
 │   ├── project-tools.ts    # Project introspection (list_projects, check_project, files, search, settings, scene_dependencies)
-│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project, attach_project, take_screenshot, etc.)
+│   ├── runtime-tools.ts    # Runtime/lifecycle (run_project in spawn and attach mode, switch_project, stop_project, take_screenshot, etc.)
 │   ├── autoload-tools.ts   # Autoload management (list/add/remove/update_autoload)
 │   ├── scene-tools.ts      # Scene creation, node addition, sprite loading, batch ops
 │   ├── node-tools.ts       # Node properties, scripts, tree, duplication, signals
-│   ├── profiler-tools.ts   # Function profiling (profile_project, start_profiler, stop_profiler)
+│   ├── profiler-tools.ts   # Profiling: functions, FPS, monitors, render stages (profile_project, start_profiler, stop_profiler)
+│   ├── render-tools.ts     # Bridge-free movie-writer render check (render_movie)
 │   └── validate-tools.ts   # GDScript and scene validation
 ├── scripts/
 │   ├── godot_operations.gd # Headless GDScript operations
 │   └── mcp_bridge.gd       # TCP autoload for runtime communication
 └── utils/
-    ├── godot-runner.ts          # Process spawning, runtime session, bridge TCP client
-    ├── output-parsing.ts        # Godot stdout parsing (extractJson, cleanOutput, cleanStdout, normalizeForCompare)
+    ├── godot-runner.ts          # Process spawning, per-project runtime sessions, bridge TCP client
+    ├── godot-spawn-options.ts   # Spawn options per kind of Godot process (headless, run, editor)
+    ├── output-parsing.ts        # Godot stdout parsing (extractOperationPayload, extractJson, cleanOutput, cleanStdout, normalizeForCompare)
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
     ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) - argument validators live in arg-parsing.ts
     ├── arg-parsing.ts           # Generic field helpers + parseProjectArgs/parseSceneArgs/parseNodePath, returning Result<T, ToolResponse>
@@ -26,19 +28,33 @@ src/
     ├── result.ts                # Result<T, E> shape + ok/err/isOk/isErr used across the handler/parser/dispatch boundary
     ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
     ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
-    ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
+    ├── structured-response.ts   # createStructuredResponse and leadWithWarnings: every success payload as structuredContent plus a JSON text block
+    ├── session-report.ts        # No-fallback session gate and error wording shared by the runtime, profiler, edit and render handlers
+    ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair) and the owner registry
+    ├── artifact-paths.ts        # Every path the server writes under .mcp/godot-runtime/, composed in one place
+    ├── atomic-write.ts          # writeFileAtomicSync: temp file plus rename, with a Windows fallback
     ├── bridge-protocol.ts       # TCP framing, port resolution, action-boundary sentinel + stderr bucketing
     ├── profiler.ts              # Godot remote-debugger receiver behind the profiling tools
     ├── godot-variant.ts         # Variant subset the remote debugger speaks on the wire
     ├── autoload-ini.ts          # project.godot [autoload] INI primitives
     ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
     ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
-    ├── scene-parsing.ts         # .tscn / project.godot parsing for the run_project pre-flight scan (launch-scene resolution, ext_resource script extraction)
+    ├── launch-gate.ts           # Pre-flight script scan + once-per-project launch confirmation, callable by any handler that launches a project
+    ├── png-decoder.ts           # Zero-dependency PNG decoder (8-bit RGB/RGBA) for pixel statistics
+    ├── pixel-stats.ts           # Pixel statistics and the likelyBlank verdict, measured from a decoded PNG
+    ├── png-encoder.ts           # Zero-dependency RGB PNG encoder for downscaled inline frame previews
+    ├── frame-preview.ts         # Box downscale and byte-capped PNG preview of a decoded frame
+    ├── movie-process.ts         # Bounded Godot spawn for render_movie: output tails, timeout, process-tree kill
+    ├── scene-parsing.ts         # .tscn scanner behind the pre-flight scan and get_scene_dependencies, launch-scene resolution, and the string-escape reader project.godot parsing shares
     ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
+    ├── progress-heartbeat.ts    # notifications/progress heartbeats for clients that attach a progress token
+    ├── process-lifecycle.ts     # SIGINT/SIGTERM/stdin-close/exit teardown, including every session's bridge artifacts
     └── logger.ts                # logDebug / logError helpers
 ```
 
-Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).
+Headless operations spawn Godot with `--headless --script godot_operations.gd`, perform the operation, and return JSON. That stdout is shared with the engine banner and with anything an autoload or scene script prints, so the result travels as one line prefixed with `MCP_OPERATION_RESULT:`, written by `emit_result` in `godot_operations.gd` and read by `extractOperationPayload`. Only the text after the prefix on that line is ever parsed as a payload; stdout with no such line is reported as an operation that exited before producing a result. Runtime operations communicate over a long-lived TCP connection with the injected `McpBridge` autoload (4-byte big-endian length prefix + UTF-8 JSON frames).
+
+On Windows, Godot attaches to its parent's console when it starts, so a Godot spawned by a server running under a terminal client can write straight onto that client's screen. Every spawn option is decided in `godotSpawnOptions` (`src/utils/godot-spawn-options.ts`): the headless spawns (version probe, headless operations, asset import) pass `windowsHide: true`, the game and the editor never do because their windows must show, and all of them keep piped stdio, which `launch_editor` drains since nothing reads the editor's output.
 
 ## Cold Asset Import
 
@@ -101,13 +117,13 @@ sequenceDiagram
     end
 ```
 
-When `run_project` or `attach_project` is called:
+When `run_project` is called, in either mode:
 
 1. `mcp_bridge.gd` is copied to `.mcp/godot-runtime/bridge/` inside the project
 2. It's registered as an autoload in `project.godot` as `res://.mcp/godot-runtime/bridge/mcp_bridge.gd`
-3. Godot launches with the bridge listening on `127.0.0.1`. Both `run_project` and `attach_project` auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. `run_project` delivers the resolved port to the spawned process via the `MCP_BRIDGE_PORT` environment variable, so the on-disk script stays identical for every spawned session regardless of which one wrote it. `attach_project` has no env-var channel into a Godot process the user launched themselves, so it bakes the port (and the auth token) into the per-project bridge script at inject time instead.
+3. Godot launches with the bridge listening on `127.0.0.1`. Both modes auto-select a free port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. A spawned session delivers the resolved port to the process via the `MCP_BRIDGE_PORT` environment variable, so the on-disk script stays identical for every spawned session regardless of which one wrote it. Attach mode (`attach: true`) has no env-var channel into a Godot process the user launched themselves, so it bakes the port (and the auth token) into the per-project bridge script at inject time instead.
 4. The Node side opens a long-lived TCP connection on first runtime call and sends framed JSON commands; the bridge replies on the same connection
-5. `stop_project` or `detach_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes this session's registry entry. The shared bridge script and autoload entry are removed only when no other live session remains on the project (see "Multiple sessions on one project" below).
+5. `stop_project` sends a `shutdown` command (so the bridge releases the port cleanly), then removes this session's registry entry. A spawned process is stopped; an attached one is left running. The shared bridge script and autoload entry are removed only when no other live session remains on the project (see "Multiple sessions on one project" below). `BridgeManager.cleanup` returns the steps it attempted and could not confirm (the autoload entry is read back from `project.godot` after its removal), and `stop_project` leads its response with them as `warnings`, along with an attached bridge that never acknowledged the `shutdown`.
 6. The same removal runs without a tool call when the session ends on its own: a spawned process that exits, an attached bridge that disconnects, or the server itself shutting down (signal, stdin close, or process exit). `stop_project` remains worth calling (it frees the retained process slot and returns the captured logs), but forgetting it does not strand artifacts in the project
 
 ### Multiple sessions on one project
@@ -116,11 +132,21 @@ N server processes can share one project at once. Every entry point reads disk s
 
 The shared script and autoload entry are created on the first live session's inject and removed only by the last live session's cleanup. A same-project restart (`run_project` called again without an intervening `stop_project`, the scenario reported in issue #61) always re-reads disk rather than trusting a per-process "already injected" flag, so a missing autoload entry gets restored even when the script itself was already present.
 
-Attach mode allows at most one live attach owner per project, because it bakes its port and token into the one shared script: a second `attach_project` on a project another session has already attached to is refused before any write, naming the other session's pid. Spawned sessions carry no such limit, since they deliver their port through the environment and never bake anything.
+Attach mode allows at most one live attach owner per project, because it bakes its port and token into the one shared script: a second `run_project` with `attach: true` on a project another session has already attached to is refused before any write, naming the other session's pid. Spawned sessions carry no such limit, since they deliver their port through the environment and never bake anything.
 
-A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own.
+A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own. Only a missing registry directory counts as an empty registry. One that exists and cannot be listed, or that holds an owner file that cannot be read, is unknown: the edit guard, `render_movie` and `run_project` refuse with the reason, and a cleanup leaves the shared script and autoload entry in place instead of removing them.
 
 Accepted gaps: two servers racing a read-modify-write on `project.godot` in the same instant can still lose one edit (writing the owner file first keeps the window tiny, and the next inject from either side restores the entry); and an older server version sharing a project writes no owner file, so it is invisible to this registry.
+
+### Sessions on several projects
+
+`GodotRunner` holds one session record per project in a map keyed by the normalized absolute project path (`sessionKey`), plus a `current` pointer to at most one of them. `run_project` adds or replaces only the record for its own project and points `current` at it. The `active*` accessors are read-only views of the current record, so a handler cannot reach another project's session by accident; anything else goes through `getSessionInfo(projectPath)` and the other snapshot methods.
+
+There is one bridge socket. It belongs to the session it was dialed for, and `switch_project` closes it so the next command lazy-connects to the new current session's port with that session's token. MCP serializes tool calls, so one channel is enough. A session that has no bridge port (its game exited) is never dialed, and a connect that outlives the command that started it is discarded, so a frame only travels on a socket dialed for the session whose token it carries.
+
+Each record carries its own epoch, bumped at the head of every transition that stops or supersedes that session. A spawned process's `'exit'` handler compares the epoch it captured with the record's, so an exit from a superseded process cannot clean the bridge its replacement just injected, and starting project B never makes project A's own later exit look stale. The same epoch guards the start itself: a start whose record is stopped or replaced inside one of its own awaits (a server shutdown landing there) throws instead of injecting a bridge and spawning a process nothing tracks.
+
+The current pointer is never moved implicitly. Stopping the current session leaves it empty, and a game that exits by itself stays current with its logs retained. `src/utils/session-report.ts` formats the resulting errors: `requireRuntimeSession` is the one gate the runtime and profiling handlers share, and it lists the live sessions instead of choosing one. The headless-edit guard and `render_movie` ask `hasLiveSessionOnProject`, so a live session blocks edits on its project whether or not it is current, and the refusal says to `switch_project` first when it is not. Server shutdown stops every session, and the synchronous exit handler removes every session's bridge artifacts. A profiler capture's track is the one profiler step that needs the bridge, so `collectTrack` in `src/tools/profiler-tools.ts` collects it only while the session that ran the capture is current.
 
 ## Input Batches
 
@@ -138,7 +164,9 @@ The sentinel constant lives in `src/utils/bridge-protocol.ts` and `src/scripts/m
 
 ## Runtime Artifacts
 
-Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, and validation temp files in `validate/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
+Files generated during runtime are stored under `.mcp/godot-runtime/` inside the project directory: the injected bridge autoload in `bridge/`, screenshots in `screenshots/`, `run_script` audit pairs in `scripts/`, validation temp files in `validate/`, and `render_movie` output in `movies/<run id>/`. `.mcp/` is automatically added to `.gitignore` and carries a `.gdignore` so Godot won't import the subtree. Stopping a session removes `bridge/` and the autoload entry; the other directories persist, so screenshot paths handed back earlier still resolve and the audit trail survives.
+
+`render_movie` is the one launcher that never touches the bridge. It spawns Godot with `--write-movie` through `runMovieProcess` in `src/utils/movie-process.ts`, holds no session state on the runner, and reads the result from disk: PNG frames are decoded and measured by the same Node-side statistics module `take_screenshot` uses. The call is bounded by a timeout that scales with the requested frames, and a timeout kills the whole process tree. `check` runs delete their directory before returning; `frames` and `video` runs stay until someone deletes them.
 
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Override per call:
 
@@ -146,4 +174,4 @@ Files generated during runtime are stored under `.mcp/godot-runtime/` inside the
 - `responseMode: "path_only"`: skip the inline image entirely when another tool or human will inspect the saved file.
 - `previewMaxWidth` / `previewMaxHeight`: override the default 960x540 preview bounds (e.g. `{ "responseMode": "preview", "previewMaxWidth": 480, "previewMaxHeight": 270 }`).
 
-The response is a JSON text entry (`{ responseMode, path, size, previewPath?, previewSize?, warnings? }`) plus an inline `image` entry for `full` and `preview`.
+The response is a JSON text entry (`{ warnings?, projectPath, responseMode, path, size, stats, previewPath?, previewSize? }`) plus an inline `image` entry for `full` and `preview`. `stats` is measured from the full PNG in every mode and is `null`, with a leading warning, when the PNG could not be measured.

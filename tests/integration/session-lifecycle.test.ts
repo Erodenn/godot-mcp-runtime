@@ -104,7 +104,7 @@ describe('spawned session self-exit', () => {
       expect(hasError(stopResult)).toBe(false);
       const stopped = JSON.parse(unwrap(stopResult).content[0].text);
       expect(stopped.alreadyExited).toBe(true);
-      expect(stopped.mode).toBe('spawned');
+      expect(stopped.sessionMode).toBe('spawned');
       expect(runner.activeProcess).toBeNull();
     },
     CASE_TIMEOUT_MS,

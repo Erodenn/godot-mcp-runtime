@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   parseAutoloads,
+  parseAutoloadSection,
   addAutoloadEntry,
   removeAutoloadEntry,
   updateAutoloadEntry,
@@ -287,5 +288,45 @@ describe('add/update/remove round-trip', () => {
     );
     writeFileSync(file, content, 'utf8');
     expect(parseAutoloads(file)).toEqual([{ name: 'X', path: 'res://x.gd', singleton: true }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAutoloadSection
+// ---------------------------------------------------------------------------
+
+describe('parseAutoloadSection', () => {
+  it('parses an entry with spaces around the equals sign', () => {
+    const dir = makeProject('config_version=5\n\n[autoload]\nSpaced = "*res://a.gd"\n');
+    expect(parseAutoloadSection(join(dir, 'project.godot'))).toEqual({
+      entries: [{ name: 'Spaced', path: 'res://a.gd', singleton: true }],
+      unparsed: [],
+    });
+  });
+
+  it('returns the lines it could not parse', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\nGood="*res://a.gd"\nmy-auto="res://b.gd"\nnot an entry\n',
+    );
+    const section = parseAutoloadSection(join(dir, 'project.godot'));
+    expect(section.entries).toEqual([{ name: 'Good', path: 'res://a.gd', singleton: true }]);
+    expect(section.unparsed).toEqual(['my-auto="res://b.gd"', 'not an entry']);
+  });
+
+  it('parseAutoloads returns the same entries', () => {
+    const dir = makeProject('config_version=5\n\n[autoload]\nA = "res://a.gd"\nbad-name="x"\n');
+    const file = join(dir, 'project.godot');
+    expect(parseAutoloads(file)).toEqual(parseAutoloadSection(file).entries);
+  });
+
+  it('removes and updates an entry written with spaces around the equals sign', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\nA = "*res://a.gd"\nB = "res://b.gd"\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(updateAutoloadEntry(file, 'A', 'res://c.gd')).toBe(true);
+    expect(readProject(dir)).toContain('A="*res://c.gd"');
+    expect(removeAutoloadEntry(file, 'B')).toBe(true);
+    expect(readProject(dir)).not.toContain('res://b.gd');
   });
 });

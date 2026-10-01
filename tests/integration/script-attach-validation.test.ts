@@ -28,7 +28,7 @@ import { execFileSync } from 'child_process';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const PARSE_ERROR_SCRIPT = 'extends Node2D\nfunc _ready(:\n';
 const VALID_SCRIPT = 'extends Node2D\nfunc _ready():\n\tpass\n';
@@ -217,7 +217,7 @@ describe('add_node rejects a properties.script that cannot be instantiated', () 
         30000,
       );
 
-      expect(stdout).not.toContain('added successfully');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/cannot be instantiated/i);
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="BadScripted"/);

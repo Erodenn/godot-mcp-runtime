@@ -156,3 +156,65 @@ describe('tokenize: punctuation', () => {
     expect(punct).toEqual(['(', ',', ')']);
   });
 });
+
+describe('tokenize: member chains across continuations and comments', () => {
+  it('coalesces a chain split by a backslash continuation before the dot', () => {
+    expect(chains('OS \\\n.execute("x")\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('coalesces a chain split by a continuation with trailing blanks and a CRLF', () => {
+    expect(chains('OS \\  \r\n  .execute("x")\r\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('coalesces a chain split by a continuation after the dot', () => {
+    expect(chains('OS. \\\n  execute("x")\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('coalesces a chain split by a comment inside parentheses', () => {
+    expect(chains('foo(OS # note\n  .execute("x"))\n')).toEqual([['OS', 'execute']]);
+    expect(chains('foo(OS. # note\n  execute("x"))\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('keeps line numbers right after a chain split by a continuation', () => {
+    const tokens = tokenize('OS \\\n.execute()\nx\n');
+    const chain = tokens.find((t) => t.kind === 'memberChain');
+    expect(chain?.line).toBe(1);
+    expect(tokens.find((t) => t.text === 'x')?.line).toBe(3);
+  });
+
+  it('two statements separated by a comment stay two identifiers', () => {
+    expect(idents('foo # note\nbar\n')).toEqual(['foo', 'bar']);
+    expect(chains('foo # note\nbar\n')).toEqual([]);
+  });
+
+  it('a comment that mentions a dot does not join the lines around it', () => {
+    expect(chains('foo # a.b\nbar\n')).toEqual([]);
+    expect(idents('foo # a.b\nbar\n')).toEqual(['foo', 'bar']);
+  });
+
+  it('a continuation between two statements does not form a chain', () => {
+    expect(chains('foo \\\nbar\n')).toEqual([]);
+    expect(idents('foo \\\nbar\n')).toEqual(['foo', 'bar']);
+  });
+
+  it('a backslash that is not a continuation does not form a chain', () => {
+    expect(chains('OS \\ x\n')).toEqual([]);
+    expect(idents('OS \\ x\n')).toEqual(['OS', 'x']);
+  });
+
+  it('a caret before an identifier does not swallow it', () => {
+    expect(chains('1^OS.execute("x")\n')).toEqual([['OS', 'execute']]);
+    expect(idents('a ^b\n')).toEqual(['a', 'b']);
+  });
+
+  it('a caret before a quoted NodePath is still one literal', () => {
+    const tokens = tokenize('x = ^"OS.execute"\n');
+    expect(tokens.filter((t) => t.kind === 'string').map((t) => t.text)).toEqual(['<string-name>']);
+    expect(tokens.some((t) => t.text === 'OS')).toBe(false);
+    expect(chains('x = ^"OS.execute"\n')).toEqual([]);
+  });
+
+  it('a trailing caret at end of input does not throw', () => {
+    expect(() => tokenize('a ^')).not.toThrow();
+  });
+});

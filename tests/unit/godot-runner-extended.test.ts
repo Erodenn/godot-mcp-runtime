@@ -6,6 +6,7 @@ import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js
 import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
 import { GodotRunner, type GodotProcess } from '../../src/utils/godot-runner.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
+import { installSession } from '../helpers/session-install.js';
 import type { ChildProcess } from 'child_process';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -390,9 +391,11 @@ describe('GodotRunner.hasActiveRuntimeSession', () => {
 
   it('reports a session while a spawned process is still running', () => {
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = 'spawned';
-    runner.activeProjectPath = TRACKED_PROJECT;
-    runner.activeProcess = trackedProcess(false);
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: TRACKED_PROJECT,
+      process: trackedProcess(false),
+    });
 
     expect(runner.hasActiveRuntimeSession()).toBe(true);
   });
@@ -403,18 +406,18 @@ describe('GodotRunner.hasActiveRuntimeSession', () => {
     // runs, so anything reading those fields directly would still see a
     // session here.
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = 'spawned';
-    runner.activeProjectPath = TRACKED_PROJECT;
-    runner.activeProcess = trackedProcess(true);
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: TRACKED_PROJECT,
+      process: trackedProcess(true),
+    });
 
     expect(runner.hasActiveRuntimeSession()).toBe(false);
   });
 
   it('reports no session when a spawned launch never produced a process', () => {
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = 'spawned';
-    runner.activeProjectPath = TRACKED_PROJECT;
-    runner.activeProcess = null;
+    installSession(runner, { mode: 'spawned', projectPath: TRACKED_PROJECT, process: null });
 
     expect(runner.hasActiveRuntimeSession()).toBe(false);
   });
@@ -423,27 +426,32 @@ describe('GodotRunner.hasActiveRuntimeSession', () => {
     // The server does not own an attached process and never observes its
     // exit, so attached liveness cannot be falsified from in here.
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = 'attached';
-    runner.activeProjectPath = TRACKED_PROJECT;
-    runner.activeProcess = null;
+    installSession(runner, { mode: 'attached', projectPath: TRACKED_PROJECT, process: null });
 
     expect(runner.hasActiveRuntimeSession()).toBe(true);
   });
 
-  it('reports no session when the project path is unset', () => {
+  it('reports no session when nothing is current although another project has a live session', () => {
+    // The predicate answers for the current session only. A live session that
+    // is not current must not make it true: runtime tools never act on it.
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = 'spawned';
-    runner.activeProjectPath = null;
-    runner.activeProcess = trackedProcess(false);
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: TRACKED_PROJECT,
+      process: trackedProcess(false),
+      current: false,
+    });
 
     expect(runner.hasActiveRuntimeSession()).toBe(false);
   });
 
   it('reports no session when the session mode is unset', () => {
     const runner = new GodotRunner({ godotPath: 'godot' });
-    runner.activeSessionMode = null;
-    runner.activeProjectPath = TRACKED_PROJECT;
-    runner.activeProcess = trackedProcess(false);
+    installSession(runner, {
+      mode: null,
+      projectPath: TRACKED_PROJECT,
+      process: trackedProcess(false),
+    });
 
     expect(runner.hasActiveRuntimeSession()).toBe(false);
   });
@@ -464,15 +472,20 @@ describe('fake runner liveness predicate matches GodotRunner', () => {
     { mode: 'spawned', projectPath: TRACKED_PROJECT, hasExited: true },
     { mode: 'spawned', projectPath: TRACKED_PROJECT, hasExited: null },
     { mode: 'attached', projectPath: TRACKED_PROJECT, hasExited: null },
-    { mode: 'spawned', projectPath: null, hasExited: false },
     { mode: null, projectPath: TRACKED_PROJECT, hasExited: false },
   ];
 
   it.each(CASES)('agrees for mode=$mode path=$projectPath exited=$hasExited', (c) => {
     const real = new GodotRunner({ godotPath: 'godot' });
-    real.activeSessionMode = c.mode;
-    real.activeProjectPath = c.projectPath;
-    real.activeProcess = c.hasExited === null ? null : trackedProcess(c.hasExited);
+    // A record always has a project path, so the all-null row is the runner
+    // with no session at all.
+    if (c.projectPath !== null) {
+      installSession(real, {
+        mode: c.mode,
+        projectPath: c.projectPath,
+        process: c.hasExited === null ? null : trackedProcess(c.hasExited),
+      });
+    }
 
     const fake = createFakeRunner().asRunner;
     fake.activeSessionMode = c.mode;
@@ -480,5 +493,8 @@ describe('fake runner liveness predicate matches GodotRunner', () => {
     fake.activeProcess = c.hasExited === null ? null : trackedProcess(c.hasExited);
 
     expect(fake.hasActiveRuntimeSession()).toBe(real.hasActiveRuntimeSession());
+    expect(fake.hasLiveSessionOnProject(TRACKED_PROJECT)).toBe(
+      real.hasLiveSessionOnProject(TRACKED_PROJECT),
+    );
   });
 });

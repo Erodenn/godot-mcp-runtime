@@ -15,6 +15,7 @@ import { join } from 'path';
  *     <project>/.mcp/godot-runtime/screenshots/             (persists across sessions)
  *     <project>/.mcp/godot-runtime/scripts/                 (run_script audit pairs, persists)
  *     <project>/.mcp/godot-runtime/validate/                (temp files, deleted per call)
+ *     <project>/.mcp/godot-runtime/movies/<run id>/         (kept for `frames` and `video` runs, removed per call for `check`)
  *
  * `.gdignore` stays at the `.mcp/` level and covers the whole subtree; the
  * autoload under it still loads, because autoload resolution goes through
@@ -35,6 +36,15 @@ const BRIDGE_OWNERS_DIR_NAME = 'owners' as const;
 const SCREENSHOTS_DIR_NAME = 'screenshots' as const;
 const AUDIT_SCRIPTS_DIR_NAME = 'scripts' as const;
 const VALIDATE_DIR_NAME = 'validate' as const;
+const MOVIES_DIR_NAME = 'movies' as const;
+
+/** Basename given to --write-movie for a PNG sequence; Godot inserts the frame index before the extension. */
+export const MOVIE_FRAME_BASENAME = 'frame' as const;
+const MOVIE_VIDEO_BASENAME = 'movie' as const;
+const MOVIE_AUDIO_EXTENSION = 'wav' as const;
+
+/** Output extensions `--write-movie` is given: a PNG sequence or one video file. */
+export type MovieOutputExtension = 'png' | 'avi' | 'ogv';
 
 /** Basename of the bridge autoload script, at both the new and legacy location. */
 const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd' as const;
@@ -107,6 +117,35 @@ export function auditScriptsDir(projectPath: string): string {
 /** `<project>/.mcp/godot-runtime/validate` — temp scripts, deleted per call. */
 export function validateTempDir(projectPath: string): string {
   return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, VALIDATE_DIR_NAME);
+}
+
+/** `<project>/.mcp/godot-runtime/movies` — one subdirectory per `render_movie` run. */
+export function moviesDir(projectPath: string): string {
+  return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, MOVIES_DIR_NAME);
+}
+
+/** `<project>/.mcp/godot-runtime/movies/<run id>` — the output directory of one run. */
+export function movieRunDir(projectPath: string, runId: string): string {
+  return join(moviesDir(projectPath), runId);
+}
+
+/**
+ * The path handed to `--write-movie`: `frame.png` for a PNG sequence (Godot
+ * writes `frame<index>.png` next to it), `movie.avi` or `movie.ogv` for one video.
+ */
+export function movieOutputPath(
+  projectPath: string,
+  runId: string,
+  extension: MovieOutputExtension,
+): string {
+  const basename = extension === 'png' ? MOVIE_FRAME_BASENAME : MOVIE_VIDEO_BASENAME;
+  return join(movieRunDir(projectPath, runId), `${basename}.${extension}`);
+}
+
+/** The audio track the movie writer emits next to a PNG sequence (`frame.wav`). */
+export function movieAudioPath(projectPath: string, runId: string): string {
+  const fileName = `${MOVIE_FRAME_BASENAME}.${MOVIE_AUDIO_EXTENSION}`;
+  return join(movieRunDir(projectPath, runId), fileName);
 }
 
 /**

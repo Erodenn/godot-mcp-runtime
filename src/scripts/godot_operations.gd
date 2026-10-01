@@ -9,6 +9,23 @@ var debug_mode = false
 # whole operation, which is only safe while nothing has been written yet.
 var import_marker_armed = true
 
+# Why the most recent load_scene_instance call returned null, as one sentence.
+# stderr carries the same reason, but a caller that reports per target (the
+# checks[] path of validate) has no other way to put it in its own result.
+var last_scene_load_error: String = ""
+
+# Prefix of the single stdout line that carries an operation's JSON result.
+# stdout is shared with the engine banner and with any print() an autoload or
+# scene script makes, so the Node side reads only the line that carries this
+# marker and parses only what follows it. KEEP IN SYNC with
+# OPERATION_RESULT_SENTINEL in src/utils/output-parsing.ts.
+const OPERATION_RESULT_SENTINEL := "MCP_OPERATION_RESULT:"
+
+# The one emitter for an operation's JSON result. Every operation that returns
+# a JSON payload goes through here; never print a result line directly.
+func emit_result(payload) -> void:
+	print(OPERATION_RESULT_SENTINEL + JSON.stringify(payload))
+
 func _init():
 	var args = OS.get_cmdline_args()
 
@@ -110,11 +127,10 @@ func _init():
 	return
 
 # Logging functions.
-# Every one of these writes to stderr. stdout is the JSON channel for a headless
-# operation and the handlers strict-parse it, so a debug line there is not noise
-# the parser skips: it puts a '[' at column 0, extractJson latches onto it, and
-# the whole payload comes back as an unparseable string. DEBUG=true must never
-# change what a tool returns.
+# Every one of these writes to stderr. stdout carries one thing only: the
+# sentinel-framed JSON line from emit_result. Anything else printed there is
+# noise the Node side has to filter out. DEBUG=true must never change what a
+# tool returns.
 func log_debug(message):
 	if debug_mode:
 		printerr("[DEBUG] " + message)
@@ -130,10 +146,21 @@ func get_script_by_name(name_of_class):
 	if debug_mode:
 		printerr("Attempting to get script for class: " + name_of_class)
 
-	if ResourceLoader.exists(name_of_class, "Script"):
+	# A value that is not a bare identifier can only be a script path, and a
+	# path that arrives in tool params is contained like every other one: Godot
+	# resolves "res://../x.gd" outward, and instantiating that script would run
+	# a file from outside the project. A class name is looked up as written.
+	var direct_path: String = name_of_class
+	if not _is_ascii_identifier(name_of_class):
+		direct_path = normalize_scene_path(name_of_class)
+		if direct_path.is_empty():
+			printerr("Path escapes the project root: " + name_of_class)
+			return null
+
+	if ResourceLoader.exists(direct_path, "Script"):
 		if debug_mode:
-			printerr("Resource exists, loading directly: " + name_of_class)
-		var script = load(name_of_class) as Script
+			printerr("Resource exists, loading directly: " + direct_path)
+		var script = load(direct_path) as Script
 		if script:
 			if debug_mode:
 				printerr("Successfully loaded script from path")
@@ -223,6 +250,14 @@ func normalize_scene_path(scene_path: String) -> String:
 	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
 		return ""
 	return "res://" + relative
+
+# Strip the res:// scheme from a normalized path, giving the project-relative
+# form every path parameter of this tool surface accepts. Payloads report paths
+# in this form so a caller can pass them straight back in.
+func _project_relative(res_path: String) -> String:
+	if res_path.begins_with("res://"):
+		return res_path.substr("res://".length())
+	return res_path
 
 # Resolves a ResourceLoader.get_dependencies() entry to its underlying
 # res:// path. Dependency strings come in two shapes:
@@ -320,14 +355,17 @@ func _probe_scene_deps(full_path: String) -> Dictionary:
 # case hangs the engine instead of returning cleanly. Probing dependencies
 # up front, before load() ever runs, is the only approach that avoided both.
 func load_scene_instance(scene_path: String):
+	last_scene_load_error = ""
 	var full_path = normalize_scene_path(scene_path)
 	if full_path.is_empty():
-		log_error("Path escapes the project root: " + scene_path)
+		last_scene_load_error = "Path escapes the project root: " + scene_path
+		log_error(last_scene_load_error)
 		return null
 	log_debug("Loading scene from: " + full_path)
 
 	if not FileAccess.file_exists(full_path):
-		log_error("Scene file does not exist: " + full_path)
+		last_scene_load_error = "Scene file does not exist: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	# Probe dependencies before loading. Missing files are checked first: a
@@ -335,20 +373,23 @@ func load_scene_instance(scene_path: String):
 	# then refused, which would leave a half-fixed state behind.
 	var probe = _probe_scene_deps(full_path)
 	if probe.missing.size() > 0:
-		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing))
+		last_scene_load_error = "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)
+		log_error(last_scene_load_error)
 		return null
 	if probe.needs_import.size() > 0:
-		_report_import_needed(scene_path, ", ".join(probe.needs_import))
+		last_scene_load_error = _report_import_needed(scene_path, ", ".join(probe.needs_import))
 		return null
 
 	var scene = load(full_path)
 	if not scene:
-		log_error("Failed to load scene: " + full_path)
+		last_scene_load_error = "Failed to load scene: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	var instance = scene.instantiate()
 	if not instance:
-		log_error("Failed to instantiate scene: " + full_path)
+		last_scene_load_error = "Failed to instantiate scene: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	return instance
@@ -441,7 +482,9 @@ func create_scene(params):
 		return
 
 	if save_scene_to_path(scene_root, full_scene_path):
-		print(JSON.stringify({"success": true, "scenePath": params.scene_path}))
+		# The project-relative form of the path that was written, not the
+		# spelling the caller used ("./a.tscn", "res://a.tscn").
+		emit_result({"success": true, "scenePath": _project_relative(full_scene_path)})
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		quit(1)
@@ -490,7 +533,10 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 # Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
-# Returns {"ok": bool, "error": String}; error is empty on success.
+# Returns {"ok": bool, "error": String}; on success also "payload" (the result
+# fields, read back from the node after add_child) and "warnings" (empty unless
+# a property was set that the scene file does not store, or Godot did not keep
+# the requested name).
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	var parent_path = "root"
 	if op.has("parent_node_path"):
@@ -502,6 +548,12 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "node_type is required for add_node"}
 	if not op.has("node_name") or op.node_name == "":
 		return {"ok": false, "error": "node_name is required for add_node"}
+	# A scene instanced into itself saves a reference from the file to itself,
+	# which the engine only reports on stderr and the next load cannot resolve.
+	if _is_scene_path(str(op.node_type)) and op.has("scene_path"):
+		var target_scene := normalize_scene_path(str(op.scene_path))
+		if target_scene != "" and target_scene == normalize_scene_path(str(op.node_type)):
+			return {"ok": false, "error": "Cannot instance scene '%s' into itself" % _project_relative(target_scene)}
 	var instantiated = _instantiate_node_type(op.node_type)
 	if not instantiated.ok:
 		return {"ok": false, "error": instantiated.error}
@@ -516,11 +568,12 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	for promoted in _PROMOTED_SPATIAL_PARAMS:
 		if op.has(promoted) and not props.has(promoted):
 			props[promoted] = op[promoted]
+	var warnings: Array = []
 	for property in props:
-		if not (property in new_node):
-			var error_message = "Property '%s' does not exist on node of type '%s'" % [property, new_node.get_class()]
+		var settable = _check_node_property_settable(new_node, property)
+		if not settable.ok:
 			new_node.free()
-			return {"ok": false, "error": error_message}
+			return {"ok": false, "error": settable.error}
 		var prepared = _prepare_property_value(new_node, property, props[property])
 		if not prepared.ok:
 			new_node.free()
@@ -535,9 +588,34 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 			if not verify.ok:
 				new_node.free()
 				return {"ok": false, "error": verify.error}
+		var unstored: String = _unstored_script_variable_warning(new_node, property)
+		if unstored != "":
+			warnings.append(unstored)
 	parent.add_child(new_node)
+	# A parent inside an instanced child is dropped by pack() unless the instance
+	# is editable from the scene root. The claim starts at the parent, not at the
+	# new node: a parent that is itself an instance root is owned by this scene
+	# and saves its new child as it is, so marking it editable would change the
+	# scene for nothing.
+	_claim_for_serialization(scene_root, parent)
 	new_node.owner = scene_root
-	return {"ok": true, "error": ""}
+	# Read the outcome back from the node now that it is in the tree. add_child
+	# renames a child whose name collides with a sibling, and assigning a name
+	# replaces characters a node name cannot hold, so the requested name is not
+	# evidence of the final one.
+	var final_name := String(new_node.name)
+	if final_name != str(op.node_name):
+		warnings.append("Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [str(op.node_name), final_name])
+	return {
+		"ok": true,
+		"error": "",
+		"warnings": warnings,
+		"payload": {
+			"nodeName": final_name,
+			"nodeType": new_node.get_class(),
+			"nodePath": _relative_path(scene_root, new_node),
+		},
+	}
 
 # Apply a load_sprite mutation without saving. Shared by standalone load_sprite
 # and batch_scene_operations.
@@ -568,8 +646,23 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	# cannot serialize it, so the assignment would silently vanish on save.
 	if texture.resource_path == "":
 		return {"ok": false, "error": "Texture was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
+	# A sprite inside an instanced child keeps this assignment only when the
+	# instance is editable from the scene root.
+	_claim_for_serialization(scene_root, sprite_node)
 	sprite_node.texture = texture
-	return {"ok": true, "error": ""}
+	# Report what the node holds after the assignment, not what was asked for.
+	var assigned = sprite_node.texture
+	if assigned == null or assigned.resource_path == "":
+		return {"ok": false, "error": "Texture assignment did not land on the node: " + full_texture_path}
+	return {
+		"ok": true,
+		"error": "",
+		"payload": {
+			"nodePath": _relative_path(scene_root, sprite_node),
+			"nodeType": sprite_node.get_class(),
+			"texturePath": _project_relative(assigned.resource_path),
+		},
+	}
 
 func add_node(params):
 	printerr("Adding node to scene: " + params.scene_path)
@@ -586,7 +679,10 @@ func add_node(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Node '" + params.node_name + "' of type '" + params.node_type + "' added successfully")
+		var payload: Dictionary = result.payload
+		if not result.warnings.is_empty():
+			payload["warnings"] = result.warnings
+		emit_result(payload)
 	else:
 		log_error("Failed to save scene after adding node")
 		quit(1)
@@ -608,7 +704,7 @@ func load_sprite(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print("Sprite loaded successfully with texture: " + params.texture_path)
+		emit_result(result.payload)
 	else:
 		log_error("Failed to save scene after loading sprite")
 		quit(1)
@@ -671,7 +767,24 @@ func export_mesh_library(params):
 
 		var error = ResourceSaver.save(mesh_library, full_output_path)
 		if error == OK:
-			print("MeshLibrary exported successfully with " + str(item_id) + " items to: " + params.output_path)
+			# Report what the saved library holds, read from the library itself
+			# rather than from the loop counter.
+			var exported_names: Array = []
+			for id in mesh_library.get_item_list():
+				exported_names.append(mesh_library.get_item_name(id))
+			var payload := {
+				"outputPath": _project_relative(full_output_path),
+				"itemCount": exported_names.size(),
+				"itemNames": exported_names,
+			}
+			if use_specific_items:
+				var not_exported: Array = []
+				for requested in mesh_item_names:
+					if not (str(requested) in exported_names):
+						not_exported.append(str(requested))
+				if not not_exported.is_empty():
+					payload["warnings"] = ["Requested mesh items were not exported (no child with that name, or the child has no mesh): " + ", ".join(not_exported)]
+			emit_result(payload)
 		else:
 			log_error("Failed to save MeshLibrary: " + str(error))
 			quit(1)
@@ -692,12 +805,22 @@ func save_scene(params):
 
 	var save_path = params.new_path if params.has("new_path") else params.scene_path
 
-	if save_scene_to_path(scene_root, save_path):
-		print("Scene saved successfully to: " + save_path)
-	else:
+	if not save_scene_to_path(scene_root, save_path):
 		log_error("Failed to save scene")
 		quit(1)
 		return
+
+	# save_scene_to_path already accepted this path, so it normalizes cleanly.
+	# Confirm the file on disk before reporting it as written.
+	var saved_full_path = normalize_scene_path(str(save_path))
+	if not FileAccess.file_exists(saved_full_path):
+		log_error("Scene save reported success but the file is not on disk: " + saved_full_path)
+		quit(1)
+		return
+	emit_result({
+		"scenePath": _project_relative(normalize_scene_path(str(params.scene_path))),
+		"savedScenePath": _project_relative(saved_full_path),
+	})
 
 # ============================================
 # NODE OPERATIONS
@@ -723,6 +846,11 @@ func delete_nodes(params):
 			entry["error"] = "Node not found: " + node_path
 		elif node == scene_root:
 			entry["error"] = "Cannot delete the root node"
+		elif node.owner != scene_root:
+			# An instance re-creates its inner nodes on every load, so a deletion
+			# made here would be reported saved and come back. The instance's own
+			# root is owned by this scene and stays deletable.
+			entry["error"] = "Node '%s' belongs to an instanced scene (or is not owned by this scene) and cannot be deleted from here; edit the scene it comes from" % node_path
 		else:
 			var parent = node.get_parent()
 			parent.remove_child(node)
@@ -733,10 +861,11 @@ func delete_nodes(params):
 
 	if any_deleted:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after deleting nodes", "results": results}))
+			log_error("Failed to save scene after deleting nodes")
+			quit(1)
 			return
 
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Make a property override on `target` (a node inside an instanced child)
 # survive PackedScene.pack(). Nodes inside an instanced scene are not owned
@@ -761,64 +890,108 @@ func _claim_for_serialization(scene_root: Node, target: Node) -> void:
 # Apply one property-update list to a loaded scene without saving. Shared by
 # standalone set_node_properties and batch_scene_operations so both paths
 # validate identically (including instanced-child serialization claiming).
-# Returns {"ok": bool, "any_set": bool, "error": String, "results": Array}.
+# Returns {"ok": bool, "any_set": bool, "error": String, "results": Array,
+# "warnings": Array}. "warnings" holds one sentence per update that was set on
+# the loaded scene but that the scene file does not store, prefixed with its
+# index; the callers lead their payload with them.
 func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> Dictionary:
 	var results: Array = []
+	var warnings: Array = []
 	var any_set := false
 
-	for update in updates:
-		var result = {"nodePath": update.node_path, "property": update.property}
-		var node = find_node_by_path(scene_root, update.node_path)
-		if node == null:
-			result["error"] = "Node not found: " + update.node_path
-		elif not (update.property in node):
-			result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
+	for i in range(updates.size()):
+		var update = updates[i]
+		# The batch path forwards operations without any Node-side check, so a
+		# malformed item is reported here instead of read by dot access, which
+		# aborts the whole script on a missing key.
+		var well_formed: bool = (
+			typeof(update) == TYPE_DICTIONARY
+			and update.has("node_path")
+			and update.has("property")
+			and update.has("value")
+			and typeof(update.get("node_path")) == TYPE_STRING
+			and typeof(update.get("property")) == TYPE_STRING
+		)
+		var result = {"nodePath": "", "property": ""}
+		if not well_formed:
+			result["error"] = "updates[%d] must be an object with nodePath, property and value" % i
 		else:
-			var prepared = _prepare_property_value(node, update.property, update.value)
-			if not prepared.ok:
-				result["error"] = prepared.error
+			result["nodePath"] = update.node_path
+			result["property"] = update.property
+			var node = find_node_by_path(scene_root, update.node_path)
+			var settable: Dictionary = {"ok": false, "error": ""}
+			if node != null:
+				settable = _check_node_property_settable(node, update.property)
+			if node == null:
+				result["error"] = "Node not found: " + update.node_path
+			elif not settable.ok:
+				result["error"] = settable.error
 			else:
-				_claim_for_serialization(scene_root, node)
-				node.set(update.property, prepared.value)
-				# "script" already passed _check_script_attachable inside
-				# _prepare_property_value, but verify the assignment actually
-				# landed -- see _verify_script_attached. A failed backstop is a
-				# per-update error, not a successful set: any_set must stay
-				# false for this update so it isn't counted as applied work.
-				var backstop_ok := true
-				if update.property == "script":
-					var verify = _verify_script_attached(node, prepared.value)
-					if not verify.ok:
-						result["error"] = verify.error
-						backstop_ok = false
-				if backstop_ok:
-					result["success"] = true
-					any_set = true
+				var prepared = _prepare_property_value(node, update.property, update.value)
+				if not prepared.ok:
+					result["error"] = prepared.error
+				else:
+					_claim_for_serialization(scene_root, node)
+					node.set(update.property, prepared.value)
+					# "script" already passed _check_script_attachable inside
+					# _prepare_property_value, but verify the assignment actually
+					# landed -- see _verify_script_attached. A failed backstop is a
+					# per-update error, not a successful set: any_set must stay
+					# false for this update so it isn't counted as applied work.
+					var backstop_ok := true
+					if update.property == "script":
+						var verify = _verify_script_attached(node, prepared.value)
+						if not verify.ok:
+							result["error"] = verify.error
+							backstop_ok = false
+					if backstop_ok:
+						result["success"] = true
+						any_set = true
+						var unstored: String = _unstored_script_variable_warning(node, update.property)
+						if unstored != "":
+							warnings.append("updates[%d]: %s" % [i, unstored])
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
 
-	return {"ok": true, "any_set": any_set, "error": "", "results": results}
+	# abort_on_error stops at the first failed update. The updates after it were
+	# never attempted, so each is listed as skipped instead of being left out of
+	# a results array that is otherwise one entry per update.
+	for skipped_index in range(results.size(), updates.size()):
+		var skipped_update = updates[skipped_index]
+		var skipped_entry := {"nodePath": "", "property": "", "skipped": true}
+		if typeof(skipped_update) == TYPE_DICTIONARY:
+			if typeof(skipped_update.get("node_path")) == TYPE_STRING:
+				skipped_entry["nodePath"] = skipped_update.get("node_path")
+			if typeof(skipped_update.get("property")) == TYPE_STRING:
+				skipped_entry["property"] = skipped_update.get("property")
+		results.append(skipped_entry)
+
+	return {"ok": true, "any_set": any_set, "error": "", "results": results, "warnings": warnings}
 
 func set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		quit(1)
 		return
 
 	var applied = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
 	if applied.any_set:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			print(JSON.stringify({"error": "Failed to save scene after updates", "results": applied.results}))
+			log_error("Failed to save scene after updates")
+			quit(1)
 			return
 
-	print(JSON.stringify({"results": applied.results}))
+	var payload: Dictionary = {"results": applied.results}
+	if not applied.warnings.is_empty():
+		payload["warnings"] = applied.warnings
+	emit_result(payload)
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		print(JSON.stringify({"error": "Failed to load scene: " + params.scene_path, "results": []}))
+		quit(1)
 		return
 
 	var results: Array = []
@@ -826,8 +999,14 @@ func get_node_properties(params: Dictionary) -> void:
 	# so we don't instantiate a fresh default per node when changed_only is true.
 	var defaults_cache: Dictionary = {}
 
-	for node_spec in params.nodes:
-		var node_path = node_spec.get("node_path", "")
+	for i in range(params.nodes.size()):
+		var node_spec = params.nodes[i]
+		# An empty or missing node_path resolves to the scene root, so a mistyped
+		# key would read the wrong node and report it as the one asked for.
+		if typeof(node_spec) != TYPE_DICTIONARY or typeof(node_spec.get("node_path", "")) != TYPE_STRING or node_spec.get("node_path", "") == "":
+			results.append({"nodePath": "", "error": "nodes[%d] is missing nodePath" % i})
+			continue
+		var node_path: String = node_spec.node_path
 		var changed_only = node_spec.get("changed_only", false)
 		var node = find_node_by_path(scene_root, node_path)
 		if node == null:
@@ -842,7 +1021,7 @@ func get_node_properties(params: Dictionary) -> void:
 		if inst:
 			inst.free()
 
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Get full hierarchical tree structure of a scene
 func get_scene_tree(params):
@@ -865,29 +1044,44 @@ func get_scene_tree(params):
 	if params.has("max_depth"):
 		max_depth = int(params.max_depth)
 
-	var tree = build_tree_recursive(tree_root, "", 0, max_depth)
-	print(JSON.stringify(tree))
+	# Counts the nodes whose children were left unlisted because of max_depth,
+	# so the payload can say the tree is not the whole scene.
+	var depth_cut := {"nodes": 0}
+	var tree = build_tree_recursive(tree_root, scene_root, 0, max_depth, depth_cut)
+	if depth_cut.nodes > 0:
+		tree["warnings"] = ["maxDepth %d cut the tree: %d node(s) have children null and a childCount" % [max_depth, depth_cut.nodes]]
+	emit_result(tree)
 
-func build_tree_recursive(node: Node, path: String, depth: int = 0, max_depth: int = -1) -> Dictionary:
-	var node_path = path + "/" + node.name if not path.is_empty() else node.name
-
-	var children = []
-	if max_depth < 0 or depth < max_depth:
-		for child in node.get_children():
-			children.append(build_tree_recursive(child, node_path, depth + 1, max_depth))
-
+# Build one node of the get_scene_tree answer. "path" is the scene-root-relative
+# "root/..." form every node tool accepts, whether the tree starts at the scene
+# root or at a parent_path subtree. A node at the depth limit that has children
+# reports children null and a childCount (they were not listed, not absent); a
+# node at the limit with no children reports an empty list. depth_cut["nodes"]
+# is incremented once per node reported that way.
+func build_tree_recursive(node: Node, scene_root: Node, depth: int, max_depth: int, depth_cut: Dictionary) -> Dictionary:
 	var script_path = ""
 	var script = node.get_script()
 	if script and script.resource_path:
 		script_path = script.resource_path
 
-	return {
+	var entry := {
 		"name": node.name,
 		"type": node.get_class(),
-		"path": node_path,
+		"path": _relative_path(scene_root, node),
 		"script": script_path,
-		"children": children
 	}
+	if max_depth < 0 or depth < max_depth:
+		var children = []
+		for child in node.get_children():
+			children.append(build_tree_recursive(child, scene_root, depth + 1, max_depth, depth_cut))
+		entry["children"] = children
+	elif node.get_child_count() > 0:
+		entry["children"] = null
+		entry["childCount"] = node.get_child_count()
+		depth_cut["nodes"] += 1
+	else:
+		entry["children"] = []
+	return entry
 
 # True when `path` (a res:// path, normalized or not) names a C# script by
 # its extension. Shared by the no-C#-support check and _check_script_attachable's
@@ -1004,6 +1198,9 @@ func attach_script(params):
 		quit(1)
 		return
 
+	# A node inside an instanced child keeps its script only when the instance
+	# is editable from the scene root.
+	_claim_for_serialization(scene_root, node)
 	node.set_script(script)
 
 	var verify = _verify_script_attached(node, script)
@@ -1013,11 +1210,13 @@ func attach_script(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({
+		# Both paths in the form every tool accepts back, read from the node and
+		# from the path that was loaded, not copied from the request.
+		emit_result({
 			"success": true,
-			"nodePath": params.node_path,
-			"scriptPath": params.script_path
-		}))
+			"nodePath": _relative_path(scene_root, node),
+			"scriptPath": _project_relative(full_script_path)
+		})
 	else:
 		log_error("Failed to save scene after attaching script")
 		quit(1)
@@ -1059,35 +1258,35 @@ func duplicate_node(params):
 			return
 
 	parent.add_child(duplicate)
+	# A duplicate placed inside an instanced child is dropped by pack() unless
+	# the instance is editable from the scene root. The claim starts at the
+	# parent: a parent that is itself an instance root needs no mark to save a
+	# child this scene owns.
+	_claim_for_serialization(scene_root, parent)
 	duplicate.owner = scene_root
-	# Iterative BFS to set owner on all descendants — avoids recursion depth.
+	# Iterative BFS over every descendant (avoids recursion depth), giving this
+	# scene as owner to the ones that have none. duplicate() leaves the nodes it
+	# copied one by one without an owner, and pack() drops a node without one.
+	# The inner nodes of an instanced scene arrive already owned by their
+	# instance root and are left alone: the instance is saved as one instance=
+	# line and re-creates them on load, so giving them this scene as owner would
+	# make pack() write them out a second time and leave two copies after a
+	# reload. The walk still goes through an instance, because a node this scene
+	# added under one (a child of the instance root, say) is copied without an
+	# owner like any other.
 	var queue: Array = duplicate.get_children()
 	while not queue.is_empty():
 		var current = queue.pop_front()
-		current.owner = scene_root
+		if current.owner == null:
+			current.owner = scene_root
 		queue.append_array(current.get_children())
 
-	# Compute the new node's scene-relative path: parent path + "/" + duplicate.name.
-	# The scene tree isn't attached in headless mode so get_path() is unreliable;
-	# derive parent path from the input node_path (or target_parent_path).
-	var parent_relative_path: String
-	if params.has("target_parent_path"):
-		parent_relative_path = params.target_parent_path
-	else:
-		var last_slash = params.node_path.rfind("/")
-		parent_relative_path = params.node_path.substr(0, last_slash) if last_slash > 0 else ""
-	var new_path: String
-	if parent_relative_path == "":
-		new_path = String(duplicate.name)
-	else:
-		new_path = parent_relative_path + "/" + String(duplicate.name)
-
 	if save_scene_to_path(scene_root, params.scene_path):
-		print(JSON.stringify({
+		emit_result({
 			"success": true,
-			"originalPath": params.node_path,
-			"newPath": new_path
-		}))
+			"nodePath": _relative_path(scene_root, node),
+			"newNodePath": _relative_path(scene_root, duplicate)
+		})
 	else:
 		log_error("Failed to save scene after duplicating node")
 		quit(1)
@@ -1133,11 +1332,11 @@ func get_node_signals(params):
 			"connections": connections
 		})
 
-	print(JSON.stringify({
-		"nodePath": params.node_path,
+	emit_result({
+		"nodePath": _relative_path(scene_root, node),
 		"nodeType": node.get_class(),
 		"signals": signals
-	}))
+	})
 
 # Verify signal wiring across a scene (or a single node subtree) by checking
 # four things per connection: the target node is reachable from the scene
@@ -1353,6 +1552,68 @@ func _get_script_user_defined_methods(node: Node) -> Array:
 
 	return methods
 
+# Read a scene back from disk after a save, bypassing the resource cache so the
+# result is what the file holds and not the instance that was just packed.
+# Returns the instantiated root, or null when the file cannot be read back.
+func _reload_saved_scene(scene_path: String):
+	var full_path = normalize_scene_path(scene_path)
+	if full_path.is_empty():
+		return null
+	var packed = ResourceLoader.load(full_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if packed == null or not (packed is PackedScene):
+		return null
+	return packed.instantiate()
+
+# Count the connections from source's signal to target.method: the same walk
+# get_node_signals reports from.
+func _count_signal_connections(source: Node, signal_name: String, target: Node, method: String) -> int:
+	var count := 0
+	for conn in source.get_signal_connection_list(signal_name):
+		var callable: Callable = conn["callable"]
+		if callable.get_object() == target and String(callable.get_method()) == method:
+			count += 1
+	return count
+
+# Look one connection up in the scene file as it is on disk after a save.
+# Returns {"read": bool, "connected": bool, "source": String, "target": String}.
+# read is false when the saved scene could not be loaded again or a node could
+# not be found in it; nothing is then known about the connection.
+func _read_back_connection(scene_path: String, node_path: String, signal_name: String, target_node_path: String, method: String) -> Dictionary:
+	var outcome := {"read": false, "connected": false, "source": "", "target": ""}
+	var reloaded = _reload_saved_scene(scene_path)
+	if reloaded == null:
+		return outcome
+	var source = find_node_by_path(reloaded, node_path)
+	var target = find_node_by_path(reloaded, target_node_path)
+	if source != null and target != null:
+		outcome = {
+			"read": true,
+			"connected": _count_signal_connections(source, signal_name, target, method) > 0,
+			"source": _relative_path(reloaded, source),
+			"target": _relative_path(reloaded, target),
+		}
+	reloaded.free()
+	return outcome
+
+# Build the connect_signal / disconnect_signal payload. connected comes from
+# the saved scene read back from disk. When that read failed it is null and a
+# warning says so, rather than reporting the state the request asked for.
+func _signal_result_payload(scene_root: Node, source: Node, target: Node, params, read_back: Dictionary) -> Dictionary:
+	var payload := {
+		"nodePath": _relative_path(scene_root, source),
+		"signal": str(params.signal),
+		"targetNodePath": _relative_path(scene_root, target),
+		"method": str(params.method),
+		"connected": null,
+	}
+	if read_back.read:
+		payload["nodePath"] = read_back.source
+		payload["targetNodePath"] = read_back.target
+		payload["connected"] = read_back.connected
+	else:
+		payload["warnings"] = ["The scene was saved, but it could not be read back to confirm the connection, so connected is null"]
+	return payload
+
 # Connect a signal from one node to a method on another node
 func connect_signal(params):
 	var scene_root = load_scene_instance(params.scene_path)
@@ -1390,12 +1651,17 @@ func connect_signal(params):
 		quit(1)
 		return
 
-	if save_scene_to_path(scene_root, params.scene_path):
-		print("Signal '" + params.signal + "' connected from '" + params.node_path + "' to '" + params.target_node_path + "." + params.method + "'")
-	else:
+	if not save_scene_to_path(scene_root, params.scene_path):
 		log_error("Failed to save scene after connecting signal")
 		quit(1)
 		return
+
+	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	if read_back.read and not read_back.connected:
+		log_error("Signal was connected and the scene saved, but the saved scene does not hold the connection when it is read back")
+		quit(1)
+		return
+	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
 # Disconnect a signal connection between two nodes
 func disconnect_signal(params):
@@ -1423,12 +1689,17 @@ func disconnect_signal(params):
 
 	source.disconnect(params.signal, Callable(target, params.method))
 
-	if save_scene_to_path(scene_root, params.scene_path):
-		print("Signal '" + params.signal + "' disconnected from '" + params.target_node_path + "." + params.method + "'")
-	else:
+	if not save_scene_to_path(scene_root, params.scene_path):
 		log_error("Failed to save scene after disconnecting signal")
 		quit(1)
 		return
+
+	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	if read_back.read and read_back.connected:
+		log_error("Signal was disconnected and the scene saved, but the saved scene still holds the connection when it is read back")
+		quit(1)
+		return
+	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
 # ============================================
 # VALIDATE OPERATION
@@ -1441,7 +1712,7 @@ func validate_resource(params):
 		quit(1)
 		return
 	var result = _validate_single(params)
-	print(JSON.stringify({"valid": result.valid, "errors": result.errors}))
+	emit_result({"valid": result.valid, "errors": result.errors})
 
 # Validate a scene file against a structural schema. Schema: { type?: string, children?: Schema[], hasProperty?: string }.
 # Returns { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }.
@@ -1458,7 +1729,7 @@ func validate_checks(params):
 		log_error(outcome.error)
 		quit(1)
 		return
-	print(JSON.stringify({"valid": outcome.errors.is_empty(), "errors": outcome.errors}))
+	emit_result({"valid": outcome.errors.is_empty(), "errors": outcome.errors})
 
 # Runs the checks[] array against one scene and returns
 # {"ok": bool, "error": String, "errors": Array}. ok=false means the scene
@@ -1474,7 +1745,12 @@ func validate_checks(params):
 func _run_scene_checks(scene_path: String, checks) -> Dictionary:
 	var scene_root = load_scene_instance(scene_path)
 	if not scene_root:
-		return {"ok": false, "error": "Scene checks skipped: could not load scene " + scene_path, "errors": []}
+		# The reason goes in the result itself: the [ERROR] line on stderr is not
+		# a form the diagnostic parser reads, so it would reach nobody.
+		var skipped := "Scene checks skipped: could not load scene " + scene_path
+		if last_scene_load_error != "":
+			skipped += " (" + last_scene_load_error + ")"
+		return {"ok": false, "error": skipped, "errors": []}
 	var errors := _collect_check_errors(scene_root, checks)
 	scene_root.free()
 	return {"ok": true, "error": "", "errors": errors}
@@ -1635,22 +1911,39 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 # BATCH OPERATIONS
 # ============================================
 
-# Helper: coerce a JSON-parsed value to a GDScript type (Vector2, Vector3, Color)
+# True for a JSON number. Every vector and color component has to be one before
+# a dictionary is coerced: a constructor handed anything else raises, the
+# coercion then yields null, and null is a value some properties accept.
+func _is_json_number(value) -> bool:
+	return typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT
+
+# Helper: coerce a JSON-parsed value to a GDScript type (Vector2, Vector3, Color).
+# A dictionary whose vector or color components are not all numbers is returned
+# unchanged, so the caller's type check reports it instead of a constructor
+# failing on it.
 func _coerce_property_value(value):
 	if typeof(value) == TYPE_DICTIONARY:
 		if value.has("x") and value.has("y"):
+			if not (_is_json_number(value.x) and _is_json_number(value.y)):
+				return value
 			# Widest form first: every Vector4 dict is also a valid Vector3 dict
 			# and a valid Vector2 dict, so testing w before z before neither is
 			# what keeps {x, y, z, w} from collapsing to Vector3 and dropping w.
 			# An {x, y, w} dict with no z is a Vector2; Vector4 needs all four.
 			if value.has("z"):
+				if not _is_json_number(value.z):
+					return value
 				if value.has("w"):
+					if not _is_json_number(value.w):
+						return value
 					return Vector4(value.x, value.y, value.z, value.w)
 				return Vector3(value.x, value.y, value.z)
 			else:
 				return Vector2(value.x, value.y)
 		elif value.has("r") and value.has("g") and value.has("b"):
 			var a = value.a if value.has("a") else 1.0
+			if not (_is_json_number(value.r) and _is_json_number(value.g) and _is_json_number(value.b) and _is_json_number(a)):
+				return value
 			return Color(value.r, value.g, value.b, a)
 	return value
 
@@ -1690,8 +1983,106 @@ func _prepare_packed_array_elements(property: String, node_class: String, declar
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type of %s" % [
 					property, node_class, i, str(element), type_string(declared)],
 			}
+		if elem_type == TYPE_INT and _is_fractional_float(element):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and %s holds integers" % [
+					property, node_class, i, str(element), type_string(declared)],
+			}
 		out.append(element)
 	return {"ok": true, "value": out, "error": ""}
+
+# True for a float with a fractional part. JSON numbers arrive as floats, so a
+# float is a legitimate value for an int property only when it is whole;
+# otherwise the typed setter truncates it without a word.
+func _is_fractional_float(value) -> bool:
+	return typeof(value) == TYPE_FLOAT and value != floorf(value)
+
+# Prefix of the node-level metadata entries Object.set() routes to set_meta().
+const _METADATA_PREFIX: String = "metadata/"
+
+# Characters an identifier may start with, and the ones it may continue with in
+# addition. Compared by character rather than by code point or by an engine
+# helper, so the rule does not depend on a method whose name changed across 4.x.
+const _IDENTIFIER_LEADING_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+const _IDENTIFIER_DIGIT_CHARS: String = "0123456789"
+
+# True when `text` is a non-empty ASCII identifier: a letter or underscore, then
+# letters, digits or underscores.
+func _is_ascii_identifier(text: String) -> bool:
+	if text.is_empty():
+		return false
+	for i in range(text.length()):
+		var character := text[i]
+		var allowed := _IDENTIFIER_LEADING_CHARS.contains(character)
+		if i > 0 and _IDENTIFIER_DIGIT_CHARS.contains(character):
+			allowed = true
+		if not allowed:
+			return false
+	return true
+
+# Can `property` be set on `node` AND survive PackedScene.pack()? One gate for
+# add_node and set_node_properties, run before _prepare_property_value, so a
+# write that cannot persist is an error naming the key instead of a success.
+# Returns {"ok": bool, "error": String}. The key text is never altered.
+#   1. metadata/<name>: Object.set() stores it as node metadata, which is
+#      untyped (declared TYPE_NIL in _prepare_property_value) and saved with
+#      the scene. Only the name is checked: it must be an ASCII identifier.
+#   2. Any other key containing "/": settable only when the node's live property
+#      list declares that exact name, as a real typed entry the scene file can
+#      hold (stored, or checkable as a theme override is). The declared type
+#      then drives the normal type check. An undeclared key has no declared type
+#      to check against, and set() would store it silently or not at all, so it
+#      is an error that points at run_script.
+#   3. A plain name must exist on the node and have an entry in its property
+#      list. A script variable is accepted whether or not it is exported,
+#      typed or not: its entry carries no storage flag when it is not exported,
+#      and the existing scripted-node behavior depends on setting it anyway.
+func _check_node_property_settable(node: Node, property: String) -> Dictionary:
+	var node_class := node.get_class()
+	if property.begins_with(_METADATA_PREFIX):
+		if not _is_ascii_identifier(property.substr(_METADATA_PREFIX.length())):
+			return {"ok": false, "error": "Metadata key '%s' is not a valid name: use letters, digits and underscore, not starting with a digit" % property}
+		return {"ok": true, "error": ""}
+
+	if "/" in property:
+		var slash_descriptor = _find_property_descriptor(node, property)
+		var declared := false
+		if slash_descriptor != null:
+			var slash_usage: int = slash_descriptor.get("usage", 0)
+			var is_pseudo_entry: bool = (slash_usage & _NON_SETTABLE_PROPERTY_USAGE_MASK) != 0
+			var has_declared_type: bool = slash_descriptor.type != TYPE_NIL or (slash_usage & PROPERTY_USAGE_NIL_IS_VARIANT) != 0
+			var is_persistable: bool = (slash_usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_CHECKABLE)) != 0
+			declared = not is_pseudo_entry and has_declared_type and is_persistable
+		if not declared:
+			return {"ok": false, "error": "Property '%s' is not declared by node of type '%s', so its value cannot be type-checked. Set it with run_script." % [property, node_class]}
+		return {"ok": true, "error": ""}
+
+	if not (property in node):
+		return {"ok": false, "error": "Property '%s' does not exist on node of type '%s'" % [property, node_class]}
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor == null:
+		return {"ok": false, "error": "Property '%s' on node of type '%s' has no entry in its property list (a constant, or a value served by _get), so it cannot be stored in a scene file" % [property, node_class]}
+	return {"ok": true, "error": ""}
+
+# The one write that passes _check_node_property_settable and is known not to
+# reach the scene file: a script variable declared without @export. Its
+# property-list entry carries PROPERTY_USAGE_SCRIPT_VARIABLE and no
+# PROPERTY_USAGE_STORAGE, and PackedScene.pack() writes stored properties only.
+# The value is still set on the loaded instance, so the write stays a success
+# and this sentence is what tells the caller it will not be in the file.
+# Returns "" for every other property. A native property without the storage
+# flag (rotation_degrees, global_position) is saved through the property it is
+# an alias of, so nothing is claimed about those.
+func _unstored_script_variable_warning(node: Node, property: String) -> String:
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor == null:
+		return ""
+	var usage: int = descriptor.get("usage", 0)
+	if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) == 0 or (usage & PROPERTY_USAGE_STORAGE) != 0:
+		return ""
+	return "Property '%s' is a script variable declared without @export. It was set on the loaded scene, but a scene file stores exported variables only, so the value is not saved. Add @export to keep it, or set it at runtime with run_script." % property
 
 # Helper: find a property's full descriptor from get_property_list(), or null
 # if the node has no property by that name. Callers that only need the
@@ -1964,6 +2355,13 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type %s" % [
 					property, node_class, i, str(element), type_string(elem_type)],
 			}
+		if elem_type == TYPE_INT and _is_fractional_float(element):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and the element type is %s" % [
+					property, node_class, i, str(element), type_string(elem_type)],
+			}
 		out.append(element)
 	# Builtin element type, so no class name and no script: Array[Node] and
 	# friends never reach here, since their element types have no
@@ -2005,13 +2403,27 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 # (float->int, String->NodePath/StringName, bool<->int/float,
 # Vector2<->Vector2i, Vector3<->Vector3i, Array->Packed*Array) while
 # rejecting everything else. TYPE_NIL (untyped Variant, or a property not in
-# the node's property list) accepts anything. null is always passed through
-# untouched -- it is the legitimate way to clear a resource.
+# the node's property list) accepts anything. null passes through only for an
+# Object-typed or untyped property -- it is the legitimate way to clear a
+# resource -- and is an error for any other declared type.
 func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
-	var declared = _declared_property_type(node, property)
-	var coerced = raw_value if declared == TYPE_DICTIONARY else _coerce_property_value(raw_value)
+	# A metadata entry is untyped, whatever the property list says. Nothing
+	# declares what it should hold, so its value is stored as it was sent: a
+	# dictionary stays a dictionary, even one shaped like a vector or a color.
+	var is_metadata: bool = property.begins_with(_METADATA_PREFIX)
+	var declared = TYPE_NIL if is_metadata else _declared_property_type(node, property)
+	var coerced = raw_value if (declared == TYPE_DICTIONARY or is_metadata) else _coerce_property_value(raw_value)
 	if coerced == null:
-		return {"ok": true, "value": coerced, "error": ""}
+		# null clears an Object-typed property, removes a metadata entry and
+		# resets an untyped Variant. On any other declared type the typed setter
+		# stores that type's zero value and reports nothing.
+		if declared == TYPE_OBJECT or declared == TYPE_NIL:
+			return {"ok": true, "value": coerced, "error": ""}
+		return {
+			"ok": false,
+			"value": null,
+			"error": "Cannot set property '%s' on node of type '%s': expected %s, got Nil" % [property, node.get_class(), type_string(declared)],
+		}
 
 	# Element-wise coercion for packed-array properties. JSON sends a
 	# PackedVector2Array (etc.) as a plain Array whose elements are still
@@ -2054,21 +2466,33 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
+			# A property value is the one path that does not arrive as a path
+			# parameter, so neither the Node-side validators nor a caller of this
+			# function has contained it. Godot resolves "res://../x" outward, so it
+			# goes through the same choke point as every path parameter, and the
+			# normalized path is the one that is probed and loaded.
+			var res_path: String = normalize_scene_path(coerced)
+			if res_path.is_empty():
+				return {
+					"ok": false,
+					"value": null,
+					"error": "Cannot set property '%s' on node of type '%s': path escapes the project root: %s" % [property, node.get_class(), coerced],
+				}
 			# First-time reference to an asset the scene-load probe never saw
 			# (e.g. a res:// string assigned to an Object-typed property).
 			# Check for the cold-import state before load() runs.
-			if _classify_dep_path(coerced) == "needs_import":
-				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, coerced)}
+			if _classify_dep_path(res_path) == "needs_import":
+				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, res_path)}
 			# "script" gets the same pre-load C#-support check attach_script runs,
 			# for the same reason: on a build with no C# module, load() on a .cs
 			# file fails with a generic message that doesn't say why.
 			if property == "script":
-				var csharp_support = _check_csharp_support(coerced)
+				var csharp_support = _check_csharp_support(res_path)
 				if not csharp_support.ok:
 					return {"ok": false, "value": null, "error": csharp_support.error}
-			var res = load(coerced)
+			var res = load(res_path)
 			if not res:
-				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
+				return {"ok": false, "value": null, "error": "Failed to load resource: " + res_path}
 			if res.resource_path == "":
 				return {"ok": false, "value": null, "error": "Resource was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
 			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
@@ -2083,7 +2507,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			# as Script) and that is not this bug -- only the node's own script
 			# slot silently drops an unattachable value.
 			if property == "script" and res is Script:
-				var attach_check = _check_script_attachable(res, coerced)
+				var attach_check = _check_script_attachable(res, res_path)
 				if not attach_check.ok:
 					return {"ok": false, "value": null, "error": attach_check.error}
 			return {"ok": true, "value": res, "error": ""}
@@ -2107,6 +2531,12 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 				"ok": false,
 				"value": null,
 				"error": "Cannot set property '%s' on node of type '%s': expected %s, got %s" % [property, node.get_class(), type_string(declared), type_string(typeof(coerced))],
+			}
+		if declared == TYPE_INT and _is_fractional_float(coerced):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': expected a whole number for an int property, got %s" % [property, node.get_class(), str(coerced)],
 			}
 
 	return {"ok": true, "value": coerced, "error": ""}
@@ -2162,6 +2592,15 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 	return properties
 
 # Helper: validate a single target dict (script_path or scene_path)
+#
+# "valid" is the engine's own verdict, not a guess from the load result alone:
+# load() returns a non-null Script even for a GDScript with parse errors, so a
+# script is valid only when it can also be instantiated (an @abstract script
+# still is, as _check_script_attachable records), and a scene only when what
+# loaded is a PackedScene. "resolvedPath" is the normalized res:// path the
+# engine reports diagnostics against, which the TypeScript layer uses to match
+# stderr output to this target when the caller wrote the path another way
+# ("./a.gd", "dir\a.gd", a directory with a space).
 func _validate_single(target: Dictionary) -> Dictionary:
 	if target.has("script_path") and target.script_path != "":
 		var path = normalize_scene_path(target.script_path)
@@ -2170,8 +2609,26 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.script_path}
 		var resource = load(path)
+		# A file that loads as anything but a GDScript (a scene, a resource, a
+		# shader, a C# script) was not checked by anything here: "it loaded" says
+		# nothing about it. Reporting that as valid would be a verdict nobody
+		# reached, so the target fails with the reason.
+		if resource != null and not (resource is GDScript):
+			return {
+				"valid": false,
+				"errors": [{"message": "Not validated: %s loaded as %s, not as a GDScript. scriptPath checks GDScript (.gd) files only; pass a scene as scenePath." % [target.script_path, resource.get_class()]}],
+				"target": target.script_path,
+				"resolvedPath": path,
+			}
 		# Actual parse errors go to stderr and are parsed by TypeScript
-		return {"valid": resource != null, "errors": [], "target": target.script_path}
+		var script_valid: bool = resource != null
+		if script_valid:
+			# An @abstract script is a valid script whether or not this engine
+			# version lets can_instantiate() stay true for one, so the verdict
+			# does not rest on that. A script with errors is still caught: its
+			# diagnostics reach stderr and the Node side overlays them.
+			script_valid = resource.can_instantiate() or (resource.has_method("is_abstract") and resource.is_abstract())
+		return {"valid": script_valid, "errors": [], "target": target.script_path, "resolvedPath": path}
 	elif target.has("scene_path") and target.scene_path != "":
 		var path = normalize_scene_path(target.scene_path)
 		if path.is_empty():
@@ -2179,7 +2636,7 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.scene_path}
 		var scene = load(path)
-		return {"valid": scene != null, "errors": [], "target": target.scene_path}
+		return {"valid": scene is PackedScene, "errors": [], "target": target.scene_path, "resolvedPath": path}
 	else:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
 
@@ -2211,7 +2668,7 @@ func validate_batch(params: Dictionary) -> void:
 			else:
 				result["checkErrors"] = []
 		results.append(result)
-	print(JSON.stringify({"results": results}))
+	emit_result({"results": results})
 
 # Recursively collect every res:// string inside a JSON-sourced property value.
 # A value can be a bare path, an inline resource spec that nests one ("shader"
@@ -2247,8 +2704,10 @@ func _collect_res_paths(value, out: Array) -> void:
 # Any other asset is classified directly.
 #
 # A path that escapes the project root is not probed and not counted: the apply
-# site rejects it per operation, which keeps that rejection in the batch's own
-# results array instead of failing every other operation in the batch with it.
+# site rejects it per operation (a path parameter where it is normalized, a
+# property value in _prepare_property_value), which keeps that rejection in the
+# batch's own results array instead of failing every other operation in the
+# batch with it.
 func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionary, needs_import: Array, missing: Array) -> void:
 	if raw_path == "":
 		return
@@ -2288,6 +2747,12 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var abort_on_error = params.get("abort_on_error", false)
 	var results: Array = []
 	var scene_cache: Dictionary = {}
+	var batch_warnings: Array = []
+	# Scene cache key (normalized res:// path) -> indexes into `results` of the
+	# successful mutations applied to that cached scene and not yet written.
+	# Only the closing auto-save writes them, so a failed save has to reach
+	# exactly these entries.
+	var unsaved_results_by_scene: Dictionary = {}
 
 	# Pre-pass: probe everything the batch will load, for the cold-import state
 	# and for missing files, BEFORE any mutation is applied. Two kinds of value
@@ -2321,6 +2786,8 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var prepass_missing: Array = []
 	var prepass_needs_import: Array = []
 	for op in params.operations:
+		if typeof(op) != TYPE_DICTIONARY:
+			continue
 		var op_name = op.get("operation", "")
 
 		_prepass_path_param(str(op.get("scene_path", "")), true, seen_paths, prepass_needs_import, prepass_missing)
@@ -2350,14 +2817,42 @@ func batch_scene_operations(params: Dictionary) -> void:
 		return
 
 	for op in params.operations:
+		if typeof(op) != TYPE_DICTIONARY:
+			results.append({"operation": "", "scenePath": "", "error": "operations[%d] must be an object" % results.size()})
+			if abort_on_error:
+				break
+			continue
+		# The echoed operation and scenePath are always strings: a non-string
+		# operation is treated as an omitted one (the hint path below names it).
 		var op_name = op.get("operation", "")
+		if typeof(op_name) != TYPE_STRING:
+			op_name = ""
 		var scene_path = op.get("scene_path", "")
+		if typeof(scene_path) != TYPE_STRING:
+			results.append({"operation": op_name, "scenePath": "", "error": "scene_path must be a string"})
+			if abort_on_error:
+				break
+			continue
 		var result = {"operation": op_name, "scenePath": scene_path}
 
-		if scene_path != "" and scene_path not in scene_cache:
-			var scene_root = load_scene_instance(scene_path)
-			if scene_root:
-				scene_cache[scene_path] = scene_root
+		# The cache is keyed on the normalized path, the same key the pre-pass
+		# dedups on, so "a.tscn", "./a.tscn" and "res://a.tscn" are one scene.
+		# Keyed on the raw string they would be loaded into independent trees
+		# that the closing save writes over each other.
+		var scene_key := ""
+		if scene_path != "":
+			scene_key = normalize_scene_path(scene_path)
+			if scene_key.is_empty():
+				result["error"] = "Path escapes the project root: " + scene_path
+				results.append(result)
+				if abort_on_error:
+					break
+				continue
+
+		if scene_key != "" and scene_key not in scene_cache:
+			var loaded_root = load_scene_instance(scene_path)
+			if loaded_root:
+				scene_cache[scene_key] = loaded_root
 			else:
 				result["error"] = "Failed to load scene: " + scene_path
 				results.append(result)
@@ -2365,7 +2860,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 					break
 				continue
 
-		var scene_root = scene_cache.get(scene_path, null) if scene_path != "" else null
+		var scene_root = scene_cache.get(scene_key, null) if scene_key != "" else null
 
 		match op_name:
 			"add_node":
@@ -2377,6 +2872,9 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
+						result.merge(apply_result.payload)
+						for add_warning in apply_result.warnings:
+							batch_warnings.append("operations[%d]: %s" % [results.size(), add_warning])
 			"load_sprite":
 				if scene_root == null:
 					result["error"] = "scene_path required for load_sprite"
@@ -2386,6 +2884,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
+						result.merge(apply_result.payload)
 			"set_node_properties":
 				if scene_root == null:
 					result["error"] = "scene_path required for set_node_properties"
@@ -2399,6 +2898,16 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = "no properties were set"
 					if apply_result.results.size() > 0:
 						result["updates"] = apply_result.results
+					# The entry reads as a success once any update lands, so the
+					# updates that did not would sit two levels down unseen.
+					var failed_updates := 0
+					for update_result in apply_result.results:
+						if update_result.has("error"):
+							failed_updates += 1
+					if apply_result.any_set and failed_updates > 0:
+						batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
+					for update_warning in apply_result.warnings:
+						batch_warnings.append("operations[%d]: %s" % [results.size(), update_warning])
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"
@@ -2406,10 +2915,14 @@ func batch_scene_operations(params: Dictionary) -> void:
 					var new_path = op.get("new_path", scene_path)
 					if save_scene_to_path(scene_root, new_path):
 						result["success"] = true
+						result["savedScenePath"] = _project_relative(normalize_scene_path(str(new_path)))
 						# Only evict on normal save; save-as leaves the mutated scene in
 						# cache so subsequent ops on scene_path still see accumulated mutations.
-						if new_path == scene_path:
-							scene_cache.erase(scene_path)
+						# Evicting also settles the earlier entries for this scene: the
+						# file now holds them, so a later failed auto-save is not theirs.
+						if normalize_scene_path(str(new_path)) == scene_key:
+							scene_cache.erase(scene_key)
+							unsaved_results_by_scene.erase(scene_key)
 					else:
 						result["error"] = "Failed to save scene: " + scene_path
 			_:
@@ -2438,11 +2951,47 @@ func batch_scene_operations(params: Dictionary) -> void:
 			# layer to import and replay it: the replay would re-apply what is
 			# about to be saved and leave duplicate nodes behind.
 			import_marker_armed = false
+			# A save entry reports its own write, so only the mutations wait on
+			# the closing auto-save.
+			if op_name != "save":
+				if not unsaved_results_by_scene.has(scene_key):
+					unsaved_results_by_scene[scene_key] = []
+				unsaved_results_by_scene[scene_key].append(results.size() - 1)
 		if abort_on_error and result.has("error"):
 			break
 
-	# Auto-save any scenes that were mutated but not explicitly saved
-	for scene_path in scene_cache:
-		save_scene_to_path(scene_cache[scene_path], scene_path)
+	# abort_on_error stops the loop at the first failed operation. Every operation
+	# before it appended exactly one entry, so the operations after it start at
+	# results.size(); each is listed as skipped instead of being left out of a
+	# results array that is otherwise one entry per operation.
+	for skipped_index in range(results.size(), params.operations.size()):
+		var skipped_op = params.operations[skipped_index]
+		var skipped_entry := {"operation": "", "scenePath": "", "skipped": true}
+		if typeof(skipped_op) == TYPE_DICTIONARY:
+			if typeof(skipped_op.get("operation", "")) == TYPE_STRING:
+				skipped_entry["operation"] = skipped_op.get("operation", "")
+			if typeof(skipped_op.get("scene_path", "")) == TYPE_STRING:
+				skipped_entry["scenePath"] = skipped_op.get("scene_path", "")
+		results.append(skipped_entry)
 
-	print(JSON.stringify({"results": results}))
+	# Auto-save every scene still in the cache: each one an operation named and
+	# no explicit save evicted, whether or not an operation on it succeeded. A
+	# scene that cannot be written leaves its entries claiming work that exists
+	# only in a process about to exit, so each is rewritten to say so.
+	for scene_key in scene_cache:
+		if save_scene_to_path(scene_cache[scene_key], scene_key):
+			continue
+		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
+		if unsaved.is_empty():
+			continue
+		var scene_label := _project_relative(scene_key)
+		for result_index in unsaved:
+			var unsaved_entry: Dictionary = results[result_index]
+			unsaved_entry.erase("success")
+			unsaved_entry["error"] = "applied in memory but the scene could not be saved: " + scene_label
+		batch_warnings.append("Scene %s could not be saved; %d operation(s) on it were not written" % [scene_label, unsaved.size()])
+
+	var batch_payload := {"results": results}
+	if not batch_warnings.is_empty():
+		batch_payload["warnings"] = batch_warnings
+	emit_result(batch_payload)

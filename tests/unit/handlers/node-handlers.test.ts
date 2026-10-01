@@ -13,6 +13,7 @@ import {
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -286,6 +287,18 @@ describe('handleGetNodeProperties', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].nodePath).toBe('root');
     expect(parsed.results[0].nodeType).toBe('Node2D');
+    expectMatchesOutputSchema('get_node_properties', result);
+  });
+
+  it('returns an error response for a payload that carries a load failure', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ error: 'Failed to load scene: main.tscn', results: [] }),
+    });
+    const result = await handleGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: validNodes,
+    });
+    expectErrorMatching(result, /Failed to load scene: main\.tscn/);
   });
 });
 
@@ -458,6 +471,7 @@ describe('handleGetSceneTree', () => {
     const parsed = JSON.parse(text);
     expect(parsed.name).toBe('root');
     expect(parsed.type).toBe('Node2D');
+    expectMatchesOutputSchema('get_scene_tree', result);
   });
 });
 
@@ -533,8 +547,8 @@ describe('handleDuplicateNode', () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
         success: true,
-        originalPath: 'root/Sprite2D',
-        newPath: 'root/Sprite2D2',
+        nodePath: 'root/Sprite2D',
+        newNodePath: 'root/Sprite2D2',
       }),
     });
     const result = await handleDuplicateNode(fake.asRunner, {
@@ -545,10 +559,11 @@ describe('handleDuplicateNode', () => {
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({
       success: true,
-      originalPath: 'root/Sprite2D',
-      newPath: 'root/Sprite2D2',
+      nodePath: 'root/Sprite2D',
+      newNodePath: 'root/Sprite2D2',
     });
     expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
+    expectMatchesOutputSchema('duplicate_node', result);
   });
 });
 
@@ -654,8 +669,34 @@ describe('handleConnectSignal', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
+    const connection = {
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+      connected: true,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(connection) });
+    const result = await handleConnectSignal(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+    });
+    expect(expectMatchesOutputSchema('connect_signal', result)).toEqual(connection);
+  });
+
+  it('reports connected null with a leading warning when the scene was not read back', async () => {
     const fake = createFakeRunner({
-      stdout: "Signal 'pressed' connected from 'root/Button' to 'root/Receiver._on_pressed'",
+      stdout: JSON.stringify({
+        nodePath: 'root/Button',
+        signal: 'pressed',
+        targetNodePath: 'root/Receiver',
+        method: '_on_pressed',
+        connected: null,
+        warnings: ['not read back'],
+      }),
     });
     const result = await handleConnectSignal(fake.asRunner, {
       ...validBase,
@@ -664,9 +705,9 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Receiver',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('connected');
+    const payload = expectMatchesOutputSchema('connect_signal', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.connected).toBeNull();
   });
 });
 
@@ -772,9 +813,14 @@ describe('handleDisconnectSignal', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: "Signal 'pressed' disconnected from 'root/Button' to 'root/Receiver._on_pressed'",
-    });
+    const connection = {
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+      connected: false,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(connection) });
     const result = await handleDisconnectSignal(fake.asRunner, {
       ...validBase,
       nodePath: 'root/Button',
@@ -782,9 +828,7 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Receiver',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('disconnected');
+    expect(expectMatchesOutputSchema('disconnect_signal', result)).toEqual(connection);
   });
 });
 

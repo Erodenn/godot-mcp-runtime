@@ -29,8 +29,13 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { minimalPng } from '../helpers/png-fixtures.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import {
+  extractJson,
+  extractOperationPayload,
+  OPERATION_RESULT_SENTINEL,
+} from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -90,7 +95,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="ChildInstance"[^\]]*instance=ExtResource\(/);
@@ -116,7 +121,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/instance=ExtResource\(/);
     },
@@ -146,7 +151,7 @@ describe('scene instancing via add_node', () => {
         // acceptable: some engine versions propagate the nonzero exit
       }
 
-      expect(stdout).not.toContain('added successfully');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       const after = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(after).toBe(before);
     },
@@ -169,7 +174,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="PlainNode" type="Node2D"/);
       expect(saved).not.toMatch(/instance=ExtResource/);
@@ -287,7 +292,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toMatch(
         /instance=ExtResource\(/,
       );
@@ -608,5 +613,336 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
       expect(resLine!).toContain('path="res://child_a.tscn"');
     },
     120000,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Mutations on nodes inside an instanced child.
+//
+// Nodes inside an instanced scene are not owned by the scene root, so pack()
+// drops a change made on them unless the instance is marked editable from the
+// scene root. set_node_properties already did that; load_sprite, attach_script,
+// add_node and duplicate_node now do too, and delete_nodes refuses a node that
+// belongs to an instance (the instance re-creates it on every load, so a
+// deletion cannot persist).
+//
+// A node added or duplicated directly under the instance's own root needs no
+// mark (the root is owned by the scene that instances it), so those cases must
+// leave the instance unmarked.
+//
+// Assertions are made on a reload of the saved scene through get_scene_tree or
+// get_node_properties. The one exception is the editable mark itself, which a
+// reload does not report: it is read from the .tscn text, once as present and
+// elsewhere as absent, so a wrong spelling fails the first instead of passing
+// the others.
+// ---------------------------------------------------------------------------
+
+const INSTANCE_CASE_TIMEOUT_MS = 180000;
+const INSTANCE_OP_TIMEOUT_MS = 30000;
+
+interface ReloadedNode {
+  name: string;
+  children: ReloadedNode[] | null;
+}
+
+/** Run one headless operation and parse its payload. */
+async function runOperation(
+  project: string,
+  operation: string,
+  params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { stdout, stderr } = await runner.executeOperation(
+    operation,
+    params,
+    project,
+    INSTANCE_OP_TIMEOUT_MS,
+  );
+  // An operation that failed emitted no payload. Say what it printed, so the
+  // case fails on the operation's own reason and not on a JSON syntax error.
+  const payload = extractOperationPayload(stdout);
+  if (payload === null) {
+    throw new Error(`${operation} emitted no payload.\nstdout: ${stdout}\nstderr: ${stderr}`);
+  }
+  return JSON.parse(payload) as Record<string, unknown>;
+}
+
+/** The saved main scene, reloaded in a fresh process. */
+async function reloadTree(project: string): Promise<ReloadedNode> {
+  return (await runOperation(project, 'get_scene_tree', {
+    scenePath: 'main.tscn',
+  })) as unknown as ReloadedNode;
+}
+
+/** Child names of the node at `names` (a chain from the root's children down) after a reload. */
+async function reloadedChildNames(project: string, names: string[]): Promise<string[]> {
+  let node = await reloadTree(project);
+  for (const name of names) {
+    const next = (node.children ?? []).find((child) => child.name === name);
+    expect(next, `${name} is in the reloaded scene`).toBeDefined();
+    node = next!;
+  }
+  return (node.children ?? []).map((child) => child.name);
+}
+
+/** One node's properties after a reload, or its error entry. */
+async function reloadedNode(project: string, nodePath: string): Promise<Record<string, unknown>> {
+  const payload = await runOperation(project, 'get_node_properties', {
+    scenePath: 'main.tscn',
+    nodes: [{ nodePath }],
+  });
+  return (payload.results as Array<Record<string, unknown>>)[0]!;
+}
+
+/** How a scene file records that instance A is editable from the scene that holds it. */
+const EDITABLE_INSTANCE_MARK_PREFIX = '[editable ';
+const EDITABLE_INSTANCE_A_MARK = `${EDITABLE_INSTANCE_MARK_PREFIX}path="A"]`;
+
+/** The saved main scene as text, for the one fact a reload cannot show: the editable mark. */
+function savedMainScene(project: string): string {
+  return readFileSync(join(project, 'main.tscn'), 'utf-8');
+}
+
+/** Add `child_a.tscn` (one Inner node) to main.tscn as A. */
+async function addInstanceA(project: string): Promise<void> {
+  writeEntitiesScenes(project);
+  const added = await runOperation(project, 'add_node', {
+    scenePath: 'main.tscn',
+    nodeType: 'child_a.tscn',
+    nodeName: 'A',
+  });
+  expect(added.nodePath).toBe('root/A');
+}
+
+describe('mutations inside instanced children persist or are refused', () => {
+  itGodot(
+    'load_sprite on a node inside an instance survives a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      writeFileSync(
+        join(tmpProject, 'child_sprite.tscn'),
+        '[gd_scene format=3]\n\n' +
+          '[node name="ChildSprite" type="Node2D"]\n\n' +
+          '[node name="Pic" type="Sprite2D" parent="."]\n',
+      );
+      writeFileSync(join(tmpProject, 'pic.png'), minimalPng());
+      // The committed placeholder.png is intentionally invalid; give the tmp
+      // copy a real one so the import step does not report it as an error.
+      writeFileSync(join(tmpProject, 'placeholder.png'), minimalPng());
+      await runner.importAssets(tmpProject);
+      await runOperation(tmpProject, 'add_node', {
+        scenePath: 'main.tscn',
+        nodeType: 'child_sprite.tscn',
+        nodeName: 'A',
+      });
+
+      const loaded = await runOperation(tmpProject, 'load_sprite', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A/Pic',
+        texturePath: 'pic.png',
+      });
+      expect(loaded.texturePath).toBe('pic.png');
+
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Pic']);
+      const pic = await reloadedNode(tmpProject, 'root/A/Pic');
+      expect(pic).not.toHaveProperty('error');
+      expect((pic.properties as Record<string, unknown>).texture).not.toBeNull();
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'attach_script on a node inside an instance survives a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+      writeScriptFile(tmpProject, 'inner_script.gd');
+
+      const attached = await runOperation(tmpProject, 'attach_script', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A/Inner',
+        scriptPath: 'inner_script.gd',
+      });
+      expect(attached.success).toBe(true);
+
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
+      const inner = await reloadedNode(tmpProject, 'root/A/Inner');
+      expect(inner).not.toHaveProperty('error');
+      expect((inner.properties as Record<string, unknown>).script).not.toBeNull();
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'add_node under a node inside an instance survives a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      const added = await runOperation(tmpProject, 'add_node', {
+        scenePath: 'main.tscn',
+        nodeType: 'Node2D',
+        nodeName: 'Grown',
+        parentNodePath: 'root/A/Inner',
+      });
+      expect(added.nodePath).toBe('root/A/Inner/Grown');
+
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
+      expect(await reloadedChildNames(tmpProject, ['A', 'Inner'])).toEqual(['Grown']);
+      const grown = await reloadedNode(tmpProject, 'root/A/Inner/Grown');
+      expect(grown).not.toHaveProperty('error');
+      // The mark that made it persist. This is the positive twin of the
+      // "leaves the instance unmarked" case below, so that one cannot pass on a
+      // marker spelling that never occurs.
+      expect(savedMainScene(tmpProject)).toContain(EDITABLE_INSTANCE_A_MARK);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'add_node directly under an instance root survives a reload and leaves the instance unmarked',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      const added = await runOperation(tmpProject, 'add_node', {
+        scenePath: 'main.tscn',
+        nodeType: 'Node2D',
+        nodeName: 'Beside',
+        parentNodePath: 'root/A',
+      });
+      expect(added.nodePath).toBe('root/A/Beside');
+
+      const names = await reloadedChildNames(tmpProject, ['A']);
+      expect([...names].sort()).toEqual(['Beside', 'Inner']);
+      // The instance root is owned by this scene, so its new child saves as it
+      // is. Marking the instance editable here would change the scene for nothing.
+      expect(savedMainScene(tmpProject)).not.toContain(EDITABLE_INSTANCE_MARK_PREFIX);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'duplicate_node of a node inside an instance survives a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      const duplicated = await runOperation(tmpProject, 'duplicate_node', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A/Inner',
+        newName: 'InnerCopy',
+      });
+      expect(duplicated.newNodePath).toBe('root/A/InnerCopy');
+
+      const names = await reloadedChildNames(tmpProject, ['A']);
+      expect(names).toHaveLength(2);
+      expect(names).toContain('Inner');
+      expect(names).toContain('InnerCopy');
+      // The copy sits directly under the instance root, which needs no mark.
+      expect(savedMainScene(tmpProject)).not.toContain(EDITABLE_INSTANCE_MARK_PREFIX);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'duplicate_node into a node inside an instance survives a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      // The copy lands under Inner, a node the instance owns. pack() never
+      // reaches a child of such a node unless the instance is editable.
+      const duplicated = await runOperation(tmpProject, 'duplicate_node', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A/Inner',
+        newName: 'InnerCopy',
+        targetParentPath: 'root/A/Inner',
+      });
+      expect(duplicated.newNodePath).toBe('root/A/Inner/InnerCopy');
+
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
+      expect(await reloadedChildNames(tmpProject, ['A', 'Inner'])).toEqual(['InnerCopy']);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'delete_nodes refuses a node that belongs to an instanced scene',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      const refused = await runOperation(tmpProject, 'delete_nodes', {
+        scenePath: 'main.tscn',
+        nodePaths: ['root/A/Inner'],
+      });
+      const [entry] = refused.results as Array<Record<string, unknown>>;
+      expect(entry).not.toHaveProperty('success');
+      expect(String(entry!.error)).toMatch(/belongs to an instanced scene/);
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
+
+      // The instance's own root is owned by this scene, so it can still be deleted.
+      const removed = await runOperation(tmpProject, 'delete_nodes', {
+        scenePath: 'main.tscn',
+        nodePaths: ['root/A'],
+      });
+      const [removedEntry] = removed.results as Array<Record<string, unknown>>;
+      expect(removedEntry).toMatchObject({ nodePath: 'root/A', success: true });
+      const tree = await reloadTree(tmpProject);
+      expect((tree.children ?? []).map((child) => child.name)).not.toContain('A');
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'duplicating an instanced child leaves one copy of its inner nodes after a reload',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+
+      const duplicated = await runOperation(tmpProject, 'duplicate_node', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A',
+        newName: 'A2',
+      });
+      expect(duplicated.newNodePath).toBe('root/A2');
+
+      // Re-owning the instance's inner nodes to the scene root made pack() write
+      // them as nodes of their own beside the instance, so the copy reloaded
+      // with two Inner children.
+      expect(await reloadedChildNames(tmpProject, ['A2'])).toEqual(['Inner']);
+      expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'duplicating an instanced child copies a node this scene added under it',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await addInstanceA(tmpProject);
+      await runOperation(tmpProject, 'add_node', {
+        scenePath: 'main.tscn',
+        nodeType: 'Node2D',
+        nodeName: 'Extra',
+        parentNodePath: 'root/A',
+      });
+
+      const duplicated = await runOperation(tmpProject, 'duplicate_node', {
+        scenePath: 'main.tscn',
+        nodePath: 'root/A',
+        newName: 'A2',
+      });
+      expect(duplicated.newNodePath).toBe('root/A2');
+
+      // Extra belongs to this scene, not to the instance, so duplicate() copies
+      // it without an owner. Left that way, pack() drops it and the copy
+      // reloads without the node the call reported as duplicated.
+      const copied = await reloadedChildNames(tmpProject, ['A2']);
+      expect([...copied].sort()).toEqual(['Extra', 'Inner']);
+      const original = await reloadedChildNames(tmpProject, ['A']);
+      expect([...original].sort()).toEqual(['Extra', 'Inner']);
+    },
+    INSTANCE_CASE_TIMEOUT_MS,
   );
 });
