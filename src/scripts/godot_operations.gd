@@ -510,8 +510,9 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
 # Returns {"ok": bool, "error": String}; on success also "payload" (the result
-# fields, read back from the node after add_child) and "warning" ("" unless
-# Godot did not keep the requested name).
+# fields, read back from the node after add_child) and "warnings" (empty unless
+# a property was set that the scene file does not store, or Godot did not keep
+# the requested name).
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	var parent_path = "root"
 	if op.has("parent_node_path"):
@@ -543,6 +544,7 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	for promoted in _PROMOTED_SPATIAL_PARAMS:
 		if op.has(promoted) and not props.has(promoted):
 			props[promoted] = op[promoted]
+	var warnings: Array = []
 	for property in props:
 		var settable = _check_node_property_settable(new_node, property)
 		if not settable.ok:
@@ -562,6 +564,9 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 			if not verify.ok:
 				new_node.free()
 				return {"ok": false, "error": verify.error}
+		var unstored: String = _unstored_script_variable_warning(new_node, property)
+		if unstored != "":
+			warnings.append(unstored)
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	# Read the outcome back from the node now that it is in the tree. add_child
@@ -569,13 +574,12 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	# replaces characters a node name cannot hold, so the requested name is not
 	# evidence of the final one.
 	var final_name := String(new_node.name)
-	var warning := ""
 	if final_name != str(op.node_name):
-		warning = "Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [str(op.node_name), final_name]
+		warnings.append("Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [str(op.node_name), final_name])
 	return {
 		"ok": true,
 		"error": "",
-		"warning": warning,
+		"warnings": warnings,
 		"payload": {
 			"nodeName": final_name,
 			"nodeType": new_node.get_class(),
@@ -643,8 +647,8 @@ func add_node(params):
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		var payload: Dictionary = result.payload
-		if result.warning != "":
-			payload["warnings"] = [result.warning]
+		if not result.warnings.is_empty():
+			payload["warnings"] = result.warnings
 		emit_result(payload)
 	else:
 		log_error("Failed to save scene after adding node")
@@ -848,9 +852,13 @@ func _claim_for_serialization(scene_root: Node, target: Node) -> void:
 # Apply one property-update list to a loaded scene without saving. Shared by
 # standalone set_node_properties and batch_scene_operations so both paths
 # validate identically (including instanced-child serialization claiming).
-# Returns {"ok": bool, "any_set": bool, "error": String, "results": Array}.
+# Returns {"ok": bool, "any_set": bool, "error": String, "results": Array,
+# "warnings": Array}. "warnings" holds one sentence per update that was set on
+# the loaded scene but that the scene file does not store, prefixed with its
+# index; the callers lead their payload with them.
 func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> Dictionary:
 	var results: Array = []
+	var warnings: Array = []
 	var any_set := false
 
 	for i in range(updates.size()):
@@ -901,11 +909,14 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 					if backstop_ok:
 						result["success"] = true
 						any_set = true
+						var unstored: String = _unstored_script_variable_warning(node, update.property)
+						if unstored != "":
+							warnings.append("updates[%d]: %s" % [i, unstored])
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
 
-	return {"ok": true, "any_set": any_set, "error": "", "results": results}
+	return {"ok": true, "any_set": any_set, "error": "", "results": results, "warnings": warnings}
 
 func set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
@@ -920,7 +931,10 @@ func set_node_properties(params: Dictionary) -> void:
 			quit(1)
 			return
 
-	emit_result({"results": applied.results})
+	var payload: Dictionary = {"results": applied.results}
+	if not applied.warnings.is_empty():
+		payload["warnings"] = applied.warnings
+	emit_result(payload)
 
 # Get properties from one or more nodes in a single headless process (loads scene once)
 func get_node_properties(params: Dictionary) -> void:
@@ -1944,6 +1958,24 @@ func _check_node_property_settable(node: Node, property: String) -> Dictionary:
 		return {"ok": false, "error": "Property '%s' on node of type '%s' has no entry in its property list (a constant, or a value served by _get), so it cannot be stored in a scene file" % [property, node_class]}
 	return {"ok": true, "error": ""}
 
+# The one write that passes _check_node_property_settable and is known not to
+# reach the scene file: a script variable declared without @export. Its
+# property-list entry carries PROPERTY_USAGE_SCRIPT_VARIABLE and no
+# PROPERTY_USAGE_STORAGE, and PackedScene.pack() writes stored properties only.
+# The value is still set on the loaded instance, so the write stays a success
+# and this sentence is what tells the caller it will not be in the file.
+# Returns "" for every other property. A native property without the storage
+# flag (rotation_degrees, global_position) is saved through the property it is
+# an alias of, so nothing is claimed about those.
+func _unstored_script_variable_warning(node: Node, property: String) -> String:
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor == null:
+		return ""
+	var usage: int = descriptor.get("usage", 0)
+	if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) == 0 or (usage & PROPERTY_USAGE_STORAGE) != 0:
+		return ""
+	return "Property '%s' is a script variable declared without @export. It was set on the loaded scene, but a scene file stores exported variables only, so the value is not saved. Add @export to keep it, or set it at runtime with run_script." % property
+
 # Helper: find a property's full descriptor from get_property_list(), or null
 # if the node has no property by that name. Callers that only need the
 # Variant type should use _declared_property_type instead.
@@ -2689,8 +2721,8 @@ func batch_scene_operations(params: Dictionary) -> void:
 					else:
 						result["success"] = true
 						result.merge(apply_result.payload)
-						if apply_result.warning != "":
-							batch_warnings.append("operations[%d]: %s" % [results.size(), apply_result.warning])
+						for add_warning in apply_result.warnings:
+							batch_warnings.append("operations[%d]: %s" % [results.size(), add_warning])
 			"load_sprite":
 				if scene_root == null:
 					result["error"] = "scene_path required for load_sprite"
@@ -2722,6 +2754,8 @@ func batch_scene_operations(params: Dictionary) -> void:
 							failed_updates += 1
 					if apply_result.any_set and failed_updates > 0:
 						batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
+					for update_warning in apply_result.warnings:
+						batch_warnings.append("operations[%d]: %s" % [results.size(), update_warning])
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"

@@ -228,7 +228,7 @@ Every path argument is confined to the project root. A path that resolves outsid
 Each tool returns one JSON object, as `structuredContent` and as the same JSON in a text block. Outcome fields are read back from the engine after the operation, not copied from the request.
 
 - `create_scene`: `success` and the `scenePath` that was written.
-- `add_node`: `nodeName`, `nodeType` and `nodePath` of the node as it exists after the add. `nodePath` is in the `root/...` form every node tool accepts. Godot renames a child whose name is already taken by a sibling, and replaces characters a node name cannot hold. When either happens the payload carries the name Godot assigned and leads with a `warnings` entry saying so.
+- `add_node`: `nodeName`, `nodeType` and `nodePath` of the node as it exists after the add. `nodePath` is in the `root/...` form every node tool accepts. Godot renames a child whose name is already taken by a sibling, and replaces characters a node name cannot hold. When either happens the payload carries the name Godot assigned and leads with a `warnings` entry saying so. A value in `properties` that was set but that the scene file does not store is reported the same way (see "Values a scene file cannot store").
 - `load_sprite`: `nodePath`, `nodeType` and `texturePath`, the project-relative path of the texture the node holds after the assignment.
 - `save_scene`: `scenePath`, the scene that was loaded, and `savedScenePath`, the file that was written and then confirmed on disk. The two are equal unless `newPath` was given.
 - `export_mesh_library`: `outputPath`, `itemCount` and `itemNames`, read from the library that was saved. A name in `meshItemNames` that matched no child, or matched a child with no mesh, is listed in a leading `warnings` entry instead of being dropped silently.
@@ -256,7 +256,7 @@ All mutation operations save automatically. Property and delete tools take alway
 
 - `get_scene_tree`: the root node of the tree, `{ name, type, path, script, children[] }`, with every child in the same shape. `script` is the attached script's `res://` path, or an empty string.
 - `get_node_properties`: `results[]`, one entry per requested node in input order: `{ nodePath, nodeType, properties }`, or `{ nodePath, error }` when the node was not found. A scene that cannot be loaded is an error response.
-- `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`. A scene that cannot be loaded, or that could not be saved after the updates, is an error response, never a payload that reports the updates as written.
+- `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`. A scene that cannot be loaded, or that could not be saved after the updates, is an error response, never a payload that reports the updates as written. `warnings` leads the payload when an update was set but the scene file does not store it (see "Values a scene file cannot store").
 - `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`. A scene that cannot be loaded or saved is an error response.
 - `attach_script`: `success`, `nodePath`, `scriptPath`.
 - `duplicate_node`: `success`, `nodePath` (the node that was copied) and `newNodePath`, where the duplicate is after the add, in the `root/...` form.
@@ -305,7 +305,9 @@ Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is 
 
 ### Values a scene file cannot store
 
-`null` is accepted only on an Object-typed property (where it clears the value), on an untyped `Variant` property, and on a `metadata/<name>` key (where it removes the entry). On any other declared type it errors, since the typed setter would store that type's zero value. A name that exists on the node but has no entry in its property list (a script constant, or a value served by `_get`) is refused for the same reason.
+`null` is accepted only on an Object-typed property (where it clears the value), on an untyped `Variant` property, and on a `metadata/<name>` key (where it removes the entry). On any other declared type it errors, since the typed setter would store that type's zero value. A name that exists on the node but has no entry in its property list (a script constant, or a value served by `_get`) is an error too, because there is nothing a scene file could hold for it.
+
+A script variable declared without `@export` is the one write that succeeds without being saved. The value is set on the scene as loaded, and the update reports `success: true`, but a scene file stores exported variables only. `set_node_properties`, `add_node` and `batch_scene_operations` say so in a leading `warnings` entry that names the update and the property. Add `@export` to keep the value, or set it at runtime with `run_script`.
 
 ### Object-typed properties
 

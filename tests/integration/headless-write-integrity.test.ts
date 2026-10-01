@@ -3,8 +3,9 @@
  * that did not happen: an unloadable or unsaveable scene returned as a success,
  * a batch that discarded the result of its final save, two spellings of one
  * scene overwriting each other, a scene instanced into itself, and values a
- * scene file cannot store (a non-exported script variable, null or a fraction
- * on an int property). Node-level slash keys (`metadata/<name>` and keys the
+ * scene file cannot store (a script constant, null or a fraction on an int
+ * property, and a non-exported script variable, which is set and reported in a
+ * leading warning). Node-level slash keys (`metadata/<name>` and keys the
  * node itself declares) are covered here too.
  *
  * The real handlers run against a tmp copy of the fixture project and every
@@ -43,6 +44,7 @@ const READ_ONLY_SCENE = 'locked.tscn';
 const BROKEN_SCENE = 'broken.tscn';
 const SELF_SCENE = 'level.tscn';
 const TWO_SPELLING_SCENE = 'twice.tscn';
+const HOST_SCENE = 'host.tscn';
 const SCRIPT_FILE = 'stored_values.gd';
 const CASE_TIMEOUT_MS = 120000;
 const READ_ONLY_MODE = 0o444;
@@ -61,10 +63,11 @@ const MISSING_DEPENDENCY_SCENE = [
   '',
 ].join('\n');
 
-/** One exported and one non-exported variable, plus an int array of each flavor. */
+/** One exported and one non-exported variable, a constant, and an int array of each flavor. */
 const STORED_VALUES_SCRIPT = [
   'extends Node2D',
   '',
+  'const MAX_HP := 5',
   'var hidden_hp := 10',
   '@export var shown_hp := 3',
   '@export var counts: PackedInt32Array = PackedInt32Array()',
@@ -412,7 +415,7 @@ describe('node-level slash keys', () => {
   );
 });
 
-describe('values a scene file cannot store are refused', () => {
+describe('values a scene file cannot store are refused or reported', () => {
   async function sceneWithStoredValuesScript(): Promise<void> {
     writeFileSync(join(projectPath, SCRIPT_FILE), STORED_VALUES_SCRIPT, 'utf-8');
     const result = await handleAttachScript(runner, {
@@ -425,23 +428,97 @@ describe('values a scene file cannot store are refused', () => {
   }
 
   itGodot(
-    'a non-exported script variable is still set',
+    'a non-exported script variable is set, with a leading warning that the scene file does not store it',
     async () => {
       await sceneWithStoredValuesScript();
-      const entry = await setProp('root', 'hidden_hp', 5);
-      expect(entry.success).toBe(true);
+      const result = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: SCENE,
+        updates: [
+          { nodePath: 'root', property: 'visible', value: true },
+          { nodePath: 'root', property: 'hidden_hp', value: 5 },
+        ],
+      });
+      const payload = expectMatchesOutputSchema('set_node_properties', result);
+      const results = payload.results as Entry[];
+      expect(results.map((entry) => entry.success)).toEqual([true, true]);
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      const warnings = payload.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/^updates\[1\]: /);
+      expect(warnings[0]).toContain("'hidden_hp'");
+      expect(warnings[0]).toContain('@export');
     },
     CASE_TIMEOUT_MS,
   );
 
   itGodot(
-    'an exported script variable is still set',
+    'an exported script variable is still set and carries no warning',
     async () => {
       await sceneWithStoredValuesScript();
-      const entry = await setProp('root', 'shown_hp', 7);
-      expect(entry.success).toBe(true);
+      const result = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: SCENE,
+        updates: [{ nodePath: 'root', property: 'shown_hp', value: 7 }],
+      });
+      const payload = expectMatchesOutputSchema('set_node_properties', result);
+      expect((payload.results as Entry[])[0]?.success).toBe(true);
+      expect(payload).not.toHaveProperty('warnings');
       const props = await readProps(SCENE, 'root');
       expect(props.shown_hp).toBe(7);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a batch update of a non-exported script variable leads with a warning naming the operation',
+    async () => {
+      await sceneWithStoredValuesScript();
+      const payload = await batch([
+        {
+          operation: 'set_node_properties',
+          scenePath: SCENE,
+          updates: [{ nodePath: 'root', property: 'hidden_hp', value: 5 }],
+        },
+      ]);
+      expect((payload.results as Entry[])[0]?.success).toBe(true);
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      const warnings = payload.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/^operations\[0\]: updates\[0\]: /);
+      expect(warnings[0]).toContain("'hidden_hp'");
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'add_node leads with a warning for a non-exported script variable on an instanced scene',
+    async () => {
+      await sceneWithStoredValuesScript();
+      await createScene(HOST_SCENE);
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: HOST_SCENE,
+        nodeType: SCENE,
+        nodeName: 'Instanced',
+        properties: { hidden_hp: 5 },
+      });
+      const payload = expectMatchesOutputSchema('add_node', result);
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      const warnings = payload.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("'hidden_hp'");
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a script constant is an error, not a value reported as set',
+    async () => {
+      await sceneWithStoredValuesScript();
+      const entry = await setProp('root', 'MAX_HP', 9);
+      expect(entry).not.toHaveProperty('success');
+      expect(String(entry.error)).toContain('MAX_HP');
     },
     CASE_TIMEOUT_MS,
   );

@@ -86,7 +86,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties in a scene in one Godot process. Always-array: pass a single-element updates array for a one-off edit. Each value is checked against the property's declared type and errors instead of silently storing that type's zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success or error. Errors while a runtime session is live on this project.",
+      "Set one or more node properties in a scene in one Godot process. Always-array: pass one update for a one-off edit. Each value is checked against the property's declared type and errors instead of silently storing that type's zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success or error; warnings leads when a value was set but is not saved. Errors while a runtime session is live on this project.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -126,6 +126,12 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present when an update succeeded on the loaded scene but the scene file does not store it (a script variable declared without @export). Each entry names the update index.',
+        },
         results: {
           type: 'array',
           items: {

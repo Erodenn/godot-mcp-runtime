@@ -49,7 +49,7 @@ export const sceneToolDefinitions = [
   {
     name: 'add_node',
     description:
-      "Add a node to a scene, or instance another scene when nodeType is a scene path. Saves automatically. Values in properties are checked against each property's declared type; a mismatch errors (Property Values in docs/tools.md). Returns: nodeName, nodeType and nodePath, read back after the add; warnings leads when Godot did not keep the requested name. Errors and adds nothing if the type, parent or a property is invalid. Errors while a runtime session is live on this project.",
+      "Add a node to a scene, or instance another scene when nodeType is a scene path. Saves automatically. Values in properties are checked against each property's declared type; a mismatch errors (Property Values in docs/tools.md). Returns: nodeName, nodeType and nodePath, read back after the add; warnings leads when Godot renamed the node or a value will not be saved. Errors and adds nothing if the type, parent or a property is invalid. Errors while a runtime session is live on this project.",
     inputSchema: {
       type: 'object',
       properties: {
