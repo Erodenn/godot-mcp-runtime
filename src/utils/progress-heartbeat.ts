@@ -21,7 +21,7 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
  * (present only when the client registered an `onprogress` handler — the
  * SDK sends `_meta.progressToken` only then).
  */
-export function progressTokenFrom(request: CallToolRequest): string | number | undefined {
+function progressTokenFrom(request: CallToolRequest): string | number | undefined {
   const token = (request.params as { _meta?: { progressToken?: string | number } })._meta
     ?.progressToken;
   return token;
