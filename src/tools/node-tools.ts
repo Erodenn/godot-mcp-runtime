@@ -106,7 +106,7 @@ export const nodeToolDefinitions = [
               property: {
                 type: 'string',
                 description:
-                  'GDScript property name in snake_case (e.g. "position", "modulate", "collision_layer")',
+                  'GDScript property name in snake_case (e.g. "position", "modulate", "collision_layer"), or "metadata/<name>", or a slash key the node declares (e.g. "theme_override_colors/font_color")',
               },
               value: {
                 description:

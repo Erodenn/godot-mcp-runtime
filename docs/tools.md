@@ -277,7 +277,7 @@ A property whose declared type is `Dictionary` skips this coercion, so a dict wi
 
 ### Accepted widening conversions
 
-Godot performs these on store, so they are allowed: float to int, string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), `Vector4` to `Vector4i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
+Godot performs these on store, so they are allowed: a whole-number float to int (a fractional one, such as `1.7` on an int property or inside an int array, errors instead of being truncated), string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), `Vector4` to `Vector4i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
 
 ### Packed arrays
 
@@ -297,6 +297,10 @@ Godot performs these on store, so they are allowed: float to int, string to `Nod
 A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, `Vector2`, `Vector2i`, `Vector3`, `Vector3i`, `Vector4`, `Vector4i` or `Color`. Widening applies within that set the way it does for scalars, so JSON ints land in an `Array[float]` and `{ "x": 1, "y": 2 }` lands in an `Array[Vector2i]`. An element that cannot represent `T` errors and the error names its index. An untyped `Array` accepts anything, unchanged.
 
 Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is rejected with an explicit error naming the element type. That is deliberate: `set()` does not convert an untyped array element by element for a typed property, it refuses the assignment and leaves an empty array behind while reporting nothing, so passing one through would be a silent drop reported as success. Use `run_script` for those.
+
+### Values a scene file cannot store
+
+`null` is accepted only on an Object-typed property (where it clears the value), on an untyped `Variant` property, and on a `metadata/<name>` key (where it removes the entry). On any other declared type it errors, since the typed setter would store that type's zero value. A name that exists on the node but has no entry in its property list (a script constant, or a value served by `_get`) is refused for the same reason.
 
 ### Object-typed properties
 
@@ -322,7 +326,12 @@ Inner properties are assigned through the same validation described above, so ne
 
 Keys containing `/` (most importantly `ShaderMaterial`'s `shader_parameter/<uniform>` entries) name _virtual_ properties that only exist on an instance after the property they depend on is assigned.
 
-**They are supported inside an inline resource dict only** - the `{ "type": "ClassName", ... }` form above. A slash-suffixed key addressed straight at a node (`set_node_properties` with `property: "metadata/mine"`, or a top-level `properties` entry on `add_node`) still goes through the node's plain property lookup and is rejected as a property the node does not have. Inside an inline resource dict they are handled specially:
+**Inside an inline resource dict** - the `{ "type": "ClassName", ... }` form above - they are supported as described below. **Addressed straight at a node** (`set_node_properties` with a `property` such as `metadata/mine`, or a top-level `properties` entry on `add_node`), two kinds of slash key are settable:
+
+- `metadata/<name>` sets node metadata. `<name>` must be a non-empty ASCII identifier (letters, digits and underscore, not starting with a digit); anything else is an error naming the key. The value is untyped, and `null` removes the entry.
+- A slash key the node itself declares with a type, such as `theme_override_colors/font_color` on a `Control` or a per-surface material override on a mesh. Its declared type drives the same type check as any other property.
+
+Any other slash key is an error naming the key, because there is no declared type to check the value against; use `run_script` for it. The key text reaches Godot exactly as written. Inside an inline resource dict they are handled specially:
 
 - Dependency-first ordering: plain keys are assigned before slash-suffixed keys, so `"shader": "res://neon.gdshader"` lands before `"shader_parameter/glow"`.
 - Validation is against the instance's live property list (`set()` alone accepts unknown names silently), so a `shader_parameter/<name>` that the assigned shader does not declare as a uniform is an explicit error, as is any slash-suffixed key when no shader is assigned. A group/subgroup/category label that happens to contain `/` is rejected too, even when it is otherwise listed.

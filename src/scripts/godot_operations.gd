@@ -523,6 +523,12 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "node_type is required for add_node"}
 	if not op.has("node_name") or op.node_name == "":
 		return {"ok": false, "error": "node_name is required for add_node"}
+	# A scene instanced into itself saves a reference from the file to itself,
+	# which the engine only reports on stderr and the next load cannot resolve.
+	if _is_scene_path(str(op.node_type)) and op.has("scene_path"):
+		var target_scene := normalize_scene_path(str(op.scene_path))
+		if target_scene != "" and target_scene == normalize_scene_path(str(op.node_type)):
+			return {"ok": false, "error": "Cannot instance scene '%s' into itself" % _project_relative(target_scene)}
 	var instantiated = _instantiate_node_type(op.node_type)
 	if not instantiated.ok:
 		return {"ok": false, "error": instantiated.error}
@@ -538,10 +544,10 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		if op.has(promoted) and not props.has(promoted):
 			props[promoted] = op[promoted]
 	for property in props:
-		if not (property in new_node):
-			var error_message = "Property '%s' does not exist on node of type '%s'" % [property, new_node.get_class()]
+		var settable = _check_node_property_settable(new_node, property)
+		if not settable.ok:
 			new_node.free()
-			return {"ok": false, "error": error_message}
+			return {"ok": false, "error": settable.error}
 		var prepared = _prepare_property_value(new_node, property, props[property])
 		if not prepared.ok:
 			new_node.free()
@@ -867,10 +873,13 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 			result["nodePath"] = update.node_path
 			result["property"] = update.property
 			var node = find_node_by_path(scene_root, update.node_path)
+			var settable: Dictionary = {"ok": false, "error": ""}
+			if node != null:
+				settable = _check_node_property_settable(node, update.property)
 			if node == null:
 				result["error"] = "Node not found: " + update.node_path
-			elif not (update.property in node):
-				result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
+			elif not settable.ok:
+				result["error"] = settable.error
 			else:
 				var prepared = _prepare_property_value(node, update.property, update.value)
 				if not prepared.ok:
@@ -1852,8 +1861,88 @@ func _prepare_packed_array_elements(property: String, node_class: String, declar
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type of %s" % [
 					property, node_class, i, str(element), type_string(declared)],
 			}
+		if elem_type == TYPE_INT and _is_fractional_float(element):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and %s holds integers" % [
+					property, node_class, i, str(element), type_string(declared)],
+			}
 		out.append(element)
 	return {"ok": true, "value": out, "error": ""}
+
+# True for a float with a fractional part. JSON numbers arrive as floats, so a
+# float is a legitimate value for an int property only when it is whole;
+# otherwise the typed setter truncates it without a word.
+func _is_fractional_float(value) -> bool:
+	return typeof(value) == TYPE_FLOAT and value != floorf(value)
+
+# Prefix of the node-level metadata entries Object.set() routes to set_meta().
+const _METADATA_PREFIX: String = "metadata/"
+
+# Characters an identifier may start with, and the ones it may continue with in
+# addition. Compared by character rather than by code point or by an engine
+# helper, so the rule does not depend on a method whose name changed across 4.x.
+const _IDENTIFIER_LEADING_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+const _IDENTIFIER_DIGIT_CHARS: String = "0123456789"
+
+# True when `text` is a non-empty ASCII identifier: a letter or underscore, then
+# letters, digits or underscores.
+func _is_ascii_identifier(text: String) -> bool:
+	if text.is_empty():
+		return false
+	for i in range(text.length()):
+		var character := text[i]
+		var allowed := _IDENTIFIER_LEADING_CHARS.contains(character)
+		if i > 0 and _IDENTIFIER_DIGIT_CHARS.contains(character):
+			allowed = true
+		if not allowed:
+			return false
+	return true
+
+# Can `property` be set on `node` AND survive PackedScene.pack()? One gate for
+# add_node and set_node_properties, run before _prepare_property_value, so a
+# write that cannot persist is an error naming the key instead of a success.
+# Returns {"ok": bool, "error": String}. The key text is never altered.
+#   1. metadata/<name>: Object.set() stores it as node metadata, which is
+#      untyped (declared TYPE_NIL in _prepare_property_value) and saved with
+#      the scene. Only the name is checked: it must be an ASCII identifier.
+#   2. Any other key containing "/": settable only when the node's live property
+#      list declares that exact name, as a real typed entry the scene file can
+#      hold (stored, or checkable as a theme override is). The declared type
+#      then drives the normal type check. An undeclared key has no declared type
+#      to check against, and set() would store it silently or not at all, so it
+#      is an error that points at run_script.
+#   3. A plain name must exist on the node and have an entry in its property
+#      list. A script variable is accepted whether or not it is exported,
+#      typed or not: its entry carries no storage flag when it is not exported,
+#      and the existing scripted-node behavior depends on setting it anyway.
+func _check_node_property_settable(node: Node, property: String) -> Dictionary:
+	var node_class := node.get_class()
+	if property.begins_with(_METADATA_PREFIX):
+		if not _is_ascii_identifier(property.substr(_METADATA_PREFIX.length())):
+			return {"ok": false, "error": "Metadata key '%s' is not a valid name: use letters, digits and underscore, not starting with a digit" % property}
+		return {"ok": true, "error": ""}
+
+	if "/" in property:
+		var slash_descriptor = _find_property_descriptor(node, property)
+		var declared := false
+		if slash_descriptor != null:
+			var slash_usage: int = slash_descriptor.get("usage", 0)
+			var is_pseudo_entry: bool = (slash_usage & _NON_SETTABLE_PROPERTY_USAGE_MASK) != 0
+			var has_declared_type: bool = slash_descriptor.type != TYPE_NIL or (slash_usage & PROPERTY_USAGE_NIL_IS_VARIANT) != 0
+			var is_persistable: bool = (slash_usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_CHECKABLE)) != 0
+			declared = not is_pseudo_entry and has_declared_type and is_persistable
+		if not declared:
+			return {"ok": false, "error": "Property '%s' is not declared by node of type '%s', so its value cannot be type-checked. Set it with run_script." % [property, node_class]}
+		return {"ok": true, "error": ""}
+
+	if not (property in node):
+		return {"ok": false, "error": "Property '%s' does not exist on node of type '%s'" % [property, node_class]}
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor == null:
+		return {"ok": false, "error": "Property '%s' on node of type '%s' has no entry in its property list (a constant, or a value served by _get), so it cannot be stored in a scene file" % [property, node_class]}
+	return {"ok": true, "error": ""}
 
 # Helper: find a property's full descriptor from get_property_list(), or null
 # if the node has no property by that name. Callers that only need the
@@ -2126,6 +2215,13 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) cannot be coerced to the element type %s" % [
 					property, node_class, i, str(element), type_string(elem_type)],
 			}
+		if elem_type == TYPE_INT and _is_fractional_float(element):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and the element type is %s" % [
+					property, node_class, i, str(element), type_string(elem_type)],
+			}
 		out.append(element)
 	# Builtin element type, so no class name and no script: Array[Node] and
 	# friends never reach here, since their element types have no
@@ -2167,13 +2263,24 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 # (float->int, String->NodePath/StringName, bool<->int/float,
 # Vector2<->Vector2i, Vector3<->Vector3i, Array->Packed*Array) while
 # rejecting everything else. TYPE_NIL (untyped Variant, or a property not in
-# the node's property list) accepts anything. null is always passed through
-# untouched -- it is the legitimate way to clear a resource.
+# the node's property list) accepts anything. null passes through only for an
+# Object-typed or untyped property -- it is the legitimate way to clear a
+# resource -- and is an error for any other declared type.
 func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
-	var declared = _declared_property_type(node, property)
+	# A metadata entry is untyped, whatever the property list says.
+	var declared = TYPE_NIL if property.begins_with(_METADATA_PREFIX) else _declared_property_type(node, property)
 	var coerced = raw_value if declared == TYPE_DICTIONARY else _coerce_property_value(raw_value)
 	if coerced == null:
-		return {"ok": true, "value": coerced, "error": ""}
+		# null clears an Object-typed property, removes a metadata entry and
+		# resets an untyped Variant. On any other declared type the typed setter
+		# stores that type's zero value and reports nothing.
+		if declared == TYPE_OBJECT or declared == TYPE_NIL:
+			return {"ok": true, "value": coerced, "error": ""}
+		return {
+			"ok": false,
+			"value": null,
+			"error": "Cannot set property '%s' on node of type '%s': expected %s, got Nil" % [property, node.get_class(), type_string(declared)],
+		}
 
 	# Element-wise coercion for packed-array properties. JSON sends a
 	# PackedVector2Array (etc.) as a plain Array whose elements are still
@@ -2269,6 +2376,12 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 				"ok": false,
 				"value": null,
 				"error": "Cannot set property '%s' on node of type '%s': expected %s, got %s" % [property, node.get_class(), type_string(declared), type_string(typeof(coerced))],
+			}
+		if declared == TYPE_INT and _is_fractional_float(coerced):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': expected a whole number for an int property, got %s" % [property, node.get_class(), str(coerced)],
 			}
 
 	return {"ok": true, "value": coerced, "error": ""}

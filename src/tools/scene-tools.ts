@@ -95,7 +95,7 @@ export const sceneToolDefinitions = [
         properties: {
           type: 'object',
           description:
-            'Additional property values as a JSON object. Top-level params (position, rotation, etc.) take precedence over keys in this dict. An Object-typed property takes a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Coercion and Packed*Array / Array[T] element rules: Property Values in docs/tools.md.',
+            'Additional property values as a JSON object. Top-level params (position, rotation, etc.) take precedence over keys in this dict. An Object-typed property takes a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node; metadata/<name> and slash keys the node declares go straight into properties. Coercion and Packed*Array / Array[T] element rules: Property Values in docs/tools.md.',
         },
       },
       required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
