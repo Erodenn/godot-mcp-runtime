@@ -37,6 +37,16 @@ export interface ElicitorRequest {
  */
 export type Elicitor = (request: ElicitorRequest) => Promise<ElicitorResult>;
 
+/**
+ * True only for an explicit accept. An `accept` that carries a `confirm` field
+ * set to anything but `true` is a denial, the same as `decline` or `cancel`.
+ */
+export function isElicitAccepted(result: ElicitorResult): boolean {
+  return (
+    result.action === 'accept' && (result.content === undefined || result.content.confirm === true)
+  );
+}
+
 export interface SessionState {
   /**
    * Set of absolute project paths for which the user has already approved

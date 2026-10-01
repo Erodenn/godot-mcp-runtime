@@ -1,15 +1,10 @@
-import { join, sep, resolve, relative } from 'path';
+import { join, sep, resolve } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import {
-  validateSubPath,
-  isUnderDir,
-  projectGodotPath,
-  stripResPrefix,
-} from '../utils/path-validation.js';
+import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse } from '../utils/structured-response.js';
 import {
@@ -27,7 +22,7 @@ import { parseScriptDiagnostics, condenseProcessTail } from '../utils/output-par
 import { randomUUID } from 'crypto';
 import {
   createNullContext,
-  normalizeProjectKey,
+  isElicitAccepted,
   type McpContext,
   type ElicitorResult,
 } from '../utils/mcp-context.js';
@@ -38,18 +33,12 @@ import {
   type PolicyDecision,
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
-import { parseAutoloads } from '../utils/autoload-ini.js';
+import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
 import {
-  auditScriptsDir,
-  isServerOwnedBridgePath,
-  screenshotsDir,
-} from '../utils/artifact-paths.js';
-import {
-  BRIDGE_AUTOLOAD_NAME,
   BridgeAttachConflictError,
   BridgeAutoloadCollisionError,
 } from '../utils/bridge-manager.js';
-import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
+import { runLaunchGate } from '../utils/launch-gate.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -576,19 +565,11 @@ export const runtimeToolDefinitions = [
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
 const MAX_POLICY_SOLUTIONS = 4;
-const MAX_STRICT_REJECT_LINES_SHOWN = 5;
-const MAX_SCAN_WARNINGS_SHOWN = 10;
 
 function formatMoreFindingsSuffix(total: number): string {
   if (total <= 1) return '';
   const extra = total - 1;
   return ` (+${extra} more finding${extra > 1 ? 's' : ''})`;
-}
-
-function isElicitAccepted(result: ElicitorResult): boolean {
-  return (
-    result.action === 'accept' && (result.content === undefined || result.content.confirm === true)
-  );
 }
 
 /**
@@ -731,42 +712,6 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
   return out;
 }
 
-/**
- * Build a one-line summary of a project-scan finding so `run_project` can
- * attach a `warnings` array without flooding the response. Out-of-tree paths
- * are surfaced verbatim (path.relative would emit `..`-prefixed strings that
- * obscure where the file actually lives).
- */
-function formatScanFinding(sourcePath: string, projectPath: string, match: PolicyMatch): string {
-  const rel = isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
-  return `${rel}:${match.line} ${match.matchedText} - ${match.reason}`;
-}
-
-/**
- * Scan a single .gd file. Missing/unreadable files are reported as a single
- * warning string (the second tuple element); the caller decides whether to
- * surface them. Tier and strict promotion semantics match `evaluateScript`.
- */
-function scanScriptFile(
-  filePath: string,
-  strict: boolean,
-): { findings: PolicyMatch[]; warning: string | null } {
-  let source: string;
-  try {
-    source = readFileSync(filePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { findings: [], warning: `Could not scan ${filePath} (file not found)` };
-    }
-    return {
-      findings: [],
-      warning: `Could not scan ${filePath}: ${getErrorMessage(error)}`,
-    };
-  }
-  const decision = evaluateScript(source, strict);
-  return { findings: decision.matches, warning: null };
-}
-
 function exitedProcessError(actionDescription: string): HandlerResult {
   return err(
     createErrorResponse(`The spawned Godot process has exited and cannot ${actionDescription}.`, [
@@ -889,164 +834,12 @@ export async function handleRunProject(
     }
   }
 
-  // Pre-flight security scan: autoloads + the launched scene's scripts,
-  // scanning transitively into every PackedScene it instances (subscene
-  // recursion — see collectSceneScriptsRecursive). Result is a list of
-  // findings + a list of scan warnings (file-not-found, read errors,
-  // "no launchable scene"); both flow into the response warnings array.
-  // Strict mode + any Tier 1 finding → hard reject before launch. Skipped
-  // entirely when GODOT_MCP_DISABLE_SECURITY is set (complete no-op, Tier 1
-  // included — see McpContext.disableSecurity).
-  const scanWarnings: string[] = [];
-  const scanFindings: Array<{ sourcePath: string; match: PolicyMatch }> = [];
-  const absProjectPath = resolve(projectPath);
-  if (!ctx.disableSecurity) {
-    try {
-      const projectGodot = projectGodotPath(absProjectPath);
-      if (existsSync(projectGodot)) {
-        const autoloads = parseAutoloads(projectGodot);
-        for (const entry of autoloads) {
-          // Skip this server's own injected bridge. It is left registered
-          // between a launch and its cleanup, so a second run_project against
-          // the same project would otherwise scan it — and it legitimately
-          // calls the filesystem-write primitives the table flags, which would
-          // surface as warnings blaming the user's project and, under strict
-          // mode, hard-reject the launch. An McpBridge entry pointing anywhere
-          // this server does not own is a user's own autoload and still scans.
-          if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
-          const stripped = stripResPrefix(entry.path);
-          if (!stripped.endsWith('.gd')) continue;
-          if (!validateSubPath(absProjectPath, stripped)) {
-            scanWarnings.push(
-              `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
-            );
-            continue;
-          }
-          const filePath = join(absProjectPath, stripped);
-          const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-          if (warning) scanWarnings.push(warning);
-          for (const m of findings) {
-            scanFindings.push({ sourcePath: filePath, match: m });
-          }
-        }
-      }
-      const launchScene = resolveLaunchScene(absProjectPath, scene.value);
-      if (launchScene === null) {
-        scanWarnings.push(
-          'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
-        );
-      } else if (!existsSync(launchScene)) {
-        scanWarnings.push(
-          `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
-        );
-      } else {
-        const scripts = collectSceneScriptsRecursive(launchScene, absProjectPath);
-        for (const filePath of scripts) {
-          if (!isUnderDir(absProjectPath, filePath)) {
-            scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
-            continue;
-          }
-          const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
-          if (warning) scanWarnings.push(warning);
-          for (const m of findings) {
-            scanFindings.push({ sourcePath: filePath, match: m });
-          }
-        }
-      }
-    } catch (error) {
-      scanWarnings.push(`run_project pre-flight scan failed: ${getErrorMessage(error)}`);
-    }
-
-    const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
-    if (ctx.strictMode && hasTier1) {
-      const top = scanFindings
-        .filter((f) => f.match.tier === 1)
-        .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
-      const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
-      const more =
-        scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
-      return err(
-        createErrorResponse(
-          [
-            `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
-            ...summary.map((s) => `- ${s}`),
-          ].join('\n'),
-          [
-            'Remove or refactor the flagged primitives',
-            'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
-          ],
-        ),
-      );
-    }
-  }
-
-  // Session-confirmation gate: one elicitation per absolute projectPath per
-  // server session. Skipped when an active runtime session already targets
-  // the same project (the user just attached/ran), or entirely when
-  // GODOT_MCP_DISABLE_SECURITY is set — the gate no-op covers this prompt too.
-  const projectKey = normalizeProjectKey(absProjectPath);
-  if (!ctx.disableSecurity && !ctx.sessionState.runProjectConfirmed.has(projectKey)) {
-    if (ctx.disableElicitation) {
-      // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION). Skip the
-      // blanket confirmation gate and launch with a recorded warning. The
-      // tiered scan above is the real security boundary; the gate is UX.
-      scanWarnings.push(
-        'Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); launching without user confirmation.',
-      );
-      ctx.sessionState.runProjectConfirmed.add(projectKey);
-    } else {
-      let elicitResult: ElicitorResult;
-      try {
-        elicitResult = await ctx.elicitor({
-          message:
-            'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
-          requestedSchema: {
-            type: 'object',
-            properties: {
-              confirm: { type: 'boolean', description: 'Allow run_project to launch the project' },
-            },
-            required: ['confirm'],
-          },
-        });
-      } catch (error) {
-        const elicitMsg = `Elicitation unavailable (${getErrorMessage(error)})`;
-        if (ctx.strictMode) {
-          return err(
-            createErrorResponse(
-              `${elicitMsg}; strict mode refuses to launch without explicit user confirmation.`,
-              [
-                'Unset GODOT_MCP_STRICT to launch without confirmation',
-                'Use an MCP client that supports elicitation',
-              ],
-            ),
-          );
-        }
-        // Elicitation unsupported — fall through with a recorded warning. The
-        // tiered scan above is the real security boundary; the gate is UX.
-        scanWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
-        elicitResult = { action: 'accept', content: { confirm: true } };
-      }
-      if (!isElicitAccepted(elicitResult)) {
-        // A `cancel` action means the client dismissed the prompt without an
-        // explicit choice. Some clients (e.g. Claude Desktop) auto-cancel
-        // elicitation without ever displaying it, so distinguish it from an
-        // explicit `decline` and point the user at the opt-out.
-        const cancelled = elicitResult.action === 'cancel';
-        return err(
-          createErrorResponse(
-            cancelled
-              ? 'run_project confirmation was cancelled without an explicit choice. Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them.'
-              : 'User declined run_project. The project was not launched.',
-            [
-              'Retry run_project once you intend to launch the project',
-              'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them',
-            ],
-          ),
-        );
-      }
-      ctx.sessionState.runProjectConfirmed.add(projectKey);
-    }
-  }
+  const gate = await runLaunchGate(
+    { projectPath, scene: scene.value, confirm: true, toolName: 'run_project' },
+    ctx,
+  );
+  if (!gate.ok) return gate;
+  const { warnings } = gate.value;
 
   if (!runner.getGodotPath()) {
     await runner.detectGodotPath();
@@ -1146,16 +939,9 @@ export async function handleRunProject(
     if (isProfiling) {
       lines.push('- Profiling enabled: use profile_project or start_profiler');
     }
-    const allWarnings = [
-      ...scanFindings.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match)),
-      ...scanWarnings,
-    ];
-    if (allWarnings.length > 0) {
+    if (warnings.length > 0) {
       lines.push('', 'Security scan findings:');
-      for (const w of allWarnings.slice(0, MAX_SCAN_WARNINGS_SHOWN)) lines.push(`- ${w}`);
-      if (allWarnings.length > MAX_SCAN_WARNINGS_SHOWN) {
-        lines.push(`- +${allWarnings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
-      }
+      for (const w of warnings) lines.push(`- ${w}`);
     }
 
     const content: Array<{ type: string; [k: string]: unknown }> = [
