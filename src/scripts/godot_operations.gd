@@ -2451,6 +2451,11 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var results: Array = []
 	var scene_cache: Dictionary = {}
 	var batch_warnings: Array = []
+	# Scene cache key (normalized res:// path) -> indexes into `results` of the
+	# successful mutations applied to that cached scene and not yet written.
+	# Only the closing auto-save writes them, so a failed save has to reach
+	# exactly these entries.
+	var unsaved_results_by_scene: Dictionary = {}
 
 	# Pre-pass: probe everything the batch will load, for the cold-import state
 	# and for missing files, BEFORE any mutation is applied. Two kinds of value
@@ -2533,10 +2538,24 @@ func batch_scene_operations(params: Dictionary) -> void:
 			continue
 		var result = {"operation": op_name, "scenePath": scene_path}
 
-		if scene_path != "" and scene_path not in scene_cache:
-			var scene_root = load_scene_instance(scene_path)
-			if scene_root:
-				scene_cache[scene_path] = scene_root
+		# The cache is keyed on the normalized path, the same key the pre-pass
+		# dedups on, so "a.tscn", "./a.tscn" and "res://a.tscn" are one scene.
+		# Keyed on the raw string they would be loaded into independent trees
+		# that the closing save writes over each other.
+		var scene_key := ""
+		if scene_path != "":
+			scene_key = normalize_scene_path(scene_path)
+			if scene_key.is_empty():
+				result["error"] = "Path escapes the project root: " + scene_path
+				results.append(result)
+				if abort_on_error:
+					break
+				continue
+
+		if scene_key != "" and scene_key not in scene_cache:
+			var loaded_root = load_scene_instance(scene_path)
+			if loaded_root:
+				scene_cache[scene_key] = loaded_root
 			else:
 				result["error"] = "Failed to load scene: " + scene_path
 				results.append(result)
@@ -2544,7 +2563,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 					break
 				continue
 
-		var scene_root = scene_cache.get(scene_path, null) if scene_path != "" else null
+		var scene_root = scene_cache.get(scene_key, null) if scene_key != "" else null
 
 		match op_name:
 			"add_node":
@@ -2582,6 +2601,14 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["error"] = "no properties were set"
 					if apply_result.results.size() > 0:
 						result["updates"] = apply_result.results
+					# The entry reads as a success once any update lands, so the
+					# updates that did not would sit two levels down unseen.
+					var failed_updates := 0
+					for update_result in apply_result.results:
+						if update_result.has("error"):
+							failed_updates += 1
+					if apply_result.any_set and failed_updates > 0:
+						batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"
@@ -2592,8 +2619,11 @@ func batch_scene_operations(params: Dictionary) -> void:
 						result["savedScenePath"] = _project_relative(normalize_scene_path(str(new_path)))
 						# Only evict on normal save; save-as leaves the mutated scene in
 						# cache so subsequent ops on scene_path still see accumulated mutations.
-						if new_path == scene_path:
-							scene_cache.erase(scene_path)
+						# Evicting also settles the earlier entries for this scene: the
+						# file now holds them, so a later failed auto-save is not theirs.
+						if normalize_scene_path(str(new_path)) == scene_key:
+							scene_cache.erase(scene_key)
+							unsaved_results_by_scene.erase(scene_key)
 					else:
 						result["error"] = "Failed to save scene: " + scene_path
 			_:
@@ -2622,12 +2652,30 @@ func batch_scene_operations(params: Dictionary) -> void:
 			# layer to import and replay it: the replay would re-apply what is
 			# about to be saved and leave duplicate nodes behind.
 			import_marker_armed = false
+			# A save entry reports its own write, so only the mutations wait on
+			# the closing auto-save.
+			if op_name != "save":
+				if not unsaved_results_by_scene.has(scene_key):
+					unsaved_results_by_scene[scene_key] = []
+				unsaved_results_by_scene[scene_key].append(results.size() - 1)
 		if abort_on_error and result.has("error"):
 			break
 
-	# Auto-save any scenes that were mutated but not explicitly saved
-	for scene_path in scene_cache:
-		save_scene_to_path(scene_cache[scene_path], scene_path)
+	# Auto-save any scenes that were mutated but not explicitly saved. A scene
+	# that cannot be written leaves its entries claiming work that exists only in
+	# a process about to exit, so each is rewritten to say so.
+	for scene_key in scene_cache:
+		if save_scene_to_path(scene_cache[scene_key], scene_key):
+			continue
+		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
+		if unsaved.is_empty():
+			continue
+		var scene_label := _project_relative(scene_key)
+		for result_index in unsaved:
+			var unsaved_entry: Dictionary = results[result_index]
+			unsaved_entry.erase("success")
+			unsaved_entry["error"] = "applied in memory but the scene could not be saved: " + scene_label
+		batch_warnings.append("Scene %s could not be saved; %d operation(s) on it were not written" % [scene_label, unsaved.size()])
 
 	var batch_payload := {"results": results}
 	if not batch_warnings.is_empty():
