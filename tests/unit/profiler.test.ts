@@ -10,7 +10,7 @@
  * length.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as net from 'net';
 import { decodeVariant, encodeVariant, type Variant } from '../../src/utils/godot-variant.js';
 import { DebuggerProfiler, ProfilerError } from '../../src/utils/profiler.js';
@@ -495,5 +495,104 @@ describe('DebuggerProfiler readability after the engine goes away', () => {
     await waitUntil(() => fake.commandsNamed('continue').length === 1, 'continue reply');
     expect(result.frames).toBe(1);
     expect(result.rows[0]?.calls).toBe(6);
+  });
+});
+
+describe('DebuggerProfiler incomplete captures', () => {
+  const TOTALS_TIMEOUT_ADVANCE_MS = 10_001;
+  const GAP_BEFORE_LAST_FRAME_MS = 60;
+  const IDLE_AFTER_LAST_FRAME_MS = 400;
+  const MEASURED_SECONDS_MIN = 0.03;
+  const MEASURED_SECONDS_MAX = 0.3;
+
+  /** A capture with three usable frames, still open. */
+  async function openCapture(): Promise<{ p: DebuggerProfiler; fake: FakeGodot }> {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, []),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0.016, [[0, 2, 0.002, 0.004]]),
+    ]);
+    return { p, fake };
+  }
+
+  it('a capture closed by the totals timeout is marked incomplete and leads with a warning', async () => {
+    const { p } = await openCapture();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const stopped = p.stop(10, 'selfMs');
+      await vi.advanceTimersByTimeAsync(TOTALS_TIMEOUT_ADVANCE_MS);
+      const result = await stopped;
+      expect(result.complete).toBe(false);
+      expect(Object.keys(result)[0]).toBe('warnings');
+      expect(result.warnings?.[0]).toMatch(/capture is incomplete.*closing totals/);
+      expect(result.frames).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a capture closed by a disconnect is still marked incomplete when it is re-read', async () => {
+    const { p, fake } = await openCapture();
+    const stopped = p.stop(10, 'selfMs');
+    fake.close();
+    await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+
+    const reread = await p.stop(10, 'selfMs');
+    expect(reread.complete).toBe(false);
+    expect(Object.keys(reread)[0]).toBe('warnings');
+    expect(reread.warnings?.[0]).toMatch(/connection dropped/);
+  });
+
+  it('seconds is measured to the last folded frame when the capture did not close normally', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
+    fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
+    fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, GAP_BEFORE_LAST_FRAME_MS));
+    fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 1, 0.001, 0.002]])]);
+    await new Promise((resolve) => setTimeout(resolve, IDLE_AFTER_LAST_FRAME_MS));
+
+    const stopped = p.stop(10, 'selfMs');
+    fake.close();
+    await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+    const result = await p.stop(10, 'selfMs');
+    expect(result.frames).toBe(2);
+    expect(result.seconds).toBeGreaterThan(MEASURED_SECONDS_MIN);
+    expect(result.seconds).toBeLessThan(MEASURED_SECONDS_MAX);
+  });
+
+  it('a capture closed by the engine is complete and carries no warning', async () => {
+    const { p, fake } = await openCapture();
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 2, 'profiler disable');
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const result = await stopped;
+    expect(result.complete).toBe(true);
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('percentOfFrame is null with a warning when the engine reported a zero frame time', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0, []),
+      frame(2, 0, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0, [[0, 1, 0.001, 0.002]]),
+    ]);
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 2, 'profiler disable');
+    fake.send(['servers:profile_total', THREAD, frame(3, 0, [])]);
+    const result = await stopped;
+    expect(result.rows[0]?.percentOfFrame).toBeNull();
+    expect(Object.keys(result)[0]).toBe('warnings');
+    expect(result.warnings).toEqual([
+      'percentOfFrame is null: the engine reported a frame time of 0, so the share could not be computed.',
+    ]);
+    expect(result.complete).toBe(true);
   });
 });

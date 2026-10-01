@@ -196,6 +196,7 @@ Reading the numbers:
 - A capture stops itself at its time limit, measured from the first frame folded rather than from the enable round trip. `stop_project` ends it along with the session.
 - A capture that folded no usable frames errors rather than returning zeroes: the first frame received is always discarded, so a window shorter than two rendered frames has nothing to average.
 - A finished capture stays readable after the game exits, so the capture taken just before a crash can still be ranked.
+- `complete` is false, with a leading warning, when the capture closed without the engine's totals packet or after a disconnect; `seconds` then ends at the last frame received, and `percentOfFrame` is `null` when the engine reported no frame time.
 
 While the debugger is attached, a script error or a `breakpoint` would normally pause the game; the server answers every break with `continue`, so the game keeps running and the error still shows up in `get_debug_output`.
 

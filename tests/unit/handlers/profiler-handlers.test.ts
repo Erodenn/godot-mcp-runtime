@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  profilerToolDefinitions,
   handleProfileProject,
   handleStartProfiler,
   handleStopProfiler,
@@ -17,6 +18,7 @@ import { ProfilerError, type DebuggerProfiler } from '../../../src/utils/profile
 import type { GodotProcess, GodotRunner } from '../../../src/utils/godot-runner.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 
 interface ProfilerCall {
   method: 'start' | 'stop' | 'captureWindow';
@@ -209,5 +211,51 @@ describe('handleStopProfiler', () => {
 
     expectErrorMatching(result, /Start a capture first/);
     expect(unwrap(result).content[1]?.text).toMatch(/start_profiler/);
+  });
+});
+
+describe('profiler handlers: incomplete captures', () => {
+  const INCOMPLETE_WARNING = 'The capture is incomplete: Godot did not send its closing totals.';
+  const DESCRIPTION_MAX_CHARS = 500;
+  const incompleteResult = { ...captureResult, complete: false, warnings: [INCOMPLETE_WARNING] };
+
+  function withIncompleteCapture(): ReturnType<typeof createProfilerFake> {
+    const fake = createProfilerFake();
+    const profiler = (
+      fake.asRunner as unknown as {
+        activeProfiler: Record<string, (...args: unknown[]) => Promise<unknown>>;
+      }
+    ).activeProfiler;
+    profiler.stop = async () => incompleteResult;
+    profiler.captureWindow = async () => incompleteResult;
+    return fake;
+  }
+
+  it.each([
+    ['profile_project', handleProfileProject],
+    ['stop_profiler', handleStopProfiler],
+  ])('%s leads its payload with the capture warnings', async (name, handler) => {
+    const result = await handler(withIncompleteCapture().asRunner, {});
+    const payload = expectMatchesOutputSchema(name, result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings).toEqual([INCOMPLETE_WARNING]);
+    expect(payload.complete).toBe(false);
+  });
+
+  it('declares warnings, complete and a nullable percentOfFrame, and names complete in the descriptions', () => {
+    for (const name of ['profile_project', 'stop_profiler']) {
+      const tool = profilerToolDefinitions.find((t) => t.name === name);
+      const schema = tool?.outputSchema as unknown as {
+        properties: Record<string, unknown>;
+      };
+      expect(schema.properties).toHaveProperty('warnings');
+      expect(schema.properties.complete).toEqual({ type: 'boolean' });
+      const rows = schema.properties.rows as {
+        items: { properties: { percentOfFrame: { type: string[] } } };
+      };
+      expect(rows.items.properties.percentOfFrame.type).toEqual(['number', 'null']);
+      expect(tool?.description).toContain('complete');
+      expect(tool?.description.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS);
+    }
   });
 });

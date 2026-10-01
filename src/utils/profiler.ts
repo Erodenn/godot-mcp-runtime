@@ -76,7 +76,7 @@ export interface ProfileRow {
   totalMsPerFrame: number;
   msPerCall: number;
   /** Inclusive share of an average frame, the editor's "Frame %" measure. */
-  percentOfFrame: number;
+  percentOfFrame: number | null;
   peak: ProfilePeak | null;
 }
 
@@ -109,6 +109,10 @@ export interface ProfileStartResult {
 }
 
 export interface ProfileResult {
+  /** Present only when the numbers need a caveat; always the first key. */
+  warnings?: string[];
+  /** False when the capture closed without the engine's totals packet or after a disconnect. */
+  complete: boolean;
   seconds: number;
   frames: number;
   framesReceived: number;
@@ -168,6 +172,10 @@ interface Capture {
   servers: Map<string, Map<string, number>>;
   worst: ({ frame: number } & FrameTimings & { rows: FrameRow[] }) | null;
   result: FrameRow[] | null;
+  /** How the capture was closed out; null while it is still open. */
+  closedBy: 'sentinel' | 'timeout' | 'disconnect' | null;
+  /** Wall-clock time the last frame was folded; 0 before the first. */
+  lastFrameAt: number;
 }
 
 type ProfilerState = 'idle' | 'starting' | 'capturing' | 'stopping' | 'finished';
@@ -407,6 +415,8 @@ export class DebuggerProfiler {
       servers: new Map(),
       worst: null,
       result: null,
+      closedBy: null,
+      lastFrameAt: 0,
     };
     this.state = 'starting';
     this.send(true, captureLimit);
@@ -469,8 +479,8 @@ export class DebuggerProfiler {
       // went quiet while the connection held, and what we folded is still
       // good. A disconnect means the process died mid-capture, which the
       // caller needs told — a later stop_profiler re-reads the partial data.
-      this.finalize(capture);
       const recoverable = err instanceof ProfilerError && err.code === 'profile_timeout';
+      this.finalize(capture, recoverable ? 'timeout' : 'disconnect');
       if (!recoverable || capture.frames === 0) throw err;
     }
     return this.summarize(capture, top, sort);
@@ -627,7 +637,7 @@ export class DebuggerProfiler {
       // of 16 the frames saw 37 distinct functions and this packet only 16, and
       // its call counts match our sums exactly. So this is a completion
       // sentinel, not the source of the totals.
-      this.finalize(capture);
+      this.finalize(capture, 'sentinel');
       return;
     }
     if (this.state === 'starting') this.state = 'capturing';
@@ -644,6 +654,7 @@ export class DebuggerProfiler {
 
     const frame = sample.frame;
     capture.frames += 1;
+    capture.lastFrameAt = Date.now();
     if (capture.frames === 1) {
       // Measure the window from real data, not from the enable round trip: the
       // handshake and first-frame latency are not time the game was profiled.
@@ -728,22 +739,41 @@ export class DebuggerProfiler {
     }
     servers.sort((a, b) => b.msPerFrame - a.msPerFrame);
 
+    const warnings: string[] = [];
+    if (capture.closedBy === 'timeout') {
+      warnings.push(
+        `The capture is incomplete: Godot did not send its closing totals within ${WAIT_TOTAL_MS / 1000} s, so this covers only the frames received and seconds is measured to the last of them.`,
+      );
+    } else if (capture.closedBy === 'disconnect') {
+      warnings.push(
+        'The capture is incomplete: the debugger connection dropped before Godot closed it (the game exited or crashed), so this covers only the frames received before that.',
+      );
+    }
     const rows: ProfileRow[] = [];
+    let zeroFrameTime = false;
     for (const row of capture.result ?? []) {
       if (row.calls <= 0) continue;
       const totalMsPerFrame = row.totalMs / frames;
+      if (!(frame.frameMs.avg > 0)) zeroFrameTime = true;
       rows.push({
         ...row,
         callsPerFrame: row.calls / frames,
         selfMsPerFrame: row.selfMs / frames,
         totalMsPerFrame,
         msPerCall: row.totalMs / row.calls,
-        percentOfFrame: frame.frameMs.avg > 0 ? (totalMsPerFrame / frame.frameMs.avg) * 100 : 0,
+        percentOfFrame: frame.frameMs.avg > 0 ? (totalMsPerFrame / frame.frameMs.avg) * 100 : null,
         peak: capture.peaks.get(row.signature) ?? null,
       });
     }
     rows.sort((a, b) => b[sort] - a[sort]);
+    if (zeroFrameTime) {
+      warnings.push(
+        'percentOfFrame is null: the engine reported a frame time of 0, so the share could not be computed.',
+      );
+    }
     return roundNumbers({
+      ...(warnings.length > 0 ? { warnings } : {}),
+      complete: capture.closedBy === 'sentinel',
       seconds: capture.elapsedMs / 1000,
       frames: capture.frames,
       framesReceived: capture.framesReceived,
@@ -811,10 +841,14 @@ export class DebuggerProfiler {
    * later `start` as busy while `stop` kept timing out, and the advice on that
    * error points straight back at `stop`.
    */
-  private finalize(capture: Capture): void {
+  private finalize(capture: Capture, closedBy: NonNullable<Capture['closedBy']>): void {
     if (capture.result === null) {
       capture.result = [...capture.totals.values()];
-      capture.elapsedMs = Date.now() - capture.startedAt;
+      capture.closedBy = closedBy;
+      // Without the engine's closing packet the window ends at the last frame
+      // folded, not at this call, which may be a whole timeout later.
+      if (closedBy === 'sentinel') capture.elapsedMs = Date.now() - capture.startedAt;
+      else if (capture.frames > 0) capture.elapsedMs = capture.lastFrameAt - capture.startedAt;
     }
     this.state = 'finished';
     this.clearAutoStop();

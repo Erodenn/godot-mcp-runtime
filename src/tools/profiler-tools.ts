@@ -2,7 +2,7 @@ import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import { optionalNumber, optionalString } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { noLiveCurrentSessionError, type NoSessionWording } from '../utils/session-report.js';
@@ -71,7 +71,7 @@ const rowSchema = {
     selfMsPerFrame: { type: 'number' },
     totalMsPerFrame: { type: 'number' },
     msPerCall: { type: 'number' },
-    percentOfFrame: { type: 'number' },
+    percentOfFrame: { type: ['number', 'null'] },
     peak: {
       type: ['object', 'null'],
       properties: {
@@ -87,7 +87,9 @@ const rowSchema = {
 const captureResultSchema = {
   type: 'object',
   properties: {
+    warnings: { type: 'array', items: { type: 'string' } },
     projectPath: { type: 'string' },
+    complete: { type: 'boolean' },
     seconds: { type: 'number' },
     frames: { type: 'number' },
     framesReceived: { type: 'number' },
@@ -127,7 +129,7 @@ export const profilerToolDefinitions = [
   {
     name: 'profile_project',
     description:
-      "Capture a window of Godot's function profiler, the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap, so never sum totalMs. Returns: projectPath, rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached. Errors if profiling was off at launch or a capture is already open.",
+      "Capture a window of Godot's function profiler. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap, never sum totalMs. Returns: projectPath, complete (false plus a leading warning if the capture ended early), rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), frame budget, servers, worstFrame, frames/frameGaps/limitReached. Errors if profiling was off or a capture is open.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -175,7 +177,7 @@ export const profilerToolDefinitions = [
   {
     name: 'stop_profiler',
     description:
-      'Stop the capture started by start_profiler and rank the recorded functions; a capture that already hit its time limit is read back as-is, and can be re-read with a different sort. Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: the same payload as profile_project - rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames, frameGaps, limitReached. Errors if no capture was started.',
+      'Stop the start_profiler capture and rank its functions; one that hit its time limit is read back as-is, re-readable with another sort. Times are elapsed, not CPU; inclusive rows overlap, never sum totalMs. Returns: the profile_project payload: complete (false plus a leading warning if the capture ended early), rows (function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames/frameGaps/limitReached. Errors if no capture was started.',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -327,7 +329,9 @@ export async function handleProfileProject(
       sort.value,
       captureLimit.value ?? CAPTURE_LIMIT_MAX,
     );
-    return createStructuredResponse({ projectPath: profiler.value.projectPath, ...result });
+    return createStructuredResponse(
+      leadWithWarnings({ projectPath: profiler.value.projectPath, ...result }),
+    );
   } catch (error: unknown) {
     return err(profilerFailure(error));
   }
@@ -374,7 +378,9 @@ export async function handleStopProfiler(
 
   try {
     const result = await profiler.value.profiler.stop(top.value, sort.value);
-    return createStructuredResponse({ projectPath: profiler.value.projectPath, ...result });
+    return createStructuredResponse(
+      leadWithWarnings({ projectPath: profiler.value.projectPath, ...result }),
+    );
   } catch (error: unknown) {
     return err(profilerFailure(error));
   }
