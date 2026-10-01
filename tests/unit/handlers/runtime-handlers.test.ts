@@ -31,7 +31,10 @@ import {
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { encodePng, solidRgba } from '../../helpers/png-fixtures.js';
 import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
-import { BridgeAttachConflictError } from '../../../src/utils/bridge-manager.js';
+import {
+  BridgeAttachConflictError,
+  BridgeRegistryUnreadableError,
+} from '../../../src/utils/bridge-manager.js';
 import type {
   GodotRunner,
   GodotProcess,
@@ -454,6 +457,23 @@ describe('handleRunProject validation', () => {
     expectErrorMatching(result, /No display server available/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/attach: true/);
+  });
+
+  it('names an unreadable owner registry and tells the caller to retry', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setRunProjectError(
+      new BridgeRegistryUnreadableError('cannot read owners/1-a.json: EBUSY'),
+    );
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+    expectErrorMatching(result, /bridge owner registry could not be read: cannot read owners/);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toMatch(/Retry run_project/);
+    expect(solutionsText).not.toMatch(/GODOT_PATH/);
   });
 
   it('cleans up bridge artifacts when process exits before bridge readiness', async () => {

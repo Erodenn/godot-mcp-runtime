@@ -846,9 +846,13 @@ export class DebuggerProfiler {
       capture.result = [...capture.totals.values()];
       capture.closedBy = closedBy;
       // Without the engine's closing packet the window ends at the last frame
-      // folded, not at this call, which may be a whole timeout later.
+      // folded, not at this call, which may be a whole timeout later. Never
+      // below zero: the first folded frame is stamped a moment before it
+      // restarts the window, so a one-frame capture can read a tick negative.
       if (closedBy === 'sentinel') capture.elapsedMs = Date.now() - capture.startedAt;
-      else if (capture.frames > 0) capture.elapsedMs = capture.lastFrameAt - capture.startedAt;
+      else if (capture.frames > 0) {
+        capture.elapsedMs = Math.max(0, capture.lastFrameAt - capture.startedAt);
+      }
     }
     this.state = 'finished';
     this.clearAutoStop();

@@ -280,6 +280,20 @@ describe('spawned-process exit auto-clear', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  // An owner registry that cannot be read makes inject refuse. Launching anyway
+  // would start a game with no bridge and end as a bridge timeout that blames
+  // something else, so this one is surfaced too, before anything is spawned.
+  it('rethrows an unreadable owner registry instead of launching without a bridge', async () => {
+    const { BridgeRegistryUnreadableError } = await import('../../src/utils/bridge-manager.js');
+    (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
+      throw new BridgeRegistryUnreadableError('cannot read owners/1-a.json: EBUSY');
+    };
+
+    await expect(start()).rejects.toBeInstanceOf(BridgeRegistryUnreadableError);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(runner.activeSessionMode).toBeNull();
+  });
+
   it('returns null from stopProject when there is no session and no process', async () => {
     expect(await runner.stopProject()).toBeNull();
   });

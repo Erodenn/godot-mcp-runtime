@@ -131,6 +131,21 @@ const BOOLEAN_FLAG_OFF_EFFECTS: ReadonlyArray<readonly [name: string, effect: st
   ['GODOT_MCP_DISABLE_SECURITY', 'the security gate stays ON'],
 ];
 
+const HEX_RADIX = 16;
+const UNICODE_ESCAPE_DIGITS = 4;
+
+/**
+ * JSON-quote a value for a stderr line, with every character outside printable
+ * ASCII written as a `\uXXXX` escape. The value comes from the environment, and
+ * a console that is not UTF-8 would print anything else as noise.
+ */
+function quoteAsAscii(value: string): string {
+  return JSON.stringify(value).replace(
+    /[^\x20-\x7e]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(HEX_RADIX).padStart(UNICODE_ESCAPE_DIGITS, '0')}`,
+  );
+}
+
 /**
  * One startup line per security flag that is set to something other than
  * `true` or `false`. Each flag is read as the exact string `true`, so a value
@@ -143,9 +158,7 @@ export function describeIgnoredFlagValues(env: Record<string, string | undefined
   for (const [name, effect] of BOOLEAN_FLAG_OFF_EFFECTS) {
     const value = env[name];
     if (value === undefined || value === '' || value === 'true' || value === 'false') continue;
-    lines.push(
-      `[SERVER] ${name}=${JSON.stringify(value)} is not "true" and was ignored: ${effect}`,
-    );
+    lines.push(`[SERVER] ${name}=${quoteAsAscii(value)} is not "true" and was ignored: ${effect}`);
   }
   return lines;
 }

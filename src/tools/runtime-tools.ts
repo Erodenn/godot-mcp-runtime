@@ -42,6 +42,7 @@ import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
 import {
   BridgeAttachConflictError,
   BridgeAutoloadCollisionError,
+  BridgeRegistryUnreadableError,
 } from '../utils/bridge-manager.js';
 import { runLaunchGate } from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
@@ -1150,6 +1151,16 @@ async function startSpawnedSession(
         createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
           'Rename the existing McpBridge autoload in project.godot, then retry run_project',
           'Use list_autoloads to see what the project currently registers',
+        ]),
+      );
+    }
+    if (error instanceof BridgeRegistryUnreadableError) {
+      // Nothing was launched: which sessions own the shared bridge is unknown,
+      // so the bridge was not injected.
+      return err(
+        createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+          'Retry run_project: a registry file that another session was writing at that moment is readable again a moment later',
+          'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
         ]),
       );
     }

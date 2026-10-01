@@ -595,4 +595,30 @@ describe('DebuggerProfiler incomplete captures', () => {
     ]);
     expect(result.complete).toBe(true);
   });
+
+  it('seconds is never negative for a capture that folded a single frame', async () => {
+    const CLOCK_STEP_MS = 25;
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    // A clock that moves on every read, so the stamp taken when the one frame
+    // is folded is older than the window start taken right after it.
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => (now += CLOCK_STEP_MS));
+    try {
+      fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
+      fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
+      fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+      await running;
+      const stopped = p.stop(10, 'selfMs');
+      fake.close();
+      await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+      const result = await p.stop(10, 'selfMs');
+      expect(result.frames).toBe(1);
+      expect(result.complete).toBe(false);
+      expect(result.seconds).toBe(0);
+    } finally {
+      clock.mockRestore();
+    }
+  });
 });

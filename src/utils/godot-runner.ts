@@ -5,7 +5,11 @@ import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
 import * as net from 'net';
 import { randomBytes } from 'crypto';
-import { BridgeAutoloadCollisionError, BridgeManager } from './bridge-manager.js';
+import {
+  BridgeAutoloadCollisionError,
+  BridgeManager,
+  BridgeRegistryUnreadableError,
+} from './bridge-manager.js';
 import type { BridgeOwnerInfo } from './bridge-manager.js';
 import { DebuggerProfiler } from './profiler.js';
 import {
@@ -824,12 +828,19 @@ export class GodotRunner {
         this.bridge.inject(projectPath, port);
         injected = true;
       } catch (err) {
-        // A name collision with a user's own McpBridge autoload is the one
-        // inject failure the caller can act on, and swallowing it would surface
-        // as a generic bridge timeout minutes later. Everything else (an
+        // A name collision with a user's own McpBridge autoload, and an owner
+        // registry that could not be read, are the inject failures the caller
+        // can act on (rename the autoload; retry), and swallowing either would
+        // surface as a generic bridge timeout half a minute later. Inject
+        // leaves no owner file behind for either. Everything else (an
         // unwritable project directory, a packaging problem in the shipped
         // template) still degrades to a bridgeless run, as before.
-        if (err instanceof BridgeAutoloadCollisionError) throw err;
+        if (
+          err instanceof BridgeAutoloadCollisionError ||
+          err instanceof BridgeRegistryUnreadableError
+        ) {
+          throw err;
+        }
         logDebug(`Non-fatal: Failed to inject bridge autoload: ${err}`);
       }
 

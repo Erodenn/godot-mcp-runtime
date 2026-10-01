@@ -87,4 +87,16 @@ describe('describeIgnoredFlagValues', () => {
       '[SERVER] GODOT_MCP_DISABLE_SECURITY=" true" is not "true" and was ignored: the security gate stays ON',
     ]);
   });
+
+  it('writes a value outside printable ASCII as escapes, so the line is safe on any console', () => {
+    const accentedLetter = String.fromCodePoint(0xed);
+    const astralSymbol = String.fromCodePoint(0x1f600);
+    const [line] = describeIgnoredFlagValues({
+      GODOT_MCP_STRICT: `s${accentedLetter} ${astralSymbol}`,
+    });
+    expect(line).toBe(
+      '[SERVER] GODOT_MCP_STRICT="s\\u00ed \\ud83d\\ude00" is not "true" and was ignored: strict mode is OFF',
+    );
+    expect(line).toMatch(/^[\x20-\x7e]+$/);
+  });
 });
