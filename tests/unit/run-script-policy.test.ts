@@ -727,3 +727,35 @@ describe('evaluateScript: strict mode promotes the write primitives', () => {
     expect(strict.promotedByStrict).toBe(true);
   });
 });
+
+describe('evaluateScript: chains split by a continuation or hidden by an operator', () => {
+  it('blocks OS and .execute split by a backslash continuation', () => {
+    const d = evaluateScript(VALID_PREFIX + 'OS \\\n.execute("rm", [])\n');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.direct_exec.OS.execute')).toBe(true);
+  });
+
+  it('blocks OS.execute written after an unspaced caret', () => {
+    const d = evalLine('var x = 1^OS.execute("rm", [])');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.direct_exec.OS.execute')).toBe(true);
+  });
+
+  it('blocks OS.execute split by a comment inside parentheses', () => {
+    const d = evaluateScript(VALID_PREFIX + 'print(OS # note\n\t.execute("rm", []))\n');
+    expect(d.decision).toBe('hard_block');
+  });
+
+  it('a clean script using a caret and trailing comments stays ok', () => {
+    const d = evaluateScript(
+      VALID_PREFIX + 'var x = 5 ^ 3 # OS.execute\n\tvar y = x ^x\n\tvar p = ^"A/B"\n\treturn y\n',
+    );
+    expect(d.decision).toBe('ok');
+    expect(d.matches).toEqual([]);
+  });
+
+  it('a script with a continuation between unrelated statements stays ok', () => {
+    const d = evaluateScript(VALID_PREFIX + 'var a = 1 + \\\n\t2\n\tvar b = a # OS\n\treturn b\n');
+    expect(d.decision).toBe('ok');
+  });
+});

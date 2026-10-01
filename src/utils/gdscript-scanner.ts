@@ -12,7 +12,8 @@
  *  - Skip string-literal contents in all GDScript forms (`"..."`, `'...'`,
  *    `"""..."""`, `'''...'''`).
  *  - Skip node-path literals (`$Foo/Bar`, `^"..."`) — their contents are
- *    Godot scene paths, not GDScript code.
+ *    Godot scene paths, not GDScript code. A `^` before anything but a quote
+ *    is the XOR operator and is emitted as an `other` token.
  *  - Emit identifiers, member chains, parentheses, commas, and a small set
  *    of other punctuation. Everything else (operators, numbers) collapses to
  *    an `other` token the policy ignores.
@@ -21,7 +22,8 @@
  *
  * Line continuation (`\` at end of line) is handled by treating the next line
  * as a continuation of the current logical line for member-chain coalescing
- * purposes.
+ * purposes. The chain builder also reads across a continuation and across a
+ * `#` comment on either side of a `.`, as GDScript itself does.
  *
  * This tokenizer is a best-effort accident guard, not a sound static
  * analysis — see `run-script-policy.ts` and `docs/security.md` for the full
@@ -71,10 +73,11 @@ function isNodePathChar(ch: string): boolean {
 }
 
 /**
- * Skip inline whitespace (space/tab) and newlines starting at `pos`, tracking
- * line/lineStart across any newline crossed. Used by the member-chain builder
- * to peek past whitespace/newlines around a `.` without committing to the
- * skip unless the peek finds what it's looking for (see the identifier
+ * Skip inline whitespace (space/tab), newlines, backslash line continuations
+ * and `#` comments starting at `pos`, tracking line/lineStart across any
+ * newline crossed. Used by the member-chain builder to peek past everything
+ * GDScript itself reads as insignificant around a `.` without committing to
+ * the skip unless the peek finds what it's looking for (see the identifier
  * branch in `tokenize`).
  */
 function skipWsAndNewlines(
@@ -101,6 +104,24 @@ function skipWsAndNewlines(
       if (pos < len && source[pos] === '\n') pos++;
       line++;
       lineStart = pos;
+      continue;
+    }
+    if (c === '\\') {
+      // A continuation is a backslash, optional blanks, then a line break. A
+      // backslash followed by anything else is not skippable.
+      let j = pos + 1;
+      while (j < len && (source[j] === ' ' || source[j] === '\t')) j++;
+      if (j >= len || (source[j] !== '\n' && source[j] !== '\r')) break;
+      const crlf = source[j] === '\r' && source[j + 1] === '\n';
+      pos = j + (crlf ? 2 : 1);
+      line++;
+      lineStart = pos;
+      continue;
+    }
+    if (c === '#') {
+      // A comment runs to the end of its line; the line break itself is
+      // handled by the next iteration.
+      while (pos < len && source[pos] !== '\n' && source[pos] !== '\r') pos++;
       continue;
     }
     break;
@@ -247,25 +268,29 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // String-name literal: `^"..."` or `^Identifier`. Treat as opaque string.
+    // String-name literal: `^"..."`, an opaque string. A `^` followed by
+    // anything else is the XOR operator, and what follows it is ordinary code
+    // (`1^OS.execute(...)` must still reach the identifier branch).
     if (ch === '^') {
       const startLine = line;
       const startCol = colOf(i);
-      i++;
-      if (i < len && (source[i] === '"' || source[i] === "'")) {
-        const quote = source[i]!;
+      const next = i + 1 < len ? source[i + 1] : '';
+      if (next !== '"' && next !== "'") {
+        tokens.push({ kind: 'other', text: '^', line, column: startCol });
         i++;
-        while (i < len && source[i] !== quote && source[i] !== '\n') {
-          if (source[i] === '\\' && i + 1 < len) {
-            i += 2;
-            continue;
-          }
-          i++;
-        }
-        if (i < len && source[i] === quote) i++;
-      } else {
-        while (i < len && isIdentPart(source[i]!)) i++;
+        continue;
       }
+      i++;
+      const quote = source[i]!;
+      i++;
+      while (i < len && source[i] !== quote && source[i] !== '\n') {
+        if (source[i] === '\\' && i + 1 < len) {
+          i += 2;
+          continue;
+        }
+        i++;
+      }
+      if (i < len && source[i] === quote) i++;
       tokens.push({ kind: 'string', text: '<string-name>', line: startLine, column: startCol });
       continue;
     }
