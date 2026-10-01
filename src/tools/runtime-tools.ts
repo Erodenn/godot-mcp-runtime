@@ -116,7 +116,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'launch_editor',
     description:
-      'Open the Godot editor GUI for a project for the human user. Use only when the user explicitly asks to "open the editor"; for any agent-driven work, use the headless scene/node tools (add_node, set_node_properties, etc.) instead - the editor cannot be controlled programmatically. Returns plain-text confirmation after spawning the editor process. Errors if projectPath has no project.godot.',
+      'Open the Godot editor GUI for a project, for the human user. Use only when the user asks to open the editor; for agent-driven work use the headless scene and node tools (add_node, set_node_properties, etc.), since the editor cannot be controlled programmatically. Returns: projectPath, the editor process pid and message; pid is null with a leading warnings entry when the process reported none. Errors if projectPath has no project.godot.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -127,11 +127,24 @@ export const runtimeToolDefinitions = [
       },
       required: ['projectPath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        projectPath: { type: 'string' },
+        pid: {
+          type: ['number', 'null'],
+          description: 'Process id of the editor. Null when the process reported none.',
+        },
+        message: { type: 'string' },
+      },
+      required: ['projectPath', 'pid', 'message'],
+    },
   },
   {
     name: 'run_project',
     description:
-      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true inject the MCP bridge for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. It becomes the current session; sessions on other projects keep running (switch_project). Returns: projectPath, sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Call stop_project when done. Errors if the bridge never answers or attach is combined with a spawn-only parameter.',
+      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true wait for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. The new session becomes current; sessions on other projects keep running. Returns: projectPath, sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Errors if the bridge never answers.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -176,10 +189,9 @@ export const runtimeToolDefinitions = [
         projectPath: { type: 'string' },
         sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
         bridgePort: { type: ['number', 'null'] },
-        bridgeReady: { type: 'boolean' },
         message: { type: 'string' },
       },
-      required: ['projectPath', 'sessionMode', 'bridgePort', 'bridgeReady', 'message'],
+      required: ['projectPath', 'sessionMode', 'bridgePort', 'message'],
     },
   },
   {
@@ -225,7 +237,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_debug_output',
     description:
-      'Get captured stdout/stderr from a spawned Godot project. Use whenever runtime tools fail unexpectedly - script errors, missing nodes, and crash backtraces all surface here. Still works after the process exits or crashes: the session clears itself on exit but the captured logs are retained until stop_project. Requires a spawned session (attach mode does not capture output). Returns: projectPath, output/errors (last `limit` lines each, default 200), running (false after exit, null when attached), exitCode after exit, attached:true with empty arrays in attached mode.',
+      'Read captured stdout/stderr from a spawned Godot project. Use whenever a runtime tool fails unexpectedly: script errors, missing nodes and crash backtraces surface here. Still works after the process exits or crashes; the logs are kept until stop_project. Returns: projectPath, sessionMode, output and errors (last `limit` lines each, default 200), running (false after exit) and exitCode after exit. An attached session captures nothing: output and errors are empty and running is null.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -241,11 +253,11 @@ export const runtimeToolDefinitions = [
       type: 'object',
       properties: {
         projectPath: { type: 'string' },
+        sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
         output: { type: 'array', items: { type: 'string' } },
         errors: { type: 'array', items: { type: 'string' } },
         running: { type: ['boolean', 'null'] },
         exitCode: { type: ['number', 'null'] },
-        attached: { type: 'boolean' },
         tip: { type: 'string' },
       },
     },
@@ -253,7 +265,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and clean up bridge state; sessions on other projects keep running and none becomes current (switch_project selects one). A spawned Godot is stopped; an attached one (run_project attach: true) is detached and left running, never killed. Call when done with runtime testing, even after a crash, and even if you closed the Godot window yourself: it frees the process slot and clears the flag blocking scene-editing tools. A process that exited on its own already removed the bridge autoload at that moment, and this still succeeds - it reports alreadyExited:true with the exit code and the logs captured before the exit, and leaves a finished profiler capture readable. Returns: projectPath, message, mode, externalProcessPreserved, alreadyExited, exitCode (already-exited case), and condensed finalOutput/finalErrors (capped at 200); get_debug_output has the full log. Errors only when there is no session and no exited process to report.',
+      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Sessions on other projects keep running and none becomes current. Call it even after the game crashed or you closed its window: it frees the process slot and reports alreadyExited: true. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed). Errors when there is no session to stop.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -265,7 +277,7 @@ export const runtimeToolDefinitions = [
       properties: {
         projectPath: { type: 'string' },
         message: { type: 'string' },
-        mode: { type: 'string' },
+        sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
         externalProcessPreserved: { type: 'boolean' },
         alreadyExited: { type: 'boolean' },
         exitCode: { type: ['number', 'null'] },
@@ -277,7 +289,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline preview bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
+      'Capture a PNG of the running viewport, saved under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline, bounded to 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session or the bridge times out.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -348,7 +360,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      'Simulate sequential input in a running project and report what each action did. Action `type`: key, mouse_button, mouse_motion, click_element, action, text, wait. For key/mouse_button/action, omit `pressed` to tap (press+release); set it to hold or release. click_element resolves by node path/name (see get_ui_elements), not visible text. Returns: projectPath and results[] per action with ok, timing, signals fired, the Control hit, UI `changes` (appeared/disappeared/changed), `watch` samples, and `errors` from input handlers (spawned sessions only). Invalid batches inject nothing; a runtime failure stops the batch and skips the rest.',
+      'Send input actions to the running project in order and report what each did. Action types are listed in the `actions` schema. For key, mouse_button and action, omit `pressed` to tap; set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success and results[] per action: ok, Control hit, signals fired, UI `changes`, `watch` samples, handler `errors`. An invalid batch injects nothing; a runtime failure skips the rest.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -590,7 +602,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Execute a custom GDScript in the live running project with full scene tree access. Requires an active runtime session. Script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant. Return values are JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, and Node path strings). Use print() for debug output - it appears in get_debug_output, not in the result. In spawned mode, stderr runtime errors escalate to errors (when the script returns null) or surface as warnings. Returns: { projectPath, success, result, warnings?, tip? } where result is the JSON-serialized return value of execute().',
+      'Execute GDScript in the running project with full scene tree access. The script must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, success, result, plus warnings and tip when present. In a spawned session a stderr runtime error is an error when the script returned null, otherwise a warning.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -774,6 +786,11 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
 const BRIDGE_PORT_UNAVAILABLE_WARNING =
   'Bridge port unavailable: the session ended as the bridge became ready.';
 
+const EDITOR_NO_PID_WARNING =
+  'The editor process reported no pid, so it may not have started. Check that GODOT_PATH points at a Godot executable.';
+const EDITOR_LAUNCH_MESSAGE =
+  'Godot editor launched. It is a GUI application and cannot be controlled programmatically: use the headless scene and node tools (add_node, set_node_properties, etc.) to change the project.';
+
 /**
  * Build the `run_project` success payload. `warnings` is the first key and is
  * omitted when empty. A session that ended between the readiness check and
@@ -794,7 +811,6 @@ function buildRunProjectResponse(session: {
     projectPath: resolve(session.projectPath),
     sessionMode: session.sessionMode,
     bridgePort: session.bridgePort,
-    bridgeReady: true,
     message: session.message,
   });
 }
@@ -886,13 +902,14 @@ export async function handleLaunchEditor(
       console.error('Failed to start Godot editor:', spawnErr);
     });
 
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: `Godot editor launched successfully for project at ${parsed.value.projectPath}.\nNote: the editor is a GUI application and cannot be controlled programmatically. Use the scene and node editing tools (add_node, set_node_properties, etc.) to modify the project headlessly without the editor.`,
-        },
-      ],
+    // The pid is the only thing the spawn reports synchronously. A spawn that
+    // fails (bad executable path) leaves it undefined and raises 'error' later.
+    const pid = typeof process.pid === 'number' ? process.pid : null;
+    return createStructuredResponse({
+      ...(pid === null ? { warnings: [EDITOR_NO_PID_WARNING] } : {}),
+      projectPath: resolve(parsed.value.projectPath),
+      pid,
+      message: EDITOR_LAUNCH_MESSAGE,
     });
   } catch (error: unknown) {
     return err(
@@ -1268,10 +1285,10 @@ export function handleGetDebugOutput(
   if (current.mode === 'attached') {
     return createStructuredResponse({
       projectPath: current.projectPath,
+      sessionMode: 'attached',
       output: [],
       errors: [],
       running: null,
-      attached: true,
       tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
     });
   }
@@ -1291,6 +1308,7 @@ export function handleGetDebugOutput(
   const limit = limitResult.value ?? 200;
   const response: {
     projectPath: string;
+    sessionMode: 'spawned';
     output: string[];
     errors: string[];
     running: boolean;
@@ -1298,6 +1316,9 @@ export function handleGetDebugOutput(
     tip?: string;
   } = {
     projectPath: current.projectPath,
+    // Only a spawned session has a process, so logs read from one are a spawned
+    // session's logs even after the exit cleared the session's mode.
+    sessionMode: 'spawned',
     output: proc.output.slice(-limit),
     errors: proc.errors.slice(-limit),
     running: !proc.hasExited,
@@ -1341,7 +1362,7 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
   return createStructuredResponse({
     projectPath: result.projectPath,
     message: remaining === '' ? base : `${base}.${remaining} Call switch_project to select one.`,
-    mode: result.mode,
+    sessionMode: result.mode,
     externalProcessPreserved: result.externalProcessPreserved === true,
     alreadyExited,
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),

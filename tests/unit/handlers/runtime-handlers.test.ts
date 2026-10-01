@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import {
   handleGetDebugOutput,
   handleStopProject,
@@ -39,6 +39,7 @@ import type {
   RuntimeStopResult,
 } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
@@ -111,6 +112,7 @@ interface RuntimeFake {
   setBridgeResponse(response: string, runtimeErrors?: string[]): void;
   setStopResult(result: RuntimeStopResult | null): void;
   setGodotPath(path: string): void;
+  setEditorPid(pid: number | undefined): void;
   setBridgeReady(ready: boolean, error?: string): void;
   setRunProjectError(error: Error | null): void;
   setAttachProjectError(error: Error | null): void;
@@ -152,6 +154,7 @@ function createRuntimeFake(): RuntimeFake {
     errors: [],
   };
   let godotPath = '';
+  let editorPid: number | undefined = 4242;
   let bridgeReady = true;
   let bridgeError: string | undefined;
   let runProjectError: Error | null = null;
@@ -234,7 +237,7 @@ function createRuntimeFake(): RuntimeFake {
       return godotPath;
     },
     launchEditor(_projectPath: string) {
-      const proc = { on: () => proc };
+      const proc = { on: () => proc, pid: editorPid };
       return proc as unknown as GodotProcess['process'];
     },
     activeBridgePort: null as number | null,
@@ -316,6 +319,9 @@ function createRuntimeFake(): RuntimeFake {
     setGodotPath(path: string) {
       godotPath = path;
     },
+    setEditorPid(pid: number | undefined) {
+      editorPid = pid;
+    },
     setBridgeReady(ready: boolean, error?: string) {
       bridgeReady = ready;
       bridgeError = error;
@@ -356,7 +362,6 @@ interface RunProjectPayload {
   projectPath: string;
   sessionMode: string;
   bridgePort: number | null;
-  bridgeReady: boolean;
   message: string;
 }
 
@@ -476,7 +481,7 @@ describe('handleRunProject bridge port', () => {
     const payload = runProjectPayload(result);
     expect(payload.bridgePort).toBe(19900);
     expect(payload.sessionMode).toBe('spawned');
-    expect(payload.bridgeReady).toBe(true);
+    expect(payload).not.toHaveProperty('bridgeReady');
   });
 });
 
@@ -593,6 +598,30 @@ describe('handleLaunchEditor validation', () => {
   });
 });
 
+describe('handleLaunchEditor payload', () => {
+  it('returns the project path, the editor pid and a message', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
+    expect(expectMatchesOutputSchema('launch_editor', result)).toEqual({
+      projectPath: resolve(fixtureProjectPath),
+      pid: 4242,
+      message: expect.any(String),
+    });
+  });
+
+  it('reports a null pid with a leading warning when the process has none', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setEditorPid(undefined);
+    const result = await handleLaunchEditor(fake.asRunner, { projectPath: fixtureProjectPath });
+    const payload = expectMatchesOutputSchema('launch_editor', result);
+    expect(payload.pid).toBeNull();
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(/no pid/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ensureRuntimeSession (via handleTakeScreenshot: same gate every runtime
 // handler uses)
@@ -670,10 +699,10 @@ describe('handleGetDebugOutput', () => {
     const parsed = JSON.parse(text);
     expect(parsed).toEqual({
       projectPath: '/p',
+      sessionMode: 'attached',
       output: [],
       errors: [],
       running: null,
-      attached: true,
       tip: expect.stringMatching(/Attached mode does not capture/i),
     });
   });
@@ -699,6 +728,7 @@ describe('handleGetDebugOutput', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toEqual(['out7', 'out8', 'out9']);
     expect(parsed.errors).toEqual(['err7', 'err8', 'err9']);
+    expect(parsed.sessionMode).toBe('spawned');
     expect(parsed.running).toBe(true);
     expect(parsed.exitCode).toBeUndefined();
     expect(parsed.tip).toBeUndefined();
@@ -753,8 +783,29 @@ describe('handleGetDebugOutput', () => {
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.output).toEqual(['out']);
     expect(parsed.errors).toEqual(['SCRIPT ERROR: crashed']);
+    expect(parsed.sessionMode).toBe('spawned');
     expect(parsed.running).toBe(false);
     expect(parsed.exitCode).toBe(139);
+  });
+
+  it('validates an attached and a spawned payload against the declared schema', () => {
+    const attached = createRuntimeFake();
+    attached.setSession({ mode: 'attached', projectPath: '/p' });
+    expect(
+      expectMatchesOutputSchema('get_debug_output', handleGetDebugOutput(attached.asRunner, {}))
+        .sessionMode,
+    ).toBe('attached');
+
+    const spawned = createRuntimeFake();
+    spawned.setSession({
+      mode: 'spawned',
+      projectPath: '/p',
+      process: makeRunningProcess({ output: ['x'] }),
+    });
+    expect(
+      expectMatchesOutputSchema('get_debug_output', handleGetDebugOutput(spawned.asRunner, {}))
+        .sessionMode,
+    ).toBe('spawned');
   });
 });
 
@@ -770,7 +821,9 @@ describe('handleStopProject', () => {
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Godot project stopped');
-    expect(parsed.mode).toBe('spawned');
+    expect(parsed.sessionMode).toBe('spawned');
+    expect(parsed).not.toHaveProperty('mode');
+    expectMatchesOutputSchema('stop_project', result);
     expect(parsed.externalProcessPreserved).toBe(false);
   });
 
@@ -785,7 +838,7 @@ describe('handleStopProject', () => {
     const result = await handleStopProject(fake.asRunner);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.message).toBe('Attached project detached and MCP bridge state cleaned up');
-    expect(parsed.mode).toBe('attached');
+    expect(parsed.sessionMode).toBe('attached');
     expect(parsed.externalProcessPreserved).toBe(true);
   });
 
@@ -2192,7 +2245,6 @@ describe('run_project outputSchema', () => {
       validate({
         projectPath: fixtureProjectPath,
         bridgePort: 19900,
-        bridgeReady: true,
         message: 'Godot project started and the MCP bridge is ready.',
       }),
     ).toBe(false);

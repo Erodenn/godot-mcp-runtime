@@ -123,7 +123,7 @@ describe('run_project attach mode', () => {
       expect(hasError(runResult), JSON.stringify(unwrap(runResult).content)).toBe(false);
       const started = unwrap(runResult).structuredContent as Record<string, unknown>;
       expect(started.sessionMode).toBe('attached');
-      expect(started.bridgeReady).toBe(true);
+      expect(started).not.toHaveProperty('bridgeReady');
       expect(typeof started.bridgePort).toBe('number');
       // Nothing was spawned by this server.
       expect(runner.activeProcess).toBeNull();
@@ -134,7 +134,7 @@ describe('run_project attach mode', () => {
       const stopResult = await handleStopProject(runner);
       expect(hasError(stopResult)).toBe(false);
       const stopped = unwrap(stopResult).structuredContent as Record<string, unknown>;
-      expect(stopped.mode).toBe('attached');
+      expect(stopped.sessionMode).toBe('attached');
       expect(stopped.externalProcessPreserved).toBe(true);
 
       // The external process is still alive, and the bridge registration is gone.
