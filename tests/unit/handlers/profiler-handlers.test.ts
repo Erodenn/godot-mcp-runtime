@@ -373,6 +373,16 @@ describe('handleProfileProject', () => {
     ['a target frame rate of 0', { targetFps: 0 }, /Invalid targetFps/],
     ['a track entry without a property', { track: ['/root/Main'] }, /Invalid track entry/],
     [
+      'timeline: false together with a track',
+      { timeline: false, track: ['/root/Main:position'] },
+      /Invalid timeline: false .* track/,
+    ],
+    [
+      'timeline: false together with an interval',
+      { timeline: false, timeline_ms: 500 },
+      /Invalid timeline: false .* timelineMs/,
+    ],
+    [
       'more than four tracked values',
       { track: ['/a:x', '/a:y', '/a:z', '/a:w', '/a:v'] },
       /at most 4/,
@@ -706,6 +716,8 @@ describe('handleStopProfiler', () => {
 
     expectErrorMatching(result, /Start a capture first/);
     expect(unwrap(result).content[1]?.text).toMatch(/start_profiler/);
+    // The capture may be waiting on a session that is no longer the current one.
+    expect(JSON.stringify(unwrap(result).content)).toMatch(/switch_project back to it/);
   });
 
   it('leaves the track uncollected when another session has become current', async () => {

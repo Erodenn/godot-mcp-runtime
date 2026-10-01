@@ -76,6 +76,17 @@ export const MAX_TIMELINE_BUCKETS = 60;
 const TIMELINE_MS_STEP = 50;
 export const TARGET_FPS_MAX = 1000;
 export const DEFAULT_TARGET_FPS = 60;
+export const MS_PER_SECOND = 1000;
+/**
+ * Intervals a timeline may grow past its window: the frames that arrive just
+ * after the window closes. Anything later is not placed.
+ */
+const TIMELINE_OVERRUN_BUCKETS = 2;
+/**
+ * The share of an interval the trailing bucket must cover before its frame
+ * count is divided into a rate. Shorter than that, the rate is noise.
+ */
+const TRAILING_BUCKET_MIN_SHARE = 1 / 4;
 
 /**
  * The interval a timeline over `seconds` actually uses: `timelineMs`, widened
@@ -83,7 +94,8 @@ export const DEFAULT_TARGET_FPS = 60;
  */
 export function timelineBucketMs(timelineMs: number, seconds: number): number {
   const widest =
-    Math.ceil((seconds * 1000) / MAX_TIMELINE_BUCKETS / TIMELINE_MS_STEP) * TIMELINE_MS_STEP;
+    Math.ceil((seconds * MS_PER_SECOND) / MAX_TIMELINE_BUCKETS / TIMELINE_MS_STEP) *
+    TIMELINE_MS_STEP;
   return Math.min(TIMELINE_MS_MAX, Math.max(timelineMs, widest));
 }
 
@@ -120,6 +132,8 @@ const VISUAL_OVERFLOW_STOP_FRAMES = 3;
 const PATH_SEPARATOR = ' > ';
 /** Time inside a render group that none of its markers account for. */
 const OTHER_AREA = '(other)';
+/** Uncovered group time at or below this is float noise, not an `(other)` row. */
+const OTHER_AREA_MIN_MS = 1e-9;
 const MIB = 1024 * 1024;
 /** Custom monitors tracked per capture; the peer decides how many exist. */
 const MAX_CUSTOM_MONITORS = 64;
@@ -140,7 +154,6 @@ const MS_ROUNDING = 10 ** MS_DECIMALS;
 const WAIT_CONNECT_MS = 5000;
 const WAIT_FIRST_FRAME_MS = 5000;
 const WAIT_TOTAL_MS = 10000;
-const MS_PER_SECOND = 1000;
 
 export interface ProfilePeak {
   frame: number;
@@ -371,8 +384,8 @@ export interface ProfileResult {
   frames: number;
   /**
    * Engine frames per second across the capture: the frame-number span over
-   * the wall time between the first and last folded frame. Null when fewer
-   * than two frames were folded.
+   * the wall time between the first and last folded frame. Null when that
+   * span is empty: fewer than two frames folded, or all of them at once.
    */
   fps: number | null;
   targetFps: number;
@@ -784,7 +797,7 @@ function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; tru
     add(group.path, group.name, true, cpuMs, gpuMs);
     const otherCpu = Math.max(0, cpuMs - group.childCpuMs);
     const otherGpu = Math.max(0, gpuMs - group.childGpuMs);
-    if (otherCpu > 1e-9 || otherGpu > 1e-9) {
+    if (otherCpu > OTHER_AREA_MIN_MS || otherGpu > OTHER_AREA_MIN_MS) {
       add(childPath(group, OTHER_AREA), OTHER_AREA, false, otherCpu, otherGpu);
     }
     const parent = stack[stack.length - 1];
@@ -983,7 +996,7 @@ function summarizeVisual(
 function newTimeline(bucketMs: number, maxSeconds: number, track: string[]): TimelineCapture {
   return {
     bucketMs,
-    maxBuckets: Math.ceil((maxSeconds * 1000) / bucketMs) + 2,
+    maxBuckets: Math.ceil((maxSeconds * MS_PER_SECOND) / bucketMs) + TIMELINE_OVERRUN_BUCKETS,
     buckets: [],
     track,
     samples: null,
@@ -1139,7 +1152,10 @@ function summarizeTimeline(timeline: TimelineCapture, spanMs: number): TimelineR
     // Only the trailing bucket is partial. Measured from its start to the last
     // frame, it is too short to divide by when the capture ended just inside it.
     const durationMs = index === last ? spanMs - startMs : timeline.bucketMs;
-    const fps = durationMs >= timeline.bucketMs / 4 ? bucket.frames / (durationMs / 1000) : null;
+    const fps =
+      durationMs >= timeline.bucketMs * TRAILING_BUCKET_MIN_SHARE
+        ? bucket.frames / (durationMs / MS_PER_SECOND)
+        : null;
     const perFrame = (sum: number): number | null =>
       bucket.frames > 0 ? sum / bucket.frames : null;
     let track: TimelineBucket['track'] = null;
@@ -1150,7 +1166,7 @@ function summarizeTimeline(timeline: TimelineCapture, spanMs: number): TimelineR
       }
     }
     return {
-      t: startMs / 1000,
+      t: startMs / MS_PER_SECOND,
       frames: bucket.frames,
       fps,
       frameMs:
@@ -1376,7 +1392,7 @@ export class DebuggerProfiler {
 
   /**
    * Throw whatever `start` would refuse before it reaches the engine: an
-   * argument out of range, or a capture already open. The tools check this
+   * argument out of range, a dropped connection, or a capture already open. The tools check this
    * before they ask the bridge for a track, because a track_start replaces
    * any track that is running - a refused call must not take a running
    * capture's track down with it.
@@ -1410,6 +1426,11 @@ export class DebuggerProfiler {
         'bad_args',
         `captureLimit must be an integer in [${CAPTURE_LIMIT_MIN}, ${CAPTURE_LIMIT_MAX}]`,
       );
+    }
+    // A debugger connection that has dropped can open nothing, and opening
+    // would replace the finished capture that stays readable after the exit.
+    if (this.error !== null || this.closed) {
+      throw new ProfilerError('profile_disconnected', this.error ?? 'Profiler closed');
     }
     this.assertIdle();
   }
@@ -1752,7 +1773,8 @@ export class DebuggerProfiler {
       visual.truncatedRun = render.truncated ? visual.truncatedRun + 1 : 0;
       // Once stopping, the capture has switched visual off already.
       if (visual.truncatedRun >= VISUAL_OVERFLOW_STOP_FRAMES && this.state !== 'stopping') {
-        visual.stoppedAt = capture.frames > 0 ? (Date.now() - capture.startedAt) / 1000 : 0;
+        visual.stoppedAt =
+          capture.frames > 0 ? (Date.now() - capture.startedAt) / MS_PER_SECOND : 0;
         this.write(['profiler:visual', this.threadId, [false]]);
       }
       const bucket = this.timelineBucket(capture, false);
@@ -1801,7 +1823,7 @@ export class DebuggerProfiler {
       capture.frameGaps += Math.max(0, frame - capture.lastFrame - 1);
     }
     capture.lastFrame = frame;
-    const slow = sample.timings.frameMs > 1000 / capture.targetFps;
+    const slow = sample.timings.frameMs > MS_PER_SECOND / capture.targetFps;
     if (slow) capture.slowFrames += 1;
     const bucket = this.timelineBucket(capture, true);
     if (bucket !== null) foldTimelineFrame(bucket, sample, slow);
@@ -1917,7 +1939,7 @@ export class DebuggerProfiler {
       complete: capture.closedBy === 'sentinel',
       seconds: capture.elapsedMs / 1000,
       frames: capture.frames,
-      fps: spanMs > 0 && spanFrames > 0 ? spanFrames / (spanMs / 1000) : null,
+      fps: spanMs > 0 && spanFrames > 0 ? spanFrames / (spanMs / MS_PER_SECOND) : null,
       targetFps: capture.targetFps,
       slowFrames: capture.slowFrames,
       framesReceived: capture.framesReceived,

@@ -476,6 +476,28 @@ describe('DebuggerProfiler readability after the engine goes away', () => {
     expect(reread.rows[0]?.function).toBe('_other');
   });
 
+  it('refuses a new capture once the peer is gone, leaving the finished one readable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [[0, 3, 0.009, 0.012]]),
+    ]);
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    const first = await p.stop(10, 'selfMs');
+    fake.close();
+    await waitUntil(() => !p.connected, 'peer disconnect');
+
+    // Opening a capture would replace the one taken before the exit.
+    expect(() => p.assertCanStart(5, 512)).toThrow(
+      expect.objectContaining({ code: 'profile_disconnected' }),
+    );
+    await expect(p.start(5, 512)).rejects.toMatchObject({ code: 'profile_disconnected' });
+    expect(p.hasResult).toBe(true);
+    const reread = await p.stop(10, 'selfMs');
+    expect(reread.rows[0]?.calls).toBe(first.rows[0]?.calls);
+  });
+
   it('ignores a second totals packet instead of corrupting the result', async () => {
     const { profiler: p, peer: fake } = await connectedProfiler();
     const running = p.start(5, 512);

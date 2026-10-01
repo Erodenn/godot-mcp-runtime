@@ -60,6 +60,10 @@ const MAX_TRACK_ENTRIES := 4
 const MAX_TRACK_SAMPLES := 2000
 const MIN_TRACK_INTERVAL_MS := 50
 const MAX_TRACK_DURATION_MS := 180000
+# What track_start falls back to when interval_ms or max_ms is left out. The
+# server always sends both, so these only meet a bridge driven by hand.
+const DEFAULT_TRACK_INTERVAL_MS := 250
+const DEFAULT_TRACK_DURATION_MS := 60000
 
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
@@ -1055,8 +1059,8 @@ func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
 		if _split_watch_spec(watch_list[i]).is_empty():
 			_send_response(peer, {"error": "track[%d]: expected NodePath:property (got '%s')" % [i, str(watch_list[i])]})
 			return
-	var interval = payload.get("interval_ms", 250)
-	var duration = payload.get("max_ms", 60000)
+	var interval = payload.get("interval_ms", DEFAULT_TRACK_INTERVAL_MS)
+	var duration = payload.get("max_ms", DEFAULT_TRACK_DURATION_MS)
 	if not _is_number(interval) or not _is_number(duration):
 		_send_response(peer, {"error": "interval_ms and max_ms must be numbers"})
 		return
@@ -1294,6 +1298,11 @@ func _serialize_value(value: Variant) -> Variant:
 				result.append(_serialize_value(item))
 			return result
 		TYPE_OBJECT:
+			# A freed Object is not null, and `is` raises on one. A profiler track
+			# samples from _process, where that would raise on every tick. The
+			# text is what str() gives a freed Object.
+			if not is_instance_valid(value):
+				return "<Freed Object>"
 			if value is Node:
 				var node: Node = value
 				return {"class": node.get_class(), "name": String(node.name), "path": str(node.get_path())}

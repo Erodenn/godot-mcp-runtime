@@ -16,6 +16,7 @@ import {
   DEFAULT_TARGET_FPS,
   MAX_TIMELINE_BUCKETS,
   MONITOR_NAMES,
+  MS_PER_SECOND,
   PROFILE_SORTS,
   PROFILE_TOP_MAX,
   ProfilerError,
@@ -81,7 +82,7 @@ const visualProperty = {
 const timelineProperty = {
   type: 'boolean',
   description:
-    'Also record the capture over time in `timeline.buckets`: per interval the fps, frameMs avg/max, process/physics/script ms, slowFrames, draw calls, render CPU/GPU ms (with visual) and the 3 heaviest functions, server calls or render stages - where and when frames got slow (default: false).',
+    'Also record the capture over time in `timeline.buckets`: per interval the fps, frameMs avg/max, process/physics/script ms, slowFrames, draw calls, render CPU/GPU ms (with visual) and the 3 heaviest functions, server calls or render stages - where and when frames got slow (default: false). timelineMs and track turn it on by themselves; false beside either is rejected.',
 } as const;
 
 const timelineMsProperty = {
@@ -575,6 +576,22 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
     );
   }
 
+  // timelineMs and track each imply a timeline. An explicit timeline: false
+  // beside one of them contradicts it, and picking a side would ignore half of
+  // what the caller asked for.
+  const implied = [
+    ...(timelineMs.value !== undefined ? ['timelineMs'] : []),
+    ...(specs.length > 0 ? ['track'] : []),
+  ];
+  if (timeline.value === false && implied.length > 0) {
+    return err(
+      createErrorResponse(
+        `Invalid timeline: false cannot be combined with ${implied.join(' or ')}, which record onto the timeline`,
+        [`Omit timeline, or drop ${implied.join(' and ')} to capture without one`],
+      ),
+    );
+  }
+
   const wantsTimeline =
     timeline.value === true || timelineMs.value !== undefined || specs.length > 0;
   return ok({
@@ -630,7 +647,7 @@ async function startTrack(
     const raw = await runner.sendCommand('track_start', {
       watch: track,
       interval_ms: intervalMs,
-      max_ms: Math.ceil(seconds * 1000) + TRACK_GRACE_MS,
+      max_ms: Math.ceil(seconds * MS_PER_SECOND) + TRACK_GRACE_MS,
     });
     const reply = JSON.parse(raw) as { status?: unknown; error?: unknown };
     if (reply.status === 'tracking') return ok(undefined);
@@ -785,7 +802,7 @@ function unmeasuredWarnings(result: ProfileResult): string[] {
   const warnings: string[] = [];
   if (result.fps === null) {
     warnings.push(
-      'fps is null: fewer than two frames were folded, so there is no span to measure a rate over. Capture for longer.',
+      'fps is null: the folded frames span no measurable time (fewer than two of them, or all of them arriving at once), so there is no rate to compute. Capture for longer.',
     );
   }
   if (result.monitors === null) {
@@ -842,7 +859,10 @@ function profilerFailure(error: unknown): ToolResponse {
   const solutions: Record<ProfilerError['code'], string[]> = {
     bad_args: ['Pass values inside the documented ranges'],
     profile_busy: ['Call stop_profiler to close the running capture first'],
-    profile_not_started: ['Call start_profiler first, or profile_project for a one-shot capture'],
+    profile_not_started: [
+      'Call start_profiler first, or profile_project for a one-shot capture',
+      'A capture started on another project is read while that project is current: switch_project back to it, then call stop_profiler',
+    ],
     profile_timeout: [
       'Godot only emits profiler frames while it renders - make sure the window is not minimized or paused',
       'Check get_debug_output for runtime errors',
