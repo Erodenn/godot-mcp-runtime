@@ -73,6 +73,15 @@ const INPUT_SETTLE_FRAMES_PER_ACTION = 1;
 const INPUT_TAP_HOLD_FRAMES = 2;
 const INPUT_TEXT_PER_CHAR_MS = 1;
 
+// Valid TCP port range for the MCP bridge. Declared above the tool definitions
+// because the run_project input schema and parseBridgePortArg share it.
+const BRIDGE_PORT_MIN = 1;
+const BRIDGE_PORT_MAX = 65535;
+
+// run_project parameters that only mean something when this server spawns
+// Godot itself. Attach mode rejects them instead of silently ignoring them.
+const SPAWN_ONLY_RUN_PROJECT_PARAMS = ['scene', 'background', 'profiling'] as const;
+
 type ScreenshotResponseMode = (typeof SCREENSHOT_RESPONSE_MODES)[number];
 
 interface ScreenshotBridgeResponse {
@@ -106,7 +115,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Spawn a Godot project as a child process with stdout/stderr captured. Required before take_screenshot, simulate_input, get_ui_elements, run_script, or get_debug_output. Set profiling: true at launch to enable the profiler tools. Use attach_project for one you launched yourself. Verifies MCP bridge readiness before returning success. Returns: projectPath, sessionMode, bridgePort, bridgeReady, message; warnings leads when the pre-flight script scan found something. Call stop_project when done. Errors if projectPath is not a Godot project or another session is already active.',
+      'Start a runtime session: spawn the project as a child process with stdout/stderr captured, or with attach: true inject the MCP bridge into a Godot you launch yourself (nothing is spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script. Waits for the bridge before returning. Returns: projectPath, sessionMode (spawned or attached), bridgePort, bridgeReady, message; warnings leads when the pre-flight script scan found something. Call stop_project when done. Errors if projectPath is not a Godot project, the bridge never answers (the session is torn down), or attach is combined with scene, background or profiling.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -115,27 +124,32 @@ export const runtimeToolDefinitions = [
           type: 'string',
           description: 'Path to the Godot project directory',
         },
+        attach: {
+          type: 'boolean',
+          description:
+            'If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to 20s for it to start listening, 45s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project. Cannot be combined with scene, background or profiling; get_debug_output and the profiler are unavailable.',
+        },
         scene: {
           type: 'string',
           description:
-            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene.',
+            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Not valid with attach: true.',
         },
         background: {
           type: 'boolean',
           description:
-            'If true, hides the Godot window off-screen and blocks all physical keyboard and mouse input, while keeping programmatic input (simulate_input, run_script) and screenshots fully active. Useful for automated agent-driven testing where the window should not be visible or interactive.',
+            'If true, hides the Godot window off-screen and blocks all physical keyboard and mouse input, while keeping programmatic input (simulate_input, run_script) and screenshots fully active. Useful for automated agent-driven testing where the window should not be visible or interactive. Not valid with attach: true.',
         },
         bridgePort: {
           type: 'number',
-          minimum: 1,
-          maximum: 65535,
+          minimum: BRIDGE_PORT_MIN,
+          maximum: BRIDGE_PORT_MAX,
           description:
-            'TCP port for the MCP bridge. Omit to auto-select a free port (recommended). Delivered to the spawned process via an environment variable, so the bridge script on disk is unaffected by which port this session uses - safe for multiple sessions on the same project.',
+            'TCP port for the MCP bridge. Omit to auto-select a free port (recommended). Spawned sessions receive it through an environment variable; attach mode bakes it into the injected bridge script, so the Godot you launch listens on exactly this port.',
         },
         profiling: {
           type: 'boolean',
           description:
-            "Attach Godot's own remote debugger so profile_project, start_profiler and stop_profiler can measure this session. Must be set at launch - a session already running cannot be profiled - and costs a little runtime overhead.",
+            "Attach Godot's own remote debugger so profile_project, start_profiler and stop_profiler can measure this session. Must be set at launch - a session already running cannot be profiled - and costs a little runtime overhead. Not valid with attach: true.",
         },
       },
       required: ['projectPath'],
@@ -800,6 +814,62 @@ function ensureRuntimeSession(
   return null;
 }
 
+/**
+ * Read and range-check the optional `bridgePort` argument. The one place the
+ * port range is enforced for both session modes.
+ */
+function parseBridgePortArg(args: OperationParams): Result<number | undefined, ToolResponse> {
+  const bridgePort = optionalNumber(args, 'bridgePort');
+  if (!bridgePort.ok) return bridgePort;
+  if (
+    bridgePort.value !== undefined &&
+    (!Number.isInteger(bridgePort.value) ||
+      bridgePort.value < BRIDGE_PORT_MIN ||
+      bridgePort.value > BRIDGE_PORT_MAX)
+  ) {
+    return err(
+      createErrorResponse(
+        `Invalid bridgePort: must be an integer in [${BRIDGE_PORT_MIN}, ${BRIDGE_PORT_MAX}] (got: ${String(bridgePort.value)})`,
+        ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
+      ),
+    );
+  }
+  return bridgePort;
+}
+
+/**
+ * Refuse a spawn-only parameter combined with `attach: true`. `scene` is
+ * refused whenever present. `background` and `profiling` are refused only when
+ * true: false is their default and is exactly what attach mode does, so
+ * nothing is being ignored. A wrong type still fails as a type error.
+ */
+function rejectSpawnOnlyParams(args: OperationParams): ToolResponse | null {
+  const scene = optionalString(args, 'scene');
+  if (!scene.ok) return scene.error;
+  const background = optionalBoolean(args, 'background');
+  if (!background.ok) return background.error;
+  const profiling = optionalBoolean(args, 'profiling');
+  if (!profiling.ok) return profiling.error;
+
+  const requested: Record<(typeof SPAWN_ONLY_RUN_PROJECT_PARAMS)[number], boolean> = {
+    scene: scene.value !== undefined,
+    background: background.value === true,
+    profiling: profiling.value === true,
+  };
+  for (const param of SPAWN_ONLY_RUN_PROJECT_PARAMS) {
+    if (requested[param]) {
+      return createErrorResponse(
+        `"${param}" applies only to a spawned session and cannot be combined with attach: true.`,
+        [
+          `Remove ${param} to attach to a Godot process you launch yourself`,
+          'Remove attach to let run_project spawn Godot',
+        ],
+      );
+    }
+  }
+  return null;
+}
+
 // --- Handlers ---
 
 export async function handleLaunchEditor(
@@ -860,6 +930,25 @@ export async function handleRunProject(
   if (!parsed.ok) return parsed;
   const { projectPath } = parsed.value;
 
+  const attach = optionalBoolean(args, 'attach');
+  if (!attach.ok) return attach;
+
+  return attach.value === true
+    ? startAttachedSession(runner, projectPath, args, ctx)
+    : startSpawnedSession(runner, projectPath, args, ctx);
+}
+
+/**
+ * The spawn path of run_project: launch gate with the session confirmation,
+ * spawn Godot, wait for the bridge. `args` is already normalized and
+ * `projectPath` already validated.
+ */
+async function startSpawnedSession(
+  runner: GodotRunner,
+  projectPath: string,
+  args: OperationParams,
+  ctx: McpContext,
+): Promise<HandlerResult> {
   const scene = optionalString(args, 'scene');
   if (!scene.ok) return scene;
 
@@ -894,18 +983,8 @@ export async function handleRunProject(
     }
   }
 
-  const bridgePort = optionalNumber(args, 'bridgePort');
+  const bridgePort = parseBridgePortArg(args);
   if (!bridgePort.ok) return bridgePort;
-  if (bridgePort.value !== undefined) {
-    if (!Number.isInteger(bridgePort.value) || bridgePort.value < 1 || bridgePort.value > 65535) {
-      return err(
-        createErrorResponse(
-          `Invalid bridgePort: must be an integer in [1, 65535] (got: ${String(bridgePort.value)})`,
-          ['Omit bridgePort to auto-select a free port', 'Pass a valid TCP port number'],
-        ),
-      );
-    }
-  }
 
   const background = optionalBoolean(args, 'background');
   if (!background.ok) return background;
@@ -1004,6 +1083,92 @@ export async function handleRunProject(
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
       ]),
+    );
+  }
+}
+
+/**
+ * The attach path of run_project: inject the bridge and wait for a Godot
+ * process the caller launches. Nothing is spawned, so there is no Godot
+ * executable to resolve and no launch to confirm; the pre-flight scan still
+ * runs, because the scanned scripts are about to execute with the bridge
+ * attached. `args` is already normalized and `projectPath` already validated.
+ */
+async function startAttachedSession(
+  runner: GodotRunner,
+  projectPath: string,
+  args: OperationParams,
+  ctx: McpContext,
+): Promise<HandlerResult> {
+  const spawnOnlyRefusal = rejectSpawnOnlyParams(args);
+  if (spawnOnlyRefusal) return err(spawnOnlyRefusal);
+
+  const bridgePort = parseBridgePortArg(args);
+  if (!bridgePort.ok) return bridgePort;
+
+  const gate = await runLaunchGate(
+    { projectPath, scene: undefined, confirm: false, toolName: 'run_project' },
+    ctx,
+  );
+  if (!gate.ok) return gate;
+  const { warnings } = gate.value;
+
+  try {
+    await runner.attachProject(projectPath, bridgePort.value);
+
+    const bridgeResult = await runner.waitForBridgeAttached();
+
+    if (!bridgeResult.ready) {
+      const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
+      // Tear down the attached-mode session state so a retry of run_project
+      // works without an intervening stop_project.
+      await runner.stopProject();
+      const solutions = [
+        'If you are launching Godot yourself, start the launch in parallel with run_project with attach: true next time so the wait absorbs the startup - do not sequentialize',
+        'If a human is launching Godot, retry run_project with attach: true once they have launched - bridge.inject is idempotent',
+        'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
+        `Check that no other Godot project is occupying the assigned bridge port (${runner.activeBridgePort})`,
+      ];
+      const registeredLine = bridgeRegistered
+        ? ''
+        : '\nproject.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project).';
+      return err(
+        createErrorResponse(
+          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}${registeredLine}`,
+          solutions,
+        ),
+      );
+    }
+
+    return buildRunProjectResponse({
+      projectPath,
+      sessionMode: 'attached',
+      bridgePort: runner.activeBridgePort,
+      warnings,
+      message:
+        'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
+    });
+  } catch (error: unknown) {
+    if (error instanceof BridgeAttachConflictError) {
+      return err(
+        createErrorResponse(`Failed to attach project: ${error.message}`, [
+          `Stop the other session first (server pid ${error.conflictingOwner.pid}; stop_project there), then retry run_project with attach: true`,
+          'Only one attach session per project is supported',
+        ]),
+      );
+    }
+    const solutions =
+      error instanceof BridgeAutoloadCollisionError
+        ? [
+            'Rename the existing McpBridge autoload in project.godot, then retry run_project with attach: true',
+            'Use list_autoloads to see what the project currently registers',
+          ]
+        : [
+            'Check if project.godot is accessible',
+            'Ensure MCP can write the bridge autoload into the project',
+          ];
+    return err(
+      createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, solutions),
     );
   }
 }
