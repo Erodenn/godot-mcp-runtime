@@ -28,8 +28,11 @@ src/
     ├── result.ts                # Result<T, E> shape + ok/err/isOk/isErr used across the handler/parser/dispatch boundary
     ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
     ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
+    ├── structured-response.ts   # createStructuredResponse and leadWithWarnings: every success payload as structuredContent plus a JSON text block
     ├── session-report.ts        # No-fallback session gate and error wording shared by the runtime, profiler, edit and render handlers
-    ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
+    ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair) and the owner registry
+    ├── artifact-paths.ts        # Every path the server writes under .mcp/godot-runtime/, composed in one place
+    ├── atomic-write.ts          # writeFileAtomicSync: temp file plus rename, with a Windows fallback
     ├── bridge-protocol.ts       # TCP framing, port resolution, action-boundary sentinel + stderr bucketing
     ├── profiler.ts              # Godot remote-debugger receiver behind the profiling tools
     ├── godot-variant.ts         # Variant subset the remote debugger speaks on the wire
@@ -42,8 +45,10 @@ src/
     ├── png-encoder.ts           # Zero-dependency RGB PNG encoder for downscaled inline frame previews
     ├── frame-preview.ts         # Box downscale and byte-capped PNG preview of a decoded frame
     ├── movie-process.ts         # Bounded Godot spawn for render_movie: output tails, timeout, process-tree kill
-    ├── scene-parsing.ts         # .tscn / project.godot parsing for the run_project pre-flight scan (launch-scene resolution, ext_resource script extraction)
+    ├── scene-parsing.ts         # .tscn scanner behind the pre-flight scan and get_scene_dependencies, launch-scene resolution, and the string-escape reader project.godot parsing shares
     ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
+    ├── progress-heartbeat.ts    # notifications/progress heartbeats for clients that attach a progress token
+    ├── process-lifecycle.ts     # SIGINT/SIGTERM/stdin-close/exit teardown, including every session's bridge artifacts
     └── logger.ts                # logDebug / logError helpers
 ```
 

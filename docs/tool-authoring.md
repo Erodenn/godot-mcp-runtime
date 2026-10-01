@@ -113,7 +113,7 @@ If your tool's `inputSchema` has:
 
 Any tool that forwards arbitrary GDScript to a running Godot process - `run_script` today, and any future sibling - MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
 
-For tools that launch a Godot project (`run_project`) or attach to one, the same module's helpers (`parseAutoloads`, `collectSceneScriptsRecursive`, `resolveLaunchScene`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1.
+For tools that launch a Godot project (`run_project`) or attach to one, the same module's helpers (`parseAutoloads`, `collectSceneScripts`, `resolveLaunchScene`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. The scan lives in `runLaunchGate` (`src/utils/launch-gate.ts`), which `run_project` and `render_movie` both call. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1.
 
 If you add a new GDScript-executing tool, also extend the test suite in `tests/unit/handlers/runtime-handlers.test.ts` with Tier 1 / Tier 2 / Tier 3 / strict-mode coverage following the pattern there.
 
