@@ -17,6 +17,10 @@ The same thing has the same name in every payload:
 
 Inside a listing of things that have a path of their own (files, scene tree nodes, UI elements, scene dependencies, autoloads) the entry's field is plain `path`.
 
+A path field is the normalized form, read back after the operation, with one exception. A per-item entry repeats the path the caller sent, so each entry can be matched to its input: the `nodePath` in a `results[]` entry of `set_node_properties`, `delete_nodes` and `get_node_properties`, the `nodePath` in a batch entry's `updates[]`, and the `scenePath` of a batch entry. `get_scene_dependencies` repeats the `scenePath` it was given as well. Every spelling these tools accept is accepted back.
+
+The fields a tool returns on every success are listed as `required` in its `outputSchema`. A field that is present only in some cases (`warnings`, `exitCode`, `still_held`) is not.
+
 ## Project Management
 
 | Tool               | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -34,7 +38,7 @@ Inside a listing of things that have a path of their own (files, scene tree node
 - `launch_editor`: `projectPath`, `pid` and `message`. `pid` is the editor process id. A spawn that reports no pid did not start anything, so that is an error response, not a launch.
 - `run_project`: `projectPath`, `sessionMode`, `bridgePort` and `message`, led by `warnings` when the pre-flight scan flagged a script. Success already means the bridge answered, so there is no separate readiness flag. `bridgePort` is always a number: a session that ended in the moment the bridge became ready is an error response, not a success without a port.
 - `switch_project`: `projectPath`, `previousProjectPath`, `live`, `sessionMode`, `bridgePort`, `bridgeResponsive`, `message`, and `exitCode` for a session whose process exited.
-- `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`. `warnings` leads the payload when a teardown step was attempted and not confirmed: the `McpBridge` autoload entry or the bridge script could not be removed, the owner registry could not be read, or an attached bridge did not acknowledge the shutdown. The session is stopped either way; the message then says the cleanup was incomplete. For an attached session `finalOutput` and `finalErrors` are `null` with a `warnings` entry, because nothing was captured.
+- `stop_project`: `projectPath`, `message`, `sessionMode`, `externalProcessPreserved`, `alreadyExited`, `exitCode` when it already exited, and the condensed `finalOutput` and `finalErrors`. `warnings` leads the payload when a teardown step was attempted and not confirmed: the `McpBridge` autoload entry or the bridge script could not be removed, the owner registry could not be read, or an attached bridge did not acknowledge the shutdown. The session is stopped either way; the message then says the cleanup was incomplete. For an attached session `finalOutput` and `finalErrors` are `null` with a `warnings` entry, because nothing was captured. One more case returns `null` logs: a game that exited by itself while it held a finished profiler capture keeps that capture readable after the first `stop_project`, which returns the logs. A second `stop_project` releases the capture and says so in `message`, with `alreadyExited: true`, `null` logs and a leading warning that they were returned by the earlier call. With no session and nothing retained, `stop_project` is an error.
 - `get_debug_output`: `projectPath`, `sessionMode`, `output`, `errors`, `running`, and `exitCode` after an exit. An attached session has nothing captured: `output`, `errors` and `running` are `null` and `warnings` leads with the reason. `null` there means not captured, never "nothing was printed".
 - `list_projects`: `projects[]`, each `{ projectPath, name }`. Empty when nothing matches. A leading `warnings` entry names directories that could not be read and links or junctions that were not followed. A `directory` that is not a directory, or that cannot be read, is an error.
 - `check_project`: `name`, `projectPath` and `structure` when a project was asked about, `godotVersion`, and the `runtime` block described under "Several projects at once". A leading `warnings` entry says when `structure` missed directories it could not read or links it did not follow.
@@ -42,6 +46,8 @@ Inside a listing of things that have a path of their own (files, scene tree node
 ## Runtime (requires `run_project` first)
 
 `run_project` waits for the bridge before returning success, so runtime tools are usable immediately after the call returns. A spawned session waits up to 30 s for the bridge and aborts immediately if the child process exits first. With `attach: true` it waits up to 20 s for the externally launched Godot process to start listening, and up to 45 s total once a connection has been observed, so a large project's cold start is absorbed. That ceiling sits under the 60 s default per-request timeout most MCP clients use, so the failure is reported by the server rather than cut off by the client. If something is listening on the port but answers no ping at all, the wait gives up after eight consecutive failures instead of spending the whole budget, and says so. If you (the agent) are launching Godot yourself, kick the launch off in parallel with the `run_project` call so the wait absorbs Godot's startup - don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `run_project` with `attach: true` (`bridge.inject` is idempotent). Both modes auto-select a free bridge port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. A first cold launch on a large project (hundreds of scripts) is the case the longer budget exists for.
+
+`scene` must name a scene file: a project-relative path ending in `.tscn` or `.scn`, in lower case. Godot runs a command-line scene only when it carries a scene extension and silently runs the project's main scene for anything else, so any other value is an error before the scan, the confirmation and the launch. `bridgePort`, `background` and `profiling` are checked at the same point, so a call that cannot launch never asks for confirmation.
 
 Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejected alongside `attach: true` rather than ignored, and `get_debug_output` has nothing to return. The pre-flight script scan runs in both modes; the launch confirmation prompt runs only when the server spawns the project. Only one attach session per project is supported at a time. An attached session whose Godot was closed ends by itself on the next tool call; calling `stop_project` after that returns its no-session error, and nothing is left to clean up.
 
@@ -55,6 +61,13 @@ Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejecte
 `take_screenshot` defaults to `responseMode: "preview"` - the full PNG is saved to `.mcp/godot-runtime/screenshots/` and a 960x540-bounded preview is returned inline. Use `"full"` for pixel-level inspection or `"path_only"` to skip the inline image. The game waits up to 5 s for a frame to render before it captures; a window that renders nothing in that time (minimized, or fully covered on a platform that stops drawing occluded windows) is an error response saying so, never a screenshot of an older frame.
 
 `get_ui_elements` takes an optional `filter`, a native Control class name such as `Button` or `Label`; subclasses match. A name that is not a Control class, a script `class_name` included, is an error naming the filter, so an empty `elements` list always means the scene has no such control.
+
+What the runtime tools return, each with the `projectPath` of the session it acted on:
+
+- `take_screenshot`: `responseMode`, `path` and `size` of the full PNG, and `stats` (see "`take_screenshot` pixel stats"). In `preview` mode also `previewPath` and `previewSize`, the downscaled copy that is returned inline. `warnings` leads when `stats` is `null` or the game raised runtime errors during the call.
+- `simulate_input`: `success`, `results[]` with one entry per action, and `still_held` when the batch left something pressed (see "`simulate_input`").
+- `get_ui_elements`: `elements[]`, each with `name`, `path`, `type`, `rect` (`x`, `y`, `width`, `height`) and `visible`, plus `text`, `placeholder`, `disabled` and `tooltip` where the Control has them, and a `tip`. An empty list means no Control matched.
+- `run_script`: `success`, `result` (the script's return value, serialized), `tip`, and `warnings` for policy findings and runtime errors.
 
 The runtime tools report the GDScript runtime errors a spawned game printed while the call ran: as `warnings`, or per action as `errors` for `simulate_input`. Each list shows at most 30 lines, and a longer one ends with an entry such as `+12 more runtime error lines (get_debug_output has the full log)`, so a cut is always counted. An attached session cannot observe these errors. That matters most for `run_script`, where a script that raised returns `null` exactly like one that returned `null`: there, a `null` result leads with a warning saying so.
 
@@ -141,11 +154,11 @@ Signal observers are connected before injection and disconnected after the one s
 
 `render_movie` spawns one Godot process under the engine's movie writer (`--write-movie`, `--fixed-fps`, `--quit-after`) and waits for it to exit. Nothing is injected: no bridge, no autoload edit, no runtime session, and `project.godot` is not touched. It needs a display server, like `run_project`; the movie writer does not render under `--headless`. A window appears for the length of the run.
 
-It launches the project, so it goes through the same pre-flight scan and the same once-per-project launch confirmation as `run_project`. It is refused while a runtime session is live on the same project, from this server or another one, because the second process would load the injected bridge.
+It launches the project, so it goes through the same pre-flight scan and the same once-per-project launch confirmation as `run_project`. It is refused while a runtime session is live on the same project, from this server or another one, because the second process would load the injected bridge. It is refused for the same reason when `project.godot` still registers this server's `McpBridge` autoload and no live session owns it: `render_movie` does not edit `project.godot`, so remove the entry with `remove_autoload` and retry. Both refusals are checked again after the confirmation prompt returns.
 
 | Parameter      | Default | Notes                                                         |
 | -------------- | ------- | ------------------------------------------------------------- |
-| `scene`        | main    | Project-relative scene to render                              |
+| `scene`        | main    | Project-relative scene file ending in `.tscn` or `.scn`       |
 | `mode`         | `check` | `check`, `frames` or `video`                                  |
 | `frames`       | 30      | 2 to 600. The run is budgeted at 30 s plus 250 ms per frame   |
 | `fps`          | 30      | 1 to 120. Game time covered is `frames / fps` seconds         |
@@ -174,6 +187,8 @@ A frame that cannot be read is `stats: null` with a leading `warnings` entry, ne
 | `start_profiler`  | Start a capture and return immediately, so runtime tools can drive the game while it runs |
 | `stop_profiler`   | Stop (or re-read) that capture and rank its functions                                     |
 
+`start_profiler` returns `projectPath`, `active`, `maxSeconds`, `firstFrame` and `captureLimit`. `profile_project` and `stop_profiler` return a capture.
+
 A capture returns the same three things the editor's Profiler tab shows:
 
 | Field        | Editor equivalent                                                                                                                                                                                                                                                                                                                    |
@@ -196,7 +211,7 @@ Reading the numbers:
 - A capture stops itself at its time limit, measured from the first frame folded rather than from the enable round trip. `stop_project` ends it along with the session.
 - A capture that folded no usable frames errors rather than returning zeroes: the first frame received is always discarded, so a window shorter than two rendered frames has nothing to average.
 - A finished capture stays readable after the game exits, so the capture taken just before a crash can still be ranked.
-- `complete` is false, with a leading warning, when the capture closed without the engine's totals packet or after a disconnect; `seconds` then ends at the last frame received, and `percentOfFrame` is `null` when the engine reported no frame time.
+- `complete` is false, with a leading warning, when the capture closed without the engine's totals packet or after a disconnect; `seconds` then ends at the last frame received, and `percentOfFrame` is `null` when the engine reported no frame time. That holds for a `profile_project` window as well as for `stop_profiler`: a window whose totals never arrive returns the frames it folded, and the next capture can start.
 
 While the debugger is attached, a script error or a `breakpoint` would normally pause the game; the server answers every break with `continue`, so the game keeps running and the error still shows up in `get_debug_output`.
 
@@ -221,13 +236,13 @@ Spatial properties (`position`, `rotation`, `scale`, `visible`, `modulate`) may 
 
 `set_node_properties` items inside `batch_scene_operations` accept the same per-update params (`nodePath`, `property`, `value`) as the standalone tool, plus a per-operation `scenePath` and `abortOnError`; per-update results appear under `results[].updates`.
 
-Every path argument is confined to the project root. A path that resolves outside it (for example `../enemy.tscn`) is rejected rather than followed, on both the standalone and batch paths.
+Every path argument is confined to the project root. A path that resolves outside it (for example `../enemy.tscn`) is rejected rather than followed, on both the standalone and batch paths. The same holds for a path that arrives another way: a `res://` string given as a property value (see "Object-typed properties"), and a `nodeType` or `rootNodeType` that names a script file instead of a class.
 
 ### What the scene tools return
 
 Each tool returns one JSON object, as `structuredContent` and as the same JSON in a text block. Outcome fields are read back from the engine after the operation, not copied from the request.
 
-- `create_scene`: `success` and the `scenePath` that was written.
+- `create_scene`: `success` and the `scenePath` that was written, in project-relative form whichever way it was passed.
 - `add_node`: `nodeName`, `nodeType` and `nodePath` of the node as it exists after the add. `nodePath` is in the `root/...` form every node tool accepts. Godot renames a child whose name is already taken by a sibling, and replaces characters a node name cannot hold. When either happens the payload carries the name Godot assigned and leads with a `warnings` entry saying so. A value in `properties` that was set but that the scene file does not store is reported the same way (see "Values a scene file cannot store").
 - `load_sprite`: `nodePath`, `nodeType` and `texturePath`, the project-relative path of the texture the node holds after the assignment.
 - `save_scene`: `scenePath`, the scene that was loaded, and `savedScenePath`, the file that was written and then confirmed on disk. The two are equal unless `newPath` was given.
@@ -258,14 +273,14 @@ All mutation operations save automatically. Property and delete tools take alway
 - `get_node_properties`: `results[]`, one entry per requested node in input order: `{ nodePath, nodeType, properties }`, or `{ nodePath, error }` when the node was not found. A scene that cannot be loaded is an error response.
 - `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`. With `abortOnError`, the updates after the first failure were not attempted and appear as `{ nodePath, property, skipped: true }`. A scene that cannot be loaded, or that could not be saved after the updates, is an error response, never a payload that reports the updates as written. `warnings` leads the payload when an update was set but the scene file does not store it (see "Values a scene file cannot store").
 - `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`. A scene that cannot be loaded or saved is an error response. A node that belongs to an instanced scene (for example `root/Enemy/Hitbox` when `Enemy` is an instance) cannot be deleted from the scene that instances it, because the instance re-creates it on every load: that entry is an error naming the node, and the instance's own root stays deletable.
-- `attach_script`: `success`, `nodePath`, `scriptPath`.
+- `attach_script`: `success`, `nodePath` in the `root/...` form and `scriptPath` in project-relative form, whichever way each was passed.
 - `duplicate_node`: `success`, `nodePath` (the node that was copied) and `newNodePath`, where the duplicate is after the add, in the `root/...` form.
-- `get_node_signals`: `nodePath`, `nodeType` and `signals[]`, each with `name` and `connections[]` of `{ signal, target, method }`.
+- `get_node_signals`: `nodePath` in the `root/...` form, `nodeType` and `signals[]`, each with `name` and `connections[]` of `{ signal, target, method }`.
 - `connect_signal` and `disconnect_signal`: `nodePath`, `signal`, `targetNodePath`, `method` and `connected`. `connected` is not an echo of the request: after the save, the scene file is loaded again from disk and the connection is looked up in it. It is `true` after a connect and `false` after a disconnect. If that second load fails, `connected` is `null` and `warnings` leads the payload. A connect the saved scene does not hold, or a disconnect it still holds, is an error.
 
 Changes made to a node inside an instanced scene (`set_node_properties`, `load_sprite`, `attach_script`, `add_node` under it, `duplicate_node`) mark that instance editable in the parent scene, as the Godot editor's "Editable Children" does, and the parent scene file gains an `[editable path=...]` line. Without that mark Godot drops such a change when it saves. A node added or duplicated directly under the instance's own root needs no mark and adds none. Duplicating an instanced node copies the instance as one unit: its inner nodes are not re-owned by the parent scene, and a node the parent scene added under it is copied with it.
 
-The items of `nodes`, `updates` and batch `operations` are checked before Godot starts. An item that is not an object, a `nodes` or `updates` item without a non-empty string `nodePath`, an update without a string `property` or without a `value` (`null` is a value), a batch item whose `operation` or `scenePath` is not a string, or a non-boolean `changedOnly` is an error response that names the index, so a mistyped key never reads the scene root or aborts the run.
+The items of `nodes`, `updates` and batch `operations` are checked before Godot starts. An item that is not an object, a `nodes` or `updates` item without a non-empty string `nodePath`, an update without a string `property` or without a `value` (`null` is a value), a batch item whose `operation` or `scenePath` is not a string, or a non-boolean `changedOnly` is an error response that names the index, so a mistyped key never reads the scene root or aborts the run. A batch item is checked field by field as well: `nodeType`, `nodeName`, `parentNodePath`, `nodePath`, `texturePath` and `newPath` must be strings when present, `properties` an object and `abortOnError` a boolean.
 
 ## Property Values (`add_node`, `set_node_properties`)
 
@@ -280,7 +295,9 @@ Both tools take JSON property values and assign them through the same validated 
 | `{x, y, z, w}`               | `Vector4`                   |
 | `{r, g, b}` / `{r, g, b, a}` | `Color` (`a` defaults to 1) |
 
-A property whose declared type is `Dictionary` skips this coercion, so a dict with `x`/`y` or `r`/`g`/`b` keys is stored as a plain `Dictionary`.
+A property whose declared type is `Dictionary` skips this coercion, so a dict with `x`/`y` or `r`/`g`/`b` keys is stored as a plain `Dictionary`. So does a `metadata/<name>` key: metadata is untyped, so a dictionary written to it is stored as that dictionary, with every key it was sent with.
+
+The conversion applies only when every component is a number. A dictionary such as `{ "x": "left", "y": "top" }` is left as it is: on a typed property it then fails the type check (`expected Vector2, got Dictionary`), and on an untyped one it is stored as the dictionary.
 
 ### Accepted widening conversions
 
@@ -315,11 +332,11 @@ A script variable declared without `@export` is the one write that succeeds with
 
 Properties declared as a `Resource` or `Node` (for example `CollisionShape2D.shape`, `Sprite2D.texture`) reject plain values. They accept one of three forms:
 
-| Form                                | Behavior                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"res://path/to/file.tres"`         | Loads the saved resource. An asset that exists on disk but has never been imported triggers an automatic headless import and one retry, transparent to the caller. A path that does not exist on disk is an error, and a mutation on a scene that references a missing file is refused outright so the reference is not stripped on save. |
-| `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.                                                                                                                                                                                                                                               |
-| `null`                              | Clears the property.                                                                                                                                                                                                                                                                                                                      |
+| Form                                | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"res://path/to/file.tres"`         | Loads the saved resource. An asset that exists on disk but has never been imported triggers an automatic headless import and one retry, transparent to the caller. A path that does not exist on disk is an error, and a mutation on a scene that references a missing file is refused outright so the reference is not stripped on save. A path that leaves the project root (`res://../x.tres`) is an error naming the property, and nothing is loaded. |
+| `{ "type": "ClassName", ...props }` | Constructs the Resource inline via `ClassDB.instantiate`, then assigns each inner property.                                                                                                                                                                                                                                                                                                                                                               |
+| `null`                              | Clears the property.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 The `script` property gets one more check beyond the table above: a loaded Script is rejected when it cannot be instantiated (a GDScript with parse errors or declared `@abstract`, or a C# class not yet compiled into the project assembly), since `set_script()` on one fails silently and would otherwise leave the node without a script while reporting success. `attach_script` runs the same check.
 
@@ -337,7 +354,7 @@ Keys containing `/` (most importantly `ShaderMaterial`'s `shader_parameter/<unif
 
 **Inside an inline resource dict** - the `{ "type": "ClassName", ... }` form above - they are supported as described below. **Addressed straight at a node** (`set_node_properties` with a `property` such as `metadata/mine`, or a top-level `properties` entry on `add_node`), two kinds of slash key are settable:
 
-- `metadata/<name>` sets node metadata. `<name>` must be a non-empty ASCII identifier (letters, digits and underscore, not starting with a digit); anything else is an error naming the key. The value is untyped, and `null` removes the entry.
+- `metadata/<name>` sets node metadata. `<name>` must be a non-empty ASCII identifier (letters, digits and underscore, not starting with a digit); anything else is an error naming the key. The value is untyped and stored as sent (a dictionary is never turned into a vector or a color there), and `null` removes the entry.
 - A slash key the node itself declares with a type, such as `theme_override_colors/font_color` on a `Control` or a per-surface material override on a mesh. Its declared type drives the same type check as any other property.
 
 Any other slash key is an error naming the key, because there is no declared type to check the value against; use `run_script` for it. The key text reaches Godot exactly as written. Inside an inline resource dict they are handled specially:
@@ -404,7 +421,11 @@ Validate before attaching or running. Catches syntax errors and missing resource
 
 A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds structural and signal-verification checks in the same validation call. With `scenePath + checks`, both the resource-integrity validation and the checks run; their errors are merged into one `errors` array, each check-attributed error carrying a `check` discriminator.
 
-A parse error carries a `line` only when Godot's stderr includes one, which is not always. A single-target call whose process emitted no result is an error response, not `valid: false`.
+A parse error carries a `line` only when Godot's stderr includes one, which is not always. A call whose process emitted no result is an error response, not `valid: false`, in every mode.
+
+`targets` cannot be combined with a top-level `scriptPath`, `source`, `scenePath` or `checks`: only the targets would be validated, so the call is an error naming the extra parameter. Put `checks` on the target it belongs to. A target's keys may be written `scriptPath` or `script_path`, `scenePath` or `scene_path`. A target that is not an object, that names none of the three, or whose path is not a string is that target's own `valid: false` with an error naming its index, and the other targets still report.
+
+`scriptPath` checks GDScript. A file that loads as something else (a scene, a resource, a shader, a C# script) is not checked by anything here, so it is reported `valid: false` with one error that starts `Not validated:` and names what it loaded as, never `valid: true`.
 
 Check shapes are strict: a `checks` value that is not an array is that target's own error in batch mode, a schema node accepts only `type`, `children` and `hasProperty` (`has_property` is accepted as the same key), a `structure` check accepts only `type` and `schema`, and a `signals` check only `type` and `nodePath`. Any other key is rejected naming the key, because a misspelled assertion would otherwise never run.
 
@@ -429,7 +450,7 @@ Check shapes are strict: a `checks` value that is not an array is that target's 
 
 **Instantiation.** A plain `scenePath` only loads the scene. `scenePath` plus `checks` instantiates it, which runs every attached script's `_init()` inside the headless process. Worth knowing, because `validate` is the tool to run before trusting a scene.
 
-**Process cost.** Checks never cost an extra process launch, in either spelling. A single `scenePath` plus `checks` does the parse validation and the checks against one instantiated scene in one process, and `targets[].checks` run inside the same single process as the rest of the batch. One target's failure (a bad schema, a missing scene, an unimported dependency) is reported on that target and the other targets still report, in input order.
+**Process cost.** Checks never cost an extra process launch, in either spelling. A single `scenePath` plus `checks` does the parse validation and the checks against one instantiated scene in one process, and `targets[].checks` run inside the same single process as the rest of the batch. One target's failure (a bad schema, a missing scene, an unimported dependency) is reported on that target and the other targets still report, in input order. When the scene could not be loaded for its checks, the entry says why in parentheses: the file is missing, a file it references is missing, or a dependency has not been imported yet. An unimported dependency is imported and the call retried once, except while a game is running on the project (this server's or another's), where the import would race it.
 
 **Why `checks[].type` is a discriminator.** It is a deliberate exception to the antipattern in [`tool-authoring.md` section 5](tool-authoring.md#5-consolidation-criteria): the two checks are heterogeneous operations over one instantiated scene tree in one process. Splitting them would cost a second Godot launch per scene and grow the tool surface.
 
