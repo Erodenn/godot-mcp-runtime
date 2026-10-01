@@ -65,7 +65,7 @@ export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity using headless Godot. Use before attach_script or run_script to catch parse errors early. Give exactly one of scriptPath, source, or scenePath, or a targets array validated in one Godot process. Returns: { valid, errors } for one target, { results: [{ target, valid, errors }] } for a batch. An errors entry is { line?, message } for a parse error, or { check, problem?, message } for a checks[] finding. checks requires scenePath and instantiates the scene, running each attached script's _init(). Any parse error yields valid:false.",
+      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script to catch parse errors. Give exactly one of scriptPath, source or scenePath, or a targets array (one process). checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { results: [{ target, valid, errors }] } for targets; each error has message, plus line for a parse error or check and problem for a checks finding.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',

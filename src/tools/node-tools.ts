@@ -46,7 +46,7 @@ export const nodeToolDefinitions = [
   {
     name: 'delete_nodes',
     description:
-      'Remove one or more nodes (and their descendants) from a scene file. Always-array: pass a single-element nodePaths array for one-off deletes. Saves once at the end. Cannot delete the scene root - that entry returns an error and the rest still process. Returns: results array with one entry per nodePath in input order (success or error message). Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Remove one or more nodes, with their descendants, from a scene. Always-array: pass a single-element nodePaths array for a one-off delete. Saves once at the end. The scene root cannot be deleted: that entry reports an error and the rest still process. Returns: results[], one entry per nodePath in input order, each with success or error. Errors while a runtime session is live on this project.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -84,7 +84,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set one or more node properties on a scene in one Godot process. Always-array: pass a single-element updates array for one-off edits. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Saves once at the end. Returns: results[] with one entry per update in input order (success or error). Errors while a Godot runtime session is active; stop_project clears it.",
+      "Set one or more node properties in a scene in one Godot process. Always-array: pass a single-element updates array for a one-off edit. Each value is checked against the property's declared type and errors instead of silently storing that type's zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success or error. Errors while a runtime session is live on this project.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -108,7 +108,7 @@ export const nodeToolDefinitions = [
               },
               value: {
                 description:
-                  'New property value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. Packed*Array and script-declared Array[T] properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the element type errors with its index instead of silently storing zeros.',
+                  'New property value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. Packed*Array and script-declared Array[T] properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the element type errors with its index instead of silently storing zeros. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node.',
               },
             },
             required: ['nodePath', 'property', 'value'],
@@ -142,7 +142,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_node_properties',
     description:
-      "Read one or more nodes' current property values from a scene file in a single Godot process. Always-array: pass a single-element nodes array for one-off reads. Per-node changedOnly:true filters out properties matching class defaults (useful for compact diffs). Returns: { results: [{ nodePath, nodeType, properties?, error? }] }; failed reads include error and omit properties.",
+      'Read the current property values of one or more nodes from a scene file, in one Godot process. Always-array: pass a single-element nodes array for a one-off read. Per-node changedOnly: true leaves out properties that match the class defaults, for a compact diff. Returns: results[], one entry per node in input order: { nodePath, nodeType, properties }, or { nodePath, error } when the node was not found. A scene that cannot be loaded returns an empty results[] with a top-level error.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -197,7 +197,7 @@ export const nodeToolDefinitions = [
   {
     name: 'attach_script',
     description:
-      "Attach a GDScript or C# script to a node in a scene. Use after writing and validating it via the validate tool. C# needs the Godot .NET build with the class compiled into the project assembly. Replaces any previous script. Saves automatically. Returns: success with nodePath and scriptPath. Errors if the script can't be instantiated (parse errors, @abstract, or an unbuilt C# class), scriptPath doesn't exist, or nodePath isn't found. Errors while a Godot runtime session is active; stop_project clears it.",
+      'Attach a GDScript or C# script to a node in a scene, replacing any script it had. Check the script with the validate tool first. C# needs the Godot .NET build with the class compiled into the project assembly. Saves automatically. Returns: success, nodePath and scriptPath. Errors if the script cannot be instantiated (parse errors, @abstract, or an unbuilt C# class), or if scriptPath or nodePath does not exist. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -225,7 +225,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_scene_tree',
     description:
-      'Get the scene hierarchy as a nested tree of { name, type, path, script, children }. Use maxDepth:1 for a shallow listing of direct children only; default -1 returns the full tree. parentPath scopes the result to a subtree. Returns: the root node of the tree; every child has the same shape. Errors if scene does not exist or parentPath is not found.',
+      "Get a scene's node hierarchy as a nested tree. maxDepth: 1 lists only the direct children; the default -1 returns the whole tree. parentPath scopes the result to one subtree. Returns: the root node of the tree, { name, type, path, script, children[] }; every child has the same shape, and script is the attached script's res:// path or an empty string. Errors if the scene does not exist or parentPath is not found.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -263,7 +263,7 @@ export const nodeToolDefinitions = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a Godot scene, without rebuilding it node-by-node via add_node. newName defaults to the original name + "2"; targetParentPath defaults to the original parent. Saves automatically. Returns: success, nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or targetParentPath cannot accept children. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Duplicate a node and its descendants in a scene, instead of rebuilding it node by node with add_node. newName defaults to the original name plus "2"; targetParentPath defaults to the parent of the original. Saves automatically. Returns: success, nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or is the scene root, or if targetParentPath is not found. Errors while a runtime session is live on this project.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -339,7 +339,7 @@ export const nodeToolDefinitions = [
   {
     name: 'connect_signal',
     description:
-      'Connect a signal on a source node to a method on a target node, persisting it in the .tscn. Use get_node_signals first to confirm names - connecting the same pair twice creates a duplicate connection. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, which is read back from the saved scene (null with a leading warning if that read failed). Errors if the signal or method does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Connect a signal on a source node to a method on a target node and persist it in the .tscn. Use get_node_signals first to confirm the names. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, which is read back from the saved scene (null with a leading warning if that read failed). Errors if the signal or method does not exist or the connection already exists. Errors while a runtime session is live on this project.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -366,7 +366,7 @@ export const nodeToolDefinitions = [
   {
     name: 'disconnect_signal',
     description:
-      'Remove an existing signal connection between two nodes, persisting the change in the .tscn. Use get_node_signals first to confirm the connection exists; recovery requires reconnecting via connect_signal. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, read back from the saved scene: false once the connection is gone, null with a leading warning if that read failed. Errors if the connection does not exist. Errors while a Godot runtime session is active on this project; stop_project clears it.',
+      'Remove a signal connection between two nodes and persist the change in the .tscn. Use get_node_signals first to confirm the connection exists; connect_signal puts it back. Saves automatically. Returns: nodePath, signal, targetNodePath, method and connected, read back from the saved scene: false once the connection is gone, null with a leading warning if that read failed. Errors if the connection does not exist. Errors while a runtime session is live on this project.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

@@ -20,19 +20,6 @@ const allDefinitions: ToolDefinition[] = [
   ...validateToolDefinitions,
 ];
 
-// Tools that do not declare an outputSchema yet. A tool named here is skipped
-// by the check below; the list shrinks to nothing and is then deleted.
-const TOOLS_PENDING_OUTPUT_SCHEMA: readonly string[] = [
-  'launch_editor',
-  'list_projects',
-  'get_project_files',
-  'get_project_settings',
-  'list_autoloads',
-  'add_autoload',
-  'remove_autoload',
-  'update_autoload',
-];
-
 describe('tool definitions: per-tool shape contract', () => {
   it.each(allDefinitions.map((t) => [t.name, t] as [string, ToolDefinition]))(
     '%s has a non-empty name',
@@ -94,12 +81,39 @@ describe('tool definitions: no duplicate names', () => {
 });
 
 describe('tool definitions: every tool declares an outputSchema', () => {
-  it.each(
-    allDefinitions
-      .filter((t) => !TOOLS_PENDING_OUTPUT_SCHEMA.includes(t.name))
-      .map((t) => [t.name, t] as [string, ToolDefinition]),
-  )('%s declares an object outputSchema', (_name, tool) => {
-    expect(tool.outputSchema).toBeDefined();
-    expect(tool.outputSchema?.type).toBe('object');
+  it.each(allDefinitions.map((t) => [t.name, t] as [string, ToolDefinition]))(
+    '%s declares an object outputSchema',
+    (_name, tool) => {
+      expect(tool.outputSchema).toBeDefined();
+      expect(tool.outputSchema?.type).toBe('object');
+    },
+  );
+});
+
+/**
+ * Hard cap on a tool description, in characters. Every description ships on
+ * every handshake; detail beyond this belongs in a per-property description
+ * or in docs/tools.md.
+ */
+const DESCRIPTION_MAX_CHARS = 500;
+
+describe('tool definitions: description budget', () => {
+  const cases = allDefinitions.map((t) => [t.name, t] as [string, ToolDefinition]);
+
+  it.each(cases)(`%s description is at most ${DESCRIPTION_MAX_CHARS} characters`, (_name, tool) => {
+    expect(tool.description.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS);
+  });
+
+  it.each(cases)(
+    '%s description does not promise that stop_project clears an edit refusal',
+    (_name, tool) => {
+      // Only true when the blocking session is the current one. The refusal
+      // itself names the right remedy.
+      expect(tool.description).not.toMatch(/stop_project clears/);
+    },
+  );
+
+  it.each(cases)('%s description has no em-dash or en-dash', (_name, tool) => {
+    expect(tool.description).not.toMatch(/[\u2013\u2014]/);
   });
 });

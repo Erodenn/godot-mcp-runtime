@@ -127,7 +127,7 @@ export const profilerToolDefinitions = [
   {
     name: 'profile_project',
     description:
-      "Capture a window of Godot's function profiler - the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: projectPath, rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
+      "Capture a window of Godot's function profiler, the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap, so never sum totalMs. Returns: projectPath, rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached. Errors if profiling was off at launch or a capture is already open.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
