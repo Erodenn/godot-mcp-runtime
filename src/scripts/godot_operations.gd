@@ -569,8 +569,11 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 			warnings.append(unstored)
 	parent.add_child(new_node)
 	# A parent inside an instanced child is dropped by pack() unless the instance
-	# is editable from the scene root.
-	_claim_for_serialization(scene_root, new_node)
+	# is editable from the scene root. The claim starts at the parent, not at the
+	# new node: a parent that is itself an instance root is owned by this scene
+	# and saves its new child as it is, so marking it editable would change the
+	# scene for nothing.
+	_claim_for_serialization(scene_root, parent)
 	new_node.owner = scene_root
 	# Read the outcome back from the node now that it is in the tree. add_child
 	# renames a child whose name collides with a sibling, and assigning a name
@@ -1230,23 +1233,27 @@ func duplicate_node(params):
 
 	parent.add_child(duplicate)
 	# A duplicate placed inside an instanced child is dropped by pack() unless
-	# the instance is editable from the scene root.
-	_claim_for_serialization(scene_root, duplicate)
+	# the instance is editable from the scene root. The claim starts at the
+	# parent: a parent that is itself an instance root needs no mark to save a
+	# child this scene owns.
+	_claim_for_serialization(scene_root, parent)
 	duplicate.owner = scene_root
-	# Iterative BFS to set owner on all descendants — avoids recursion depth.
-	# The inner nodes of an instanced scene are not this scene's own: the
-	# instance is saved as one instance= line and re-creates them on load, so
-	# giving them this scene as owner would make pack() write them out a second
-	# time and leave two copies after a reload. The instance root itself is
-	# owned like any other node; nothing below it is touched.
-	var queue: Array = []
-	if duplicate.get_scene_file_path() == "":
-		queue = duplicate.get_children()
+	# Iterative BFS over every descendant (avoids recursion depth), giving this
+	# scene as owner to the ones that have none. duplicate() leaves the nodes it
+	# copied one by one without an owner, and pack() drops a node without one.
+	# The inner nodes of an instanced scene arrive already owned by their
+	# instance root and are left alone: the instance is saved as one instance=
+	# line and re-creates them on load, so giving them this scene as owner would
+	# make pack() write them out a second time and leave two copies after a
+	# reload. The walk still goes through an instance, because a node this scene
+	# added under one (a child of the instance root, say) is copied without an
+	# owner like any other.
+	var queue: Array = duplicate.get_children()
 	while not queue.is_empty():
 		var current = queue.pop_front()
-		current.owner = scene_root
-		if current.get_scene_file_path() == "":
-			queue.append_array(current.get_children())
+		if current.owner == null:
+			current.owner = scene_root
+		queue.append_array(current.get_children())
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		emit_result({
