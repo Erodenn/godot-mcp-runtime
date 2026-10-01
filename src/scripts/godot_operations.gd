@@ -813,7 +813,8 @@ func delete_nodes(params):
 
 	if any_deleted:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			emit_result({"error": "Failed to save scene after deleting nodes", "results": results})
+			log_error("Failed to save scene after deleting nodes")
+			quit(1)
 			return
 
 	emit_result({"results": results})
@@ -846,34 +847,51 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 	var results: Array = []
 	var any_set := false
 
-	for update in updates:
-		var result = {"nodePath": update.node_path, "property": update.property}
-		var node = find_node_by_path(scene_root, update.node_path)
-		if node == null:
-			result["error"] = "Node not found: " + update.node_path
-		elif not (update.property in node):
-			result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
+	for i in range(updates.size()):
+		var update = updates[i]
+		# The batch path forwards operations without any Node-side check, so a
+		# malformed item is reported here instead of read by dot access, which
+		# aborts the whole script on a missing key.
+		var well_formed: bool = (
+			typeof(update) == TYPE_DICTIONARY
+			and update.has("node_path")
+			and update.has("property")
+			and update.has("value")
+			and typeof(update.get("node_path")) == TYPE_STRING
+			and typeof(update.get("property")) == TYPE_STRING
+		)
+		var result = {"nodePath": "", "property": ""}
+		if not well_formed:
+			result["error"] = "updates[%d] must be an object with nodePath, property and value" % i
 		else:
-			var prepared = _prepare_property_value(node, update.property, update.value)
-			if not prepared.ok:
-				result["error"] = prepared.error
+			result["nodePath"] = update.node_path
+			result["property"] = update.property
+			var node = find_node_by_path(scene_root, update.node_path)
+			if node == null:
+				result["error"] = "Node not found: " + update.node_path
+			elif not (update.property in node):
+				result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
 			else:
-				_claim_for_serialization(scene_root, node)
-				node.set(update.property, prepared.value)
-				# "script" already passed _check_script_attachable inside
-				# _prepare_property_value, but verify the assignment actually
-				# landed -- see _verify_script_attached. A failed backstop is a
-				# per-update error, not a successful set: any_set must stay
-				# false for this update so it isn't counted as applied work.
-				var backstop_ok := true
-				if update.property == "script":
-					var verify = _verify_script_attached(node, prepared.value)
-					if not verify.ok:
-						result["error"] = verify.error
-						backstop_ok = false
-				if backstop_ok:
-					result["success"] = true
-					any_set = true
+				var prepared = _prepare_property_value(node, update.property, update.value)
+				if not prepared.ok:
+					result["error"] = prepared.error
+				else:
+					_claim_for_serialization(scene_root, node)
+					node.set(update.property, prepared.value)
+					# "script" already passed _check_script_attachable inside
+					# _prepare_property_value, but verify the assignment actually
+					# landed -- see _verify_script_attached. A failed backstop is a
+					# per-update error, not a successful set: any_set must stay
+					# false for this update so it isn't counted as applied work.
+					var backstop_ok := true
+					if update.property == "script":
+						var verify = _verify_script_attached(node, prepared.value)
+						if not verify.ok:
+							result["error"] = verify.error
+							backstop_ok = false
+					if backstop_ok:
+						result["success"] = true
+						any_set = true
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
@@ -883,13 +901,14 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 func set_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		emit_result({"error": "Failed to load scene: " + params.scene_path, "results": []})
+		quit(1)
 		return
 
 	var applied = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
 	if applied.any_set:
 		if not save_scene_to_path(scene_root, params.scene_path):
-			emit_result({"error": "Failed to save scene after updates", "results": applied.results})
+			log_error("Failed to save scene after updates")
+			quit(1)
 			return
 
 	emit_result({"results": applied.results})
@@ -898,7 +917,7 @@ func set_node_properties(params: Dictionary) -> void:
 func get_node_properties(params: Dictionary) -> void:
 	var scene_root = load_scene_instance(params.scene_path)
 	if not scene_root:
-		emit_result({"error": "Failed to load scene: " + params.scene_path, "results": []})
+		quit(1)
 		return
 
 	var results: Array = []
@@ -906,8 +925,14 @@ func get_node_properties(params: Dictionary) -> void:
 	# so we don't instantiate a fresh default per node when changed_only is true.
 	var defaults_cache: Dictionary = {}
 
-	for node_spec in params.nodes:
-		var node_path = node_spec.get("node_path", "")
+	for i in range(params.nodes.size()):
+		var node_spec = params.nodes[i]
+		# An empty or missing node_path resolves to the scene root, so a mistyped
+		# key would read the wrong node and report it as the one asked for.
+		if typeof(node_spec) != TYPE_DICTIONARY or typeof(node_spec.get("node_path", "")) != TYPE_STRING or node_spec.get("node_path", "") == "":
+			results.append({"nodePath": "", "error": "nodes[%d] is missing nodePath" % i})
+			continue
+		var node_path: String = node_spec.node_path
 		var changed_only = node_spec.get("changed_only", false)
 		var node = find_node_by_path(scene_root, node_path)
 		if node == null:
@@ -2459,6 +2484,8 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var prepass_missing: Array = []
 	var prepass_needs_import: Array = []
 	for op in params.operations:
+		if typeof(op) != TYPE_DICTIONARY:
+			continue
 		var op_name = op.get("operation", "")
 
 		_prepass_path_param(str(op.get("scene_path", "")), true, seen_paths, prepass_needs_import, prepass_missing)
@@ -2488,8 +2515,22 @@ func batch_scene_operations(params: Dictionary) -> void:
 		return
 
 	for op in params.operations:
+		if typeof(op) != TYPE_DICTIONARY:
+			results.append({"operation": "", "scenePath": "", "error": "operations[%d] must be an object" % results.size()})
+			if abort_on_error:
+				break
+			continue
+		# The echoed operation and scenePath are always strings: a non-string
+		# operation is treated as an omitted one (the hint path below names it).
 		var op_name = op.get("operation", "")
+		if typeof(op_name) != TYPE_STRING:
+			op_name = ""
 		var scene_path = op.get("scene_path", "")
+		if typeof(scene_path) != TYPE_STRING:
+			results.append({"operation": op_name, "scenePath": "", "error": "scene_path must be a string"})
+			if abort_on_error:
+				break
+			continue
 		var result = {"operation": op_name, "scenePath": scene_path}
 
 		if scene_path != "" and scene_path not in scene_cache:

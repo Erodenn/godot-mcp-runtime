@@ -146,9 +146,16 @@ function interpretOperationResult(
       );
     }
     try {
-      return createStructuredResponse(
-        leadWithWarnings(JSON.parse(payload) as Record<string, unknown>),
-      );
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      // A payload that carries a top-level error string is a failure the script
+      // reported by the wrong channel: the work it describes did not happen.
+      // Every operation fails by printing to stderr and quitting without a
+      // payload, so this is the backstop for one that does not.
+      if (typeof parsed?.error === 'string') {
+        const message = `${failurePrefix}: ${parsed.error}`;
+        return err(createErrorResponse(message, emptyStdoutSolutions));
+      }
+      return createStructuredResponse(leadWithWarnings(parsed));
     } catch (parseErr) {
       return err(
         createErrorResponse(

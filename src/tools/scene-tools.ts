@@ -15,6 +15,7 @@ import {
   optionalBoolean,
   requireArray,
   optionalObject,
+  checkBatchOperationItems,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
@@ -586,6 +587,8 @@ export async function handleBatchSceneOperations(
 
   const operations = requireArray(args, 'operations');
   if (!operations.ok) return operations;
+  const checkedOperations = checkBatchOperationItems(operations.value);
+  if (!checkedOperations.ok) return checkedOperations;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
   if (!abortOnError.ok) return abortOnError;

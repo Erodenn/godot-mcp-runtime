@@ -290,7 +290,7 @@ describe('handleGetNodeProperties', () => {
     expectMatchesOutputSchema('get_node_properties', result);
   });
 
-  it('validates the payload of a scene that could not be loaded', async () => {
+  it('returns an error response for a payload that carries a load failure', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({ error: 'Failed to load scene: main.tscn', results: [] }),
     });
@@ -298,8 +298,7 @@ describe('handleGetNodeProperties', () => {
       ...validBase,
       nodes: validNodes,
     });
-    const payload = expectMatchesOutputSchema('get_node_properties', result);
-    expect(payload.results).toEqual([]);
+    expectErrorMatching(result, /Failed to load scene: main\.tscn/);
   });
 });
 

@@ -250,13 +250,15 @@ All mutation operations save automatically. Property and delete tools take alway
 ### What the node tools return
 
 - `get_scene_tree`: the root node of the tree, `{ name, type, path, script, children[] }`, with every child in the same shape. `script` is the attached script's `res://` path, or an empty string.
-- `get_node_properties`: `results[]`, one entry per requested node in input order: `{ nodePath, nodeType, properties }`, or `{ nodePath, error }` when the node was not found. A scene that cannot be loaded returns an empty `results[]` and a top-level `error`.
-- `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`.
-- `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`.
+- `get_node_properties`: `results[]`, one entry per requested node in input order: `{ nodePath, nodeType, properties }`, or `{ nodePath, error }` when the node was not found. A scene that cannot be loaded is an error response.
+- `set_node_properties`: `results[]`, one entry per update: `nodePath`, `property`, and `success: true` or `error`. A scene that cannot be loaded, or that could not be saved after the updates, is an error response, never a payload that reports the updates as written.
+- `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`. A scene that cannot be loaded or saved is an error response.
 - `attach_script`: `success`, `nodePath`, `scriptPath`.
 - `duplicate_node`: `success`, `nodePath` (the node that was copied) and `newNodePath`, where the duplicate is after the add, in the `root/...` form.
 - `get_node_signals`: `nodePath`, `nodeType` and `signals[]`, each with `name` and `connections[]` of `{ signal, target, method }`.
 - `connect_signal` and `disconnect_signal`: `nodePath`, `signal`, `targetNodePath`, `method` and `connected`. `connected` is not an echo of the request: after the save, the scene file is loaded again from disk and the connection is looked up in it. It is `true` after a connect and `false` after a disconnect. If that second load fails, `connected` is `null` and `warnings` leads the payload. A connect the saved scene does not hold, or a disconnect it still holds, is an error.
+
+The items of `nodes`, `updates` and batch `operations` are checked before Godot starts. An item that is not an object, a `nodes` or `updates` item without a non-empty string `nodePath`, an update without a string `property` or without a `value` (`null` is a value), a batch item whose `operation` or `scenePath` is not a string, or a non-boolean `changedOnly` is an error response that names the index, so a mistyped key never reads the scene root or aborts the run.
 
 ## Property Values (`add_node`, `set_node_properties`)
 

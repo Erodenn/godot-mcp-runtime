@@ -351,3 +351,134 @@ export function parseOptionalNodePath(
   }
   return parseNodePath(raw, key);
 }
+
+// --- Array item validators ---
+//
+// `normalizeParameters` does not descend into arrays, so the items of `nodes`,
+// `updates` and `operations` reach a handler spelled however the caller wrote
+// them: camelCase from the tool schema, or snake_case from a client that
+// mirrors the engine's names. Each validator accepts both spellings and refuses
+// what the script would otherwise read as a different request (a mistyped key
+// defaulting to the scene root) or abort on (a missing key). The error names
+// the index, and nothing reaches Godot.
+
+type ItemRecord = Record<string, unknown>;
+
+function asItemRecord(item: unknown): ItemRecord | null {
+  if (typeof item !== 'object' || item === null || Array.isArray(item)) return null;
+  return item as ItemRecord;
+}
+
+/** Read a key an item may spell in camelCase or snake_case. */
+function itemField(item: ItemRecord, camelKey: string, snakeKey: string): unknown {
+  return item[camelKey] !== undefined ? item[camelKey] : item[snakeKey];
+}
+
+function itemError(message: string, solution: string): Result<void, ToolResponse> {
+  return err(createErrorResponse(message, [solution]));
+}
+
+function checkItemNodePath(item: ItemRecord, where: string): Result<void, ToolResponse> {
+  const raw = itemField(item, 'nodePath', 'node_path');
+  if (typeof raw !== 'string' || raw === '') {
+    return itemError(
+      `${where}.nodePath is required and must be a non-empty string`,
+      'Provide a scene-tree path such as "root/Player"',
+    );
+  }
+  const parsed = parseNodePath(raw, `${where}.nodePath`);
+  if (!parsed.ok) return parsed;
+  return ok(undefined);
+}
+
+/** Validate the items of get_node_properties `nodes`: { nodePath, changedOnly? }. */
+export function checkNodeReadItems(items: unknown[], field = 'nodes'): Result<void, ToolResponse> {
+  for (let i = 0; i < items.length; i++) {
+    const where = `${field}[${i}]`;
+    const item = asItemRecord(items[i]);
+    if (!item) {
+      return itemError(`${where} must be an object with a nodePath`, 'Each item is { nodePath }');
+    }
+    const nodePath = checkItemNodePath(item, where);
+    if (!nodePath.ok) return nodePath;
+    const changedOnly = itemField(item, 'changedOnly', 'changed_only');
+    if (changedOnly !== undefined && typeof changedOnly !== 'boolean') {
+      return itemError(
+        `${where}.changedOnly must be a boolean when provided`,
+        'Provide true or false for changedOnly, or omit it',
+      );
+    }
+  }
+  return ok(undefined);
+}
+
+/** Validate the items of set_node_properties `updates`: { nodePath, property, value }. */
+export function checkUpdateItems(items: unknown[], field = 'updates'): Result<void, ToolResponse> {
+  for (let i = 0; i < items.length; i++) {
+    const where = `${field}[${i}]`;
+    const item = asItemRecord(items[i]);
+    if (!item) {
+      return itemError(
+        `${where} must be an object with nodePath, property and value`,
+        'Each update is { nodePath, property, value }',
+      );
+    }
+    const nodePath = checkItemNodePath(item, where);
+    if (!nodePath.ok) return nodePath;
+    if (typeof item.property !== 'string' || item.property === '') {
+      return itemError(
+        `${where}.property is required and must be a non-empty string`,
+        'Provide the property name, for example "position"',
+      );
+    }
+    if (item.value === undefined) {
+      return itemError(
+        `${where}.value is required`,
+        'Provide a value for the property, or null to clear an Object-typed one',
+      );
+    }
+  }
+  return ok(undefined);
+}
+
+/**
+ * Validate the items of batch_scene_operations `operations`. An item with no
+ * `operation` key still goes through: the script names the index and hints the
+ * intended operation, which is more useful than a generic refusal here.
+ */
+export function checkBatchOperationItems(
+  items: unknown[],
+  field = 'operations',
+): Result<void, ToolResponse> {
+  for (let i = 0; i < items.length; i++) {
+    const where = `${field}[${i}]`;
+    const item = asItemRecord(items[i]);
+    if (!item) {
+      return itemError(
+        `${where} must be an object`,
+        'Each operation is an object with an operation key',
+      );
+    }
+    if (item.operation !== undefined && typeof item.operation !== 'string') {
+      return itemError(
+        `${where}.operation must be a string`,
+        'Use one of: add_node, load_sprite, set_node_properties, save',
+      );
+    }
+    const scenePath = itemField(item, 'scenePath', 'scene_path');
+    if (scenePath !== undefined && typeof scenePath !== 'string') {
+      return itemError(
+        `${where}.scenePath must be a string when provided`,
+        'Provide the scene file path relative to the project',
+      );
+    }
+    if (item.updates !== undefined) {
+      if (!Array.isArray(item.updates)) {
+        return itemError(`${where}.updates must be an array`, 'Provide an array of updates');
+      }
+      const updates = checkUpdateItems(item.updates, `${where}.updates`);
+      if (!updates.ok) return updates;
+    }
+  }
+  return ok(undefined);
+}

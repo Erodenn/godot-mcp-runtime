@@ -16,6 +16,8 @@ import {
   requireArray,
   optionalNumber,
   optionalBoolean,
+  checkNodeReadItems,
+  checkUpdateItems,
 } from '../utils/arg-parsing.js';
 import type { NodePath, ProjectPath, ScenePath } from '../utils/branded.js';
 import type { Result } from '../utils/result.js';
@@ -142,7 +144,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_node_properties',
     description:
-      'Read the current property values of one or more nodes from a scene file, in one Godot process. Always-array: pass a single-element nodes array for a one-off read. Per-node changedOnly: true leaves out properties that match the class defaults, for a compact diff. Returns: results[], one entry per node in input order: { nodePath, nodeType, properties }, or { nodePath, error } when the node was not found. A scene that cannot be loaded returns an empty results[] with a top-level error.',
+      'Read the current property values of one or more nodes from a scene file, in one Godot process. Always-array: pass a single-element nodes array for a one-off read. Per-node changedOnly: true leaves out properties that match the class defaults, for a compact diff. Returns: results[], one entry per node in input order: { nodePath, nodeType, properties }, or { nodePath, error } when the node was not found. Errors if the scene cannot be loaded.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -173,10 +175,6 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        error: {
-          type: 'string',
-          description: 'Present when the scene could not be loaded; results is then empty.',
-        },
         results: {
           type: 'array',
           items: {
@@ -427,6 +425,8 @@ export async function handleSetNodeProperties(
 
   const updates = requireArray(args, 'updates');
   if (!updates.ok) return updates;
+  const checkedUpdates = checkUpdateItems(updates.value);
+  if (!checkedUpdates.ok) return checkedUpdates;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
   if (!abortOnError.ok) return abortOnError;
@@ -458,6 +458,8 @@ export async function handleGetNodeProperties(
 
   const nodes = requireArray(args, 'nodes');
   if (!nodes.ok) return nodes;
+  const checkedNodes = checkNodeReadItems(nodes.value);
+  if (!checkedNodes.ok) return checkedNodes;
 
   const params = { scenePath: parsed.value.scenePath, nodes: nodes.value };
   return executeSceneOp(
