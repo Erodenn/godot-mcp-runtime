@@ -130,3 +130,30 @@ export function measurePngFile(filePath: string): Result<MeasuredFrame, string> 
   }
   return measurePngBuffer(buffer);
 }
+
+const RGB_CHANNELS = 3;
+const CHANNEL_MAX = 255;
+/** A sampled pair shows motion when its difference is above this fraction of full scale. */
+export const MOTION_MIN_DIFFERENCE = 0.0005;
+
+/**
+ * Mean absolute R, G, B difference between two frames over the stats sampling
+ * grid, 0..1. Alpha is ignored. Null when the sizes differ, because no
+ * pairing of pixels is defined then.
+ */
+export function computeFrameDifference(a: RgbaFrame, b: RgbaFrame): number | null {
+  if (a.width !== b.width || a.height !== b.height) return null;
+  let total = 0;
+  const sampled = forEachSampleOffset(a.width, a.height, (i) => {
+    for (let channel = 0; channel < RGB_CHANNELS; channel++) {
+      total += Math.abs(a.data[i + channel]! - b.data[i + channel]!);
+    }
+  });
+  if (sampled === 0) return null;
+  return total / (sampled * RGB_CHANNELS * CHANNEL_MAX);
+}
+
+/** True when a frame difference is above the fixed no-motion threshold. */
+export function showsMotion(difference: number): boolean {
+  return difference > MOTION_MIN_DIFFERENCE;
+}

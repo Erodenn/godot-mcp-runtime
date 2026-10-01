@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import {
+  computeFrameDifference,
   computePixelStats,
   forEachSampleOffset,
   isLikelyBlank,
@@ -11,6 +12,8 @@ import {
   LIKELY_BLANK_MAX_DOMINANT,
   LIKELY_BLANK_MIN_CHROMATIC,
   LIKELY_BLANK_MIN_DISTINCT,
+  MOTION_MIN_DIFFERENCE,
+  showsMotion,
 } from '../../src/utils/pixel-stats.js';
 import { encodePng, invalidPng, solidRgba } from '../helpers/png-fixtures.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -195,5 +198,64 @@ describe('measurePngBuffer and measurePngFile', () => {
     if (!result.ok) return;
     expect(result.value.stats.chromatic).toBe(1);
     expect(result.value.stats.dominant).toBe(1);
+  });
+});
+
+describe('computeFrameDifference', () => {
+  const BLACK: readonly [number, number, number, number] = [0, 0, 0, 255];
+  const WHITE: readonly [number, number, number, number] = [255, 255, 255, 255];
+  const GRID_SIZE = 128;
+  const OFF_GRID_PIXEL_X = 1;
+  const OFF_GRID_PIXEL_Y = 1;
+  const ABOVE_THRESHOLD_MARGIN = 0.0001;
+
+  function frame(
+    width: number,
+    height: number,
+    pixel: readonly [number, number, number, number],
+  ): { width: number; height: number; data: Uint8Array } {
+    return { width, height, data: solidRgba(width, height, pixel) };
+  }
+
+  it('returns 0 for identical frames', () => {
+    expect(computeFrameDifference(frame(4, 4, RED), frame(4, 4, RED))).toBe(0);
+  });
+
+  it('returns 1 for black against white', () => {
+    expect(computeFrameDifference(frame(4, 4, BLACK), frame(4, 4, WHITE))).toBe(1);
+  });
+
+  it('returns 0.25 when one of four pixels flips black to white', () => {
+    const a = frame(2, 2, BLACK);
+    const b = frame(2, 2, BLACK);
+    setPixel(b.data, 0, WHITE);
+    expect(computeFrameDifference(a, b)).toBe(0.25);
+  });
+
+  it('ignores alpha', () => {
+    const a = frame(4, 4, [10, 20, 30, 255]);
+    const b = frame(4, 4, [10, 20, 30, 0]);
+    expect(computeFrameDifference(a, b)).toBe(0);
+  });
+
+  it('returns null when the frames differ in size', () => {
+    expect(computeFrameDifference(frame(4, 4, RED), frame(4, 2, RED))).toBeNull();
+  });
+
+  it('compares only the sampling grid', () => {
+    const a = frame(GRID_SIZE, GRID_SIZE, BLACK);
+    const b = frame(GRID_SIZE, GRID_SIZE, BLACK);
+    // The grid steps by 2 at this size, so (1, 1) is never visited.
+    setPixel(b.data, OFF_GRID_PIXEL_Y * GRID_SIZE + OFF_GRID_PIXEL_X, WHITE);
+    expect(computeFrameDifference(a, b)).toBe(0);
+  });
+
+  it('pins MOTION_MIN_DIFFERENCE at 0.0005', () => {
+    expect(MOTION_MIN_DIFFERENCE).toBe(0.0005);
+  });
+
+  it('showsMotion is exclusive at the threshold', () => {
+    expect(showsMotion(MOTION_MIN_DIFFERENCE)).toBe(false);
+    expect(showsMotion(MOTION_MIN_DIFFERENCE + ABOVE_THRESHOLD_MARGIN)).toBe(true);
   });
 });
