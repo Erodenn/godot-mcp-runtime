@@ -290,6 +290,12 @@ export interface RuntimeStopResult {
    * listening on its port.
    */
   shutdownAcknowledged?: boolean;
+  /**
+   * True when the record held nothing but a finished profiler capture: its
+   * process had exited and an earlier stop had already returned its logs. This
+   * stop released the capture, so `output` and `errors` are null.
+   */
+  releasedCaptureOnly?: boolean;
 }
 
 /**
@@ -822,6 +828,10 @@ export class GodotRunner {
     try {
       const port = bridgePort ?? (await findFreePort());
       this.assertStartStillOwned(session, epoch);
+      // The token is set before the port: a record with a port can be dialed,
+      // and a frame sent to it must never go out without the token.
+      const sessionToken = randomBytes(16).toString('hex');
+      session.token = sessionToken;
       session.bridgePort = port;
 
       try {
@@ -861,8 +871,6 @@ export class GodotRunner {
 
       const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
       logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
-      const sessionToken = randomBytes(16).toString('hex');
-      session.token = sessionToken;
       const spawnOptions: SpawnOptions = {
         ...godotSpawnOptions('run'),
         env: {
@@ -928,7 +936,10 @@ export class GodotRunner {
       // Nothing is running for this record: drop it, release the debugger
       // listener, and remove whatever bridge artifacts the start (or the
       // session it replaced) left on the project.
-      this.discardFailedStart(session, injected || previous !== null);
+      this.appendCleanupProblems(
+        err,
+        this.discardFailedStart(session, injected || previous !== null),
+      );
       throw err;
     }
   }
@@ -1000,21 +1011,37 @@ export class GodotRunner {
   /**
    * Undo a start that threw before it produced a running session. The record
    * is dropped so nothing reports a session that never ran, and the bridge
-   * artifacts are removed when this start injected them or when it replaced a
-   * session whose artifacts would otherwise have no owner left to remove them.
+   * artifacts are removed when this start injected them (or tried to: an
+   * inject that throws part-way has already written its owner file) or when it
+   * replaced a session whose artifacts would otherwise have no owner left to
+   * remove them.
+   *
+   * Returns what that cleanup attempted and could not confirm. The start is
+   * about to rethrow to its caller, which is the only place left to say so.
    */
-  private discardFailedStart(session: RuntimeSession, ownsArtifacts: boolean): void {
+  private discardFailedStart(session: RuntimeSession, ownsArtifacts: boolean): string[] {
     this.closeProfiler(session);
     this.forgetSession(session);
-    if (!ownsArtifacts) return;
+    if (!ownsArtifacts) return [];
     // Another record took this project while the start was in flight. It
     // shares the owner file, so the artifacts are its to remove now.
-    if (this.sessions.has(session.key)) return;
+    if (this.sessions.has(session.key)) return [];
     try {
-      this.bridge.cleanup(session.projectPath);
+      return this.bridge.cleanup(session.projectPath);
     } catch (err) {
       logDebug(`Bridge cleanup after a failed start failed (ignored): ${err}`);
+      return [`bridge cleanup failed outright (${String(err)})`];
     }
+  }
+
+  /**
+   * Put cleanup problems on the error a caller is about to receive. They were
+   * found while handling that error, and no later call would report them: the
+   * session record is already gone.
+   */
+  private appendCleanupProblems(error: unknown, problems: readonly string[]): void {
+    if (problems.length === 0 || !(error instanceof Error)) return;
+    error.message += ` Bridge cleanup was incomplete: ${problems.join('; ')}`;
   }
 
   /**
@@ -1122,15 +1149,22 @@ export class GodotRunner {
    * its record is deleted outright.
    *
    * Production call site: the disconnect probe in `sendCommandWithReconnect`.
+   *
+   * Returns what the cleanup attempted and could not confirm. The record is
+   * deleted here, so no later stop_project can report it: the caller puts it
+   * on the error it is about to throw.
    */
-  private clearAttachedSession(session: RuntimeSession): void {
+  private clearAttachedSession(session: RuntimeSession): string[] {
     if (this.socketSession === session) this.closeConnection();
+    let problems: string[];
     try {
-      this.bridge.cleanup(session.projectPath);
+      problems = this.bridge.cleanup(session.projectPath);
     } catch (err) {
       logDebug(`Bridge cleanup after attached disconnect failed (ignored): ${err}`);
+      problems = [`bridge cleanup failed outright (${String(err)})`];
     }
     this.forgetSession(session);
+    return problems;
   }
 
   /**
@@ -1180,20 +1214,31 @@ export class GodotRunner {
     this.sessions.set(key, session);
     this.setCurrent(session);
 
+    // Set the moment inject is called, not when it returns. inject writes its
+    // owner file and the baked script before it touches .gitignore and
+    // project.godot, so one that throws there has left a live owner claim on
+    // the project. Without a cleanup that claim stands until this server
+    // exits, and every other server is told a session is running here.
+    let injectAttempted = false;
     try {
       const port = bridgePort ?? (await findFreePort());
       this.assertStartStillOwned(session, epoch);
-      session.bridgePort = port;
       // Attach has no env channel to a Godot process the user launched
       // themselves, so the baked script copy is the only way to deliver the
-      // auth token.
+      // auth token. Set before the port, so the record never has a port to
+      // dial without the token every frame must carry.
       const token = randomBytes(16).toString('hex');
       session.token = token;
+      session.bridgePort = port;
+      injectAttempted = true;
       this.bridge.inject(projectPath, port, token);
       const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
       logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     } catch (err) {
-      this.discardFailedStart(session, previous !== null);
+      this.appendCleanupProblems(
+        err,
+        this.discardFailedStart(session, injectAttempted || previous !== null),
+      );
       throw err;
     }
   }
@@ -1213,11 +1258,25 @@ export class GodotRunner {
     if (session.mode === null) {
       // Release the debugger listener before any early return. A record with
       // no mode and no process is a finished capture kept readable after an
-      // earlier stop; stopping again is where it is finally released.
+      // earlier stop; stopping again is where it is finally released. That is
+      // a stop that did something, so it is reported as one: the callers that
+      // point here (switch_project, check_project) say stop_project frees it.
       if (!session.process) {
+        const heldCapture = session.profiler !== null;
         this.closeProfiler(session);
         this.forgetSession(session);
-        return null;
+        if (!heldCapture) return null;
+        return {
+          mode: 'spawned',
+          projectPath: session.projectPath,
+          // The logs went out with the earlier stop: nothing is held, which is
+          // not the same as a process that printed nothing.
+          output: null,
+          errors: null,
+          alreadyExited: true,
+          cleanupProblems: [],
+          releasedCaptureOnly: true,
+        };
       }
 
       // The process exited on its own and handleSpawnedProcessExit already
@@ -1946,7 +2005,7 @@ export class GodotRunner {
     try {
       await this.sendCommandTo(session, 'ping', {}, BRIDGE_PING_TIMEOUT_MS);
     } catch {
-      this.clearAttachedSession(session);
+      this.appendCleanupProblems(failure, this.clearAttachedSession(session));
     }
     throw failure;
   }

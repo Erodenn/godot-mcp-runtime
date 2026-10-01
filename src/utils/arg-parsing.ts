@@ -442,6 +442,21 @@ export function checkUpdateItems(items: unknown[], field = 'updates'): Result<vo
 }
 
 /**
+ * The string-valued fields of a batch operation item, in both spellings. The
+ * script reads each of them into a typed parameter or a string comparison, so
+ * a value of another type raises inside the script and takes every other
+ * operation in the batch down with it, with no per-operation result.
+ */
+const BATCH_ITEM_STRING_FIELDS: ReadonlyArray<readonly [camel: string, snake: string]> = [
+  ['nodeType', 'node_type'],
+  ['nodeName', 'node_name'],
+  ['parentNodePath', 'parent_node_path'],
+  ['nodePath', 'node_path'],
+  ['texturePath', 'texture_path'],
+  ['newPath', 'new_path'],
+];
+
+/**
  * Validate the items of batch_scene_operations `operations`. An item with no
  * `operation` key still goes through: the script names the index and hints the
  * intended operation, which is more useful than a generic refusal here.
@@ -470,6 +485,28 @@ export function checkBatchOperationItems(
       return itemError(
         `${where}.scenePath must be a string when provided`,
         'Provide the scene file path relative to the project',
+      );
+    }
+    for (const [camelKey, snakeKey] of BATCH_ITEM_STRING_FIELDS) {
+      const value = itemField(item, camelKey, snakeKey);
+      if (value !== undefined && typeof value !== 'string') {
+        return itemError(
+          `${where}.${camelKey} must be a string when provided`,
+          `Provide a string for ${camelKey}, or omit it`,
+        );
+      }
+    }
+    if (item.properties !== undefined && asItemRecord(item.properties) === null) {
+      return itemError(
+        `${where}.properties must be an object when provided`,
+        'Provide a JSON object of property values, or omit properties',
+      );
+    }
+    const abortOnError = itemField(item, 'abortOnError', 'abort_on_error');
+    if (abortOnError !== undefined && typeof abortOnError !== 'boolean') {
+      return itemError(
+        `${where}.abortOnError must be a boolean when provided`,
+        'Provide true or false for abortOnError, or omit it',
       );
     }
     if (item.updates !== undefined) {

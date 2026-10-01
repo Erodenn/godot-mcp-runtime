@@ -533,6 +533,57 @@ describe('DebuggerProfiler incomplete captures', () => {
     }
   });
 
+  // The one-shot window used to wait for the totals by itself before handing
+  // over to the shared close-out. When the engine never sent them, that wait
+  // rejected past the close-out: the frames already folded were withheld, and
+  // the capture stayed open, refusing every later capture as busy.
+  it('a one-shot window whose totals never arrive returns what was folded, marked incomplete', async () => {
+    const WINDOW_SECONDS = 1;
+    const WINDOW_AND_TOTALS_TIMEOUT_MS = WINDOW_SECONDS * 1000 + TOTALS_TIMEOUT_ADVANCE_MS;
+    const TIMERS_ONCE_WAITING_FOR_TOTALS = 2;
+    const MAX_IO_TURNS = 500;
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.captureWindow(WINDOW_SECONDS, 10, 'selfMs', 512);
+    // Observed below; this keeps a rejection from surfacing as unhandled first.
+    running.catch(() => undefined);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'Date'],
+      shouldClearNativeTimers: true,
+    });
+    try {
+      fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
+      fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
+      fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+      fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 2, 0.002, 0.004]])]);
+      // The frames arrive over a real socket. Yield to it until the capture
+      // holds its two timers: the window's auto-stop and the wait for totals.
+      for (
+        let turn = 0;
+        turn < MAX_IO_TURNS && vi.getTimerCount() < TIMERS_ONCE_WAITING_FOR_TOTALS;
+        turn++
+      ) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(vi.getTimerCount()).toBe(TIMERS_ONCE_WAITING_FOR_TOTALS);
+
+      await vi.advanceTimersByTimeAsync(WINDOW_AND_TOTALS_TIMEOUT_MS);
+      const result = await running;
+
+      expect(result.complete).toBe(false);
+      expect(Object.keys(result)[0]).toBe('warnings');
+      expect(result.warnings?.[0]).toMatch(/capture is incomplete.*closing totals/);
+      expect(result.frames).toBeGreaterThan(0);
+      // Closed out, not left open: the result can be read again.
+      const reread = await p.stop(10, 'selfMs');
+      expect(reread.complete).toBe(false);
+      expect(reread.frames).toBe(result.frames);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a capture closed by a disconnect is still marked incomplete when it is re-read', async () => {
     const { p, fake } = await openCapture();
     const stopped = p.stop(10, 'selfMs');

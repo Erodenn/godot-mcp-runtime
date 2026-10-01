@@ -21,7 +21,7 @@ import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import { OPERATION_RESULT_SENTINEL, extractJson } from '../../src/utils/output-parsing.js';
 
 const ESCAPE_MESSAGE = 'escapes the project root';
 
@@ -54,6 +54,14 @@ afterAll(() => {
     }
   }
 });
+
+/** The per-update entries of a set_node_properties payload. */
+function parseUpdateResults(stdout: string): Array<{ success?: boolean; error?: string }> {
+  const payload = JSON.parse(extractJson(stdout)) as {
+    results: Array<{ success?: boolean; error?: string }>;
+  };
+  return payload.results;
+}
 
 /** Drop a file just outside the project root; returns its bare filename. */
 function plantOutside(projectDir: string, name: string, body: string): string {
@@ -186,6 +194,120 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       }
 
       expect(existsSync(target)).toBe(false);
+    },
+    60000,
+  );
+
+  // A property value is the one path that does not arrive as a path parameter:
+  // no Node-side validator inspects it, so the script is the only guard.
+  itGodot(
+    'set_node_properties rejects a res:// property value that escapes the project root',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(tmpProject, 'outside_value.gd', 'extends Node2D\n');
+      const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'root', property: 'script', value: 'res://../outside_value.gd' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const [entry] = parseUpdateResults(stdout);
+      expect(entry).not.toHaveProperty('success');
+      expect(String(entry?.error)).toContain(ESCAPE_MESSAGE);
+      // Nothing was set, so the scene is not rewritten with an outside reference.
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
+    },
+    60000,
+  );
+
+  itGodot(
+    'batch rejects an escaping res:// path nested in an inline resource value',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(
+        tmpProject,
+        'outside_value.gdshader',
+        'shader_type canvas_item;\nvoid fragment() {}\n',
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'set_node_properties',
+              scenePath: 'main.tscn',
+              updates: [
+                {
+                  nodePath: 'root/Sprite2D',
+                  property: 'material',
+                  value: { type: 'ShaderMaterial', shader: 'res://../outside_value.gdshader' },
+                },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain(ESCAPE_MESSAGE);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('outside_value');
+    },
+    60000,
+  );
+
+  itGodot(
+    'add_node rejects a nodeType that names a script outside the project root',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(tmpProject, 'outside_node.gd', 'extends Node2D\n');
+
+      let stderr = '';
+      try {
+        const result = await runner.executeOperation(
+          'add_node',
+          { scenePath: 'main.tscn', nodeType: 'res://../outside_node.gd', nodeName: 'Intruder' },
+          tmpProject,
+          30000,
+        );
+        stderr = result.stderr;
+      } catch {
+        // acceptable: the operation exits nonzero on rejection
+      }
+
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('Intruder');
+    },
+    60000,
+  );
+
+  itGodot(
+    'a res:// property value inside the project still loads, however it is spelled',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      writeFileSync(join(tmpProject, 'inside_value.gd'), 'extends Node2D\n');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'root', property: 'script', value: 'res://./inside_value.gd' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const [entry] = parseUpdateResults(stdout);
+      expect(entry).not.toHaveProperty('error');
+      expect(entry?.success).toBe(true);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toContain('inside_value.gd');
     },
     60000,
   );

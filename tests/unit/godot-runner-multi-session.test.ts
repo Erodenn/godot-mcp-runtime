@@ -119,9 +119,12 @@ function stubBridge(runner: Runner): BridgeRecorder {
     inject: (projectPath: string) => {
       rec.injectCalls.push(projectPath);
     },
-    cleanup: (projectPath: string) => {
+    // Returns what BridgeManager.cleanup returns: the steps it could not
+    // confirm, none here.
+    cleanup: (projectPath: string): string[] => {
       rec.cleanupCalls.push(projectPath);
       if (rec.cleanupThrowsFor.has(projectPath)) throw new Error('cleanup failed');
+      return [];
     },
     isBridgeAutoloadRegistered: () => false,
     listOtherLiveOwners: () => [],

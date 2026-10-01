@@ -202,21 +202,158 @@ describe('handleValidate', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleValidate batch mode', () => {
-  it('invokes validate_batch (not validate_resource) when targets array is provided alongside single-target params', async () => {
-    // Boundary contract: targets[] should route through the batch operation
-    // even when single-target params are also present. Asserting only on the
-    // result shape can't distinguish batch from single, so we inspect the spy.
+  it('invokes validate_batch (not validate_resource) when a targets array is provided', async () => {
+    // Boundary contract: targets[] routes through the batch operation.
+    // Asserting only on the result shape can't distinguish batch from single,
+    // so we inspect the spy.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
-      scenePath: fixtureScenePath,
       targets: [{ scenePath: fixtureScenePath }],
     });
     expect(hasError(result)).toBe(false);
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0].operation).toBe('validate_batch');
+  });
+
+  // A single-target parameter beside targets used to be dropped: the batch ran
+  // and reported the targets alone, with no sign the other parameter was never
+  // read. It is refused before Godot runs, naming the parameter.
+  it.each([
+    ['scenePath', { scenePath: fixtureScenePath }],
+    ['scriptPath', { scriptPath: 'placeholder.gd' }],
+    ['source', { source: 'extends Node' }],
+  ])('refuses a top-level %s passed alongside targets', async (param, extra) => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      ...extra,
+      targets: [{ scenePath: fixtureScenePath }],
+    });
+    expectErrorMatching(result, new RegExp(`"${param}" cannot be combined with targets`));
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('refuses top-level checks passed alongside targets instead of reporting the targets valid', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath }],
+      checks: [{ type: 'structure', schema: { type: 'Node3D' } }],
+    });
+    expectErrorMatching(result, /"checks" cannot be combined with targets/);
+    expectErrorMatching(result, /would not run on any target/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('accepts an empty top-level checks array alongside targets, as single mode does', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath }],
+      checks: [],
+    });
+    expect(hasError(result)).toBe(false);
+  });
+
+  it('reads a target written in snake_case and forwards it', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scene_path: fixtureScenePath }, { script_path: 'placeholder.gd' }],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0].params).toEqual({
+      targets: [{ scene_path: fixtureScenePath }, { script_path: 'placeholder.gd' }],
+    });
+  });
+
+  it('reports a target that names nothing as its own failure and never forwards it', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath }, { scenePth: 'typo.tscn' }, 7],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{
+      target: string;
+      valid: boolean;
+      errors: Array<{ message: string }>;
+    }>;
+    expect(results).toHaveLength(3);
+    expect(results[0]?.valid).toBe(true);
+    expect(results[1]?.valid).toBe(false);
+    expect(results[1]?.errors[0]?.message).toBe(
+      'targets[1]: Target must have exactly one of scriptPath, source, or scenePath',
+    );
+    expect(results[2]?.valid).toBe(false);
+    expect(results[2]?.errors[0]?.message).toMatch(/targets\[2\] must be an object/);
+    expect(fake.calls[0].params).toEqual({ targets: [{ scene_path: fixtureScenePath }] });
+  });
+
+  it('reports a path of the wrong type as that target, not as a failed batch', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scriptPath: 5 }],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{
+      valid: boolean;
+      errors: Array<{ message: string }>;
+    }>;
+    expect(results[0]?.valid).toBe(false);
+    expect(results[0]?.errors[0]?.message).toBe('targets[0].scriptPath must be a string');
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('reports a target the engine returned no result for instead of shortening results', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath }, { scriptPath: 'placeholder.gd' }],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{
+      target: string;
+      valid: boolean;
+      errors: Array<{ message: string }>;
+    }>;
+    expect(results).toHaveLength(2);
+    expect(results[1]).toEqual({
+      target: 'placeholder.gd',
+      valid: false,
+      errors: [{ message: 'Not validated: the engine returned no result for this target' }],
+    });
+  });
+
+  it('words output without a result line as no result emitted, with the reason from stderr', async () => {
+    const fake = createFakeRunner({
+      stdout: '[Audio] ready\n',
+      stderr: '[ERROR] Failed to parse JSON parameters',
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: fixtureScenePath }],
+    });
+    expectErrorMatching(result, /Batch validate failed: no result was emitted/);
+    expectErrorMatching(result, /Failed to parse JSON parameters/);
+    expect(unwrap(result).content[0]?.text ?? '').not.toContain('Invalid response');
   });
 
   it('treats empty Godot output as a failed operation in batch mode', async () => {

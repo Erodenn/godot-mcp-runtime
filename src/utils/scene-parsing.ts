@@ -11,18 +11,22 @@
  *    them, so a bracketed line inside a multi-line string is never mistaken
  *    for a header and a `]` inside a quoted path never ends one early.
  *  - Collect every script a scene brings with it (`collectSceneScripts`):
- *    `[ext_resource type="Script"]` files, the source of inline
- *    `[sub_resource type="GDScript"]` scripts, and the same for every
- *    `[ext_resource type="PackedScene"]` it instances, transitively. A script
- *    attached to an instanced node, or assigned by an instance override, is
- *    always one of those two forms, so it is covered by construction.
+ *    the `.gd` files its `[ext_resource]` lines name, the source of inline
+ *    `[sub_resource type="GDScript"]` scripts, and the same for every scene
+ *    it references, transitively. A reference is classified by its path as
+ *    well as by its `type` attribute, which is only a hint. A script attached
+ *    to an instanced node, or assigned by an instance override, is always one
+ *    of those two forms, so it is covered by construction.
  *  - Report what it could not read instead of skipping it: scripts that are
- *    not GDScript, binary scenes, malformed headers, unterminated strings.
+ *    not GDScript, binary scenes, resource files, scene files that exist and
+ *    could not be read, malformed headers, unterminated strings.
  *
  * Not read (documented limitation, see `docs/security.md`): scripts carried by
  * non-scene resources a scene references (`.tres` / `.res`), binary `.scn`
  * scenes, and references by `uid://` alone. Each of these that the walk meets
- * is reported, not dropped.
+ * is reported, not dropped. One limit is not reported: an `ext_resource` that
+ * carries both a `uid` and a `path` is read by its `path`, while the engine
+ * prefers the `uid`, so a stale `path` names a file the engine will not load.
  */
 
 import { readFileSync } from 'fs';
@@ -34,6 +38,16 @@ import { walkIniSection } from './autoload-ini.js';
 const TSCN_RAW_SNIPPET_MAX = 200;
 const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
+/** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says. */
+const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
+/** Path extensions of resource files, which can carry a script the scan does not read. */
+const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.tres', '.res'];
+/**
+ * `type` values that say an `ext_resource` is a script. Godot's loaders take
+ * the base class or the concrete one, so a hand-edited `type="GDScript"` loads
+ * exactly as `type="Script"` does.
+ */
+const SCRIPT_TYPE_HINTS: ReadonlySet<string> = new Set(['Script', 'GDScript', 'CSharpScript']);
 const UNICODE_SHORT_ESCAPE_DIGITS = 4;
 const UNICODE_LONG_ESCAPE_DIGITS = 6;
 const HEX_BASE = 16;
@@ -365,6 +379,13 @@ export interface InlineSceneScript {
 export interface UnscannedSceneItem {
   scenePath: string;
   reason: string;
+  /**
+   * True when `scenePath` exists and reading it failed (a permission error, a
+   * directory in its place). Different from the other entries, which are files
+   * of a kind the scan does not read: this one it set out to read and could
+   * not, so a caller that must not launch on an incomplete scan can tell.
+   */
+  readFailed?: true;
 }
 
 export interface SceneScriptCollection {
@@ -380,22 +401,31 @@ function resPathOf(attrs: Map<string, string>): string | null {
 }
 
 /**
- * Transitively walk `[ext_resource type="PackedScene"]` references starting at
- * `scenePath` and collect, from every reachable scene, the `.gd` files its
- * `type="Script"` ext_resources name and the source of its inline GDScript
- * sub-resources. A hostile script attached to a PackedScene the launched scene
- * instances is invisible to a single-scene scan.
+ * Transitively walk the scenes `scenePath` references and collect, from every
+ * reachable scene, the `.gd` files its ext_resources name and the source of
+ * its inline GDScript sub-resources. A hostile script attached to a
+ * PackedScene the launched scene instances is invisible to a single-scene scan.
+ *
+ * An `ext_resource` is classified by its path as well as by its `type`
+ * attribute. The engine loads the file the path names, and `type` is a hint a
+ * hand-edited scene can set to anything: a `.gd` path is scanned and a `.tscn`
+ * or `.scn` path is walked whatever the hint says. A reference the walk does
+ * not follow and that can still bring a script in (a script that is not
+ * GDScript, a `.tres` or `.res` resource, a reference with no `res://` path)
+ * is listed in `unscanned`, never dropped.
  *
  * Cycle-safe: scene graphs can reference each other, so a scene already walked
  * (by resolved absolute path) is never walked again. Nothing throws on a stale
- * reference; whatever could not be read is listed in `unscanned` so the caller
- * can say the scan was incomplete.
+ * reference or on a file that cannot be read; whatever could not be read is
+ * listed in `unscanned` so the caller can say the scan was incomplete.
  */
 export function collectSceneScripts(scenePath: string, projectDir: string): SceneScriptCollection {
   const visited = new Set<string>();
   const scripts = new Set<string>();
   const inlineScripts: InlineSceneScript[] = [];
   const unscanned: UnscannedSceneItem[] = [];
+  // One notice per resource file, however many scenes reference it.
+  const reportedResources = new Set<string>();
 
   function walk(currentScenePath: string): void {
     const absScenePath = resolve(currentScenePath);
@@ -405,7 +435,21 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
       unscanned.push({ scenePath: absScenePath, reason });
     };
 
-    const content = readSceneFileSafe(currentScenePath);
+    let content: string | null;
+    try {
+      content = readSceneFileSafe(currentScenePath);
+    } catch (err) {
+      // The file is there and could not be read. One entry for it, and the
+      // walk goes on: a throw here used to abandon every scene and autoload
+      // the caller had not reached yet, with nothing naming them.
+      const detail = err instanceof Error ? err.message : String(err);
+      unscanned.push({
+        scenePath: absScenePath,
+        reason: `scene file could not be read (${detail})`,
+        readFailed: true,
+      });
+      return;
+    }
     if (content === null) {
       skip('scene file not found');
       return;
@@ -418,19 +462,26 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
 
     for (const header of scan.headers) {
       if (header.tag === 'ext_resource') {
-        const type = header.attrs.get('type');
+        const type = header.attrs.get('type') ?? '';
         const path = resPathOf(header.attrs);
-        if (type === 'Script') {
-          if (path === null) {
-            skip(`Script ext_resource has no res:// path: ${header.raw}`);
-          } else if (path.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) {
-            scripts.add(join(projectDir, stripResPrefix(path)));
-          } else {
-            skip(`script ${path} is not GDScript and is not scanned`);
-          }
+        const lowered = path === null ? '' : path.toLowerCase();
+        if (path !== null && lowered.endsWith(GDSCRIPT_EXTENSION)) {
+          scripts.add(join(projectDir, stripResPrefix(path)));
+        } else if (path !== null && SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
+          walk(join(projectDir, stripResPrefix(path)));
         } else if (type === 'PackedScene') {
           if (path === null) skip(`PackedScene ext_resource has no res:// path: ${header.raw}`);
           else walk(join(projectDir, stripResPrefix(path)));
+        } else if (SCRIPT_TYPE_HINTS.has(type)) {
+          if (path === null) skip(`Script ext_resource has no res:// path: ${header.raw}`);
+          else skip(`script ${path} is not GDScript and is not scanned`);
+        } else if (path === null) {
+          skip(`ext_resource has no res:// path and was not followed: ${header.raw}`);
+        } else if (RESOURCE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
+          if (!reportedResources.has(lowered)) {
+            reportedResources.add(lowered);
+            skip(`resource ${path} is not scanned (a .tres or .res file can carry a script)`);
+          }
         }
       } else if (header.tag === 'sub_resource' && header.attrs.get('type') === 'GDScript') {
         const id = header.attrs.get('id') ?? '?';
@@ -455,8 +506,9 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
 }
 
 /**
- * Extract the `[ext_resource type="Script" path="res://....gd"]` references of
- * one scene as absolute filesystem paths under the project root.
+ * Extract the `[ext_resource path="res://....gd"]` references of one scene as
+ * absolute filesystem paths under the project root, whatever their `type`
+ * attribute says (see `collectSceneScripts`).
  *
  * Does not chase subscenes (use `collectSceneScripts` for the transitive walk)
  * and does not read inline `[sub_resource type="GDScript"]` source. Returns
@@ -468,7 +520,7 @@ export function extractSceneScripts(scenePath: string, projectDir: string): stri
   if (content === null) return [];
   const result: string[] = [];
   for (const header of scanTscn(content).headers) {
-    if (header.tag !== 'ext_resource' || header.attrs.get('type') !== 'Script') continue;
+    if (header.tag !== 'ext_resource') continue;
     const path = resPathOf(header.attrs);
     if (path === null || !path.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) continue;
     result.push(join(projectDir, stripResPrefix(path)));

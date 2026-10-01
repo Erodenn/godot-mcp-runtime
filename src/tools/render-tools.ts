@@ -18,7 +18,7 @@ import { condenseProcessTail } from '../utils/output-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
-import { runLaunchGate } from '../utils/launch-gate.js';
+import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
 import { liveSessionRemedy } from '../utils/session-report.js';
 import {
@@ -123,7 +123,7 @@ export const renderToolDefinitions = [
           type: 'integer',
           minimum: MIN_MOVIE_FRAMES,
           maximum: MAX_MOVIE_FRAMES,
-          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, so above about 100 frames a client with a 60s request timeout may cut the call off first.`,
+          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, and a run that overruns it takes up to 10s more to stop, so above about 80 frames a client with a 60s request timeout may cut the call off before this server can report the timeout.`,
         },
         fps: {
           type: 'integer',
@@ -358,6 +358,8 @@ function parseRenderOptions(
         ),
       );
     }
+    const notAScene = rejectNonSceneLaunchArg(scene.value);
+    if (notAScene) return err(notAScene);
     if (!existsSync(join(projectRoot, stripResPrefix(scene.value)))) {
       return err(
         createErrorResponse(`Scene file does not exist: ${scene.value}`, [
@@ -477,6 +479,36 @@ function findServerOwnedBridgeEntry(projectRoot: string): string | null {
     logDebug(`render_movie could not read the autoload section: ${getErrorMessage(error)}`);
     return null;
   }
+}
+
+/**
+ * The refusals that keep a movie run from loading the McpBridge autoload: a
+ * live session on the project (this server's or another's), an owner registry
+ * that cannot be read, or a server-owned entry no live session owns. Null
+ * when the project is clear. Reads only; nothing is written.
+ */
+function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse | null {
+  let live: LiveSessionOnProject | null;
+  try {
+    live = findLiveSessionOnProject(runner, root);
+  } catch (error: unknown) {
+    // An unreadable owner registry is "unknown", never "nobody is running".
+    if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
+    return createErrorResponse(
+      `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing to start a movie run.`,
+      [
+        'Retry: a registry file that another session was writing at that moment is readable again a moment later',
+        'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
+      ],
+    );
+  }
+  if (live !== null) {
+    return live.owner === 'self'
+      ? refuseOwnSession(runner, root)
+      : refuseOtherSession(live.info.pid, live.info.mode);
+  }
+  const strandedPath = findServerOwnedBridgeEntry(root);
+  return strandedPath !== null ? refuseStrandedBridge(strandedPath) : null;
 }
 
 // --- Run interpretation ---
@@ -901,31 +933,8 @@ export function createRenderMovieHandler(
     // a launch that cannot happen must never ask for confirmation.
     if (!deps.displayAvailable()) return err(refuseNoDisplay());
 
-    let live: LiveSessionOnProject | null;
-    try {
-      live = findLiveSessionOnProject(runner, root);
-    } catch (error: unknown) {
-      // An unreadable owner registry is "unknown", never "nobody is running".
-      if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
-      return err(
-        createErrorResponse(
-          `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing to start a movie run.`,
-          [
-            'Retry: a registry file that another session was writing at that moment is readable again a moment later',
-            'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
-          ],
-        ),
-      );
-    }
-    if (live !== null) {
-      return err(
-        live.owner === 'self'
-          ? refuseOwnSession(runner, root)
-          : refuseOtherSession(live.info.pid, live.info.mode),
-      );
-    }
-    const strandedPath = findServerOwnedBridgeEntry(root);
-    if (strandedPath !== null) return err(refuseStrandedBridge(strandedPath));
+    const busy = refuseIfBridgeMayLoad(runner, root);
+    if (busy !== null) return err(busy);
 
     let godotPath = runner.getGodotPath();
     if (!godotPath) {
@@ -947,6 +956,13 @@ export function createRenderMovieHandler(
       ctx,
     );
     if (!gate.ok) return gate;
+
+    // The gate can hold a confirmation prompt open for as long as a human
+    // takes to answer it. A session started on this project in that time has
+    // injected the bridge, and the movie process would load it with no session
+    // token and no port of its own. Asked again, now that the wait is over.
+    const busyAfterGate = refuseIfBridgeMayLoad(runner, root);
+    if (busyAfterGate !== null) return err(busyAfterGate);
 
     const runId = `${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);

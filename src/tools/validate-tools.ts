@@ -15,7 +15,8 @@ import {
 import { err } from '../utils/result.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
-import { IMPORT_NEEDED_MARKER } from '../utils/headless-op.js';
+import { findLiveSessionOnProject, stderrRequestsImport } from '../utils/headless-op.js';
+import { BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
 
 /**
  * Item schema for the checks[] array. Referenced by both the top-level
@@ -96,7 +97,7 @@ export const validateToolDefinitions = [
         scriptPath: {
           type: 'string',
           description:
-            '[single] Path to a .gd file relative to the project to validate (e.g. "scripts/player.gd")',
+            '[single] Path to a .gd file relative to the project to validate (e.g. "scripts/player.gd"). A file that does not load as a GDScript is reported invalid with a "Not validated" error, since nothing checks it.',
         },
         source: {
           type: 'string',
@@ -111,13 +112,13 @@ export const validateToolDefinitions = [
         checks: {
           type: 'array',
           description:
-            '[single, requires scenePath] Structural and signal-verification checks to run against the scene. Types: "structure" (validate node tree against a schema) and "signals" (verify signal connections and handler methods, optional nodePath scope). Merged into the errors array with a "check" discriminator.',
+            '[single, requires scenePath] Structural and signal-verification checks to run against the scene. Types: "structure" (validate node tree against a schema) and "signals" (verify signal connections and handler methods, optional nodePath scope). Merged into the errors array with a "check" discriminator. Not accepted alongside targets: put checks on the target they belong to.',
           items: CHECK_ITEM_SCHEMA,
         },
         targets: {
           type: 'array',
           description:
-            '[batch] Array of targets to validate in a single Godot process. Each item must have exactly one of: scriptPath, source, or scenePath.',
+            '[batch] Array of targets to validate in a single Godot process. Each item must have exactly one of: scriptPath, source, or scenePath. Cannot be combined with the top-level scriptPath, source, scenePath or checks.',
           items: {
             type: 'object',
             properties: {
@@ -270,11 +271,12 @@ function capUnattributedWarnings(lines: string[]): string[] {
  * validate branches need raw stdout plus stderr for the per-path diagnostic
  * overlay).
  *
- * The retry is skipped while a runtime session is live on this project,
- * whether or not it is the current one: importAssets writes .godot/ under the
- * project and a running engine there is a second writer. A session on another
- * project does not block it. Skipping only costs the caller the existing
- * unimported-dependency error.
+ * The retry is skipped while a game is, or may be, running on this project:
+ * this server's own session (current or not), another MCP server's session,
+ * or an owner registry that cannot be read. importAssets writes .godot/ under
+ * the project and a running engine there is a second writer. A session on
+ * another project does not block it. Skipping costs the caller the import
+ * only: the target's own result names the dependency that was not imported.
  *
  * An importAssets rejection propagates: both call sites sit inside a try whose
  * catch produces a structured error response.
@@ -286,11 +288,87 @@ async function executeValidateOp(
   projectPath: string,
 ): Promise<{ stdout: string; stderr: string }> {
   const first = await runner.executeOperation(operation, params, projectPath);
-  if (!first.stderr.includes(IMPORT_NEEDED_MARKER) || runner.hasLiveSessionOnProject(projectPath)) {
+  if (!stderrRequestsImport(first.stderr) || gameMayBeRunningOnProject(runner, projectPath)) {
     return first;
   }
   await runner.importAssets(projectPath);
   return runner.executeOperation(operation, params, projectPath);
+}
+
+/**
+ * True when a session is live on the project, whoever owns it, or when that
+ * cannot be ruled out. The same detector the scene-edit guard uses, so a
+ * validate call never runs an asset import under another server's game.
+ */
+function gameMayBeRunningOnProject(runner: GodotRunner, projectPath: string): boolean {
+  try {
+    return findLiveSessionOnProject(runner, projectPath) !== null;
+  } catch (error: unknown) {
+    if (error instanceof BridgeRegistryUnreadableError) return true;
+    throw error;
+  }
+}
+
+/** The single-target parameters, which a call that passes `targets` must not also pass. */
+const SINGLE_TARGET_PATH_PARAMS = ['scriptPath', 'source', 'scenePath'] as const;
+
+/** A defined `checks` value that asks for something: anything but an empty array. */
+function requestsChecks(checks: unknown): boolean {
+  return checks !== undefined && (!Array.isArray(checks) || checks.length > 0);
+}
+
+/** One `targets[]` item as the batch loop reads it, after both key spellings are folded. */
+interface BatchTarget {
+  scriptPath?: unknown;
+  source?: unknown;
+  scenePath?: unknown;
+  checks?: unknown;
+}
+
+/**
+ * Read one `targets[]` item. `normalizeParameters` does not descend into
+ * arrays, so an item reaches the handler spelled however the caller wrote it;
+ * both spellings are read, as the items of `nodes`, `updates` and `operations`
+ * are. Null when the item is not an object.
+ */
+function readBatchTarget(raw: unknown): BatchTarget | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  return {
+    scriptPath: item.scriptPath !== undefined ? item.scriptPath : item.script_path,
+    source: item.source,
+    scenePath: item.scenePath !== undefined ? item.scenePath : item.scene_path,
+    checks: item.checks,
+  };
+}
+
+const TARGET_SHAPE_MESSAGE = 'Target must have exactly one of scriptPath, source, or scenePath';
+
+/** Most engine diagnostics quoted when a validate run ended without a result. */
+const MAX_NO_RESULT_DIAGNOSTICS_SHOWN = 5;
+
+const NO_RESULT_SOLUTIONS = [
+  'Check that the script or scene path is correct',
+  'An autoload that fails or quits while the project starts stops the run before it reports: list_autoloads shows what is registered',
+  'Ensure Godot is installed correctly',
+];
+
+/**
+ * The error for a validate run that printed no result line. All three branches
+ * (single, single with checks, targets) word it the same way: what the script
+ * said on its own [ERROR] line, and when it said nothing, the engine
+ * diagnostics that are the only account of why it stopped.
+ */
+function noResultMessage(prefix: string, stderr: string): string {
+  const head = `${prefix}: no result was emitted - ${extractGdError(stderr)}`;
+  if (stderr.includes('[ERROR]')) return head;
+  const diagnostics = parseScriptDiagnostics(stderr)
+    .slice(0, MAX_NO_RESULT_DIAGNOSTICS_SHOWN)
+    .map((d) => {
+      const where = d.filePath ? `${d.filePath}${d.line !== undefined ? `:${d.line}` : ''}: ` : '';
+      return `${where}${d.message}`;
+    });
+  return diagnostics.length === 0 ? head : `${head}\nstderr: ${diagnostics.join('\n')}`;
 }
 
 export async function handleValidate(
@@ -305,12 +383,36 @@ export async function handleValidate(
 
   // Batch mode: targets array
   if (args.targets && Array.isArray(args.targets)) {
-    const targets = args.targets as Array<{
-      scriptPath?: string;
-      source?: string;
-      scenePath?: string;
-      checks?: unknown;
-    }>;
+    // The batch branch reads `targets` and nothing else. A single-target
+    // parameter passed beside it used to be dropped without a word, so a
+    // top-level `checks` came back as targets reported valid with the checks
+    // never run. Single mode refuses every mixed combination; so does this.
+    for (const key of SINGLE_TARGET_PATH_PARAMS) {
+      if (args[key] !== undefined && args[key] !== '') {
+        return err(
+          createErrorResponse(
+            `"${key}" cannot be combined with targets: with a targets array, only the targets are validated and a top-level ${key} would be ignored.`,
+            [
+              `Add it as another item of targets, e.g. { "${key}": ... }`,
+              `Or remove targets to validate the one ${key}`,
+            ],
+          ),
+        );
+      }
+    }
+    if (requestsChecks(args.checks)) {
+      return err(
+        createErrorResponse(
+          '"checks" cannot be combined with targets: top-level checks apply to a single scenePath and would not run on any target.',
+          [
+            'Move the checks into the target they belong to: targets: [{ "scenePath": "main.tscn", "checks": [...] }]',
+            'Or remove targets and pass scenePath with checks',
+          ],
+        ),
+      );
+    }
+
+    const targets = args.targets as unknown[];
     const tempFiles: string[] = [];
 
     try {
@@ -321,7 +423,37 @@ export async function handleValidate(
       }> = [];
       const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
-      for (const [i, t] of targets.entries()) {
+      for (const [i, raw] of targets.entries()) {
+        // A target that is not an object, or names a path with something other
+        // than a string, is this target's own failure. Reading it further would
+        // throw and cost every other target its result.
+        const read = readBatchTarget(raw);
+        const mistyped =
+          read === null
+            ? undefined
+            : SINGLE_TARGET_PATH_PARAMS.find(
+                (key) => read[key] !== undefined && typeof read[key] !== 'string',
+              );
+        if (read === null || mistyped !== undefined) {
+          preErrors.set(i, {
+            target: '',
+            errors: [
+              {
+                message:
+                  read === null
+                    ? `targets[${i}] must be an object with exactly one of scriptPath, source, or scenePath`
+                    : `targets[${i}].${mistyped} must be a string`,
+              },
+            ],
+          });
+          continue;
+        }
+        const t = read as {
+          scriptPath?: string;
+          source?: string;
+          scenePath?: string;
+          checks?: unknown;
+        };
         // An empty array means no checks, as in single mode. Any other defined
         // value that is not an array is not "no checks": it is a mistake that
         // used to be dropped, leaving the target reported valid with its checks
@@ -335,9 +467,7 @@ export async function handleValidate(
         if ([t.scriptPath, t.source, t.scenePath].filter(Boolean).length > 1) {
           preErrors.set(i, {
             target: t.scenePath ?? t.scriptPath ?? '',
-            errors: [
-              { message: 'Target must have exactly one of scriptPath, source, or scenePath' },
-            ],
+            errors: [{ message: TARGET_SHAPE_MESSAGE }],
           });
           continue;
         }
@@ -415,7 +545,14 @@ export async function handleValidate(
             snakeTargets.push(accepted);
           }
         } else {
-          snakeTargets.push({});
+          // A target that names nothing never reaches Godot. Forwarded empty, it
+          // came back as "provide script_path or scene_path", which names keys
+          // the tool does not declare and, for a caller who misspelled one,
+          // the keys it had just provided.
+          preErrors.set(i, {
+            target: '',
+            errors: [{ message: `targets[${i}]: ${TARGET_SHAPE_MESSAGE}` }],
+          });
         }
       }
 
@@ -445,6 +582,18 @@ export async function handleValidate(
         );
       }
 
+      const batchPayload = extractOperationPayload(stdout);
+      if (batchPayload === null) {
+        // Output without a result line: the script stopped before it emitted
+        // one, and stdout is engine or project noise. The reason is on stderr.
+        return err(
+          createErrorResponse(
+            noResultMessage('Batch validate failed', stderr),
+            NO_RESULT_SOLUTIONS,
+          ),
+        );
+      }
+
       let batchParsed: {
         results: Array<{
           target: string;
@@ -455,7 +604,7 @@ export async function handleValidate(
         }>;
       };
       try {
-        batchParsed = JSON.parse(extractOperationPayload(stdout) ?? '');
+        batchParsed = JSON.parse(batchPayload);
       } catch {
         return err(
           createErrorResponse(
@@ -532,9 +681,20 @@ export async function handleValidate(
           results.push({ target: pre.target, valid: false, errors: pre.errors });
         } else {
           const r = godotResults[godotIdx++];
-          // Unreachable: godotIdx is incremented once per non-pre-error target,
-          // and godotResults has exactly that many entries.
-          if (r === undefined) continue;
+          // Not reachable with the shipped script, which answers every target
+          // it is sent. If it ever answered fewer, the target is reported as
+          // not validated: leaving it out would shorten `results` without a
+          // sign and shift every later entry onto the wrong input.
+          if (r === undefined) {
+            const unanswered = readBatchTarget(targets[i]);
+            const label = unanswered?.scenePath ?? unanswered?.scriptPath;
+            results.push({
+              target: typeof label === 'string' ? label : '',
+              valid: false,
+              errors: [{ message: 'Not validated: the engine returned no result for this target' }],
+            });
+            continue;
+          }
           results.push(r);
         }
       }
@@ -690,6 +850,12 @@ export async function handleValidate(
           ]),
         );
       }
+      const combinedPayload = extractOperationPayload(stdout);
+      if (combinedPayload === null) {
+        return err(
+          createErrorResponse(noResultMessage('Scene checks failed', stderr), NO_RESULT_SOLUTIONS),
+        );
+      }
       let batchParsed: {
         results?: Array<{
           valid?: boolean;
@@ -698,7 +864,7 @@ export async function handleValidate(
         }>;
       };
       try {
-        batchParsed = JSON.parse(extractOperationPayload(stdout) ?? '');
+        batchParsed = JSON.parse(combinedPayload);
       } catch {
         batchParsed = {};
       }
@@ -729,14 +895,7 @@ export async function handleValidate(
       }
       if (parsed === null) {
         return err(
-          createErrorResponse(
-            `Validation failed: no result was emitted - ${extractGdError(stderr)}`,
-            [
-              'Check that the script or scene path is correct',
-              'Ensure Godot is installed correctly',
-              'Use get_debug_output or the project logs for the engine output',
-            ],
-          ),
+          createErrorResponse(noResultMessage('Validation failed', stderr), NO_RESULT_SOLUTIONS),
         );
       }
       valid = parsed.valid === true;

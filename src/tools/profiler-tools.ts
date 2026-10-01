@@ -123,6 +123,28 @@ const captureResultSchema = {
     rows: { type: 'array', items: rowSchema },
     worstFrame: { type: ['object', 'null'] },
   },
+  // Every field of a capture result is always present. A capture that folded
+  // no frame is an error, never a payload with fields left out.
+  required: [
+    'projectPath',
+    'complete',
+    'seconds',
+    'frames',
+    'framesReceived',
+    'firstFrame',
+    'lastFrame',
+    'frameGaps',
+    'undecodablePackets',
+    'captureLimit',
+    'limitReached',
+    'sort',
+    'functionsReceived',
+    'unresolvedFunctions',
+    'frame',
+    'servers',
+    'rows',
+    'worstFrame',
+  ],
 } as const;
 
 export const profilerToolDefinitions = [
@@ -172,6 +194,7 @@ export const profilerToolDefinitions = [
         firstFrame: { type: ['number', 'null'] },
         captureLimit: { type: 'number' },
       },
+      required: ['projectPath', 'active', 'maxSeconds', 'firstFrame', 'captureLimit'],
     },
   },
   {

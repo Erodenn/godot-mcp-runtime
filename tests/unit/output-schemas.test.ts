@@ -29,6 +29,34 @@ describe('outputSchema: every declared schema is valid', () => {
   });
 });
 
+describe('outputSchema: fields a tool always returns are declared required', () => {
+  // A schema with no required list validates {} and every older payload, so a
+  // client reading it learns nothing is guaranteed. Each tool here returns the
+  // listed fields on every success branch.
+  const ALWAYS_RETURNED: Array<[string, string[]]> = [
+    ['simulate_input', ['projectPath', 'success', 'results']],
+    ['get_ui_elements', ['projectPath', 'elements', 'tip']],
+    ['run_script', ['projectPath', 'success', 'result', 'tip']],
+    ['start_profiler', ['projectPath', 'active', 'maxSeconds', 'firstFrame', 'captureLimit']],
+    ['profile_project', ['projectPath', 'complete', 'frames', 'frame', 'servers', 'rows']],
+    ['stop_profiler', ['projectPath', 'complete', 'frames', 'frame', 'servers', 'rows']],
+    ['search_project', ['matches', 'truncated', 'filesSearched', 'fileTypes']],
+    ['create_scene', ['success', 'scenePath']],
+    ['attach_script', ['success', 'nodePath', 'scriptPath']],
+    ['delete_nodes', ['results']],
+    ['set_node_properties', ['results']],
+    ['get_node_signals', ['nodePath', 'nodeType', 'signals']],
+  ];
+
+  it.each(ALWAYS_RETURNED)('%s requires them and rejects an empty payload', (name, fields) => {
+    const tool = toolsWithOutputSchema.find(([toolName]) => toolName === name)?.[1];
+    if (!tool) throw new Error(`${name} outputSchema not found`);
+    const schema = tool.outputSchema as { required?: string[] };
+    expect(schema.required ?? []).toEqual(expect.arrayContaining(fields));
+    expect(ajv.compile(tool.outputSchema as object)({})).toBe(false);
+  });
+});
+
 describe('outputSchema and Returns: prose are complementary, not exclusive', () => {
   // Per docs/tool-authoring.md §3, when a tool has an outputSchema it must also
   // carry a Returns: sentence in its description: the schema is invisible to
@@ -50,10 +78,16 @@ describe('simulate_input: every declared entry shape validates', () => {
   if (!simulateInputDef) throw new Error('simulate_input outputSchema not found');
   const validate = ajv.compile(simulateInputDef.outputSchema as object);
 
+  // The payloads below are written as the bridge sends them. The handler adds
+  // the session's projectPath to every one, and the schema requires it.
   function expectValid(payload: Record<string, unknown>): void {
-    const valid = validate(payload);
+    const valid = validate({ projectPath: fixtureProjectPath, ...payload });
     expect(valid, JSON.stringify(validate.errors)).toBe(true);
   }
+
+  it('rejects a payload that does not name its session', () => {
+    expect(validate({ success: true, results: [] })).toBe(false);
+  });
 
   it('validates a success: false payload carrying a failure and a skipped entry', () => {
     expectValid({

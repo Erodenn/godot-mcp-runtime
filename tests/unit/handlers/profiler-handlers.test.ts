@@ -30,7 +30,18 @@ interface ProfilerFake {
   calls: ProfilerCall[];
 }
 
+// Every field DebuggerProfiler.summarize returns: the schema requires them all.
+const FRAME_STAT = { avg: 16, max: 20 };
 const captureResult = {
+  complete: true,
+  frame: {
+    frameMs: FRAME_STAT,
+    processMs: FRAME_STAT,
+    physicsMs: FRAME_STAT,
+    physicsFrameMs: FRAME_STAT,
+    scriptMs: FRAME_STAT,
+  },
+  servers: [],
   seconds: 5,
   frames: 300,
   framesReceived: 301,

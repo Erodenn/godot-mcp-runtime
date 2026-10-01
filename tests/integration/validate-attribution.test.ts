@@ -27,6 +27,9 @@ const CASE_TIMEOUT_MS = 120000;
 const BROKEN_SCRIPT = 'extends Node\nfunc broken(\n\t# unclosed parameter list\n';
 /** An abstract script with no errors. It loads and instantiates, and is still valid. */
 const ABSTRACT_SCRIPT = '@abstract\nclass_name AttributionAbstractProbe\nextends Node\n';
+/** An abstract script with a parse error: an unclosed parameter list. */
+const ABSTRACT_BROKEN_SCRIPT =
+  '@abstract\nclass_name AttributionAbstractBroken\nextends Node\nfunc broken(\n\t# unclosed parameter list\n';
 
 interface BatchEntry {
   target: string;
@@ -116,6 +119,40 @@ describe('validate batch attribution against a real engine', () => {
       const entry = await validateScriptTarget('abstract_probe.gd');
       expect(entry.valid).toBe(true);
       expect(entry.errors).toEqual([]);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // The verdict for an abstract script does not rest on whether this engine
+  // version lets one be instantiated, so a broken one must still be caught.
+  itGodot(
+    'an @abstract script with a parse error is invalid',
+    async () => {
+      writeFileSync(join(projectPath, 'abstract_broken.gd'), ABSTRACT_BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('abstract_broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // A scriptPath that loads as something other than a GDScript was checked by
+  // nothing. "It loaded" used to be reported as valid: true.
+  itGodot(
+    'a scriptPath that does not load as a GDScript is not reported valid, in a batch or alone',
+    async () => {
+      const entry = await validateScriptTarget('main.tscn');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors).toHaveLength(1);
+      expect(entry.errors[0]?.message).toMatch(/^Not validated: main\.tscn loaded as PackedScene/);
+
+      const single = expectMatchesOutputSchema(
+        'validate',
+        await handleValidate(runner, { projectPath, scriptPath: 'main.tscn' }),
+      );
+      expect(single.valid).toBe(false);
+      const singleErrors = single.errors as Array<{ message: string }>;
+      expect(singleErrors[0]?.message).toMatch(/^Not validated: main\.tscn loaded as PackedScene/);
     },
     CASE_TIMEOUT_MS,
   );

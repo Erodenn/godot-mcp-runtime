@@ -45,6 +45,23 @@ export function validateSubPath(projectPath: string, userPath: string): boolean 
 }
 
 /**
+ * File extensions a `scene` argument of a launch (`run_project`,
+ * `render_movie`) may end in. Godot treats a positional argument as the scene
+ * to run only when it ends in a scene or resource extension, compared case
+ * sensitively; any other argument is ignored and the project's main scene runs
+ * instead. So a `scene` outside this list would have the launch gate scan one
+ * file while the engine runs another. Only the two scene formats are accepted:
+ * the gate reads `.tscn`, reports `.scn` as not scanned, and has nothing to
+ * say about a scene held in a `.res` or `.tres` file.
+ */
+export const LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
+
+/** True when `scene` ends, case-sensitively, in an extension a launch accepts. */
+export function isLaunchScenePath(scene: string): boolean {
+  return LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
+}
+
+/**
  * Validate a Godot scene-tree path (NodePath). Scene-tree paths are a
  * separate namespace from filesystem paths — they address nodes inside
  * a scene, not files on disk, so the project-root containment check

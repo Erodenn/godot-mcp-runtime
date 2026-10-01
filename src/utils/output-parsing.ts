@@ -41,17 +41,41 @@ export const OPERATION_RESULT_SENTINEL = 'MCP_OPERATION_RESULT:';
  * Return the text after the operation-result sentinel on the last line that
  * carries it, or null when no line does. Never falls back to scanning for
  * brackets: text that was not taken from a sentinel line is not a payload.
+ *
+ * The emitter writes the sentinel once, at the start of the payload. The text
+ * can still occur more than once on that line: inside the payload itself (a
+ * Label whose text quotes it, a requested node name echoed in a warning), or
+ * in front of it (an unterminated `printraw` from a project script). So the
+ * occurrences are tried left to right and the first one followed by valid
+ * JSON is the payload. Taking the last one would start inside a string value
+ * of a payload that quotes the sentinel, and report a finished operation as
+ * invalid JSON. When none parses, the text after the first is returned so the
+ * caller reports the parse failure against what the operation emitted.
  */
 export function extractOperationPayload(output: string): string | null {
   const lines = output.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i] ?? '';
-    const at = line.lastIndexOf(OPERATION_RESULT_SENTINEL);
-    if (at !== -1) {
-      return line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+    let at = line.indexOf(OPERATION_RESULT_SENTINEL);
+    if (at === -1) continue;
+    const first = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+    while (at !== -1) {
+      const candidate = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+      if (isJsonText(candidate)) return candidate;
+      at = line.indexOf(OPERATION_RESULT_SENTINEL, at + OPERATION_RESULT_SENTINEL.length);
     }
+    return first;
   }
   return null;
+}
+
+function isJsonText(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

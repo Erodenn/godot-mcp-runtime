@@ -9,6 +9,11 @@ var debug_mode = false
 # whole operation, which is only safe while nothing has been written yet.
 var import_marker_armed = true
 
+# Why the most recent load_scene_instance call returned null, as one sentence.
+# stderr carries the same reason, but a caller that reports per target (the
+# checks[] path of validate) has no other way to put it in its own result.
+var last_scene_load_error: String = ""
+
 # Prefix of the single stdout line that carries an operation's JSON result.
 # stdout is shared with the engine banner and with any print() an autoload or
 # scene script makes, so the Node side reads only the line that carries this
@@ -141,10 +146,21 @@ func get_script_by_name(name_of_class):
 	if debug_mode:
 		printerr("Attempting to get script for class: " + name_of_class)
 
-	if ResourceLoader.exists(name_of_class, "Script"):
+	# A value that is not a bare identifier can only be a script path, and a
+	# path that arrives in tool params is contained like every other one: Godot
+	# resolves "res://../x.gd" outward, and instantiating that script would run
+	# a file from outside the project. A class name is looked up as written.
+	var direct_path: String = name_of_class
+	if not _is_ascii_identifier(name_of_class):
+		direct_path = normalize_scene_path(name_of_class)
+		if direct_path.is_empty():
+			printerr("Path escapes the project root: " + name_of_class)
+			return null
+
+	if ResourceLoader.exists(direct_path, "Script"):
 		if debug_mode:
-			printerr("Resource exists, loading directly: " + name_of_class)
-		var script = load(name_of_class) as Script
+			printerr("Resource exists, loading directly: " + direct_path)
+		var script = load(direct_path) as Script
 		if script:
 			if debug_mode:
 				printerr("Successfully loaded script from path")
@@ -339,14 +355,17 @@ func _probe_scene_deps(full_path: String) -> Dictionary:
 # case hangs the engine instead of returning cleanly. Probing dependencies
 # up front, before load() ever runs, is the only approach that avoided both.
 func load_scene_instance(scene_path: String):
+	last_scene_load_error = ""
 	var full_path = normalize_scene_path(scene_path)
 	if full_path.is_empty():
-		log_error("Path escapes the project root: " + scene_path)
+		last_scene_load_error = "Path escapes the project root: " + scene_path
+		log_error(last_scene_load_error)
 		return null
 	log_debug("Loading scene from: " + full_path)
 
 	if not FileAccess.file_exists(full_path):
-		log_error("Scene file does not exist: " + full_path)
+		last_scene_load_error = "Scene file does not exist: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	# Probe dependencies before loading. Missing files are checked first: a
@@ -354,20 +373,23 @@ func load_scene_instance(scene_path: String):
 	# then refused, which would leave a half-fixed state behind.
 	var probe = _probe_scene_deps(full_path)
 	if probe.missing.size() > 0:
-		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing))
+		last_scene_load_error = "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)
+		log_error(last_scene_load_error)
 		return null
 	if probe.needs_import.size() > 0:
-		_report_import_needed(scene_path, ", ".join(probe.needs_import))
+		last_scene_load_error = _report_import_needed(scene_path, ", ".join(probe.needs_import))
 		return null
 
 	var scene = load(full_path)
 	if not scene:
-		log_error("Failed to load scene: " + full_path)
+		last_scene_load_error = "Failed to load scene: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	var instance = scene.instantiate()
 	if not instance:
-		log_error("Failed to instantiate scene: " + full_path)
+		last_scene_load_error = "Failed to instantiate scene: " + full_path
+		log_error(last_scene_load_error)
 		return null
 
 	return instance
@@ -460,7 +482,9 @@ func create_scene(params):
 		return
 
 	if save_scene_to_path(scene_root, full_scene_path):
-		emit_result({"success": true, "scenePath": params.scene_path})
+		# The project-relative form of the path that was written, not the
+		# spelling the caller used ("./a.tscn", "res://a.tscn").
+		emit_result({"success": true, "scenePath": _project_relative(full_scene_path)})
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		quit(1)
@@ -1186,10 +1210,12 @@ func attach_script(params):
 		return
 
 	if save_scene_to_path(scene_root, params.scene_path):
+		# Both paths in the form every tool accepts back, read from the node and
+		# from the path that was loaded, not copied from the request.
 		emit_result({
 			"success": true,
-			"nodePath": params.node_path,
-			"scriptPath": params.script_path
+			"nodePath": _relative_path(scene_root, node),
+			"scriptPath": _project_relative(full_script_path)
 		})
 	else:
 		log_error("Failed to save scene after attaching script")
@@ -1307,7 +1333,7 @@ func get_node_signals(params):
 		})
 
 	emit_result({
-		"nodePath": params.node_path,
+		"nodePath": _relative_path(scene_root, node),
 		"nodeType": node.get_class(),
 		"signals": signals
 	})
@@ -1719,7 +1745,12 @@ func validate_checks(params):
 func _run_scene_checks(scene_path: String, checks) -> Dictionary:
 	var scene_root = load_scene_instance(scene_path)
 	if not scene_root:
-		return {"ok": false, "error": "Scene checks skipped: could not load scene " + scene_path, "errors": []}
+		# The reason goes in the result itself: the [ERROR] line on stderr is not
+		# a form the diagnostic parser reads, so it would reach nobody.
+		var skipped := "Scene checks skipped: could not load scene " + scene_path
+		if last_scene_load_error != "":
+			skipped += " (" + last_scene_load_error + ")"
+		return {"ok": false, "error": skipped, "errors": []}
 	var errors := _collect_check_errors(scene_root, checks)
 	scene_root.free()
 	return {"ok": true, "error": "", "errors": errors}
@@ -1880,22 +1911,39 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 # BATCH OPERATIONS
 # ============================================
 
-# Helper: coerce a JSON-parsed value to a GDScript type (Vector2, Vector3, Color)
+# True for a JSON number. Every vector and color component has to be one before
+# a dictionary is coerced: a constructor handed anything else raises, the
+# coercion then yields null, and null is a value some properties accept.
+func _is_json_number(value) -> bool:
+	return typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT
+
+# Helper: coerce a JSON-parsed value to a GDScript type (Vector2, Vector3, Color).
+# A dictionary whose vector or color components are not all numbers is returned
+# unchanged, so the caller's type check reports it instead of a constructor
+# failing on it.
 func _coerce_property_value(value):
 	if typeof(value) == TYPE_DICTIONARY:
 		if value.has("x") and value.has("y"):
+			if not (_is_json_number(value.x) and _is_json_number(value.y)):
+				return value
 			# Widest form first: every Vector4 dict is also a valid Vector3 dict
 			# and a valid Vector2 dict, so testing w before z before neither is
 			# what keeps {x, y, z, w} from collapsing to Vector3 and dropping w.
 			# An {x, y, w} dict with no z is a Vector2; Vector4 needs all four.
 			if value.has("z"):
+				if not _is_json_number(value.z):
+					return value
 				if value.has("w"):
+					if not _is_json_number(value.w):
+						return value
 					return Vector4(value.x, value.y, value.z, value.w)
 				return Vector3(value.x, value.y, value.z)
 			else:
 				return Vector2(value.x, value.y)
 		elif value.has("r") and value.has("g") and value.has("b"):
 			var a = value.a if value.has("a") else 1.0
+			if not (_is_json_number(value.r) and _is_json_number(value.g) and _is_json_number(value.b) and _is_json_number(a)):
+				return value
 			return Color(value.r, value.g, value.b, a)
 	return value
 
@@ -2359,9 +2407,12 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 # Object-typed or untyped property -- it is the legitimate way to clear a
 # resource -- and is an error for any other declared type.
 func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
-	# A metadata entry is untyped, whatever the property list says.
-	var declared = TYPE_NIL if property.begins_with(_METADATA_PREFIX) else _declared_property_type(node, property)
-	var coerced = raw_value if declared == TYPE_DICTIONARY else _coerce_property_value(raw_value)
+	# A metadata entry is untyped, whatever the property list says. Nothing
+	# declares what it should hold, so its value is stored as it was sent: a
+	# dictionary stays a dictionary, even one shaped like a vector or a color.
+	var is_metadata: bool = property.begins_with(_METADATA_PREFIX)
+	var declared = TYPE_NIL if is_metadata else _declared_property_type(node, property)
+	var coerced = raw_value if (declared == TYPE_DICTIONARY or is_metadata) else _coerce_property_value(raw_value)
 	if coerced == null:
 		# null clears an Object-typed property, removes a metadata entry and
 		# resets an untyped Variant. On any other declared type the typed setter
@@ -2415,21 +2466,33 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
+			# A property value is the one path that does not arrive as a path
+			# parameter, so neither the Node-side validators nor a caller of this
+			# function has contained it. Godot resolves "res://../x" outward, so it
+			# goes through the same choke point as every path parameter, and the
+			# normalized path is the one that is probed and loaded.
+			var res_path: String = normalize_scene_path(coerced)
+			if res_path.is_empty():
+				return {
+					"ok": false,
+					"value": null,
+					"error": "Cannot set property '%s' on node of type '%s': path escapes the project root: %s" % [property, node.get_class(), coerced],
+				}
 			# First-time reference to an asset the scene-load probe never saw
 			# (e.g. a res:// string assigned to an Object-typed property).
 			# Check for the cold-import state before load() runs.
-			if _classify_dep_path(coerced) == "needs_import":
-				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, coerced)}
+			if _classify_dep_path(res_path) == "needs_import":
+				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, res_path)}
 			# "script" gets the same pre-load C#-support check attach_script runs,
 			# for the same reason: on a build with no C# module, load() on a .cs
 			# file fails with a generic message that doesn't say why.
 			if property == "script":
-				var csharp_support = _check_csharp_support(coerced)
+				var csharp_support = _check_csharp_support(res_path)
 				if not csharp_support.ok:
 					return {"ok": false, "value": null, "error": csharp_support.error}
-			var res = load(coerced)
+			var res = load(res_path)
 			if not res:
-				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
+				return {"ok": false, "value": null, "error": "Failed to load resource: " + res_path}
 			if res.resource_path == "":
 				return {"ok": false, "value": null, "error": "Resource was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
 			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
@@ -2444,7 +2507,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			# as Script) and that is not this bug -- only the node's own script
 			# slot silently drops an unattachable value.
 			if property == "script" and res is Script:
-				var attach_check = _check_script_attachable(res, coerced)
+				var attach_check = _check_script_attachable(res, res_path)
 				if not attach_check.ok:
 					return {"ok": false, "value": null, "error": attach_check.error}
 			return {"ok": true, "value": res, "error": ""}
@@ -2546,10 +2609,25 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.script_path}
 		var resource = load(path)
+		# A file that loads as anything but a GDScript (a scene, a resource, a
+		# shader, a C# script) was not checked by anything here: "it loaded" says
+		# nothing about it. Reporting that as valid would be a verdict nobody
+		# reached, so the target fails with the reason.
+		if resource != null and not (resource is GDScript):
+			return {
+				"valid": false,
+				"errors": [{"message": "Not validated: %s loaded as %s, not as a GDScript. scriptPath checks GDScript (.gd) files only; pass a scene as scenePath." % [target.script_path, resource.get_class()]}],
+				"target": target.script_path,
+				"resolvedPath": path,
+			}
 		# Actual parse errors go to stderr and are parsed by TypeScript
 		var script_valid: bool = resource != null
-		if script_valid and resource is GDScript:
-			script_valid = resource.can_instantiate()
+		if script_valid:
+			# An @abstract script is a valid script whether or not this engine
+			# version lets can_instantiate() stay true for one, so the verdict
+			# does not rest on that. A script with errors is still caught: its
+			# diagnostics reach stderr and the Node side overlays them.
+			script_valid = resource.can_instantiate() or (resource.has_method("is_abstract") and resource.is_abstract())
 		return {"valid": script_valid, "errors": [], "target": target.script_path, "resolvedPath": path}
 	elif target.has("scene_path") and target.scene_path != "":
 		var path = normalize_scene_path(target.scene_path)
@@ -2626,8 +2704,10 @@ func _collect_res_paths(value, out: Array) -> void:
 # Any other asset is classified directly.
 #
 # A path that escapes the project root is not probed and not counted: the apply
-# site rejects it per operation, which keeps that rejection in the batch's own
-# results array instead of failing every other operation in the batch with it.
+# site rejects it per operation (a path parameter where it is normalized, a
+# property value in _prepare_property_value), which keeps that rejection in the
+# batch's own results array instead of failing every other operation in the
+# batch with it.
 func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionary, needs_import: Array, missing: Array) -> void:
 	if raw_path == "":
 		return
@@ -2894,9 +2974,10 @@ func batch_scene_operations(params: Dictionary) -> void:
 				skipped_entry["scenePath"] = skipped_op.get("scene_path", "")
 		results.append(skipped_entry)
 
-	# Auto-save any scenes that were mutated but not explicitly saved. A scene
-	# that cannot be written leaves its entries claiming work that exists only in
-	# a process about to exit, so each is rewritten to say so.
+	# Auto-save every scene still in the cache: each one an operation named and
+	# no explicit save evicted, whether or not an operation on it succeeded. A
+	# scene that cannot be written leaves its entries claiming work that exists
+	# only in a process about to exit, so each is rewritten to say so.
 	for scene_key in scene_cache:
 		if save_scene_to_path(scene_cache[scene_key], scene_key):
 			continue

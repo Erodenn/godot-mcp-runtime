@@ -42,8 +42,12 @@ export const sceneToolDefinitions = [
       type: 'object',
       properties: {
         success: { type: 'boolean' },
-        scenePath: { type: 'string' },
+        scenePath: {
+          type: 'string',
+          description: 'Project-relative path of the scene file that was written.',
+        },
       },
+      required: ['success', 'scenePath'],
     },
   },
   {
@@ -75,11 +79,16 @@ export const sceneToolDefinitions = [
             'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node',
           properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
-        rotation: { type: 'number', description: 'Rotation in radians' },
+        rotation: {
+          type: 'number',
+          description:
+            'Rotation in radians, for a 2D node. On a 3D node rotation is a vector: pass it as properties.rotation, {"x", "y", "z"} in radians.',
+        },
         scale: {
           type: 'object',
-          description: 'Vector2 scale (e.g. {"x": 2, "y": 2})',
-          properties: { x: { type: 'number' }, y: { type: 'number' } },
+          description:
+            'Scale: {"x": 2, "y": 2} on a 2D node, {"x": 2, "y": 2, "z": 2} on a 3D node',
+          properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
         visible: { type: 'boolean', description: 'Whether the node is visible' },
         modulate: {
@@ -275,11 +284,13 @@ export const sceneToolDefinitions = [
               },
               rotation: {
                 type: 'number',
-                description: '[add_node] Rotation in radians - shorthand for properties.rotation',
+                description:
+                  '[add_node] Rotation in radians on a 2D node - shorthand for properties.rotation. A 3D node takes {"x","y","z"} under properties.rotation',
               },
               scale: {
                 type: 'object',
-                description: '[add_node] Vector2 scale - shorthand for properties.scale',
+                description:
+                  '[add_node] Scale - {"x","y"} for 2D nodes, {"x","y","z"} for 3D. Shorthand for properties.scale',
               },
               visible: {
                 type: 'boolean',

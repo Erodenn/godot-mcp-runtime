@@ -24,7 +24,9 @@ import {
   type McpContext,
 } from './mcp-context.js';
 import {
+  isLaunchScenePath,
   isUnderDir,
+  LAUNCH_SCENE_EXTENSIONS,
   projectGodotPath,
   stripResPrefix,
   validateSubPath,
@@ -44,6 +46,24 @@ export const MAX_SCAN_WARNINGS_SHOWN = 10;
 export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
+
+/**
+ * Refuse a `scene` argument the engine would not run as a scene, or null when
+ * the argument is one. Called by every launcher before the gate: the gate
+ * scans the scene it is given, and Godot silently runs the project's main
+ * scene instead when the argument has no scene extension, so letting such a
+ * value through would scan one file and launch another.
+ */
+export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
+  if (isLaunchScenePath(scene)) return null;
+  return createErrorResponse(
+    `Invalid scene: "${scene}" does not end in ${LAUNCH_SCENE_EXTENSIONS.join(' or ')} (lower case). Godot runs a command-line scene only when it carries a scene file extension; anything else is ignored and the project's main scene runs instead.`,
+    [
+      'Pass the scene file with its extension, e.g. "scenes/main.tscn"',
+      "Omit scene to launch the project's main scene",
+    ],
+  );
+}
 
 export interface LaunchGateRequest {
   /** Validated project directory; resolved to an absolute path inside. */
@@ -91,27 +111,34 @@ function formatScanFinding(finding: ScanFinding): string {
 
 /**
  * Scan a single .gd file. Missing/unreadable files are reported as a single
- * warning string (the second tuple element); the caller decides whether to
- * surface them. Tier and strict promotion semantics match `evaluateScript`.
+ * warning string; the caller decides whether to surface them. `readFailed` is
+ * true when the file exists and the read failed, which is not the same thing
+ * as a file that is not there: the scan set out to read it and could not.
+ * Tier and strict promotion semantics match `evaluateScript`.
  */
 function scanScriptFile(
   filePath: string,
   strict: boolean,
-): { findings: PolicyMatch[]; warning: string | null } {
+): { findings: PolicyMatch[]; warning: string | null; readFailed: boolean } {
   let source: string;
   try {
     source = readFileSync(filePath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { findings: [], warning: `Could not scan ${filePath} (file not found)` };
+      return {
+        findings: [],
+        warning: `Could not scan ${filePath} (file not found)`,
+        readFailed: false,
+      };
     }
     return {
       findings: [],
       warning: `Could not scan ${filePath}: ${getErrorMessage(error)}`,
+      readFailed: true,
     };
   }
   const decision = evaluateScript(source, strict);
-  return { findings: decision.matches, warning: null };
+  return { findings: decision.matches, warning: null, readFailed: false };
 }
 
 /**
@@ -143,11 +170,19 @@ export async function runLaunchGate(
   // scan warnings so their cap can never cut it.
   const confirmationWarnings: string[] = [];
   const scanFindings: ScanFinding[] = [];
+  // The part of the scan that failed on something it reads: a GDScript file or
+  // text scene that exists and could not be read, or a scan step that threw.
+  // Each entry is also in scanWarnings. Strict mode refuses on these. Items the
+  // scan does not read by kind (a C# script, a binary scene, a resource file)
+  // are never added here: refusing on those would block whole classes of
+  // project, and whether strict mode should is left open (docs/security.md).
+  const scanReadFailures: string[] = [];
   const absProjectPath = resolve(request.projectPath);
 
   const scanScriptPath = (filePath: string): void => {
-    const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+    const { findings, warning, readFailed } = scanScriptFile(filePath, ctx.strictMode);
     if (warning) scanWarnings.push(warning);
+    if (warning && readFailed) scanReadFailures.push(warning);
     const label = displayPath(absProjectPath, filePath);
     for (const m of findings) scanFindings.push({ label, match: m });
   };
@@ -169,9 +204,13 @@ export async function runLaunchGate(
       for (const m of decision.matches) scanFindings.push({ label, match: m });
     }
     for (const item of collected.unscanned) {
-      scanWarnings.push(
-        `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`,
-      );
+      const notice = `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`;
+      scanWarnings.push(notice);
+      // A text scene is one the scan reads. A file of another extension that
+      // could not be read is a binary scene at best, which it does not.
+      if (item.readFailed && item.scenePath.toLowerCase().endsWith(SCENE_EXTENSION)) {
+        scanReadFailures.push(notice);
+      }
     }
   };
 
@@ -225,7 +264,11 @@ export async function runLaunchGate(
       scanScene(launchScene);
     }
   } catch (error) {
-    scanWarnings.push(`${request.toolName} pre-flight scan failed: ${getErrorMessage(error)}`);
+    // Whatever the loop above had not reached was not scanned, and nothing
+    // names it. That is a failed scan, not a kind of file the scan skips.
+    const failure = `${request.toolName} pre-flight scan failed: ${getErrorMessage(error)}`;
+    scanWarnings.push(failure);
+    scanReadFailures.push(failure);
   }
 
   const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
@@ -245,6 +288,29 @@ export async function runLaunchGate(
         [
           'Remove or refactor the flagged primitives',
           'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
+        ],
+      ),
+    );
+  }
+
+  // Strict mode is the setting for a launch nobody is watching, so it does not
+  // launch on a scan that failed on files it reads: their Tier 1 findings, if
+  // any, are exactly what was not found.
+  if (ctx.strictMode && scanReadFailures.length > 0) {
+    const shown = scanReadFailures.slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
+    const more =
+      scanReadFailures.length > shown.length
+        ? ` (+${scanReadFailures.length - shown.length} more)`
+        : '';
+    return err(
+      createErrorResponse(
+        [
+          `Strict mode: refusing to launch project because the pre-flight scan could not read scripts or scenes it scans, so they were not checked${more}.`,
+          ...shown.map((s) => `- ${s}`),
+        ].join('\n'),
+        [
+          'Fix what stops the file from being read (permissions, a directory where the file should be), then retry',
+          'Unset GODOT_MCP_STRICT to launch with these reported in `warnings` instead',
         ],
       ),
     );

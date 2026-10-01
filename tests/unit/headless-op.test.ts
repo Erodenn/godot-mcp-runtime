@@ -122,7 +122,31 @@ describe('executeSceneOp', () => {
       EMPTY_SOLUTIONS,
       EXCEPTION_SOLUTIONS,
     );
-    expectErrorMatching(result, /see get_debug_output for details/);
+    expectErrorMatching(result, /gave no reason \(it printed no \[ERROR\] line\)/);
+    // With no reason from the script, what stderr does hold is shown, and the
+    // message names no log to go and read: a headless run keeps none.
+    expectErrorMatching(result, /just some banner output/);
+    expect(unwrap(result).content[0]?.text ?? '').not.toContain('get_debug_output');
+  });
+
+  it('shows the engine diagnostics when the script itself stopped without an [ERROR] line', async () => {
+    // A runtime error inside godot_operations.gd: SCRIPT ERROR lines, no
+    // payload and no [ERROR] line. The diagnostics are the only account of it.
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr:
+        "SCRIPT ERROR: Invalid assignment of property or key 'name' with value of type 'float'.\n   at: _apply_add_node (res://godot_operations.gd:537)",
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'batch_scene_operations',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expectErrorMatching(result, /Invalid assignment of property or key 'name'/);
   });
 
   it('wraps a thrown runner error with failurePrefix and exceptionSolutions', async () => {
@@ -572,6 +596,93 @@ describe('executeSceneOp cold-import retry', () => {
     expect(hasError(result)).toBe(false);
   });
 
+  // A single-step operation emits its payload after it has saved. Replaying
+  // one adds the node a second time: Godot renames the copy, and the caller
+  // gets a success for the copy while the first node is never reported.
+  describe('an operation that emitted its result is never replayed', () => {
+    const ADDED = JSON.stringify({ nodeName: 'Hud', nodeType: 'Label', nodePath: 'root/Hud' });
+
+    async function addNodeWith(stderr: string): Promise<{ fake: FakeRunner; result: unknown }> {
+      const fake = createFakeRunner({ stdout: ADDED, stderr });
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { parseStdoutAsJson: true, mutatesSceneFile: true },
+      );
+      return { fake, result };
+    }
+
+    it('when DEBUG=true echoes a parameter that holds the marker text', async () => {
+      // What log_debug writes to stderr for add_node with a Label text of
+      // "[IMPORT_NEEDED] soon": the marker text, quoted, on a line of its own kind.
+      const { fake, result } = await addNodeWith(
+        '[INFO] Operation: add_node\n[DEBUG] Params JSON: {"scene_path":"main.tscn","properties":{"text":"[IMPORT_NEEDED] soon"}}\n',
+      );
+      expect(fake.importCalls).toEqual([]);
+      expect(fake.calls).toHaveLength(1);
+      expect(hasError(result)).toBe(false);
+      expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADDED));
+    });
+
+    it('when a script in the project prints a marker line of its own', async () => {
+      const { fake, result } = await addNodeWith('[IMPORT_NEEDED] autoload: res://x.png\n');
+      expect(fake.importCalls).toEqual([]);
+      expect(fake.calls).toHaveLength(1);
+      expect(hasError(result)).toBe(false);
+    });
+  });
+
+  it('does not treat the marker text quoted mid-line as a request for an import', async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr:
+        '[DEBUG] Params JSON: {"node_name":"[IMPORT_NEEDED] x"}\n[ERROR] Parent node not found: root/X\n',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /Parent node not found: root\/X/);
+  });
+
+  it('recognizes the marker in the form the script prints it, behind its [ERROR] prefix', async () => {
+    const fake = createFakeRunner({
+      responses: [
+        {
+          stdout: '',
+          stderr:
+            '[INFO] Operation: get_scene_tree\n[ERROR] [IMPORT_NEEDED] main.tscn: res://assets/tex.png\n',
+        },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    expect(hasError(result)).toBe(false);
+  });
+
   it('never calls importAssets when the marker is absent', async () => {
     const fake = createFakeRunner({ stdout: '{"ok":true}', stderr: '' });
     const result = await executeSceneOp(
@@ -816,6 +927,41 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
     // emission blame) fails here.
     expect(message).toBe(`${TEST_FAILURE_PREFIX}: Node not found: NoSuchNode`);
     expect(unwrap(result).content[1]?.text ?? '').toContain(EMPTY_SOLUTIONS[0]);
+  });
+
+  // A project whose autoload prints to stdout sends every failed operation
+  // down the no-payload path. The operation's own reason is on stderr behind
+  // the engine's exit-time lines, and those used to be all that was shown.
+  it("leads with the operation's own reason when engine diagnostics are also on stderr", async () => {
+    const fake = createFakeRunner({
+      stdout: '[Audio] ready',
+      stderr: [
+        '[INFO] Operation: add_node',
+        '[ERROR] Parent node not found: root/X',
+        'ERROR: 1 resources still in use at exit.',
+        '   at: clear (core/io/resource.cpp:1)',
+      ].join('\n'),
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const message = unwrap(result).content[0]?.text ?? '';
+    expect(message).toContain('no JSON payload was emitted');
+    expect(message).toContain('reason: Parent node not found: root/X');
+    // The engine line and the project's stdout are still shown, after it.
+    expect(message.indexOf('Parent node not found')).toBeLessThan(
+      message.indexOf('resources still in use'),
+    );
+    expect(message).toContain('[Audio] ready');
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).not.toMatch(/Check get_debug_output/);
   });
 
   it('classifies the same captured stdout as no-payload when it reaches the parser uncleaned', async () => {

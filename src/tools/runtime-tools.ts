@@ -44,7 +44,7 @@ import {
   BridgeAutoloadCollisionError,
   BridgeRegistryUnreadableError,
 } from '../utils/bridge-manager.js';
-import { runLaunchGate } from '../utils/launch-gate.js';
+import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 import {
   noLiveCurrentSessionError,
@@ -92,6 +92,8 @@ const INPUT_TEXT_PER_CHAR_MS = 1;
 
 /** Bridge timeout for one screenshot command when the caller passes no `timeout`. */
 export const SCREENSHOT_DEFAULT_TIMEOUT_MS = 10000;
+/** How long run_script waits for the bridge when the caller passes no timeout. */
+const RUN_SCRIPT_DEFAULT_TIMEOUT_MS = 30000;
 /**
  * KEEP IN SYNC: `FRAME_RENDER_BUDGET_MS` in src/scripts/mcp_bridge.gd is the
  * twin of this constant. How long the bridge waits for one rendered frame
@@ -283,7 +285,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed; null if attached); warnings leads when cleanup was not confirmed. Errors if no session.',
+      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed; null if not held); warnings leads when cleanup was not confirmed. Errors if no session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -303,12 +305,13 @@ export const runtimeToolDefinitions = [
         finalOutput: {
           type: ['array', 'null'],
           items: { type: 'string' },
-          description: 'Null for an attached session, which captures nothing.',
+          description:
+            'Null when no logs are held: an attached session captures nothing, and a record that kept only a finished profiler capture gave its logs to the earlier stop.',
         },
         finalErrors: {
           type: ['array', 'null'],
           items: { type: 'string' },
-          description: 'Null for an attached session, which captures nothing.',
+          description: 'Null in the same cases as finalOutput.',
         },
       },
       required: [
@@ -585,6 +588,7 @@ export const runtimeToolDefinitions = [
             'Inputs this batch pressed and did not release, e.g. "key:W", "action:jump".',
         },
       },
+      required: ['projectPath', 'success', 'results'],
     },
   },
   {
@@ -640,6 +644,7 @@ export const runtimeToolDefinitions = [
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },
+      required: ['projectPath', 'elements', 'tip'],
     },
   },
   {
@@ -657,7 +662,7 @@ export const runtimeToolDefinitions = [
         },
         timeout: {
           type: 'number',
-          description: 'Timeout in ms (default: 30000). Increase for long-running scripts.',
+          description: `Timeout in ms (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}). Increase for long-running scripts.`,
         },
       },
       required: ['script'],
@@ -671,6 +676,7 @@ export const runtimeToolDefinitions = [
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },
+      required: ['projectPath', 'success', 'result', 'tip'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -707,6 +713,20 @@ function parseBridgeJson<T = unknown>(
       ]),
     );
   }
+}
+
+/**
+ * The error for a bridge frame that parsed as JSON and lacks what its command
+ * always answers with. The shipped bridge never sends one, so this is the
+ * guard against a frame from something else (an older bridge script left in a
+ * project, a different listener on the port): reading it as an empty result
+ * would report a success for work nobody observed.
+ */
+function malformedBridgeFrame(context: string, problem: string): ToolResponse {
+  return createErrorResponse(`Invalid response from bridge (${context}): ${problem}`, [
+    'The bridge answered with a frame this server does not recognize - check Godot stderr via get_debug_output',
+    'Restart the project with stop_project followed by run_project',
+  ]);
 }
 
 /**
@@ -1027,7 +1047,23 @@ async function startSpawnedSession(
         ),
       );
     }
+    const notAScene = rejectNonSceneLaunchArg(scene.value);
+    if (notAScene) return err(notAScene);
   }
+
+  // Every argument is read before the gate: a launch that cannot happen must
+  // never ask a human to confirm it, and must not record the project as
+  // confirmed.
+  const bridgePort = parseBridgePortArg(args);
+  if (!bridgePort.ok) return bridgePort;
+
+  const background = optionalBoolean(args, 'background');
+  if (!background.ok) return background;
+  const isBackground = background.value === true;
+
+  const profiling = optionalBoolean(args, 'profiling');
+  if (!profiling.ok) return profiling;
+  const isProfiling = profiling.value === true;
 
   const gate = await runLaunchGate(
     { projectPath, scene: scene.value, confirm: true, toolName: 'run_project' },
@@ -1048,17 +1084,6 @@ async function startSpawnedSession(
       );
     }
   }
-
-  const bridgePort = parseBridgePortArg(args);
-  if (!bridgePort.ok) return bridgePort;
-
-  const background = optionalBoolean(args, 'background');
-  if (!background.ok) return background;
-  const isBackground = background.value === true;
-
-  const profiling = optionalBoolean(args, 'profiling');
-  if (!profiling.ok) return profiling;
-  const isProfiling = profiling.value === true;
 
   try {
     await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value, isProfiling);
@@ -1466,6 +1491,27 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     );
   }
 
+  if (result.releasedCaptureOnly === true) {
+    // The record held only a finished profiler capture: the game had exited
+    // and an earlier stop_project returned its logs. Releasing the capture is
+    // what switch_project and check_project send the caller here for, so it is
+    // a success, and the logs are null because none are held any more.
+    const others = otherLiveSessionsClause(runner.getRuntimeSessionStatus());
+    const released =
+      'Released the finished profiler capture retained for this project. Its Godot process had already exited';
+    return createStructuredResponse({
+      warnings: [CAPTURE_ONLY_NO_LOGS_WARNING],
+      projectPath: result.projectPath,
+      message:
+        others === '' ? released : `${released}.${others} Call switch_project to select one.`,
+      sessionMode: result.mode,
+      externalProcessPreserved: false,
+      alreadyExited: true,
+      finalOutput: null,
+      finalErrors: null,
+    });
+  }
+
   const alreadyExited = result.alreadyExited === true;
   // Each teardown step that was attempted and not confirmed leads the payload.
   // The stop itself still happened, so this stays a success.
@@ -1513,6 +1559,8 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
 }
 
 const CLEANUP_INCOMPLETE_PREFIX = 'Bridge cleanup incomplete: ';
+const CAPTURE_ONLY_NO_LOGS_WARNING =
+  'finalOutput and finalErrors are null, not empty: the logs of the exited process were returned by the earlier stop_project call and are no longer held.';
 const SHUTDOWN_UNACKNOWLEDGED_WARNING =
   'The bridge inside the still-running Godot did not acknowledge shutdown, so it keeps listening on its port until that Godot process is closed.';
 
@@ -1924,12 +1972,22 @@ export async function handleSimulateInput(
       );
     }
 
-    const results: Record<string, unknown>[] = Array.isArray(parsed.results)
-      ? (parsed.results.filter((entry) => typeof entry === 'object' && entry !== null) as Record<
-          string,
-          unknown
-        >[])
-      : [];
+    // One entry per action is what the bridge always sends. A frame without
+    // the list, or with an entry that is not an object, says nothing about
+    // what was injected, and dropping it would leave a shorter timeline that
+    // reads as complete.
+    if (
+      !Array.isArray(parsed.results) ||
+      parsed.results.some((entry) => typeof entry !== 'object' || entry === null)
+    ) {
+      return err(
+        malformedBridgeFrame(
+          'simulate_input',
+          'the frame has no results array of per-action entries, so what was injected is not known',
+        ),
+      );
+    }
+    const results = parsed.results as Record<string, unknown>[];
     const executed = results.filter((entry) => entry.skipped !== true).length;
     const { buckets, trailing, sentinelTimedOut } = await runner.collectActionErrors(
       capture,
@@ -2017,6 +2075,14 @@ export async function handleGetUiElements(
       );
     }
 
+    // No list is not an empty list: an empty one says the scene has no
+    // matching Control, and a frame without one says nothing.
+    if (!Array.isArray(parsed.elements)) {
+      return err(
+        malformedBridgeFrame('get_ui_elements', 'the frame has no elements array to report'),
+      );
+    }
+
     const payload: Record<string, unknown> = {
       ...parsed,
       projectPath: sessionProjectPath,
@@ -2069,6 +2135,12 @@ export async function handleRunScript(
       ]),
     );
   }
+
+  // Read before the gate: a call that cannot be sent must not prompt a human
+  // or leave an audit record saying the script ran.
+  const timeoutResult = optionalNumber(args, 'timeout');
+  if (!timeoutResult.ok) return timeoutResult;
+  const timeout = timeoutResult.value ?? RUN_SCRIPT_DEFAULT_TIMEOUT_MS;
 
   // Static-analysis gate. Decision drives audit + dispatch. Completely
   // skipped when GODOT_MCP_DISABLE_SECURITY is set: no scan, no Tier 1/2/3
@@ -2162,10 +2234,6 @@ export async function handleRunScript(
     }
   }
 
-  const timeoutResult = optionalNumber(args, 'timeout');
-  if (!timeoutResult.ok) return timeoutResult;
-  const timeout = timeoutResult.value ?? 30000;
-
   try {
     const {
       response: responseStr,
@@ -2208,6 +2276,18 @@ export async function handleRunScript(
           'Ensure the script extends RefCounted',
           'Check get_debug_output for details',
         ]),
+      );
+    }
+
+    // The bridge answers a run with `success: true` and the `result`, or with
+    // an `error`. A frame without them does not say the script ran, or what it
+    // returned: a missing result is not the null a script returns.
+    if (parsed.success !== true || !('result' in parsed)) {
+      return err(
+        malformedBridgeFrame(
+          'run_script',
+          'the frame reports neither a successful run with its result nor an error, so it is not known whether the script ran',
+        ),
       );
     }
 

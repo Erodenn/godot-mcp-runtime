@@ -392,7 +392,11 @@ describe('extractGdError', () => {
   });
 
   it('falls back to a generic message when no [ERROR] line present', () => {
-    expect(extractGdError('just noise\n[INFO] ok')).toBe('see get_debug_output for details');
+    const fallback = extractGdError('just noise\n[INFO] ok');
+    expect(fallback).toBe('the operation gave no reason (it printed no [ERROR] line)');
+    // get_debug_output reads a runtime session, never a headless run, so the
+    // fallback must not send the caller there.
+    expect(fallback).not.toContain('get_debug_output');
   });
 
   it('strips the prefix correctly when [ERROR] has surrounding context', () => {

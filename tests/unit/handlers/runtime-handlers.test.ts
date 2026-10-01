@@ -1084,6 +1084,96 @@ const TIMEOUT_BUFFER_MS = 10000;
 /** Mirrors INPUT_PESSIMISTIC_FRAME_MS: a 10 fps floor, not a frame-rate guess. */
 const PESSIMISTIC_FRAME_MS = 100;
 
+describe('handleStopProject on a record that holds only a finished profiler capture', () => {
+  // switch_project and check_project both tell the caller that stop_project
+  // frees this record. It does, so the answer is the success it is.
+  it('reports the release as a success with null logs and a leading warning', async () => {
+    const fake = createRuntimeFake();
+    fake.setStopResult({
+      mode: 'spawned',
+      projectPath: '/p',
+      output: null,
+      errors: null,
+      alreadyExited: true,
+      cleanupProblems: [],
+      releasedCaptureOnly: true,
+    });
+
+    const result = await handleStopProject(fake.asRunner);
+
+    expect(hasError(result)).toBe(false);
+    const payload = expectMatchesOutputSchema('stop_project', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect((payload.warnings as string[])[0]).toMatch(
+      /finalOutput and finalErrors are null, not empty/,
+    );
+    expect(payload.projectPath).toBe('/p');
+    expect(payload.message).toMatch(/Released the finished profiler capture/);
+    expect(payload.sessionMode).toBe('spawned');
+    expect(payload.alreadyExited).toBe(true);
+    expect(payload.externalProcessPreserved).toBe(false);
+    expect(payload.finalOutput).toBeNull();
+    expect(payload.finalErrors).toBeNull();
+    expect(payload).not.toHaveProperty('exitCode');
+  });
+});
+
+describe('a bridge frame missing what its command always sends is an error, not an empty success', () => {
+  const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1\n';
+
+  function activeSession(response: unknown): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify(response));
+    return fake;
+  }
+
+  it('simulate_input: a frame with no results array', async () => {
+    const fake = activeSession({ success: true });
+    const result = await handleSimulateInput(fake.asRunner, { actions: [{ type: 'wait', ms: 1 }] });
+    expectErrorMatching(result, /Invalid response from bridge \(simulate_input\)/);
+    expectErrorMatching(result, /what was injected is not known/);
+  });
+
+  it('simulate_input: a results entry that is not an object', async () => {
+    const fake = activeSession({ success: true, results: [{ index: 0, type: 'wait' }, 'oops'] });
+    const result = await handleSimulateInput(fake.asRunner, {
+      actions: [
+        { type: 'wait', ms: 1 },
+        { type: 'wait', ms: 1 },
+      ],
+    });
+    expectErrorMatching(result, /Invalid response from bridge \(simulate_input\)/);
+  });
+
+  it('get_ui_elements: a frame with no elements array', async () => {
+    const fake = activeSession({ status: 'ok' });
+    const result = await handleGetUiElements(fake.asRunner, {});
+    expectErrorMatching(result, /Invalid response from bridge \(get_ui_elements\)/);
+  });
+
+  it('run_script: a frame with neither success nor an error', async () => {
+    const dir = tmp.makeProject('run-script-bad-frame-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ result: 5 }));
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    expectErrorMatching(result, /Invalid response from bridge \(run_script\)/);
+    expectErrorMatching(result, /not known whether the script ran/);
+  });
+
+  it('run_script: an invalid timeout is refused before the script is audited or sent', async () => {
+    const dir = tmp.makeProject('run-script-bad-timeout-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }));
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT, timeout: 'soon' });
+    expectErrorMatching(result, /timeout must be a finite number/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+    expect(existsSync(auditScriptsDir(dir))).toBe(false);
+  });
+});
+
 describe('computeInputTimeoutMs', () => {
   it('charges the buffer plus one settle frame per action when there are no waits', () => {
     const ms = computeInputTimeoutMs([{ type: 'key', key: 'Space', pressed: true }]);
@@ -2193,6 +2283,91 @@ describe('handleRunProject security pre-flight', () => {
     );
     expect(hasError(result)).toBe(false);
     expect(runProjectPayload(result).warnings).toBeUndefined();
+  });
+
+  // Godot runs a positional argument as the scene only when it ends in a scene
+  // extension; anything else is ignored and run/main_scene launches. The gate
+  // would then have scanned the named file while the main scene ran unscanned.
+  it.each([
+    ['a file that is not a scene', 'icon.svg'],
+    ['a scene path with its extension forgotten', 'scenes/level'],
+    ['an upper-case extension, which the engine does not match', 'Other.TSCN'],
+    ['a resource file', 'other.tres'],
+  ])('refuses %s as scene before the scan, the prompt and the launch', async (_label, scene) => {
+    const dir = tmp.makeProject(
+      'run-project-not-a-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(dir, 'attack.gd'), 'extends Node\nfunc _ready():\n\tOS.execute("x")\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n',
+    );
+    writeFileSync(join(dir, scene.replace('scenes/', '')), 'not a scene');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCalls = 0;
+    const counting: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene },
+      makeContext({ elicit: counting, strict: true }),
+    );
+
+    expectErrorMatching(result, /does not end in \.tscn or \.scn/);
+    expectErrorMatching(result, /main scene runs instead/);
+    expect(elicitCalls).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
+  });
+
+  it('accepts a .scn scene argument and reports that a binary scene is not scanned', async () => {
+    const dir = tmp.makeProject('run-project-scn-scene-', 'config_version=5\n');
+    writeFileSync(join(dir, 'level.scn'), 'RSCC binary scene bytes');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene: 'level.scn' },
+      acceptingContext(),
+    );
+
+    expect(hasError(result)).toBe(false);
+    expect((runProjectPayload(result).warnings ?? []).join('\n')).toMatch(
+      /Not scanned: level\.scn: not a text scene/,
+    );
+  });
+
+  // A launch that cannot happen must never ask for confirmation, and must not
+  // leave the project recorded as confirmed.
+  it.each([
+    ['an out-of-range bridgePort', { bridgePort: 70000 }, /Invalid bridgePort/],
+    ['a non-boolean background', { background: 'yes' }, /background must be a boolean/],
+    ['a non-boolean profiling', { profiling: 1 }, /profiling must be a boolean/],
+  ])('rejects %s before the confirmation prompt', async (_label, extra, pattern) => {
+    const dir = tmp.makeProject('run-project-args-before-gate-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCalls = 0;
+    const counting: Elicitor = async () => {
+      elicitCalls++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const ctx = makeContext({ elicit: counting });
+
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir, ...extra }, ctx);
+
+    expectErrorMatching(result, pattern);
+    expect(elicitCalls).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
   });
 });
 

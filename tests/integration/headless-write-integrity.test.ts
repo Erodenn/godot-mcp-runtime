@@ -309,7 +309,7 @@ describe('add_node refuses to instance a scene into itself', () => {
         nodeName: 'Again',
       });
       expect(hasError(standalone)).toBe(true);
-      expect(String(errorText(standalone))).toMatch(/into itself|no JSON payload/);
+      expect(String(errorText(standalone))).toMatch(/into itself/);
 
       const payload = await batch([
         {
@@ -347,6 +347,49 @@ describe('node-level slash keys', () => {
       expect(entry.success).toBe(true);
       const props = await readProps(SCENE, 'root');
       expect(props).not.toHaveProperty('metadata/mine');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // Metadata is untyped: nothing declares what a key should hold, so the value
+  // is stored as it was sent. A dictionary used to be turned into a vector when
+  // it had x and y keys, which dropped its other keys under a success.
+  itGodot(
+    'a dictionary written to a metadata key is stored as that dictionary, vector-shaped or not',
+    async () => {
+      const spawn = { x: 4, y: 2, name: 'left gate' };
+      const corner = { x: 'left', y: 'top' };
+      const tint = { r: 1, g: 0, b: 0, note: 'warning color' };
+      expect((await setProp('root', 'metadata/spawn', spawn)).success).toBe(true);
+      expect((await setProp('root', 'metadata/corner', corner)).success).toBe(true);
+      expect((await setProp('root', 'metadata/tint', tint)).success).toBe(true);
+
+      const props = await readProps(SCENE, 'root');
+      expect(props['metadata/spawn']).toEqual(spawn);
+      expect(props['metadata/corner']).toEqual(corner);
+      expect(props['metadata/tint']).toEqual(tint);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // A vector-shaped dictionary whose components are not numbers cannot become
+  // a vector. It reaches the type check as the dictionary it is and is refused
+  // there, instead of a failed conversion standing in for null.
+  itGodot(
+    'a vector-shaped dictionary with non-numeric components is an error on a typed property',
+    async () => {
+      const onVector = await setProp('root', 'position', { x: 'left', y: 'top' });
+      expect(onVector).not.toHaveProperty('success');
+      expect(String(onVector.error)).toMatch(/expected Vector2, got Dictionary/);
+
+      const onObject = await setProp('root/Sprite2D', 'texture', { x: 'left', y: 'top' });
+      expect(onObject).not.toHaveProperty('success');
+      expect(String(onObject.error)).toContain('Object-typed');
+
+      // The well-formed vector still converts.
+      expect((await setProp('root', 'position', { x: 12, y: 34 })).success).toBe(true);
+      const props = await readProps(SCENE, 'root');
+      expect(props.position).toEqual({ x: 12, y: 34 });
     },
     CASE_TIMEOUT_MS,
   );

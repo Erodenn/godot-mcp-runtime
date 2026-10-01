@@ -256,6 +256,34 @@ describe('spawned-process exit auto-clear', () => {
     expect(runner.activeProfiler).toBe(profiler);
   });
 
+  // What is left after that stop is a record holding only the capture. The
+  // next stop releases it, which is a stop that did something: a result, not
+  // the null that reads as "nothing to stop".
+  it('a second stop releases the retained capture and reports that it did', async () => {
+    await start();
+    const profiler = { hasResult: true, close: vi.fn() };
+    currentRecord(runner).profiler = profiler as unknown as RuntimeSession['profiler'];
+    proc.emit('exit', 0);
+    await runner.stopProject();
+
+    const second = await runner.stopProject();
+
+    expect(second).toEqual({
+      mode: 'spawned',
+      projectPath: expect.any(String),
+      output: null,
+      errors: null,
+      alreadyExited: true,
+      cleanupProblems: [],
+      releasedCaptureOnly: true,
+    });
+    expect(profiler.close).toHaveBeenCalledTimes(1);
+    expect(runner.activeProfiler).toBeNull();
+    expect(runner.listSessions()).toEqual([]);
+    // Nothing is left: a third stop has nothing to act on.
+    expect(await runner.stopProject()).toBeNull();
+  });
+
   it('closes an unfinished profiler capture across the already-exited stop', async () => {
     await start();
     const profiler = { hasResult: false, close: vi.fn() };
@@ -592,6 +620,76 @@ describe('attached-mode bridge disconnect', () => {
     },
     DISCONNECT_CASE_TIMEOUT_MS,
   );
+
+  // The disconnect clear deletes the record, so no later stop_project can
+  // report what its cleanup left behind. The error is the last place to say it.
+  it(
+    'a disconnect that ends the session puts an incomplete cleanup on the error it throws',
+    async () => {
+      const problem =
+        'the McpBridge autoload entry could not be removed from project.godot (EPERM)';
+      scripted = await startScriptedBridge(() => ({ kind: 'drop' }));
+      attach(scripted.port);
+      bridge.cleanupProblems = [problem];
+
+      const failure = await runner.sendCommandWithErrors('run_script', {}).catch((e: unknown) => e);
+
+      expect(failure).toBeInstanceOf(BridgeDisconnectedError);
+      expect((failure as Error).message).toContain('Bridge cleanup was incomplete');
+      expect((failure as Error).message).toContain(problem);
+      expect(runner.activeSessionMode).toBeNull();
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+});
+
+describe('an attach whose bridge injection fails', () => {
+  const ATTACH_PORT = 19988;
+  let runner: Runner;
+  let bridge: BridgeRecorder;
+  let projectPath: string;
+
+  beforeEach(() => {
+    runner = new GodotRunner({ godotPath: 'godot' });
+    bridge = stubBridge(runner);
+    projectPath = tmp.makeProject('godot-mcp-attach-fail-');
+  });
+
+  function failInject(message: string): void {
+    (runner as unknown as { bridge: { inject: (path: string) => void } }).bridge.inject = (
+      path: string,
+    ) => {
+      bridge.injectCalls.push(path);
+      throw new Error(message);
+    };
+  }
+
+  // inject writes its owner file before it touches .gitignore and
+  // project.godot, so one that throws there has left a live owner claim behind.
+  // With no cleanup, every other server is told a session is running here
+  // until this server exits.
+  it('withdraws what the injection left on the project, with no earlier session', async () => {
+    failInject('EPERM: operation not permitted, open project.godot');
+
+    await expect(runner.attachProject(projectPath, ATTACH_PORT)).rejects.toThrow(/EPERM/);
+
+    expect(bridge.injectCalls).toEqual([projectPath]);
+    expect(bridge.cleanupCalls).toEqual([projectPath]);
+    expect(runner.listSessions()).toEqual([]);
+    expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  it('says so on the error when that cleanup could not be confirmed', async () => {
+    const problem = "this session's bridge owner file could not be removed (EBUSY)";
+    failInject('EPERM: operation not permitted, open project.godot');
+    bridge.cleanupProblems = [problem];
+
+    const failure = await runner.attachProject(projectPath, ATTACH_PORT).catch((e: unknown) => e);
+
+    expect((failure as Error).message).toMatch(/EPERM/);
+    expect((failure as Error).message).toContain('Bridge cleanup was incomplete');
+    expect((failure as Error).message).toContain(problem);
+  });
 });
 
 // ---------------------------------------------------------------------------

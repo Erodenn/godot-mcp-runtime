@@ -81,6 +81,7 @@ export const nodeToolDefinitions = [
           },
         },
       },
+      required: ['results'],
     },
   },
   {
@@ -149,6 +150,7 @@ export const nodeToolDefinitions = [
           },
         },
       },
+      required: ['results'],
     },
   },
   {
@@ -225,9 +227,16 @@ export const nodeToolDefinitions = [
       type: 'object',
       properties: {
         success: { type: 'boolean' },
-        nodePath: { type: 'string' },
-        scriptPath: { type: 'string' },
+        nodePath: {
+          type: 'string',
+          description: 'Path from the scene root in "root/..." form, read from the node.',
+        },
+        scriptPath: {
+          type: 'string',
+          description: 'Project-relative path of the script that was attached.',
+        },
       },
+      required: ['success', 'nodePath', 'scriptPath'],
     },
   },
   {
@@ -357,6 +366,7 @@ export const nodeToolDefinitions = [
           },
         },
       },
+      required: ['nodePath', 'nodeType', 'signals'],
     },
   },
   {

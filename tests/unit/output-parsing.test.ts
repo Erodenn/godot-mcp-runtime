@@ -45,6 +45,29 @@ describe('stdout payload extraction with interleaved engine noise', () => {
     expect(extractOperationPayload(stdout)).toBe('{"n": 2}');
   });
 
+  // The emitter writes the sentinel once, at the start of the payload. A
+  // payload can still quote it: a Label whose text mentions it, a requested
+  // node name echoed in a warning. Reading from the last occurrence starts
+  // inside that string and reports a finished operation as invalid JSON.
+  it('reads the whole payload when the payload itself quotes the sentinel', () => {
+    const quoting = {
+      results: [{ nodePath: 'root/Label', properties: { text: `${OPERATION_RESULT_SENTINEL}x` } }],
+    };
+    const stdout = `Godot Engine v4.7.2\n${OPERATION_RESULT_SENTINEL}${JSON.stringify(quoting)}\n`;
+    expect(JSON.parse(extractOperationPayload(stdout) ?? '')).toEqual(quoting);
+    expect(JSON.parse(extractOperationPayload(cleanStdout(stdout)) ?? '')).toEqual(quoting);
+  });
+
+  it('skips sentinel text left in front of the payload by an unterminated print', () => {
+    const stdout = `noise ${OPERATION_RESULT_SENTINEL} not json ${payloadLine}\n`;
+    expect(JSON.parse(extractOperationPayload(stdout) ?? '')).toEqual(payload);
+  });
+
+  it('returns the text after the first sentinel when nothing on the line parses', () => {
+    const stdout = `${OPERATION_RESULT_SENTINEL}{"a": ${OPERATION_RESULT_SENTINEL} tru`;
+    expect(extractOperationPayload(stdout)).toBe(`{"a": ${OPERATION_RESULT_SENTINEL} tru`);
+  });
+
   it('returns null, never a fallback parse, when no line carries the sentinel', () => {
     expect(extractOperationPayload('Godot Engine v4.7.2\n[Audio] ready\n{"a": 1}\n')).toBeNull();
     expect(extractOperationPayload('{"bare": "json"}')).toBeNull();

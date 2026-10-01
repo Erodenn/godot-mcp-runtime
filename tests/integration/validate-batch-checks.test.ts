@@ -147,7 +147,12 @@ describe('validate - batch targets with checks', () => {
         target: 'ghost.tscn',
         valid: false,
         errors: [{ message: 'File not found: res://ghost.tscn' }],
-        checkErrors: [{ message: 'Scene checks skipped: could not load scene ghost.tscn' }],
+        checkErrors: [
+          {
+            message:
+              'Scene checks skipped: could not load scene ghost.tscn (Scene file does not exist: res://ghost.tscn)',
+          },
+        ],
       });
     },
     TEST_TIMEOUT_MS,

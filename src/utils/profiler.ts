@@ -54,6 +54,7 @@ const MS_ROUNDING = 10 ** MS_DECIMALS;
 const WAIT_CONNECT_MS = 5000;
 const WAIT_FIRST_FRAME_MS = 5000;
 const WAIT_TOTAL_MS = 10000;
+const MS_PER_SECOND = 1000;
 
 export interface ProfilePeak {
   frame: number;
@@ -466,13 +467,14 @@ export class DebuggerProfiler {
    * re-reading `this.capture` so a caller that snapshotted one cannot be handed
    * a different capture's numbers.
    */
-  private async finish(capture: Capture, top: number, sort: ProfileSort): Promise<ProfileResult> {
+  private async finish(
+    capture: Capture,
+    top: number,
+    sort: ProfileSort,
+    waitMs: number = WAIT_TOTAL_MS,
+  ): Promise<ProfileResult> {
     try {
-      await this.wait(
-        () => capture.result !== null,
-        WAIT_TOTAL_MS,
-        'Godot sent no profiler totals',
-      );
+      await this.wait(() => capture.result !== null, waitMs, 'Godot sent no profiler totals');
     } catch (err) {
       // Close the capture out either way, so it never sits in `stopping` and
       // stays re-readable. But only a timeout is recoverable here: the engine
@@ -496,12 +498,11 @@ export class DebuggerProfiler {
     await this.start(seconds, captureLimit);
     const capture = this.capture;
     if (capture === null) throw new ProfilerError('profile_not_started', 'Capture was discarded');
-    await this.wait(
-      () => capture.result !== null,
-      seconds * 1000 + WAIT_TOTAL_MS,
-      'Godot sent no profiler totals',
-    );
-    return this.finish(capture, top, sort);
+    // One wait, inside `finish`, covering the window and the close. A wait of
+    // its own here would reject past `finish`'s handling when the engine never
+    // sends its totals: the frames already folded would be withheld, and the
+    // capture would sit in `stopping`, refusing every later start as busy.
+    return this.finish(capture, top, sort, seconds * MS_PER_SECOND + WAIT_TOTAL_MS);
   }
 
   close(): void {

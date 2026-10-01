@@ -30,6 +30,40 @@ const STDERR_TAIL_LINES = 5;
 export const IMPORT_NEEDED_MARKER = '[IMPORT_NEEDED]';
 
 /**
+ * The marker as godot_operations.gd prints it: at the start of a stderr line,
+ * through `log_error`, so behind an `[ERROR] ` prefix. Matching the text
+ * anywhere in stderr would also match a line that merely quotes it, and those
+ * exist: with DEBUG=true the script echoes its params to stderr, so a Label
+ * text or node name holding the marker text would ask for a replay of an
+ * operation that asked for none.
+ */
+const IMPORT_NEEDED_LINE = /^(?:\[ERROR\] )?\[IMPORT_NEEDED\] /m;
+
+/** True when a line of this stderr is the script's own request for an asset import. */
+export function stderrRequestsImport(stderr: string): boolean {
+  return IMPORT_NEEDED_LINE.test(stderr);
+}
+
+/** Prefix of the lines godot_operations.gd prints through `log_error`. */
+const SCRIPT_ERROR_PREFIX = '[ERROR] ';
+
+/**
+ * The reasons godot_operations.gd gave for a failure, in the order it printed
+ * them. An operation that fails says why on one of these lines and quits, so
+ * they are the first thing an early-exit message owes the caller: engine
+ * diagnostics printed around them (a leak warning at exit, an unrelated
+ * `ERROR:` line) describe the process, not the failure.
+ */
+function scriptErrorLines(stderr: string): string[] {
+  return stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(SCRIPT_ERROR_PREFIX))
+    .map((line) => line.slice(SCRIPT_ERROR_PREFIX.length).trim())
+    .filter((line) => line !== '');
+}
+
+/**
  * Render one parsed stderr diagnostic, preserving the file+line location
  * `parseScriptDiagnostics` recovers — that location is the single most
  * useful part of the diagnosis, and dropping it (as a bare message-only
@@ -67,6 +101,17 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
 }
 
 /**
+ * What a run that asked for an import had already done.
+ *
+ * - `nothing`: no payload, or one that reports no applied step. The retry is
+ *   exactly what the operation needs.
+ * - `applied-steps`: a multi-step payload with a successful step.
+ * - `completed`: a single-step payload, which an operation emits only after
+ *   its work is done and saved.
+ */
+type MarkedRunState = 'nothing' | 'applied-steps' | 'completed';
+
+/**
  * Did this run already report work it applied?
  *
  * The cold-import retry re-runs the operation from the start, which is only
@@ -79,23 +124,35 @@ function renderStderrForEarlyExit(stderr: string): string | undefined {
  * first, and it keys on the payload rather than the operation name so any
  * future multi-step operation inherits it.
  *
- * Stdout without a payload line answers false: an operation that never
- * emitted a payload never reported applied work, and the retry is exactly what it needs.
+ * A single-step operation (`add_node`, `duplicate_node`, `attach_script`)
+ * emits its payload after it has saved, and never together with the marker. A
+ * payload of that kind beside a marker line means the line came from somewhere
+ * else (a script in the project printing it), and the operation is finished:
+ * replaying it would add the node a second time under a success response.
+ *
+ * Stdout without a payload line answers `nothing`: an operation that never
+ * emitted a payload never reported applied work. So does a payload that
+ * carries a top-level `error` string, which describes work that did not happen.
  */
-function reportsAppliedWork(stdout: string): boolean {
+function classifyMarkedRun(stdout: string): MarkedRunState {
   const candidate = extractOperationPayload(stdout);
-  if (!candidate) return false;
+  if (!candidate) return 'nothing';
   try {
-    const payload = JSON.parse(candidate) as { results?: unknown };
-    if (!Array.isArray(payload.results)) return false;
-    return payload.results.some(
+    const payload: unknown = JSON.parse(candidate);
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return 'nothing';
+    }
+    const { results, error } = payload as { results?: unknown; error?: unknown };
+    if (!Array.isArray(results)) return typeof error === 'string' ? 'nothing' : 'completed';
+    const anyApplied = results.some(
       (entry) =>
         typeof entry === 'object' &&
         entry !== null &&
         (entry as { success?: unknown }).success === true,
     );
+    return anyApplied ? 'applied-steps' : 'nothing';
   } catch {
-    return false;
+    return 'nothing';
   }
 }
 
@@ -116,8 +173,18 @@ function interpretOperationResult(
   options: { parseStdoutAsJson?: boolean },
 ): HandlerResult {
   if (!stdout.trim()) {
+    // The script's own [ERROR] line when there is one. Without one the script
+    // itself was stopped (a runtime error inside godot_operations.gd prints
+    // SCRIPT ERROR lines and no [ERROR] line), and the engine's diagnostics are
+    // the only account of why, so they are shown instead of being dropped.
+    const reasons = scriptErrorLines(stderr);
+    const stderrPart = reasons.length === 0 ? renderStderrForEarlyExit(stderr) : undefined;
+    const message = `${failurePrefix}: ${extractGdError(stderr)}`;
     return err(
-      createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
+      createErrorResponse(
+        stderrPart === undefined ? message : `${message}\n${stderrPart}`,
+        emptyStdoutSolutions,
+      ),
     );
   }
   const payload = extractOperationPayload(stdout);
@@ -131,6 +198,12 @@ function interpretOperationResult(
       const parts = [
         `${failurePrefix}: no JSON payload was emitted - the operation likely exited early on an error.`,
       ];
+      // The operation's own reason leads. It is on stderr behind the engine's
+      // diagnostics, and renderStderrForEarlyExit shows those when it finds any,
+      // so without this line the one sentence that explains the failure is the
+      // one left out.
+      const reasons = scriptErrorLines(stderr);
+      if (reasons.length > 0) parts.push(`reason: ${reasons.join('\n')}`);
       const stderrPart = renderStderrForEarlyExit(stderr);
       if (stderrPart) parts.push(stderrPart);
       const stdoutTail = stripOperationSentinel(stdout.trim())
@@ -141,7 +214,7 @@ function interpretOperationResult(
       return err(
         createErrorResponse(parts.join('\n'), [
           'Check the surfaced stdout/stderr above - this is the operation failing before it could emit its JSON payload, not a JSON formatting bug',
-          'Check get_debug_output for the raw output',
+          'A headless operation keeps no log: get_debug_output reads a runtime session, not this run',
         ]),
       );
     }
@@ -162,7 +235,7 @@ function interpretOperationResult(
           `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
           [
             'This indicates a bug in godot_operations.gd - the operation should emit a JSON payload matching its outputSchema',
-            'Check get_debug_output for the raw stdout and stderr',
+            'A headless operation keeps no log: get_debug_output reads a runtime session, not this run',
           ],
         ),
       );
@@ -186,7 +259,8 @@ function interpretOperationResult(
  * capped structurally rather than by a loop — a marker on the retried run
  * falls through to normal error handling instead of importing again. A run
  * that already reported applied work is never retried at all (see
- * `reportsAppliedWork`): the replay would redo what it already saved.
+ * `classifyMarkedRun`): the replay would redo what it already saved. A marker
+ * counts only as a line the script itself printed (see `stderrRequestsImport`).
  */
 export async function executeSceneOp(
   runner: GodotRunner,
@@ -210,8 +284,11 @@ export async function executeSceneOp(
     // error). One retry, structurally: this branch runs at most once per
     // call, so a second marker on the retried run falls through to the
     // normal interpretation path below rather than importing again.
-    if (stderr.includes(IMPORT_NEEDED_MARKER)) {
-      if (reportsAppliedWork(stdout)) {
+    // A run that emitted a single-step result is finished and asked for
+    // nothing: its payload is interpreted as it stands (see classifyMarkedRun).
+    const markedRun = stderrRequestsImport(stderr) ? classifyMarkedRun(stdout) : null;
+    if (markedRun !== null && markedRun !== 'completed') {
+      if (markedRun === 'applied-steps') {
         return err(
           createErrorResponse(
             `${failurePrefix}: an asset still needed importing after part of this operation had already been applied and saved. Refusing the automatic import-and-retry, which would apply those steps a second time.\nreported by this run: ${stripOperationSentinel(stdout.trim())}`,

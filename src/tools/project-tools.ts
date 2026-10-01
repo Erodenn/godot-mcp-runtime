@@ -229,6 +229,7 @@ export const projectToolDefinitions = [
           description: 'The extensions that were searched.',
         },
       },
+      required: ['matches', 'truncated', 'filesSearched', 'fileTypes'],
     },
   },
   {

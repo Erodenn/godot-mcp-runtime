@@ -313,6 +313,74 @@ describe('handleValidate batch mode - per-target checks', () => {
     expectErrorMatching(result, /Batch validate failed/);
   });
 
+  // The import writes .godot/ under the project. A game another MCP server is
+  // running there is the same second writer this server's own session is, and
+  // a registry that cannot be read does not say there is none.
+  it("skips the import retry while another MCP server's session is live on the project", async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png',
+    });
+    (fake.asRunner as unknown as { otherLiveSessions: unknown[] }).otherLiveSessions = [
+      {
+        pid: 4242,
+        instanceId: 'abc123',
+        hostname: 'some-host',
+        mode: 'spawned',
+        startedAt: new Date().toISOString(),
+        port: 9900,
+      },
+    ];
+
+    await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('skips the import retry when the owner registry cannot be read', async () => {
+    const { BridgeRegistryUnreadableError } = await import('../../../src/utils/bridge-manager.js');
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png',
+    });
+    (
+      fake.asRunner as unknown as { otherLiveSessionsOnProject: () => never }
+    ).otherLiveSessionsOnProject = () => {
+      throw new BridgeRegistryUnreadableError('cannot list owners: EACCES');
+    };
+
+    await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('does not import for marker text that only appears quoted inside a stderr line', async () => {
+    const goodPayload = JSON.stringify({
+      results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+    });
+    const fake = createFakeRunner({
+      stdout: goodPayload,
+      stderr: '[DEBUG] Params JSON: {"targets":[{"scene_path":"[IMPORT_NEEDED] x.tscn"}]}',
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
   it('runs the import retry when the only live session is on another project', async () => {
     const goodPayload = JSON.stringify({
       results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],

@@ -31,7 +31,11 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import {
+  extractJson,
+  extractOperationPayload,
+  OPERATION_RESULT_SENTINEL,
+} from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -647,13 +651,19 @@ async function runOperation(
   operation: string,
   params: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const { stdout } = await runner.executeOperation(
+  const { stdout, stderr } = await runner.executeOperation(
     operation,
     params,
     project,
     INSTANCE_OP_TIMEOUT_MS,
   );
-  return JSON.parse(extractJson(stdout)) as Record<string, unknown>;
+  // An operation that failed emitted no payload. Say what it printed, so the
+  // case fails on the operation's own reason and not on a JSON syntax error.
+  const payload = extractOperationPayload(stdout);
+  if (payload === null) {
+    throw new Error(`${operation} emitted no payload.\nstdout: ${stdout}\nstderr: ${stderr}`);
+  }
+  return JSON.parse(payload) as Record<string, unknown>;
 }
 
 /** The saved main scene, reloaded in a fresh process. */

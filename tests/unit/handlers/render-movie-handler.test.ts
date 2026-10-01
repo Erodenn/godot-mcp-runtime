@@ -413,6 +413,66 @@ describe('render_movie arguments', () => {
   });
 });
 
+// Godot runs a positional argument as the scene only when it ends in a scene
+// extension. Anything else is ignored and the main scene renders, so the frames
+// would be measured, and the gate would have scanned, a scene nobody named.
+describe('render_movie refuses a scene argument the engine would not run as a scene', () => {
+  it.each([
+    ['a file that is not a scene', 'icon.svg'],
+    ['a scene path with its extension forgotten', 'level'],
+    ['an upper-case extension', 'Level.TSCN'],
+    ['a resource file', 'level.tres'],
+  ])('%s', async (_label, scene) => {
+    const { dir, runner, stub, handler } = setup();
+    writeFileSync(join(dir, scene), 'present on disk');
+    let elicitCalls = 0;
+
+    const result = await handler(
+      runner,
+      { projectPath: dir, scene },
+      makeContext({
+        elicit: async () => {
+          elicitCalls++;
+          return { action: 'accept', content: { confirm: true } };
+        },
+      }),
+    );
+
+    expectErrorMatching(result, /does not end in \.tscn or \.scn/);
+    expect(elicitCalls).toBe(0);
+    expect(stub.calls.length).toBe(0);
+    expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
+  });
+});
+
+describe('render_movie asks again whether the bridge may load once the gate returns', () => {
+  // The confirmation prompt can stay open as long as a human takes to answer.
+  // A session started on the project in that time has injected the bridge, and
+  // the movie process would load it with no token and no port of its own.
+  it('refuses when a session went live on the project while the prompt was open', async () => {
+    const { dir, runner, stub, handler } = setup();
+
+    const result = await handler(
+      runner,
+      { projectPath: dir },
+      makeContext({
+        elicit: async () => {
+          Object.assign(runner as unknown as Record<string, unknown>, {
+            activeSessionMode: 'spawned',
+            activeProjectPath: dir,
+            activeProcess: { hasExited: false },
+          });
+          return { action: 'accept', content: { confirm: true } };
+        },
+      }),
+    );
+
+    expectErrorMatching(result, /runtime session is active on this project/);
+    expect(stub.calls.length).toBe(0);
+    expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
+  });
+});
+
 describe('render_movie sampling helpers', () => {
   it.each([
     [8, 3, [0, 4, 7]],
