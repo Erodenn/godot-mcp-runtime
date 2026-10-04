@@ -396,7 +396,9 @@ export class GodotRunner {
   /**
    * The session the runtime tools act on, or null. Set by `runProject`,
    * `attachProject` and `switchSession`; emptied when its session is stopped
-   * or forgotten. Never moved to another session implicitly.
+   * or forgotten. Never moved to another session implicitly: the one way it
+   * goes back to an earlier session is a start that launched nothing undoing
+   * its own move (see `restoreCurrentAfterFailedStart`).
    */
   private current: RuntimeSession | null = null;
   /** How session games are killed. A field so tests can substitute the OS calls. */
@@ -843,10 +845,12 @@ export class GodotRunner {
 
     const session = this.createSession(projectPath, 'spawned');
     const epoch = session.epoch;
+    const previousCurrent = this.current;
     this.sessions.set(key, session);
     this.setCurrent(session);
 
     let injected = false;
+    let processSpawned = false;
     try {
       const port = bridgePort ?? (await findFreePort());
       this.assertStartStillOwned(session, epoch);
@@ -909,6 +913,7 @@ export class GodotRunner {
         spawnOptions.env = { ...spawnOptions.env, MCP_BACKGROUND: '1' };
       }
       const proc = spawn(this.godotPath, cmdArgs, spawnOptions);
+      processSpawned = true;
       const output: string[] = [];
       const errors: string[] = [];
 
@@ -958,12 +963,30 @@ export class GodotRunner {
       // Nothing is running for this record: drop it, release the debugger
       // listener, and remove whatever bridge artifacts the start (or the
       // session it replaced) left on the project.
+      const heldCurrent = this.current === session;
       this.appendCleanupProblems(
         err,
         this.discardFailedStart(session, injected || previous !== null),
       );
+      if (!processSpawned && heldCurrent) this.restoreCurrentAfterFailedStart(previousCurrent);
       throw err;
     }
+  }
+
+  /**
+   * Give the current pointer back to the session that held it before a start
+   * that launched nothing. Such a start took the pointer and then failed
+   * without anything to show for it (a name collision, an unreadable
+   * registry), so leaving the pointer empty would be the call moving it by
+   * itself. This is an undo, not a promotion: only the record that was
+   * current before the call is considered, only when it is still registered
+   * (a session the start replaced is not), and only when nothing else has
+   * taken the pointer since.
+   */
+  private restoreCurrentAfterFailedStart(previousCurrent: RuntimeSession | null): void {
+    if (previousCurrent === null || this.current !== null) return;
+    if (this.sessions.get(previousCurrent.key) !== previousCurrent) return;
+    this.setCurrent(previousCurrent);
   }
 
   /**
@@ -1270,6 +1293,7 @@ export class GodotRunner {
 
     const session = this.createSession(projectPath, 'attached');
     const epoch = session.epoch;
+    const previousCurrent = this.current;
     this.sessions.set(key, session);
     this.setCurrent(session);
 
@@ -1294,10 +1318,13 @@ export class GodotRunner {
       const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
       logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     } catch (err) {
+      const heldCurrent = this.current === session;
       this.appendCleanupProblems(
         err,
         this.discardFailedStart(session, injectAttempted || previous !== null),
       );
+      // An attach never spawns, so a failure here always launched nothing.
+      if (heldCurrent) this.restoreCurrentAfterFailedStart(previousCurrent);
       throw err;
     }
   }

@@ -34,6 +34,7 @@ vi.mock('../../src/utils/profiler.js', () => ({
 
 const { GodotRunner, NoLiveCurrentSessionError, sessionKey } =
   await import('../../src/utils/godot-runner.js');
+const { BridgeAutoloadCollisionError } = await import('../../src/utils/bridge-manager.js');
 type Runner = InstanceType<typeof GodotRunner>;
 type NoLiveCurrent = InstanceType<typeof NoLiveCurrentSessionError>;
 
@@ -789,8 +790,56 @@ describe('multi-project runtime sessions', () => {
     expect(sessionPaths()).toEqual([projectA]);
     expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
     expect(bridge.cleanupCalls).toEqual([projectB]);
-    // The failed start had taken the current pointer and nothing is promoted
-    // into its place.
+    // Nothing was launched, so the call must not have moved the pointer: the
+    // session that was current before it is current again.
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA, live: true });
+  });
+
+  it('a start refused before anything is launched keeps the session that was current', async () => {
+    await startProject(projectA, PORT_A);
+    await startProject(projectB, PORT_B);
+    runner.switchSession(projectA);
+    (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
+      throw new BridgeAutoloadCollisionError('McpBridge is taken', 'res://game/own_bridge.gd');
+    };
+
+    await expect(runner.runProject(projectC, undefined, false, PORT_C)).rejects.toThrow(
+      'McpBridge is taken',
+    );
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(sessionPaths()).toEqual([projectA, projectB]);
+    // A was current, not B: the pointer goes back to where it was, and the
+    // other live session is not picked instead.
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA });
+  });
+
+  it('a failed attach keeps the session that was current', async () => {
+    await startProject(projectA, PORT_A);
+    (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
+      throw new Error('project.godot is not writable');
+    };
+
+    await expect(runner.attachProject(projectB, PORT_B)).rejects.toThrow('not writable');
+
+    expect(sessionPaths()).toEqual([projectA]);
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA, live: true });
+  });
+
+  it('a failed restart of the current project leaves no session current, because the one it replaced is gone', async () => {
+    await startProject(projectA, PORT_A);
+    await startProject(projectB, PORT_B, { exitOnKill: false });
+    spawnMock.mockImplementationOnce(() => {
+      throw new Error('spawn godot ENOENT');
+    });
+
+    await expect(runner.runProject(projectB, undefined, false, PORT_B)).rejects.toThrow(
+      'spawn godot ENOENT',
+    );
+
+    // B was current and the restart killed it: there is nothing to go back
+    // to, and A is not promoted.
+    expect(sessionPaths()).toEqual([projectA]);
     expect(runner.getCurrentSessionInfo()).toBeNull();
   });
 
