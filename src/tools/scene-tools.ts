@@ -167,7 +167,7 @@ export const sceneToolDefinitions = [
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to another path (save-as). The mutation tools (add_node, set_node_properties, delete_nodes, etc.) save by themselves: use this only for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns: scenePath (the scene that was loaded) and savedScenePath (the file written, confirmed on disk). Errors if the scene file does not exist. Errors while a runtime session is live on this project.',
+      'Re-pack and save a scene, optionally to another path (save-as). The mutation tools save by themselves: use this only for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. A newPath file gets no uid of its own. Returns: scenePath (loaded) and savedScenePath (written, confirmed on disk); warnings leads if the save dropped content. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -185,6 +185,7 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         scenePath: { type: 'string', description: 'The scene that was loaded.' },
         savedScenePath: {
           type: 'string',

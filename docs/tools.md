@@ -303,6 +303,8 @@ Every tool below errors while a Godot runtime session is active on the same proj
 
 A scene that inherits from another keeps its `instance=` root through every mutation, and a node it inherits is not written out as a concrete copy. An edit inside an instanced child writes only the property that changed: the other properties the child's scene sets stay in that scene and are not pinned into the parent. Both follow from loading scenes with an edit state, as the editor does; an engine build without editor features loads them plainly and cannot keep this distinction.
 
+A save keeps the scene's own `uid` (the one on the `[gd_scene ...]` line) and the `uid` of each `[ext_resource]` reference. Godot's headless save writes neither, so the server reads them from the file before the save and puts them back afterwards. `save_scene` with `newPath` writes a file with no uid of its own, because the new scene is not the file that uid names; Godot assigns one when the editor next scans the project. Saving onto an existing file keeps that file's uid. References keep their uids on a save-as, so a copy still resolves its dependencies by uid.
+
 Spatial properties (`position`, `rotation`, `scale`, `visible`, `modulate`) may be passed as top-level params instead of under `properties`, on the standalone tool and on `add_node` items inside `batch_scene_operations` alike. `properties` wins on a key conflict. `position` takes `{x, y}` on a 2D node and `{x, y, z}` on a 3D node.
 
 `set_node_properties` items inside `batch_scene_operations` accept the same per-update params (`nodePath`, `property`, `value`) as the standalone tool, plus a per-operation `scenePath` and `abortOnError`; per-update results appear under `results[].updates`.

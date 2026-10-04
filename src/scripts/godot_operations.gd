@@ -454,12 +454,103 @@ func find_node_by_path(scene_root: Node, node_path: String) -> Node:
 
 	return scene_root.get_node_or_null(path)
 
+# Text-scene header scanning, used to carry uids across a save (see
+# _restore_scene_uids). Everything before the first node or sub_resource section
+# is the header block.
+const _SCENE_HEADER_PREFIX := "[gd_scene"
+const _EXT_RESOURCE_PREFIX := "[ext_resource "
+const _UID_ATTR := "uid=\""
+const _PATH_ATTR := "path=\""
+const _SCENE_BODY_PREFIXES: Array = ["[node ", "[sub_resource "]
+
+# True for the first line of a scene's body, where the header block ends.
+func _starts_scene_body(line: String) -> bool:
+	for prefix in _SCENE_BODY_PREFIXES:
+		if line.begins_with(prefix):
+			return true
+	return false
+
+# The quoted value of `attr` (written as `name="`) on a header line, or "".
+func _header_attr(line: String, attr: String) -> String:
+	var at := line.find(" " + attr)
+	if at == -1:
+		return ""
+	var start := at + 1 + attr.length()
+	var end := line.find("\"", start)
+	return "" if end == -1 else line.substr(start, end - start)
+
+# {"scene": String, "ext": {res_path: uid_text}} read from a text scene's header
+# block. Reading the text, not ResourceLoader.get_resource_uid: that call
+# answers -1 on 4.6 in a project with no uid cache.
+func _read_scene_uids(full_path: String) -> Dictionary:
+	var found := {"scene": "", "ext": {}}
+	if not full_path.to_lower().ends_with(".tscn") or not FileAccess.file_exists(full_path):
+		return found
+	for raw_line in FileAccess.get_file_as_string(full_path).split("\n"):
+		var line: String = raw_line.strip_edges()
+		if line.begins_with(_SCENE_HEADER_PREFIX):
+			found.scene = _header_attr(line, _UID_ATTR)
+		elif line.begins_with(_EXT_RESOURCE_PREFIX):
+			var uid := _header_attr(line, _UID_ATTR)
+			var path := _header_attr(line, _PATH_ATTR)
+			if uid != "" and path != "" and not path.contains("\\"):
+				found.ext[path] = uid
+		elif _starts_scene_body(line):
+			break
+	return found
+
+# ResourceSaver.save outside the editor writes neither the scene's own uid nor
+# the uid of any ext_resource (the id lookup is an editor callback). Put both
+# back: the scene's through ResourceSaver.set_uid, each reference's by inserting
+# the attribute into its ext_resource line.
+func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Dictionary) -> void:
+	if not full_path.to_lower().ends_with(".tscn"):
+		return
+	if scene_uid != "":
+		var id := ResourceUID.text_to_id(scene_uid)
+		if id != ResourceUID.INVALID_ID and ResourceSaver.set_uid(full_path, id) != OK:
+			log_error("Could not restore the scene uid on " + full_path)
+	if ext_uids.is_empty():
+		return
+	var lines := FileAccess.get_file_as_string(full_path).split("\n")
+	var changed := false
+	for i in range(lines.size()):
+		var line: String = lines[i]
+		if _starts_scene_body(line):
+			break
+		if not line.begins_with(_EXT_RESOURCE_PREFIX) or line.contains(" " + _UID_ATTR):
+			continue
+		var path := _header_attr(line, _PATH_ATTR)
+		var at := line.find(" " + _PATH_ATTR)
+		if path == "" or at == -1 or not ext_uids.has(path):
+			continue
+		lines[i] = line.substr(0, at) + " " + _UID_ATTR + str(ext_uids[path]) + "\"" + line.substr(at)
+		changed = true
+	if not changed:
+		return
+	var file := FileAccess.open(full_path, FileAccess.WRITE)
+	if file == null:
+		log_error("Could not rewrite ext_resource uids on " + full_path)
+		return
+	file.store_string("\n".join(lines))
+	file.close()
+
 # Helper to save a scene
 func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 	var full_path = normalize_scene_path(save_path)
 	if full_path.is_empty():
 		log_error("Path escapes the project root: " + save_path)
 		return false
+
+	# The scene's own uid comes only from the file being overwritten: a save-as to
+	# a new path gets none, a save-as onto an existing file keeps that file's. The
+	# uids of the files a scene references travel with a save-as, so the source
+	# scene's are merged in under the target's.
+	var target_uids := _read_scene_uids(full_path)
+	var ext_uids: Dictionary = target_uids.ext.duplicate()
+	var source_path: String = scene_root.scene_file_path
+	if source_path != "" and source_path != full_path:
+		ext_uids.merge(_read_scene_uids(source_path).ext)
 
 	var packed_scene = PackedScene.new()
 	var result = packed_scene.pack(scene_root)
@@ -473,6 +564,7 @@ func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 		log_error("Failed to save scene: " + str(save_error))
 		return false
 
+	_restore_scene_uids(full_path, target_uids.scene, ext_uids)
 	return true
 
 # Ensure the parent directory of a res:// path exists, creating it recursively

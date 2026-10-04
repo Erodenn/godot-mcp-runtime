@@ -128,3 +128,96 @@ describe('a scene script that names an autoload survives a headless save', () =>
     CASE_TIMEOUT_MS,
   );
 });
+
+const PLAYER_SCENE_UID = 'uid://clomui4eibwiq';
+const PLAYER_SCRIPT_UID = 'uid://cp6gyxwwwr27j';
+const DERIVED_SCENE = 'derived_unit.tscn';
+const DERIVED_SCENE_UID = 'uid://ud33laavt82f';
+const BASE_SCENE_UID = 'uid://76owar7af2bj';
+
+/** The first line of a scene file: its `[gd_scene ...]` header. */
+function headerLine(scene: string): string {
+  return sceneText(scene).split('\n')[0] ?? '';
+}
+
+/** The `[ext_resource ...]` line that points at `path`. */
+function extResourceLine(scene: string, path: string): string {
+  const line = sceneText(scene)
+    .split('\n')
+    .find((candidate) => candidate.startsWith('[ext_resource ') && candidate.includes(path));
+  if (line === undefined) throw new Error(`${scene} has no ext_resource for ${path}`);
+  return line;
+}
+
+describe('a headless save keeps the scene uid and the reference uids', () => {
+  itGodot(
+    'set_node_properties keeps the scene uid and the script reference uid',
+    async () => {
+      const result = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: PLAYER_SCENE,
+        updates: [{ nodePath: 'root/Body', property: 'position', value: { x: 30, y: 40 } }],
+      });
+      expectMatchesOutputSchema('set_node_properties', result);
+
+      expect(headerLine(PLAYER_SCENE)).toMatch(/^\[gd_scene .*uid="uid:\/\/clomui4eibwiq"\]/);
+      expect(extResourceLine(PLAYER_SCENE, 'res://player.gd')).toContain(
+        `uid="${PLAYER_SCRIPT_UID}"`,
+      );
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'save_scene with newPath writes a copy with no uid of its own and keeps the reference uid',
+    async () => {
+      const result = await handleSaveScene(runner, {
+        projectPath,
+        scenePath: PLAYER_SCENE,
+        newPath: 'player_copy.tscn',
+      });
+      expectMatchesOutputSchema('save_scene', result);
+
+      expect(headerLine('player_copy.tscn')).not.toContain('uid=');
+      expect(extResourceLine('player_copy.tscn', 'res://player.gd')).toContain(
+        `uid="${PLAYER_SCRIPT_UID}"`,
+      );
+      // The original is untouched by the save-as.
+      expect(headerLine(PLAYER_SCENE)).toContain(`uid="${PLAYER_SCENE_UID}"`);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a second save leaves both uids unchanged',
+    async () => {
+      for (let pass = 0; pass < 2; pass++) {
+        const result = await handleSaveScene(runner, { projectPath, scenePath: PLAYER_SCENE });
+        expectMatchesOutputSchema('save_scene', result);
+        expect(headerLine(PLAYER_SCENE)).toContain(`uid="${PLAYER_SCENE_UID}"`);
+        expect(extResourceLine(PLAYER_SCENE, 'res://player.gd')).toContain(
+          `uid="${PLAYER_SCRIPT_UID}"`,
+        );
+      }
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'an inherited scene keeps its own uid and the uid of its base scene',
+    async () => {
+      const result = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: DERIVED_SCENE,
+        updates: [{ nodePath: 'root/Leg', property: 'text', value: 'changed' }],
+      });
+      expectMatchesOutputSchema('set_node_properties', result);
+
+      expect(headerLine(DERIVED_SCENE)).toContain(`uid="${DERIVED_SCENE_UID}"`);
+      expect(extResourceLine(DERIVED_SCENE, 'res://base_unit.tscn')).toContain(
+        `uid="${BASE_SCENE_UID}"`,
+      );
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
