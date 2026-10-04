@@ -80,6 +80,63 @@ describe('handleListAutoloads', () => {
 // handleAddAutoload
 // ---------------------------------------------------------------------------
 
+describe('autoload path characters and empty updates', () => {
+  const FORBIDDEN = [
+    ['a double quote', 'x".gd'],
+    ['a carriage return', 'x\r.gd'],
+    ['a line feed', 'x\n.gd'],
+  ] as const;
+
+  it.each(FORBIDDEN)(
+    'add_autoload rejects %s and leaves project.godot untouched',
+    async (_l, p) => {
+      const dir = makeTmpProject();
+      const before = readProjectGodot(dir);
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Thing',
+        autoloadPath: p,
+      });
+      expectErrorMatching(result, /double quote or a line break/i);
+      expect(readProjectGodot(dir)).toBe(before);
+    },
+  );
+
+  it.each(FORBIDDEN)(
+    'update_autoload rejects %s and leaves project.godot untouched',
+    async (_l, p) => {
+      const dir = makeTmpProjectWithAutoload('Thing', 'old.gd');
+      const before = readProjectGodot(dir);
+      const result = await handleUpdateAutoload({
+        projectPath: dir,
+        autoloadName: 'Thing',
+        autoloadPath: p,
+      });
+      expectErrorMatching(result, /double quote or a line break/i);
+      expect(readProjectGodot(dir)).toBe(before);
+    },
+  );
+
+  it('update_autoload with neither field errors naming both and leaves the file unchanged', async () => {
+    const dir = makeTmpProjectWithAutoload('Thing', 'old.gd');
+    const before = readProjectGodot(dir);
+    const result = await handleUpdateAutoload({ projectPath: dir, autoloadName: 'Thing' });
+    expectErrorMatching(result, /autoloadPath.*singleton/i);
+    expect(readProjectGodot(dir)).toBe(before);
+  });
+
+  it('stores a backslash path with forward slashes', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Thing',
+      autoloadPath: 'sub\\x.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Thing="*res://sub/x.gd"');
+  });
+});
+
 describe('handleAddAutoload path spellings', () => {
   it.each([
     ['res://', 'res://x.gd'],

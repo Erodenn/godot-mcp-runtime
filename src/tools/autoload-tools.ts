@@ -15,6 +15,7 @@ import {
   parseAutoloads,
   parseAutoloadSection,
   addAutoloadEntry,
+  AUTOLOAD_PATH_FORBIDDEN_REGEX,
   removeAutoloadEntry,
   updateAutoloadEntry,
 } from '../utils/autoload-ini.js';
@@ -123,7 +124,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'update_autoload',
     description:
-      "Change an existing autoload's path or singleton flag. Pass either or both; an omitted field keeps its current value. Use instead of remove_autoload plus add_autoload: one edit, no window where the autoload is missing. No Godot process is used. Returns: autoload { name, path, singleton } read back from project.godot. Errors if autoloadName is not registered.",
+      "Change an existing autoload's path or singleton flag. Pass autoloadPath, singleton or both; errors if neither is given. An omitted field keeps its current value. Use instead of remove_autoload plus add_autoload: one edit, no window where the autoload is missing. No Godot process is used. Returns: autoload { name, path, singleton } read back from project.godot. Errors if autoloadName is not registered.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -146,6 +147,15 @@ export const autoloadToolDefinitions = [
 ] as const satisfies readonly ToolDefinition[];
 
 // --- Handlers ---
+
+function rejectForbiddenPathCharacters(autoloadPath: string): HandlerResult | undefined {
+  if (!AUTOLOAD_PATH_FORBIDDEN_REGEX.test(autoloadPath)) return undefined;
+  return err(
+    createErrorResponse('autoloadPath must not contain a double quote or a line break', [
+      'Remove the double quote or line break from autoloadPath',
+    ]),
+  );
+}
 
 export function handleListAutoloads(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
@@ -181,6 +191,9 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
 
   const autoloadPath = requireString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
+
+  const forbiddenAdd = rejectForbiddenPathCharacters(autoloadPath.value);
+  if (forbiddenAdd) return forbiddenAdd;
 
   const resolvedAutoload = resolveProjectPath(parsed.value.projectPath, autoloadPath.value);
   if (!resolvedAutoload) {
@@ -284,6 +297,11 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   const autoloadPath = optionalString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
 
+  if (autoloadPath.value !== undefined) {
+    const forbidden = rejectForbiddenPathCharacters(autoloadPath.value);
+    if (forbidden) return forbidden;
+  }
+
   const resolvedAutoload =
     autoloadPath.value === undefined
       ? undefined
@@ -298,6 +316,15 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
 
   const singleton = optionalBoolean(args, 'singleton');
   if (!singleton.ok) return singleton;
+
+  if (autoloadPath.value === undefined && singleton.value === undefined) {
+    return err(
+      createErrorResponse('update_autoload changes nothing: pass autoloadPath, singleton or both', [
+        'Pass autoloadPath to change the path',
+        'Pass singleton to change the singleton flag',
+      ]),
+    );
+  }
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);

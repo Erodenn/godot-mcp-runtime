@@ -49,6 +49,18 @@ function assertValidName(name: string): void {
   }
 }
 
+/**
+ * A quote or line break in a path would end the quoted value early or split the
+ * entry across lines, so it can never be written.
+ */
+export const AUTOLOAD_PATH_FORBIDDEN_REGEX = /["\r\n]/;
+
+function assertValidAutoloadPath(path: string): void {
+  if (AUTOLOAD_PATH_FORBIDDEN_REGEX.test(path)) {
+    throw new Error('Invalid autoload path: must not contain a double quote or a line break');
+  }
+}
+
 export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
@@ -161,6 +173,7 @@ export function addAutoloadEntry(
   existingContent?: string,
 ): void {
   assertValidName(name);
+  assertValidAutoloadPath(path);
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
   const eol = eolOf(content);
   const entry = formatEntryLine(name, singleton, normalizeAutoloadPath(path));
@@ -240,6 +253,7 @@ export function updateAutoloadEntry(
   singleton?: boolean,
 ): boolean {
   assertValidName(name);
+  if (newPath !== undefined) assertValidAutoloadPath(newPath);
   const content = readFileSync(projectFilePath, 'utf8');
   const eol = eolOf(content);
   const targets = autoloadStatements(scanProjectFile(content))
