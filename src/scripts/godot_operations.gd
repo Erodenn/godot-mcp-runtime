@@ -3347,15 +3347,18 @@ func batch_scene_operations(params: Dictionary) -> void:
 				skipped_entry["scenePath"] = skipped_op.get("scene_path", "")
 		results.append(skipped_entry)
 
-	# Auto-save every scene still in the cache: each one an operation named and
-	# no explicit save evicted, whether or not an operation on it succeeded. A
-	# scene that cannot be written leaves its entries claiming work that exists
-	# only in a process about to exit, so each is rewritten to say so.
+	# Auto-save every scene still in the cache that an operation succeeded on and
+	# no explicit save has written since. A scene nothing succeeded on is the
+	# file as it was loaded, and writing it back could only canonicalize it or
+	# lose content nobody asked to change; an explicit save item is the way to
+	# re-pack a scene on purpose. A scene that cannot be written leaves its
+	# entries claiming work that exists only in a process about to exit, so each
+	# is rewritten to say so.
 	for scene_key in scene_cache:
-		if save_scene_to_path(scene_cache[scene_key], scene_key):
-			continue
 		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
 		if unsaved.is_empty():
+			continue
+		if save_scene_to_path(scene_cache[scene_key], scene_key):
 			continue
 		var scene_label := _project_relative(scene_key)
 		for result_index in unsaved:

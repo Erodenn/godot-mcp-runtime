@@ -9,7 +9,8 @@
  * node itself declares) are covered here too.
  *
  * The real handlers run against a tmp copy of the fixture project and every
- * assertion reads a parsed payload, never .tscn text. Read-only scenes are made
+ * assertion reads a parsed payload, except the one that a scene was not
+ * rewritten, which compares the file's text byte for byte. Read-only scenes are made
  * with chmod and restored in a finally block so cleanup can delete them.
  *
  * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
@@ -17,7 +18,7 @@
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { chmodSync, cpSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, cpSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -275,6 +276,22 @@ describe('batch_scene_operations reports what it saved', () => {
       const childNames = (tree.children ?? []).map((child) => child.name);
       expect(childNames).toContain('A');
       expect(childNames).toContain('B');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a batch whose only operation on a scene fails leaves the scene file untouched',
+    async () => {
+      const before = readFileSync(join(projectPath, SCENE), 'utf-8');
+      const payload = await batch([
+        { operation: 'add_node', scenePath: SCENE, nodeType: 'NotAClass', nodeName: 'Bad' },
+      ]);
+      const results = payload.results as Entry[];
+      expect(results).toHaveLength(1);
+      expect(results[0]).not.toHaveProperty('success');
+      expect(String(results[0]?.error)).toContain('NotAClass');
+      expect(readFileSync(join(projectPath, SCENE), 'utf-8')).toBe(before);
     },
     CASE_TIMEOUT_MS,
   );

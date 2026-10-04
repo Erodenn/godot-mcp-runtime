@@ -297,6 +297,47 @@ describe('checkBatchOperationItems', () => {
     expect(messageOf(result)).toBe('operations[0].properties must be an object when provided');
   });
 
+  it.each([
+    ['missing', {}],
+    ['null', { operation: null }],
+    ['empty', { operation: '' }],
+  ])('err: refuses an item whose operation is %s, naming the item', (_label, operationKey) => {
+    const result = checkBatchOperationItems([
+      ADD_NODE,
+      { scenePath: 'main.tscn', ...operationKey },
+    ]);
+    expectErr(result);
+    expect(messageOf(result)).toBe(
+      "operations[1] is missing the required 'operation' key (one of: add_node, load_sprite, set_node_properties, save).",
+    );
+  });
+
+  it.each([
+    ['nodeName', { nodeName: 'A' }, 'nodeName/nodeType', 'add_node'],
+    ['node_type', { node_type: 'Node2D' }, 'nodeName/nodeType', 'add_node'],
+    ['updates', { updates: [] }, 'updates', 'set_node_properties'],
+    ['texturePath', { texturePath: 'a.png' }, 'texturePath', 'load_sprite'],
+    ['texture_path', { texture_path: 'a.png' }, 'texturePath', 'load_sprite'],
+  ])('err: a missing operation with %s present hints the intended one', (_k, keys, shown, op) => {
+    const result = checkBatchOperationItems([{ scenePath: 'main.tscn', ...keys }]);
+    expectErr(result);
+    expect(messageOf(result)).toContain(` (${shown} present: did you mean operation '${op}'?)`);
+  });
+
+  it('err: refuses a non-string operation', () => {
+    const result = checkBatchOperationItems([ADD_NODE, { operation: 7 }]);
+    expectErr(result);
+    expect(messageOf(result)).toBe('operations[1].operation must be a string');
+  });
+
+  it('err: refuses an unknown operation string, naming it and the valid ones', () => {
+    const result = checkBatchOperationItems([ADD_NODE, { operation: 'delete_everything' }]);
+    expectErr(result);
+    expect(messageOf(result)).toBe(
+      'operations[1].operation "delete_everything" is not a batch operation (one of: add_node, load_sprite, set_node_properties, save)',
+    );
+  });
+
   it('err: refuses a non-boolean abortOnError on an item', () => {
     const result = checkBatchOperationItems([
       {

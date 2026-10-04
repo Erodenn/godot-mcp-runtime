@@ -192,13 +192,13 @@ describe('batch_scene_operations item validation', () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  it('batch_scene_operations still forwards an item with no operation key', async () => {
+  it('batch_scene_operations rejects an item with no operation key before Godot starts', async () => {
     const fake = createFakeRunner({ stdout: '{"results":[]}' });
     const result = await sceneTools.handleBatchSceneOperations(fake.asRunner, {
       projectPath: fixtureProjectPath,
       operations: [{ scenePath: fixtureScenePath, nodeName: 'Probe', nodeType: 'Node2D' }],
     });
-    expect(hasError(result)).toBe(false);
-    expect(fake.calls).toHaveLength(1);
+    expectErrorMatching(result, /operations\[0\] is missing the required 'operation' key/);
+    expect(fake.calls).toHaveLength(0);
   });
 });

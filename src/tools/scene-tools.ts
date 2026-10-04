@@ -250,7 +250,7 @@ export const sceneToolDefinitions = [
               operation: {
                 type: 'string',
                 enum: ['add_node', 'load_sprite', 'set_node_properties', 'save'],
-                description: 'The sub-operation to perform',
+                description: 'Required. The sub-operation to perform',
               },
               scenePath: { type: 'string', description: 'Scene file path for this operation' },
               nodeType: { type: 'string', description: '[add_node] Node class to instantiate' },

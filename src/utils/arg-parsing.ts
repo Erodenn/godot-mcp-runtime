@@ -463,15 +463,39 @@ const BATCH_ITEM_STRING_FIELDS: ReadonlyArray<readonly [camel: string, snake: st
   ['newPath', 'new_path'],
 ];
 
+/** The sub-operations a batch item may name. KEEP IN SYNC with the match in batch_scene_operations. */
+const BATCH_OPERATION_NAMES = ['add_node', 'load_sprite', 'set_node_properties', 'save'] as const;
+
+/** The operation an item's other keys suggest, worded as a hint appended to a missing-operation error. */
+function batchOperationHint(item: Record<string, unknown>): string {
+  const didYouMean = (keys: string, operation: string): string =>
+    ` (${keys} present: did you mean operation '${operation}'?)`;
+  if (
+    itemField(item, 'nodeName', 'node_name') !== undefined ||
+    itemField(item, 'nodeType', 'node_type') !== undefined
+  ) {
+    return didYouMean('nodeName/nodeType', 'add_node');
+  }
+  if (item.updates !== undefined) return didYouMean('updates', 'set_node_properties');
+  if (itemField(item, 'texturePath', 'texture_path') !== undefined) {
+    return didYouMean('texturePath', 'load_sprite');
+  }
+  return '';
+}
+
 /**
- * Validate the items of batch_scene_operations `operations`. An item with no
- * `operation` key still goes through: the script names the index and hints the
- * intended operation, which is more useful than a generic refusal here.
+ * Validate the items of batch_scene_operations `operations`. An item whose
+ * `operation` is missing, empty, not a string or not one of the four batch
+ * operations is refused before Godot starts, so no other item in the batch runs
+ * on a call that is malformed. A missing one names the operation the item's
+ * other keys suggest. The script keeps its own hint branch for callers that
+ * reach `executeOperation` without this check.
  */
 export function checkBatchOperationItems(
   items: unknown[],
   field = 'operations',
 ): Result<void, ToolResponse> {
+  const operationList = BATCH_OPERATION_NAMES.join(', ');
   for (let i = 0; i < items.length; i++) {
     const where = `${field}[${i}]`;
     const item = asItemRecord(items[i]);
@@ -481,10 +505,19 @@ export function checkBatchOperationItems(
         'Each operation is an object with an operation key',
       );
     }
-    if (item.operation !== undefined && typeof item.operation !== 'string') {
+    if (item.operation === undefined || item.operation === null || item.operation === '') {
       return itemError(
-        `${where}.operation must be a string`,
-        'Use one of: add_node, load_sprite, set_node_properties, save',
+        `${where} is missing the required 'operation' key (one of: ${operationList}).${batchOperationHint(item)}`,
+        `Add an operation key to ${where}`,
+      );
+    }
+    if (typeof item.operation !== 'string') {
+      return itemError(`${where}.operation must be a string`, `Use one of: ${operationList}`);
+    }
+    if (!(BATCH_OPERATION_NAMES as readonly string[]).includes(item.operation)) {
+      return itemError(
+        `${where}.operation "${item.operation}" is not a batch operation (one of: ${operationList})`,
+        `Use one of: ${operationList}`,
       );
     }
     const scenePath = itemField(item, 'scenePath', 'scene_path');
