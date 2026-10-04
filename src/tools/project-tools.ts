@@ -309,8 +309,8 @@ const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules'
 
 // --- Walk problems: what a directory walk could not read or did not follow ---
 
-/** Start of a header line the scene scanner could not read but that was meant as a dependency. */
-const EXT_RESOURCE_HEADER_PREFIX = '[ext_resource';
+/** A header line the scene scanner could not read but that was meant as a dependency. */
+const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
 
 /** The maxDepth value that lists every level. */
 const UNLIMITED_DEPTH = -1;
@@ -936,7 +936,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
     }
     const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
     const malformedDependencies = scan.malformed.filter((entry) =>
-      entry.raw.startsWith(EXT_RESOURCE_HEADER_PREFIX),
+      EXT_RESOURCE_HEADER_PATTERN.test(entry.raw),
     );
     let unreadLines = malformedDependencies.length;
     for (const header of scan.headers) {

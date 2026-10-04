@@ -488,3 +488,60 @@ describe('launch scan: autoloads', () => {
     expect(warnings.join('\n')).toMatch(/Skipped autoload Out/);
   });
 });
+
+describe('launch scan: headers a blank follows the bracket of, and headers it cannot read', () => {
+  it('scans the script of an ext_resource written with a blank after the bracket', async () => {
+    const dir = projectWithMainScene(
+      'scan-blank-ext-',
+      '[gd_scene format=3]\n\n[ ext_resource type="Script" path="res://a.gd" id="1"]\n',
+    );
+    writeFileSync(join(dir, 'a.gd'), TIER1_BODY, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/a\.gd:3 OS\.execute/);
+  });
+
+  it('scans the inline source of a sub_resource written with a blank after the bracket', async () => {
+    const dir = projectWithMainScene(
+      'scan-blank-sub-',
+      INLINE_TIER1_SCENE.replace('[sub_resource', '[ sub_resource'),
+    );
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/main\.tscn\[GDScript GDScript_evil\]:4 OS\.execute/);
+  });
+
+  it('reports a malformed ext_resource header as not scanned', async () => {
+    const dir = projectWithMainScene(
+      'scan-malformed-ext-',
+      '[gd_scene format=3]\n\n[ ext_resource path="x\n',
+    );
+    const warnings = await gateWarnings(dir);
+    expect(warnings.some((w) => /^Not scanned: main\.tscn: .*ext_resource/.test(w))).toBe(true);
+  });
+
+  it('reports a malformed header of any other tag as not scanned', async () => {
+    const dir = projectWithMainScene(
+      'scan-malformed-node-',
+      '[gd_scene format=3]\n\n[node name="Main" type="Node"\nscript = null\n',
+    );
+    const warnings = await gateWarnings(dir);
+    expect(warnings.some((w) => /^Not scanned: main\.tscn: .*\[node/.test(w))).toBe(true);
+  });
+
+  it('does not read a scene instance that leaves the project', async () => {
+    const dir = projectWithMainScene(
+      'scan-escape-',
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://../outside.tscn" id="1"]\n',
+    );
+    const outside = join(dir, '..', 'outside.tscn');
+    writeFileSync(
+      outside,
+      '[gd_scene format=3]\n\n[sub_resource type="GDScript" id="x"]\nscript/source = "extends Node\\nfunc f():\\n\\tOS.execute(\\"x\\", [])\\n"\n',
+      'utf8',
+    );
+    tmp.track(outside);
+    const warnings = await gateWarnings(dir);
+    const text = warnings.join('\n');
+    expect(text).toMatch(/reference res:\/\/\.\.\/outside\.tscn escapes the project root/);
+    expect(text).not.toMatch(/OS\.execute/);
+  });
+});

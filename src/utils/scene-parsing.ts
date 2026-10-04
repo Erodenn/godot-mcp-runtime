@@ -29,6 +29,7 @@
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
+import { resolveProjectPath } from './path-validation.js';
 
 /** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
 const TSCN_RAW_SNIPPET_MAX = 200;
@@ -167,6 +168,8 @@ type HeaderParse =
  */
 function parseHeader(content: string, start: number, lineEnd: number): HeaderParse {
   let i = start + 1;
+  // Godot skips blanks between the bracket and the tag: `[ ext_resource ...]`.
+  while (i < lineEnd && isBlank(content[i])) i++;
   const tagStart = i;
   while (i < lineEnd && /[A-Za-z0-9_]/.test(content[i]!)) i++;
   const tag = content.slice(tagStart, i);
@@ -387,6 +390,14 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
     const skip = (reason: string): void => {
       unscanned.push({ scenePath: absScenePath, reason });
     };
+    // A scene reference is followed only when it stays inside the project, so
+    // a `res://../x.tscn` the engine would refuse is never read off the disk.
+    const followScene = (path: string): void => {
+      const resolved = resolveProjectPath(projectDir, path);
+      if (resolved === null)
+        skip(`reference ${path} escapes the project root and was not followed`);
+      else walk(resolved.absPath);
+    };
 
     let content: string | null;
     try {
@@ -421,10 +432,10 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
         if (path !== null && lowered.endsWith(GDSCRIPT_EXTENSION)) {
           scripts.add(resReferenceToAbs(projectDir, path));
         } else if (path !== null && SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
-          walk(resReferenceToAbs(projectDir, path));
+          followScene(path);
         } else if (type === 'PackedScene') {
           if (path === null) skip(`PackedScene ext_resource has no res:// path: ${header.raw}`);
-          else walk(resReferenceToAbs(projectDir, path));
+          else followScene(path);
         } else if (SCRIPT_TYPE_HINTS.has(type)) {
           if (path === null) skip(`Script ext_resource has no res:// path: ${header.raw}`);
           else skip(`script ${path} is not GDScript and is not scanned`);
@@ -443,14 +454,10 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
         else inlineScripts.push({ scenePath: absScenePath, id, source, line: header.line });
       }
     }
+    // A malformed header loses the properties under it whatever its tag was,
+    // so every one is reported.
     for (const problem of scan.malformed) {
-      if (
-        problem.reason === 'unterminated string' ||
-        problem.raw.startsWith('[ext_resource') ||
-        problem.raw.startsWith('[sub_resource')
-      ) {
-        skip(`${problem.reason} at line ${problem.line}: ${problem.raw}`);
-      }
+      skip(`${problem.reason} at line ${problem.line}: ${problem.raw}`);
     }
   }
 

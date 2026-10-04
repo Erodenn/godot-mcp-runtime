@@ -941,3 +941,36 @@ describe('handleGetSceneDependencies: unreadable input', () => {
     expect(parsed.dependencies).toEqual([{ path: 'scripts/enemy.gd', type: 'Script' }]);
   });
 });
+
+describe('handleGetSceneDependencies: a blank after the opening bracket', () => {
+  type DepsPayload = {
+    warnings?: string[];
+    dependencies: Array<{ path: string; type: string; uid?: string }>;
+  };
+
+  it('lists an ext_resource written as [ ext_resource ...]', async () => {
+    const dir = tmp.makeProject('mcp-deps-blank-');
+    writeFileSync(
+      join(dir, 'level.tscn'),
+      '[gd_scene format=3]\n\n[ ext_resource type="Script" path="res://a.gd" id="1"]\n',
+      'utf8',
+    );
+    const result = await handleGetSceneDependencies({ projectPath: dir, scenePath: 'level.tscn' });
+    const parsed = parseText<DepsPayload>(result);
+    expect(parsed.dependencies).toEqual([{ path: 'a.gd', type: 'Script' }]);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('counts an unreadable [ ext_resource header in the warning', async () => {
+    const dir = tmp.makeProject('mcp-deps-blank-bad-');
+    writeFileSync(
+      join(dir, 'level.tscn'),
+      '[gd_scene format=3]\n\n[ ext_resource path="x\n',
+      'utf8',
+    );
+    const result = await handleGetSceneDependencies({ projectPath: dir, scenePath: 'level.tscn' });
+    const parsed = parseText<DepsPayload>(result);
+    expect(parsed.dependencies).toEqual([]);
+    expect(parsed.warnings?.[0]).toMatch(/1 .*ext_resource/);
+  });
+});
