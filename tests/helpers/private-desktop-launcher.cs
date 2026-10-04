@@ -116,6 +116,8 @@ static class BackgroundLauncher
     [DllImport("kernel32.dll")]
     static extern uint GetCurrentThreadId();
     [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
     static extern IntPtr GetCommandLineW();
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern IntPtr CreateJobObjectW(IntPtr attrs, string name);
@@ -195,20 +197,32 @@ static class BackgroundLauncher
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
         si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
 
+        // This process joins the job first, so the child is born inside it:
+        // a process created by a job member is a member from its first
+        // instruction. Creating the child suspended and assigning it afterwards
+        // leaves a window in which a kill of this process strands a suspended
+        // child that no job covers (seen as a leftover "godot --version").
+        bool selfInJob = AssignProcessToJobObject(job, GetCurrentProcess());
+
         PROCESS_INFORMATION pi;
-        // Suspended, so the child cannot start a process of its own before it
-        // is inside the job.
-        if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi))
+        uint creationFlags = CREATE_NO_WINDOW;
+        // Fallback when this process could not join the job: suspended, so the
+        // child cannot start a process of its own before it is assigned.
+        if (!selfInJob) creationFlags |= CREATE_SUSPENDED;
+        if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creationFlags, IntPtr.Zero, null, ref si, out pi))
         {
             return Fail("CreateProcess");
         }
-        if (!AssignProcessToJobObject(job, pi.hProcess))
+        if (!selfInJob)
         {
-            int failed = Fail("AssignProcessToJobObject");
-            TerminateProcess(pi.hProcess, (uint)ExitLaunchFailed);
-            return failed;
+            if (!AssignProcessToJobObject(job, pi.hProcess))
+            {
+                int failed = Fail("AssignProcessToJobObject");
+                TerminateProcess(pi.hProcess, (uint)ExitLaunchFailed);
+                return failed;
+            }
+            ResumeThread(pi.hThread);
         }
-        ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
         WaitForSingleObject(pi.hProcess, INFINITE);
         uint code;
