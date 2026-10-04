@@ -325,7 +325,7 @@ Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
 ```json
 {
-  "decision": "hard_block" | "elicit_denied" | "elicit_accepted" | "elicit_bypassed" | "warn" | "ok",
+  "decision": "hard_block" | "elicit_denied" | "elicit_cancelled" | "elicit_accepted" | "elicit_bypassed" | "warn" | "ok",
   "tier": 1,
   "strict_mode": false,
   "promoted_by_strict": false,
@@ -345,6 +345,7 @@ Every `run_script` call writes two files to `.mcp/godot-runtime/scripts/`:
 
 - `hard_block`: Tier 1 finding; script refused before reaching the bridge.
 - `elicit_denied`: Tier 2 finding; user declined the elicitation OR the client does not support elicitation.
+- `elicit_cancelled`: Tier 2 finding; the client dismissed the prompt without a choice (`cancel`). Script refused. Some clients do this without displaying the prompt, so it is recorded apart from a person declining, and the error names `GODOT_MCP_DISABLE_ELICITATION`.
 - `elicit_accepted`: Tier 2 finding; user accepted the elicitation. Script executed.
 - `elicit_bypassed`: Tier 2 finding; elicitation was disabled (`GODOT_MCP_DISABLE_ELICITATION`), so the finding ran unprompted. Script executed; the finding is in `warnings`.
 - `warn`: Tier 3 finding only (no Tier 1 or Tier 2). Script executed; warnings surfaced in the response.

@@ -2046,9 +2046,19 @@ describe('handleRunScript security policy', () => {
     );
     expectErrorMatching(result, /User declined.*HTTPRequest/);
     expect(fake.bridgeCalls).toHaveLength(0);
+    // A person said no: nothing points at the opt-out, and the audit says denied.
+    expect(unwrap(result).content[1]?.text ?? '').not.toContain('GODOT_MCP_DISABLE_ELICITATION');
+    const scriptsDir = auditScriptsDir(dir);
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_denied');
   });
 
-  it('rejects Tier 2 when elicitor returns cancel (anything but accept is denial)', async () => {
+  // A cancel is a prompt dismissed without a choice, which some clients do
+  // without ever showing it. It still refuses the script, but it is not
+  // reported as a person declining, and it names the opt-out, as run_project
+  // does.
+  it('rejects Tier 2 when the elicitor returns cancel, reported apart from a decline', async () => {
     const dir = tmp.makeProject('run-script-tier2-cancel-');
     const fake = activeFake(dir);
     const result = await handleRunScript(
@@ -2056,8 +2066,18 @@ describe('handleRunScript security policy', () => {
       { script: TIER2_SCRIPT },
       makeContext({ elicit: cancelElicitor }),
     );
-    expectErrorMatching(result, /User declined.*HTTPRequest/);
+    expectErrorMatching(
+      result,
+      /run_script confirmation was cancelled without an explicit choice.*HTTPRequest/,
+    );
+    expectErrorMatching(result, /The script was not executed/);
+    expect(unwrap(result).content[0]?.text ?? '').not.toContain('User declined');
+    expect(unwrap(result).content[1]?.text ?? '').toContain('GODOT_MCP_DISABLE_ELICITATION=true');
     expect(fake.bridgeCalls).toHaveLength(0);
+    const scriptsDir = auditScriptsDir(dir);
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_cancelled');
   });
 
   it('rejects Tier 2 when accept carries content.confirm:false', async () => {

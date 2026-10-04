@@ -765,11 +765,16 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
   }
 }
 
+/** KEEP IN SYNC with the same solution in `runLaunchGate` (src/utils/launch-gate.ts). */
+const ELICITATION_OPT_OUT_SOLUTION =
+  'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
+
 /**
- * Type used for the `decision` field of the audit sidecar. Adds three synthetic
+ * Type used for the `decision` field of the audit sidecar. Adds four synthetic
  * values that `PolicyDecision.decision` never carries — `elicit_denied`,
- * `elicit_accepted`, and `elicit_bypassed` are derived from the elicitation
- * outcome by the handler. `elicit_bypassed` records a Tier 2 finding that ran
+ * `elicit_cancelled`, `elicit_accepted`, and `elicit_bypassed` are derived from
+ * the elicitation outcome by the handler. `elicit_cancelled` is a prompt the
+ * client dismissed without a choice, which is not a person saying no. `elicit_bypassed` records a Tier 2 finding that ran
  * without a prompt because elicitation was disabled (GODOT_MCP_DISABLE_ELICITATION),
  * distinct from a user-confirmed `elicit_accepted`. Keeping them distinct from
  * `warn` preserves the confirmation event in the audit trail.
@@ -777,6 +782,7 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
 type AuditDecision =
   | 'hard_block'
   | 'elicit_denied'
+  | 'elicit_cancelled'
   | 'elicit_accepted'
   | 'elicit_bypassed'
   | 'warn'
@@ -2290,13 +2296,30 @@ export async function handleRunScript(
         }
 
         if (!isElicitAccepted(elicitResult)) {
+          // A `cancel` means the client dismissed the prompt without an
+          // explicit choice. Some clients auto-cancel elicitation without ever
+          // displaying it, so it is told apart from a `decline`, in the same
+          // words the launch gate uses, and it points at the opt-out. The
+          // audit record keeps the two apart as well: nobody decided.
+          const cancelled = elicitResult.action === 'cancel';
           if (projectPath) {
-            writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+            writeAuditSidecar(
+              projectPath,
+              script,
+              cancelled ? 'elicit_cancelled' : 'elicit_denied',
+              policy,
+              ctx.strictMode,
+            );
           }
+          const finding = summarizeMatch(policy.matches[0]!);
           return err(
             createErrorResponse(
-              `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
-              collectSolutions(policy.matches),
+              cancelled
+                ? `run_script confirmation was cancelled without an explicit choice (${finding}). Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them. The script was not executed.`
+                : `User declined: ${finding}. The script was not executed.`,
+              cancelled
+                ? [...collectSolutions(policy.matches), ELICITATION_OPT_OUT_SOLUTION]
+                : collectSolutions(policy.matches),
             ),
           );
         }
