@@ -1790,7 +1790,7 @@ export class DebuggerProfiler {
     if (name === 'servers:profile_total') {
       // The engine's own accumulated rows are capped by `captureLimit` exactly
       // as the frame packets are, and carry nothing the frames did not already
-      // deliver � while top-N membership rotates between frames, so summing
+      // deliver — while top-N membership rotates between frames, so summing
       // them covers strictly more functions. Verified against Godot: at a limit
       // of 16 the frames saw 37 distinct functions and this packet only 16, and
       // its call counts match our sums exactly. So this is a completion
