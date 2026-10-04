@@ -1074,7 +1074,13 @@ async function startSpawnedSession(
   const isProfiling = profiling.value === true;
 
   const gate = await runLaunchGate(
-    { projectPath, scene: resolvedScene, confirm: true, toolName: 'run_project' },
+    {
+      projectPath,
+      scene: resolvedScene,
+      confirm: true,
+      launchedByServer: true,
+      toolName: 'run_project',
+    },
     ctx,
   );
   if (!gate.ok) return gate;
@@ -1241,7 +1247,13 @@ async function startAttachedSession(
   if (!bridgePort.ok) return bridgePort;
 
   const gate = await runLaunchGate(
-    { projectPath, scene: undefined, confirm: false, toolName: 'run_project' },
+    {
+      projectPath,
+      scene: undefined,
+      confirm: false,
+      launchedByServer: false,
+      toolName: 'run_project',
+    },
     ctx,
   );
   if (!gate.ok) return gate;

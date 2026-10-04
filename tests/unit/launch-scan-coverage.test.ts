@@ -53,7 +53,7 @@ function projectWithMainScene(prefix: string, sceneText: string, extraSettings =
 
 async function gateWarnings(dir: string, strict = false): Promise<string[]> {
   const result = await runLaunchGate(
-    { projectPath: dir, confirm: false, toolName: 'run_project' },
+    { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
     makeContext({ strict }),
   );
   if (!result.ok) throw new Error(`expected an ok outcome, got: ${JSON.stringify(result.error)}`);
@@ -70,7 +70,7 @@ describe('launch scan: inline GDScript sub-resources', () => {
   it('strict mode refuses on a Tier 1 finding in an inline script', async () => {
     const dir = projectWithMainScene('scan-inline-strict-', INLINE_TIER1_SCENE);
     const result = await runLaunchGate(
-      { projectPath: dir, confirm: false, toolName: 'run_project' },
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
       makeContext({ strict: true }),
     );
     expectErrorMatching(result, /Strict mode: refusing to launch/);
@@ -422,7 +422,7 @@ describe('launch scan: autoloads', () => {
       `\n[autoload]\n${lines.join('\n')}\n`,
     );
     const result = await runLaunchGate(
-      { projectPath: dir, confirm: true, toolName: 'run_project' },
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
       makeContext({ disableElicitation: true }),
     );
     if (!result.ok) throw new Error(`expected an ok outcome, got: ${JSON.stringify(result.error)}`);
@@ -451,7 +451,7 @@ describe('launch scan: autoloads', () => {
     );
     writeFileSync(join(dir, 'boot.gd'), TIER1_BODY, 'utf8');
     const result = await runLaunchGate(
-      { projectPath: dir, confirm: false, toolName: 'run_project' },
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
       makeContext({ strict: true }),
     );
     expectErrorMatching(result, /Strict mode: refusing to launch/);

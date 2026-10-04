@@ -226,6 +226,7 @@ A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invali
 
 - Every Tier 2 match becomes Tier 1 (hard reject). No elicitation prompt is sent.
 - `run_project` becomes a hard reject if any autoload script or the launched scene's attached scripts contain a Tier 1 primitive.
+- A launch this server performs (`run_project` in spawn mode, `render_movie`) is refused when the scene it would run cannot be found or resolved: no `run/main_scene`, a file that does not exist, or a `uid://` nothing carries. With `attach: true` the user starts Godot and may run a scene the server never sees, so a project with no `run/main_scene` only warns; a configured scene that cannot be found is still refused.
 
 This promotion has a consequence worth naming explicitly: the `tier2.config.ConfigFile` class anchor (see "Tier 2 - Elicit" above) matches on `ConfigFile.new()` because none of `ConfigFile`'s own instance methods can be matched safely on their own, and that anchor fires whether the following code path reads or writes. Under strict mode, a pure config **read** - `var cf = ConfigFile.new(); cf.load(path)` and nothing else - hard-blocks exactly like a `save`, since the gate never distinguishes them. This is existing, intended behavior, not a bug to fix: narrowing the anchor to only writes would reopen the hole `cf.load(p)` already can't be matched any other way (see the class-anchor note above).
 
@@ -295,14 +296,15 @@ With `attach: true` the same scan runs over the autoloads and `run/main_scene` b
 
 What the scan cannot read is reported, not skipped. Still not scanned: scripts that are not GDScript (a C# script, an autoload that is neither `.gd` nor `.tscn`), binary `.scn` scenes, scripts carried by non-scene resources a scene references (`.tres` / `.res`), and references with no `res://` path, such as one by `uid://` alone. Each one the scan meets is listed in `warnings` as `Not scanned: <scene>: <reason>` (or an `Autoload ... was not scanned` entry), as is an `[autoload]` line the parser could not read. A resource file is listed once, however many scenes reference it. Findings and these notices are capped separately (10 each, with a `+N more` tail), so a long list of findings never pushes a not-scanned notice out of the answer.
 
-Strict mode separates two kinds of incomplete scan:
+Strict mode separates two kinds of incomplete scan, and refuses outright when it has no scene to scan:
 
-| What was not scanned                                                                                   | Default mode | Strict mode                |
-| ------------------------------------------------------------------------------------------------------ | ------------ | -------------------------- |
-| A `.gd` script or `.tscn` scene that exists and could not be read, or a scan step that threw           | Warned       | The launch is refused      |
-| A file of a kind the scan never reads: a C# script, a binary `.scn` scene, a `.tres` / `.res` resource | Warned       | Warned, the launch goes on |
-| A script or scene a reference names that is not on disk, a reference with no `res://` path             | Warned       | Warned, the launch goes on |
-| A malformed header or an unterminated string inside a scene that was read                              | Warned       | Warned, the launch goes on |
+| What was not scanned                                                                                                                                            | Default mode | Strict mode                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | -------------------------- |
+| A `.gd` script or `.tscn` scene that exists and could not be read, or a scan step that threw                                                                    | Warned       | The launch is refused      |
+| A file of a kind the scan never reads: a C# script, a binary `.scn` scene, a `.tres` / `.res` resource                                                          | Warned       | Warned, the launch goes on |
+| The scene to launch: no `run/main_scene`, a file that is not on disk, or a `uid://` nothing carries (attach mode with no `run/main_scene` is the one exception) | Warned       | The launch is refused      |
+| A script or scene a reference names that is not on disk, a reference with no `res://` path                                                                      | Warned       | Warned, the launch goes on |
+| A malformed header or an unterminated string inside a scene that was read                                                                                       | Warned       | Warned, the launch goes on |
 
 The first row is a scan that set out to read a file and failed, so what it would have found is unknown. The others are known limits of what the scan covers. Whether strict mode should refuse on those too is an open question: refusing on every one would block every C# project and every project with a binary scene or a resource file. See "What this does NOT do."
 

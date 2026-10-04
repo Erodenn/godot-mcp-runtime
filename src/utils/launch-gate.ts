@@ -73,6 +73,14 @@ export interface LaunchGateRequest {
   scene?: ResolvedProjectPath | undefined;
   /** Run the once-per-project session confirmation. */
   confirm: boolean;
+  /**
+   * True when this server starts the process (`run_project` in spawn mode,
+   * `render_movie`), so the scene it runs is the one the gate scanned. False
+   * for attach mode, where the user launches Godot and may pick a scene the
+   * server never sees: a project with no main scene is then only a warning in
+   * strict mode, because the missing scene says nothing about what runs.
+   */
+  launchedByServer: boolean;
   /** Names the caller in the prompt, the refusals and the warnings. */
   toolName: string;
 }
@@ -178,6 +186,15 @@ export async function runLaunchGate(
   // are never added here: refusing on those would block whole classes of
   // project, and whether strict mode should is left open (docs/security.md).
   const scanReadFailures: string[] = [];
+  // The launch scene could not be found or resolved, so its scripts were not
+  // checked. Each entry is also in scanWarnings. `noSceneConfigured` marks the
+  // one case attach mode tolerates: nothing configured at all. A scene that is
+  // configured, or passed, and cannot be reached is never tolerated.
+  const launchSceneFailures: Array<{ message: string; noSceneConfigured: boolean }> = [];
+  const failLaunchScene = (message: string, noSceneConfigured = false): void => {
+    scanWarnings.push(message);
+    launchSceneFailures.push({ message, noSceneConfigured });
+  };
   const absProjectPath = resolve(request.projectPath);
 
   const scanScriptPath = (filePath: string): void => {
@@ -225,13 +242,14 @@ export async function runLaunchGate(
     } else {
       const launch = resolveLaunchScene(absProjectPath);
       if (launch.kind === 'none') {
-        scanWarnings.push(
+        failLaunchScene(
           'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
+          true,
         );
         return;
       }
       if (launch.kind === 'unresolved') {
-        scanWarnings.push(
+        failLaunchScene(
           `Launch scene ${launch.value} could not be resolved to a file (${launch.reason}); scene-script scan skipped.`,
         );
         return;
@@ -241,7 +259,7 @@ export async function runLaunchGate(
     }
     for (const scenePath of scenes) {
       if (!existsSync(scenePath)) {
-        scanWarnings.push(
+        failLaunchScene(
           `Configured launch scene not found at ${scenePath}; scene-script scan skipped.`,
         );
       } else {
@@ -332,6 +350,28 @@ export async function runLaunchGate(
         [
           'Remove or refactor the flagged primitives',
           'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
+        ],
+      ),
+    );
+  }
+
+  // A launch the server performs runs the scene the scan was meant to read, so
+  // strict mode does not launch when that scene is missing, unresolved or not
+  // configured. In attach mode only a configured scene counts: with none, the
+  // user's own Godot decides what runs.
+  const refusedLaunchScene = launchSceneFailures.filter(
+    (failure) => request.launchedByServer || !failure.noSceneConfigured,
+  );
+  if (ctx.strictMode && refusedLaunchScene.length > 0) {
+    return err(
+      createErrorResponse(
+        [
+          'Strict mode: refusing to launch project because the scene to launch could not be found or resolved, so its scripts were not checked.',
+          ...refusedLaunchScene.map((failure) => `- ${failure.message}`),
+        ].join('\n'),
+        [
+          'Set `run/main_scene` in project.godot or pass `scene`',
+          'Unset GODOT_MCP_STRICT to launch with this reported in `warnings` instead',
         ],
       ),
     );

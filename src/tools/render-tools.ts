@@ -988,7 +988,7 @@ export function createRenderMovieHandler(
     }
 
     const gate = await runLaunchGate(
-      { projectPath: root, scene, confirm: true, toolName: 'render_movie' },
+      { projectPath: root, scene, confirm: true, launchedByServer: true, toolName: 'render_movie' },
       ctx,
     );
     if (!gate.ok) return gate;

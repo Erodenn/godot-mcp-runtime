@@ -2014,11 +2014,16 @@ describe('handleRunScript security policy', () => {
 
 describe('handleRunProject security pre-flight', () => {
   function makeProjectWithAutoload(prefix: string, autoloadGd: string): string {
+    // A main scene is configured so a strict spawn launch has a scene to scan.
     const dir = tmp.makeProject(
       prefix,
-      'config_version=5\n\n[application]\n[autoload]\nMyAuto="res://auto.gd"\n',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n[autoload]\nMyAuto="res://auto.gd"\n',
     );
     writeFileSync(join(dir, 'auto.gd'), autoloadGd, 'utf8');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    );
     return dir;
   }
 
@@ -2083,8 +2088,12 @@ describe('handleRunProject security pre-flight', () => {
     // and it writes screenshots: so it matches the filesystem-write rules.
     const dir = tmp.makeProject(
       'run-project-own-bridge-',
-      'config_version=5\n\n[application]\n[autoload]\n' +
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n[autoload]\n' +
         'McpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
     );
     mkdirSync(join(dir, '.mcp', 'godot-runtime', 'bridge'), { recursive: true });
     writeFileSync(
@@ -2237,7 +2246,14 @@ describe('handleRunProject security pre-flight', () => {
   });
 
   it('strict mode refuses launch when elicitor throws (no silent fallback)', async () => {
-    const dir = tmp.makeProject('run-project-strict-elicitor-throw-', 'config_version=5\n');
+    const dir = tmp.makeProject(
+      'run-project-strict-elicitor-throw-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    );
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
