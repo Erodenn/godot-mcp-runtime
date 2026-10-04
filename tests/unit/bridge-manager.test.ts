@@ -325,6 +325,95 @@ describe('BridgeManager.cleanup', () => {
   });
 });
 
+describe('BridgeManager on a project.godot written by hand', () => {
+  /** A line feed with no carriage return before it: a mixed line ending in a CRLF file. */
+  const BARE_LF_REGEX = /(?<!\r)\n/;
+  const BRIDGE_LINE = `McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`;
+  const CRLF_PROJECT = [
+    'config_version=5',
+    '',
+    '[autoload]',
+    'OtherSingleton="*res://other.gd"',
+    '',
+    '[rendering]',
+    'x="y"',
+    '',
+  ].join('\r\n');
+  const COMMENTED_PROJECT =
+    'config_version=5\n\n[autoload] ; x\nOtherSingleton="*res://other.gd"\n\n[rendering]\nx="y"\n';
+
+  it('inject and cleanup on a CRLF project leave every other line byte-equal', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: CRLF_PROJECT });
+    const projectFile = join(projectPath, 'project.godot');
+
+    manager.inject(projectPath, TEST_PORT);
+    const injected = readFileSync(projectFile, 'utf8');
+    expect(injected).toBe(
+      CRLF_PROJECT.replace(
+        'OtherSingleton="*res://other.gd"\r\n',
+        `OtherSingleton="*res://other.gd"\r\n${BRIDGE_LINE}\r\n`,
+      ),
+    );
+    expect(injected).not.toMatch(BARE_LF_REGEX);
+
+    expect(manager.cleanup(projectPath)).toEqual([]);
+    expect(readFileSync(projectFile, 'utf8')).toBe(CRLF_PROJECT);
+  });
+
+  it('cleanup on a CRLF project whose only entry was the bridge writes no bare line feed', () => {
+    const withoutAutoloads = 'config_version=5\r\n\r\n[rendering]\r\nx="y"\r\n';
+    const { projectPath, manager } = setupProject({ projectGodot: withoutAutoloads });
+    const projectFile = join(projectPath, 'project.godot');
+    manager.inject(projectPath, TEST_PORT);
+    expect(readFileSync(projectFile, 'utf8')).not.toMatch(BARE_LF_REGEX);
+
+    manager.cleanup(projectPath);
+    expect(readFileSync(projectFile, 'utf8')).toBe(withoutAutoloads);
+  });
+
+  it('inject under a commented [autoload] header adds no second header', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: COMMENTED_PROJECT });
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(
+      COMMENTED_PROJECT.replace(
+        'OtherSingleton="*res://other.gd"\n',
+        `OtherSingleton="*res://other.gd"\n${BRIDGE_LINE}\n`,
+      ),
+    );
+    expect(manager.isBridgeAutoloadRegistered(projectPath)).toBe(true);
+  });
+
+  it('cleanup under a commented [autoload] header removes the entry and nothing else', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: COMMENTED_PROJECT });
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(manager.cleanup(projectPath)).toEqual([]);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(COMMENTED_PROJECT);
+  });
+
+  it('a second inject under a commented header sees the entry and does not add another', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: COMMENTED_PROJECT });
+    manager.inject(projectPath, TEST_PORT);
+    manager.inject(projectPath, TEST_PORT);
+
+    const projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    expect(projectGodot.split(BRIDGE_LINE).length - 1).toBe(1);
+    expect((projectGodot.match(/^\[autoload\]/gm) ?? []).length).toBe(1);
+  });
+
+  it('a user-owned McpBridge under a commented header still collides', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot:
+        'config_version=5\n\n[autoload] ; x\nMcpBridge="*res://mine/bridge.gd" ; mine\n',
+    });
+    const before = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(BridgeAutoloadCollisionError);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(before);
+  });
+});
+
 describe('BridgeManager.repairOrphaned', () => {
   it('removes a stale McpBridge autoload entry when the script file is missing', () => {
     const projectPath = tmp.makeProject(

@@ -411,6 +411,22 @@ describe('handleListAutoloads unparsed lines', () => {
     expect(payload.autoloads).toEqual([{ name: 'Good', path: 'res://a.gd', singleton: true }]);
   });
 
+  it('list_autoloads returns the entries under a commented header', async () => {
+    const dir = makeTmpProject();
+    writeFileSync(
+      join(dir, 'project.godot'),
+      'config_version=5\n\n[autoload] ; managed by hand\nGood="*res://a.gd" ; first\nPlain="res://b.gd"\n',
+      'utf8',
+    );
+    const result = await handleListAutoloads({ projectPath: dir });
+    const payload = expectMatchesOutputSchema('list_autoloads', result) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.autoloads).toEqual([
+      { name: 'Good', path: 'res://a.gd', singleton: true },
+      { name: 'Plain', path: 'res://b.gd', singleton: false },
+    ]);
+  });
+
   it('list_autoloads has no warnings key when every line parses', async () => {
     const dir = makeTmpProjectWithAutoload('Ok', 'ok.gd');
     const result = await handleListAutoloads({ projectPath: dir });

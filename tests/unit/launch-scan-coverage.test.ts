@@ -434,6 +434,40 @@ describe('launch scan: autoloads', () => {
     expect(warnings[warnings.length - 1]).toMatch(/launching without user confirmation/);
   });
 
+  it('autoloads under a commented [autoload] header are scanned', async () => {
+    const dir = tmp.makeProject(
+      'scan-commented-header-',
+      'config_version=5\n\n[autoload] ; managed by hand\nBoot="*res://boot.gd" ; first\n',
+    );
+    writeFileSync(join(dir, 'boot.gd'), TIER1_BODY, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+  });
+
+  it('strict mode refuses on a Tier 1 autoload under a commented header in a CRLF file', async () => {
+    const dir = tmp.makeProject(
+      'scan-commented-header-strict-',
+      'config_version=5\r\n\r\n[autoload] ; managed by hand\r\nBoot="*res://boot.gd"\r\n',
+    );
+    writeFileSync(join(dir, 'boot.gd'), TIER1_BODY, 'utf8');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+  });
+
+  it('the scanned main scene is the last run/main_scene, the one the engine runs', async () => {
+    const dir = tmp.makeProject(
+      'scan-last-main-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://decoy.tscn"\nrun/main_scene="res://main.tscn" ; current\n',
+    );
+    writeFileSync(join(dir, 'decoy.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    writeFileSync(join(dir, 'main.tscn'), INLINE_TIER1_SCENE, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/main\.tscn\[GDScript GDScript_evil\]:4 OS\.execute/);
+  });
+
   it('an unparsed autoload line is reported by the launch gate', async () => {
     const dir = tmp.makeProject(
       'scan-unparsed-',

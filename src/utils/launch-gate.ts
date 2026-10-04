@@ -33,7 +33,8 @@ import {
 } from './path-validation.js';
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
-import { collectSceneScripts, resolveLaunchScene } from './scene-parsing.js';
+import { collectSceneScripts } from './scene-parsing.js';
+import { resolveLaunchScene } from './launch-scene.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */

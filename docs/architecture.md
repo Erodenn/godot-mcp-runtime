@@ -36,7 +36,9 @@ src/
     ├── bridge-protocol.ts       # TCP framing, port resolution, action-boundary sentinel + stderr bucketing
     ├── profiler.ts              # Godot remote-debugger receiver behind the profiling tools
     ├── godot-variant.ts         # Variant subset the remote debugger speaks on the wire
-    ├── autoload-ini.ts          # project.godot [autoload] INI primitives
+    ├── project-godot.ts         # The one project.godot reader: statements, sections and line spans (scanProjectFile), and the settings view get_project_settings returns
+    ├── autoload-ini.ts          # project.godot [autoload] primitives: parse, add, remove and update, located through project-godot.ts
+    ├── launch-scene.ts          # run/main_scene resolution for a launch that names no scene
     ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
     ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
     ├── launch-gate.ts           # Pre-flight script scan + once-per-project launch confirmation, callable by any handler that launches a project
@@ -45,7 +47,7 @@ src/
     ├── png-encoder.ts           # Zero-dependency RGB PNG encoder for downscaled inline frame previews
     ├── frame-preview.ts         # Box downscale and byte-capped PNG preview of a decoded frame
     ├── movie-process.ts         # Bounded Godot spawn for render_movie: output tails, timeout, process-tree kill
-    ├── scene-parsing.ts         # .tscn scanner behind the pre-flight scan and get_scene_dependencies, launch-scene resolution, and the string-escape reader project.godot parsing shares
+    ├── scene-parsing.ts         # .tscn scanner behind the pre-flight scan and get_scene_dependencies, and the string-escape reader project.godot parsing shares
     ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
     ├── progress-heartbeat.ts    # notifications/progress heartbeats for clients that attach a progress token
     ├── process-lifecycle.ts     # SIGINT/SIGTERM/stdin-close/exit teardown, including every session's bridge artifacts

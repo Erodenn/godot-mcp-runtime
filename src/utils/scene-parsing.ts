@@ -1,11 +1,9 @@
 /**
- * .tscn / project.godot parsing helpers shared by the run-script security
- * pipeline. Parallel in style to `autoload-ini.ts`: text parsing, no Godot
- * process required.
+ * .tscn parsing helpers shared by the run-script security pipeline. Text
+ * parsing, no Godot process required. project.godot is read by
+ * `project-godot.ts`, and the launched scene is resolved by `launch-scene.ts`.
  *
  * Responsibilities:
- *  - Resolve the scene a `run_project` call will actually launch (explicit
- *    `scene` arg > `run/main_scene` in [application] > null).
  *  - Read a text scene with one quote-aware scanner (`scanTscn`): section
  *    headers, their attributes, and the string-valued properties that follow
  *    them, so a bracketed line inside a multi-line string is never mistaken
@@ -31,8 +29,6 @@
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { projectGodotPath } from './path-validation.js';
-import { walkIniSection } from './autoload-ini.js';
 
 /** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
 const TSCN_RAW_SNIPPET_MAX = 200;
@@ -311,61 +307,16 @@ export function scanTscn(content: string): TscnScan {
   return { isTextResource: SCENE_HEADER_TAGS.has(headers[0]?.tag ?? ''), headers, malformed };
 }
 
-// --- Launch scene resolution ---
+// --- Script collection ---
 
 /**
- * Read `run/main_scene` from `[application]` in project.godot. Returns the
- * `res://...` string if present, else null. Does NOT verify the file exists.
- */
-export function readMainSceneFromProject(projectDir: string): string | null {
-  const projectFile = projectGodotPath(projectDir);
-  let content: string;
-  try {
-    content = readFileSync(projectFile, 'utf8');
-  } catch (err) {
-    if (isFileNotFound(err)) return null;
-    throw err;
-  }
-  let mainScene: string | null = null;
-  walkIniSection(content, 'application', (trimmed) => {
-    // Match: run/main_scene="res://main.tscn"  (quotes are always present
-    // when Godot writes; tolerate omitted quotes for hand-edited files).
-    const match = trimmed.match(/^run\/main_scene\s*=\s*"?([^"]+?)"?$/);
-    if (match && match[1]) {
-      mainScene = match[1];
-      return true;
-    }
-  });
-  return mainScene;
-}
-
-/**
- * Absolute path of a reference read out of a project file (`res://x`; a
- * hand-edited `run/main_scene` may omit the prefix). The input is file content,
- * not a user string, so no containment check applies here.
+ * Absolute path of a reference read out of a scene file (`res://x`). The input
+ * is file content, not a user string, so no containment check applies here.
  */
 function resReferenceToAbs(projectDir: string, resPath: string): string {
   const rel = resPath.startsWith(TSCN_RES_PREFIX) ? resPath.slice(TSCN_RES_PREFIX.length) : resPath;
   return join(projectDir, rel);
 }
-
-/**
- * The scene a launch with no explicit `scene` argument runs: `run/main_scene`
- * from project.godot, joined to the project root. A launch that names a scene
- * resolves it with `resolveProjectPath` instead and never comes through here.
- *
- * Returns an absolute filesystem path, or null when the project has no main
- * scene (the caller logs a warning and skips the scene-script scan; the
- * autoload scan still runs). Does NOT verify the file exists; the caller's
- * `existsSync` check produces the warning if the path is stale.
- */
-export function resolveLaunchScene(projectDir: string): string | null {
-  const main = readMainSceneFromProject(projectDir);
-  if (!main) return null;
-  return resReferenceToAbs(projectDir, main);
-}
-
-// --- Script collection ---
 
 /** An inline `[sub_resource type="GDScript"]` and the source it carries. */
 export interface InlineSceneScript {

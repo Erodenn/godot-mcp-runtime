@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { writeFileAtomicSync } from './atomic-write.js';
+import { scanProjectFile, type ProjectFileScan, type ProjectStatement } from './project-godot.js';
 
 /**
  * Parsing and editing primitives for the `[autoload]` section of project.godot.
@@ -10,6 +11,13 @@ import { writeFileAtomicSync } from './atomic-write.js';
  *
  * Pure functions: each takes the absolute path to project.godot and returns
  * either parsed data or a boolean indicating whether the file was mutated.
+ *
+ * The section is located with the project.godot grammar (`scanProjectFile` in
+ * `project-godot.ts`), so a header or entry followed by a `; comment`, a value
+ * that spans lines and a second `[autoload]` section are all read the way the
+ * engine reads them. The writers edit whole lines of `content.split('\n')` and
+ * leave every line they do not touch byte for byte as it was, line ending
+ * included.
  */
 
 export interface AutoloadEntry {
@@ -19,18 +27,19 @@ export interface AutoloadEntry {
 }
 
 /**
- * Matches an empty `[autoload]` section (the header followed by only blank
- * lines, up to the next section header or end-of-file). Used by cleanup paths
- * to drop the section after the last entry is removed.
- */
-export const EMPTY_AUTOLOAD_SECTION_REGEX = /\[autoload\]\s*(?=\n\[|\n*$)/g;
-
-/**
- * Mirrors the parser's `\w+` assumption (parseAutoloads / removeAutoloadEntry).
- * Enforced on write paths to prevent a name with newlines or INI section
- * delimiters from corrupting project.godot.
+ * The name rule the parser applies to an entry's key. Enforced on write paths
+ * to prevent a name with newlines or INI section delimiters from corrupting
+ * project.godot.
  */
 export const VALID_AUTOLOAD_NAME_REGEX = /^\w+$/;
+
+const AUTOLOAD_SECTION = 'autoload';
+const AUTOLOAD_HEADER = '[autoload]';
+/** Leads an entry's value when the autoload is a singleton. */
+const SINGLETON_MARKER = '*';
+const LF = '\n';
+const CRLF = '\r\n';
+const CARRIAGE_RETURN = '\r';
 
 function assertValidName(name: string): void {
   if (!VALID_AUTOLOAD_NAME_REGEX.test(name)) {
@@ -40,78 +49,110 @@ function assertValidName(name: string): void {
   }
 }
 
-/**
- * Iterate every non-blank, non-comment data line inside the named INI section
- * of `content`. The callback receives each line with its surrounding whitespace
- * trimmed. Stops only at end of content; the callback should return a falsy
- * value to continue or any truthy value to short-circuit.
- *
- * Used wherever code needs to read a single project.godot section without
- * spinning up Godot — `[autoload]`, `[application]`, etc. The shared walker
- * keeps the section-header + skip-comment skeleton in one place.
- */
-export function walkIniSection(
-  content: string,
-  sectionName: string,
-  onLine: (trimmed: string) => boolean | void,
-): void {
-  const targetHeader = `[${sectionName}]`;
-  let inSection = false;
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[')) {
-      inSection = trimmed === targetHeader;
-      continue;
-    }
-    if (!inSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#')) {
-      continue;
-    }
-    if (onLine(trimmed)) return;
-  }
-}
-
 export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
 
-/**
- * One `[autoload]` data line: `Name="*res://path"`. The `"?` pairs are
- * intentional: Godot always writes quotes, but hand-edited project.godot files
- * sometimes omit them, and optional blanks round the `=` are tolerated too.
- * Tolerating each shape means it doesn't silently drop the entry.
- */
-const AUTOLOAD_ENTRY_REGEX = /^(\w+)\s*=\s*"?(\*?)([^"]*?)"?$/;
+/** An `[autoload]` statement that reads as an entry: a valid name and one whole string value. */
+type EntryStatement = ProjectStatement & { value: string };
+
+function isEntryStatement(statement: ProjectStatement): statement is EntryStatement {
+  return (
+    VALID_AUTOLOAD_NAME_REGEX.test(statement.key) &&
+    typeof statement.value === 'string' &&
+    !statement.unterminated
+  );
+}
+
+function autoloadStatements(scan: ProjectFileScan): ProjectStatement[] {
+  return scan.statements.filter((statement) => statement.section === AUTOLOAD_SECTION);
+}
+
+function toEntry(statement: EntryStatement): AutoloadEntry {
+  const singleton = statement.value.startsWith(SINGLETON_MARKER);
+  return {
+    name: statement.key,
+    singleton,
+    path: singleton ? statement.value.slice(SINGLETON_MARKER.length) : statement.value,
+  };
+}
+
+/** The line ending new lines are written with: CRLF when the file uses it anywhere. */
+function eolOf(content: string): string {
+  return content.includes(CRLF) ? CRLF : LF;
+}
 
 /**
- * Parse the `[autoload]` section, keeping the data lines it could not read.
+ * One element of `content.split('\n')` for a new line. The `\n` comes from the
+ * join, so only the carriage return of a CRLF ending is carried here.
+ */
+function asLineElement(text: string, eol: string): string {
+  return eol === CRLF ? text + CARRIAGE_RETURN : text;
+}
+
+function formatEntryLine(name: string, singleton: boolean, writtenPath: string): string {
+  return `${name}="${singleton ? SINGLETON_MARKER : ''}${writtenPath}"`;
+}
+
+/**
+ * Escape a value read out of the file so that writing it back inside quotes
+ * reads to the same value, on one line.
+ */
+function escapeQuotedValue(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
+/**
+ * Parse every `[autoload]` section, keeping the data lines it could not read.
  * A line in `unparsed` is registered in the file but absent from `entries`, so
  * a caller that lists or scans autoloads must say so rather than present
  * `entries` as the whole section.
+ *
+ * An entry is a statement whose key is a valid name and whose value is one
+ * string: quotes are what Godot writes, and a bare value in a hand-edited file
+ * is tolerated. A name written twice is listed twice. `unparsed` holds the
+ * trimmed source line, the first one for a statement that spans several.
  */
 export function parseAutoloadSection(
   projectFilePath: string,
   existingContent?: string,
 ): { entries: AutoloadEntry[]; unparsed: string[] } {
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
+  const scan = scanProjectFile(content);
+  const lines = content.split(LF);
   const entries: AutoloadEntry[] = [];
-  const unparsed: string[] = [];
+  const unparsedAt: Array<{ line: number; text: string }> = [];
 
-  walkIniSection(content, 'autoload', (trimmed) => {
-    const match = trimmed.match(AUTOLOAD_ENTRY_REGEX);
-    if (match) {
-      const [, name = '', star = '', path = ''] = match;
-      entries.push({ name, singleton: star === '*', path });
+  for (const statement of autoloadStatements(scan)) {
+    if (isEntryStatement(statement)) {
+      entries.push(toEntry(statement));
     } else {
-      unparsed.push(trimmed);
+      unparsedAt.push({
+        line: statement.startLine,
+        text: (lines[statement.startLine] ?? '').trim(),
+      });
     }
-  });
-  return { entries, unparsed };
+  }
+  for (const skipped of scan.unparsed) {
+    if (skipped.section === AUTOLOAD_SECTION) unparsedAt.push(skipped);
+  }
+  unparsedAt.sort((a, b) => a.line - b.line);
+  return { entries, unparsed: unparsedAt.map((item) => item.text) };
 }
 
 export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
   return parseAutoloadSection(projectFilePath, existingContent).entries;
 }
 
+/**
+ * Add an entry to the last `[autoload]` section, directly after its last
+ * statement (or after the header when it has none). With no such section, one
+ * is created at the end of the file.
+ */
 export function addAutoloadEntry(
   projectFilePath: string,
   name: string,
@@ -121,59 +162,77 @@ export function addAutoloadEntry(
 ): void {
   assertValidName(name);
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
-  const lines = content.split('\n');
-  const entry = `${name}="${singleton ? '*' : ''}${normalizeAutoloadPath(path)}"`;
+  const eol = eolOf(content);
+  const entry = formatEntryLine(name, singleton, normalizeAutoloadPath(path));
+  const scan = scanProjectFile(content);
 
-  const sectionIdx = lines.findIndex((l) => l.trim() === '[autoload]');
-  if (sectionIdx === -1) {
-    writeFileAtomicSync(projectFilePath, content.trimEnd() + '\n\n[autoload]\n' + entry + '\n');
+  const section = scan.sections.filter((s) => s.name === AUTOLOAD_SECTION).at(-1);
+  if (section === undefined) {
+    writeFileAtomicSync(
+      projectFilePath,
+      content.trimEnd() + eol + eol + AUTOLOAD_HEADER + eol + entry + eol,
+    );
     return;
   }
 
-  let insertIdx = sectionIdx + 1;
-  while (insertIdx < lines.length && !(lines[insertIdx] ?? '').trim().startsWith('[')) {
-    insertIdx++;
+  const lastStatement = scan.statements
+    .filter((s) => s.startLine > section.headerLine && s.startLine < section.endLine)
+    .at(-1);
+  const insertAt = (lastStatement?.endLine ?? section.headerLine) + 1;
+  const lines = content.split(LF);
+  if (insertAt >= lines.length) {
+    // The file ends on the line the entry follows, with no line break after
+    // it: give that line its ending, then end the file with one too.
+    const lastIdx = lines.length - 1;
+    const last = lines[lastIdx] ?? '';
+    if (eol === CRLF && !last.endsWith(CARRIAGE_RETURN)) lines[lastIdx] = last + CARRIAGE_RETURN;
+    lines.push(asLineElement(entry, eol), '');
+  } else {
+    lines.splice(insertAt, 0, asLineElement(entry, eol));
   }
-  lines.splice(insertIdx, 0, entry);
-  writeFileAtomicSync(projectFilePath, lines.join('\n'));
+  writeFileAtomicSync(projectFilePath, lines.join(LF));
 }
 
 /**
- * Remove the named autoload entry. Also drops the `[autoload]` section header
- * if the removed entry was the last one in it. Returns true when the file was
+ * Remove every entry with this name, from every `[autoload]` section. A section
+ * left with no statements and nothing but blank lines is dropped with its
+ * header, unless the header carries a comment. Returns true when the file was
  * mutated.
  */
 export function removeAutoloadEntry(projectFilePath: string, name: string): boolean {
   const content = readFileSync(projectFilePath, 'utf8');
-  const lines = content.split('\n');
-  let inAutoloadSection = false;
-  let removed = false;
+  const scan = scanProjectFile(content);
+  const targets = autoloadStatements(scan).filter((statement) => statement.key === name);
+  if (targets.length === 0) return false;
 
-  const filtered = lines.filter((line) => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[')) {
-      inAutoloadSection = trimmed === '[autoload]';
-      return true;
+  const lines = content.split(LF);
+  const dropped = new Set<number>();
+  for (const target of targets) {
+    for (let i = target.startLine; i <= target.endLine; i++) dropped.add(i);
+  }
+
+  for (const section of scan.sections) {
+    if (section.name !== AUTOLOAD_SECTION || section.headerHasComment) continue;
+    const bodyEnd = Math.min(section.endLine, lines.length);
+    let empty = true;
+    for (let i = section.headerLine + 1; i < bodyEnd && empty; i++) {
+      empty = dropped.has(i) || (lines[i] ?? '').trim() === '';
     }
-    if (inAutoloadSection) {
-      const match = trimmed.match(/^(\w+)\s*=/);
-      if (match && match[1] === name) {
-        removed = true;
-        return false;
-      }
-    }
-    return true;
-  });
+    if (!empty) continue;
+    for (let i = section.headerLine; i < bodyEnd; i++) dropped.add(i);
+  }
 
-  if (!removed) return false;
-
-  let newContent = filtered.join('\n');
-  newContent = newContent.replace(EMPTY_AUTOLOAD_SECTION_REGEX, '');
-  newContent = newContent.trimEnd() + '\n';
-  writeFileAtomicSync(projectFilePath, newContent);
+  const kept = lines.filter((_, index) => !dropped.has(index));
+  writeFileAtomicSync(projectFilePath, kept.join(LF).trimEnd() + eolOf(content));
   return true;
 }
 
+/**
+ * Rewrite every entry with this name as one line `Name="[*]path"`, replacing
+ * the lines the statement covered. An omitted `newPath` or `singleton` keeps
+ * what the entry had. A comment that followed the entry on its line is dropped.
+ * Returns true when the file was mutated.
+ */
 export function updateAutoloadEntry(
   projectFilePath: string,
   name: string,
@@ -182,28 +241,27 @@ export function updateAutoloadEntry(
 ): boolean {
   assertValidName(name);
   const content = readFileSync(projectFilePath, 'utf8');
-  const lines = content.split('\n');
-  let inAutoloadSection = false;
-  let updated = false;
+  const eol = eolOf(content);
+  const targets = autoloadStatements(scanProjectFile(content))
+    .filter(isEntryStatement)
+    .filter((statement) => statement.key === name);
+  if (targets.length === 0) return false;
 
-  const newLines = lines.map((line) => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[')) {
-      inAutoloadSection = trimmed === '[autoload]';
-      return line;
-    }
-    if (inAutoloadSection) {
-      const match = trimmed.match(AUTOLOAD_ENTRY_REGEX);
-      if (match && match[1] === name) {
-        const effectiveSingleton = singleton !== undefined ? singleton : match[2] === '*';
-        const effectivePath = newPath !== undefined ? normalizeAutoloadPath(newPath) : match[3];
-        updated = true;
-        return `${name}="${effectiveSingleton ? '*' : ''}${effectivePath}"`;
-      }
-    }
-    return line;
-  });
-
-  if (updated) writeFileAtomicSync(projectFilePath, newLines.join('\n'));
-  return updated;
+  const lines = content.split(LF);
+  // Last statement first, so replacing a span never shifts one still to come.
+  for (const target of targets.reverse()) {
+    const existing = toEntry(target);
+    const writtenPath =
+      newPath !== undefined ? normalizeAutoloadPath(newPath) : escapeQuotedValue(existing.path);
+    const line = formatEntryLine(name, singleton ?? existing.singleton, writtenPath);
+    // The file's last line has no line break after it, so it carries no ending.
+    const endsFile = target.endLine >= lines.length - 1;
+    lines.splice(
+      target.startLine,
+      target.endLine - target.startLine + 1,
+      endsFile ? line : asLineElement(line, eol),
+    );
+  }
+  writeFileAtomicSync(projectFilePath, lines.join(LF));
+  return true;
 }

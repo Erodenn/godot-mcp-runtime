@@ -1,72 +1,18 @@
 /**
- * Tests for the .tscn / project.godot helpers used by run_project's pre-flight
- * scan. Mirrors the autoload-ini test layout: tmp project dirs, INI/TSCN
- * content as fixtures.
+ * Tests for the .tscn helpers used by run_project's pre-flight scan. Mirrors
+ * the autoload-ini test layout: tmp project dirs, TSCN content as fixtures.
  */
 
 import { describe, it, expect } from 'vitest';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import {
-  readMainSceneFromProject,
-  resolveLaunchScene,
   extractSceneScripts,
   collectSceneScriptsRecursive,
 } from '../../src/utils/scene-parsing.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();
-
-describe('readMainSceneFromProject', () => {
-  it('returns the main scene from [application]', () => {
-    const dir = tmp.makeProject(
-      'main-scene-',
-      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
-    );
-    expect(readMainSceneFromProject(dir)).toBe('res://main.tscn');
-  });
-
-  it('returns null when the key is absent', () => {
-    const dir = tmp.makeProject('main-scene-', 'config_version=5\n\n[application]\n');
-    expect(readMainSceneFromProject(dir)).toBeNull();
-  });
-
-  it('returns null when project.godot is missing', () => {
-    const dir = tmp.make('no-project-');
-    expect(readMainSceneFromProject(dir)).toBeNull();
-  });
-
-  it('ignores main_scene keys outside [application]', () => {
-    const dir = tmp.makeProject(
-      'main-scene-',
-      'config_version=5\n\n[autoload]\nrun/main_scene="res://decoy.tscn"\n',
-    );
-    expect(readMainSceneFromProject(dir)).toBeNull();
-  });
-
-  it('tolerates an unquoted value (hand-edited project.godot)', () => {
-    const dir = tmp.makeProject(
-      'main-scene-',
-      'config_version=5\n\n[application]\nrun/main_scene=res://main.tscn\n',
-    );
-    expect(readMainSceneFromProject(dir)).toBe('res://main.tscn');
-  });
-});
-
-describe('resolveLaunchScene', () => {
-  it('reads run/main_scene', () => {
-    const dir = tmp.makeProject(
-      'launch-scene-',
-      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
-    );
-    expect(resolveLaunchScene(dir)).toBe(join(dir, 'main.tscn'));
-  });
-
-  it('returns null when no scene is configured', () => {
-    const dir = tmp.makeProject('launch-scene-', 'config_version=5\n');
-    expect(resolveLaunchScene(dir)).toBeNull();
-  });
-});
 
 describe('extractSceneScripts', () => {
   it('returns absolute paths for each [ext_resource type="Script"] entry', () => {
