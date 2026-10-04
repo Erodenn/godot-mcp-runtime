@@ -18,7 +18,8 @@
 
 import { describe, beforeAll, afterAll, expect } from 'vitest';
 import { spawnSync } from 'child_process';
-import { appendFileSync, cpSync, rmSync, writeFileSync } from 'fs';
+import { appendFileSync, cpSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -64,7 +65,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   try {
-    rmSync(tmpProject, { recursive: true, force: true });
+    removeTmpDir(tmpProject);
   } catch {
     // best-effort cleanup
   }

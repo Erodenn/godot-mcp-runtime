@@ -13,7 +13,8 @@
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import type { TestContext } from 'vitest';
 import { join } from 'path';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
@@ -83,7 +84,7 @@ describe('profiler smoke', () => {
     }
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
+        removeTmpDir(tmpProject);
       } catch {
         // best-effort
       }

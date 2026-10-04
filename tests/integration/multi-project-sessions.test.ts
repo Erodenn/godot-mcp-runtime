@@ -14,7 +14,8 @@
  */
 
 import { describe, beforeEach, afterEach, expect } from 'vitest';
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -125,7 +126,7 @@ afterEach(async () => {
   // and no Godot process outlives the test.
   await runner.stopAllSessions();
   for (const dir of tmpDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 

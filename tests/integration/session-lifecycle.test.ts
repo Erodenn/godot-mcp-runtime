@@ -8,7 +8,8 @@
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { existsSync, readFileSync, cpSync, rmSync } from 'fs';
+import { existsSync, readFileSync, cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -43,7 +44,7 @@ describe('spawned session self-exit', () => {
     }
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
+        removeTmpDir(tmpProject);
       } catch {
         // best-effort
       }

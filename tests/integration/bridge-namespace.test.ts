@@ -13,7 +13,8 @@
  */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { existsSync, readFileSync, readdirSync, cpSync, rmSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -71,7 +72,7 @@ describe('bridge artifact namespace', () => {
     }
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
+        removeTmpDir(tmpProject);
       } catch {
         // best-effort
       }

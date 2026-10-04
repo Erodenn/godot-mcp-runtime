@@ -12,6 +12,26 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+const REMOVE_MAX_RETRIES = 20;
+const REMOVE_RETRY_DELAY_MS = 100;
+
+/**
+ * Remove a temp directory, retrying while something still holds it. On
+ * Windows the suite starts Godot through a launcher exe, so killing a game
+ * kills the launcher at once and the real Godot only dies a moment later (the
+ * kill-on-close job object), still holding the directory: a bare `rmSync`
+ * right after a stop fails with EBUSY. Node retries EBUSY/EPERM/ENOTEMPTY
+ * itself with these options, for a budget of a couple of seconds.
+ */
+export function removeTmpDir(dir: string): void {
+  rmSync(dir, {
+    recursive: true,
+    force: true,
+    maxRetries: REMOVE_MAX_RETRIES,
+    retryDelay: REMOVE_RETRY_DELAY_MS,
+  });
+}
+
 export interface TmpDirHandle {
   /** Track an already-created dir so it gets cleaned up after each test. */
   track(dir: string): string;
@@ -50,7 +70,7 @@ export function useTmpDirs(): TmpDirHandle {
   afterEach(() => {
     for (const d of dirs) {
       try {
-        rmSync(d, { recursive: true, force: true });
+        removeTmpDir(d);
       } catch {
         // ignore cleanup errors
       }

@@ -9,7 +9,8 @@
 
 import { describe, afterEach, expect } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
-import { readFileSync, cpSync, rmSync } from 'fs';
+import { readFileSync, cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -77,7 +78,7 @@ describe('run_project attach mode', () => {
     }
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
+        removeTmpDir(tmpProject);
       } catch {
         // best-effort
       }

@@ -18,7 +18,8 @@
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import * as net from 'net';
@@ -46,7 +47,7 @@ describe('runtime bridge smoke', () => {
     }
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
+        removeTmpDir(tmpProject);
       } catch {
         // best-effort
       }

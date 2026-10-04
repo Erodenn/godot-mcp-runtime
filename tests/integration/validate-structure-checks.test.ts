@@ -11,7 +11,8 @@
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -43,7 +44,7 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     } catch {
       // best-effort cleanup
     }

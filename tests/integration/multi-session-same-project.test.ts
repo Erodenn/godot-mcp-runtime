@@ -10,7 +10,8 @@
  */
 
 import { describe, beforeEach, afterEach, expect } from 'vitest';
-import { cpSync, rmSync, existsSync, readdirSync, readFileSync } from 'fs';
+import { cpSync, existsSync, readdirSync, readFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -62,7 +63,7 @@ afterEach(async () => {
   await runnerA.stopProject().catch(() => undefined);
   await runnerB.stopProject().catch(() => undefined);
   for (const dir of tmpDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 

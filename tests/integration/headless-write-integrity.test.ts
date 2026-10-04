@@ -18,13 +18,13 @@
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { chmodSync, cpSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, cpSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
-import { dropProjectFeatureVersion } from '../helpers/tmp.js';
+import { dropProjectFeatureVersion, removeTmpDir } from '../helpers/tmp.js';
 import { errorText, hasError } from '../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
@@ -105,7 +105,7 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     } catch {
       // best-effort cleanup
     }

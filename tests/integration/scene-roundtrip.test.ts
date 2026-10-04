@@ -11,7 +11,8 @@
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { cpSync, readFileSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -32,7 +33,7 @@ function makeTmpProject(): string {
 function cleanup(dirs: string[]) {
   for (const dir of dirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     } catch {
       // best-effort cleanup
     }

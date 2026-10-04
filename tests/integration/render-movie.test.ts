@@ -20,7 +20,8 @@
  */
 
 import { describe, beforeAll, afterAll, expect, type TestContext } from 'vitest';
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -150,7 +151,7 @@ beforeAll(async () => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     } catch {
       // best-effort cleanup
     }
