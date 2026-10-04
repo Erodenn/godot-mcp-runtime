@@ -25,6 +25,8 @@ import {
   BRIDGE_AUTOLOAD_NAME,
   BridgeManager,
   BridgeRegistryUnreadableError,
+  foreignHostOwnerRemedy,
+  type BridgeOwnerInfo,
 } from '../utils/bridge-manager.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
 import {
@@ -465,12 +467,14 @@ function refuseOwnSession(runner: GodotRunner, root: string): ToolResponse {
   );
 }
 
-function refuseOtherSession(pid: number, mode: string): ToolResponse {
+function refuseOtherSession(other: BridgeOwnerInfo, projectRoot: string): ToolResponse {
+  const foreign = foreignHostOwnerRemedy(other, projectRoot);
   return createErrorResponse(
-    `Another MCP session (server pid ${pid}, ${mode} mode) is running this project's game. That game belongs to the other session, not this one, and only it can stop it. render_movie would start a second Godot process that loads that session's McpBridge autoload, so it is refused while that session lives. Wait for the other session to finish (stop_project there), then retry.`,
+    `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this project's game. That game belongs to the other session, not this one, and only it can stop it. render_movie would start a second Godot process that loads that session's McpBridge autoload, so it is refused while that session lives. Wait for the other session to finish (stop_project there), then retry.${foreign?.note ?? ''}`,
     [
       'Wait and retry once the other MCP session has stopped or detached its game',
       "check_project on this project shows this session's own state, not the other session's",
+      ...(foreign !== null ? [foreign.solution] : []),
     ],
   );
 }
@@ -522,7 +526,7 @@ function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse 
   if (live !== null) {
     return live.owner === 'self'
       ? refuseOwnSession(runner, root)
-      : refuseOtherSession(live.info.pid, live.info.mode);
+      : refuseOtherSession(live.info, root);
   }
   const strandedPath = findServerOwnedBridgeEntry(root);
   return strandedPath !== null ? refuseStrandedBridge(strandedPath) : null;

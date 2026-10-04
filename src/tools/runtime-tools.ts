@@ -1330,6 +1330,7 @@ async function startAttachedSession(
         createErrorResponse(`Failed to attach project: ${error.message}`, [
           `Stop the other session first (server pid ${error.conflictingOwner.pid}; stop_project there), then retry run_project with attach: true`,
           'Only one attach session per project is supported',
+          ...(error.foreignHostSolution !== undefined ? [error.foreignHostSolution] : []),
         ]),
       );
     }

@@ -2,7 +2,11 @@ import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
 import { createStructuredResponse, leadWithWarnings } from './structured-response.js';
-import { BridgeRegistryUnreadableError, type BridgeOwnerInfo } from './bridge-manager.js';
+import {
+  BridgeRegistryUnreadableError,
+  foreignHostOwnerRemedy,
+  type BridgeOwnerInfo,
+} from './bridge-manager.js';
 import {
   extractOperationPayload,
   parseScriptDiagnostics,
@@ -517,16 +521,18 @@ function rejectIfLiveSessionOnProject(
   }
 
   const other = live.info;
+  const foreign = foreignHostOwnerRemedy(other, projectPath);
   return err(
     createErrorResponse(
       `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
         "project's game. That game belongs to the other session, not this one, and only it can " +
         "stop it. A running game can write this project's scene files at any time, so a " +
         'headless edit now would race it. Wait for the other session to finish (stop_project ' +
-        'there), then retry.',
+        `there), then retry.${foreign?.note ?? ''}`,
       [
         'Wait and retry once the other MCP session has stopped or detached its game',
         "check_project on this project shows this session's own state, not the other session's",
+        ...(foreign !== null ? [foreign.solution] : []),
         ...extraSolutions,
       ],
     ),

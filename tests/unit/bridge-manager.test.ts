@@ -851,6 +851,51 @@ describe('BridgeManager with concurrent sessions on one project', () => {
       expect(ownerFileNames(projectPath)).toEqual(beforeOwners);
     });
 
+    it('an attach refused by an owner from another host names that host and the owner file to delete', () => {
+      const { projectPath, bridgeSourcePath } = setupProject();
+      const managerA = new BridgeManager(bridgeSourcePath, {
+        hostname: () => 'some-other-machine',
+      });
+      managerA.inject(projectPath, TEST_PORT, 'token-a');
+      const [foreignOwnerFile] = ownerFileNames(projectPath);
+
+      const managerB = new BridgeManager(bridgeSourcePath, { hostname: () => 'this-machine' });
+      let thrown: unknown;
+      try {
+        managerB.inject(projectPath, ALT_PORT, 'token-b');
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(BridgeAttachConflictError);
+      const conflict = thrown as BridgeAttachConflictError;
+      expect(conflict.message).toContain(
+        'registered from another host ("some-other-machine"; this host is "this-machine")',
+      );
+      expect(conflict.foreignHostSolution).toContain(
+        join(bridgeOwnersDir(projectPath), foreignOwnerFile!),
+      );
+      // Naming the file changes nothing about who counts as live: the foreign
+      // owner is still there.
+      expect(ownerFileNames(projectPath)).toEqual([foreignOwnerFile]);
+    });
+
+    it('an attach refused by an owner on this host carries no foreign-host remedy', () => {
+      const { projectPath, bridgeSourcePath } = setupProject();
+      new BridgeManager(bridgeSourcePath).inject(projectPath, TEST_PORT, 'token-a');
+
+      let thrown: unknown;
+      try {
+        new BridgeManager(bridgeSourcePath).inject(projectPath, ALT_PORT, 'token-b');
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(BridgeAttachConflictError);
+      expect((thrown as BridgeAttachConflictError).foreignHostSolution).toBeUndefined();
+      expect((thrown as Error).message).not.toContain('another host');
+    });
+
     it('a spawned inject alongside a live attach owner is allowed and does not disturb the baked port/token', () => {
       const { projectPath, bridgeSourcePath } = setupProject();
       const managerA = new BridgeManager(bridgeSourcePath);

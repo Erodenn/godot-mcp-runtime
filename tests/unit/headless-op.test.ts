@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { hostname as osHostname } from 'os';
 import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
 import { sceneBackupsDir } from '../../src/utils/artifact-paths.js';
 import { inPlaceSceneWrite } from '../../src/utils/scene-loss-guard.js';
@@ -370,6 +371,43 @@ describe('executeSceneOp', () => {
       expectErrorMatching(result, /pid 4242/);
       expectErrorMatching(result, /wait/i);
       expect(fake.calls.length).toBe(0);
+      // The owner is on another host, so it counts as live for as long as its
+      // file exists. The refusal has to give the way out: the host it came
+      // from and the file to delete.
+      expectErrorMatching(result, /registered from another host \("some-host"/);
+      const solutions = unwrap(result).content[1]?.text ?? '';
+      expect(solutions).toContain('4242-abc123.json');
+      expect(solutions).toContain('delete its owner file');
+    });
+
+    it('names no host and no owner file when the other session is on this host', async () => {
+      const fake = runnerWithLiveSession(null);
+      (fake.asRunner as GodotRunner & { otherLiveSessions: unknown[] }).otherLiveSessions = [
+        {
+          pid: 4242,
+          instanceId: 'abc123',
+          hostname: osHostname(),
+          mode: 'spawned',
+          startedAt: new Date().toISOString(),
+          port: 9900,
+        },
+      ];
+      const result = await executeSceneOp(
+        fake.asRunner,
+        'add_node',
+        { scenePath: 'scenes/main.tscn' },
+        '/proj',
+        TEST_FAILURE_PREFIX,
+        EMPTY_SOLUTIONS,
+        EXCEPTION_SOLUTIONS,
+        { mutatesSceneFile: true },
+      );
+      expectErrorMatching(result, /Another MCP session/);
+      const text = unwrap(result)
+        .content.map((block) => block.text ?? '')
+        .join('\n');
+      expect(text).not.toContain('another host');
+      expect(text).not.toContain('owner file');
     });
 
     it('allows scene mutations when the other live session it can see is on a different project', async () => {

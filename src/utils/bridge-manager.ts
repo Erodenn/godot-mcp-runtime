@@ -65,6 +65,11 @@ export class BridgeAttachConflictError extends Error {
   constructor(
     message: string,
     readonly conflictingOwner: BridgeOwnerInfo,
+    /**
+     * Set when the conflicting owner was registered from another host: how to
+     * clear it when it is known to be stale (see `foreignHostOwnerRemedy`).
+     */
+    readonly foreignHostSolution?: string,
   ) {
     super(message);
     this.name = 'BridgeAttachConflictError';
@@ -127,6 +132,33 @@ export interface BridgeOwnerInfo {
   startedAt: string;
   port: number;
   token?: string;
+}
+
+/** File name of a session's owner file under `bridge/owners/`. */
+export function bridgeOwnerFileName(info: Pick<BridgeOwnerInfo, 'pid' | 'instanceId'>): string {
+  return `${info.pid}-${info.instanceId}.json`;
+}
+
+/**
+ * What to tell a caller blocked by an owner registered from another host, or
+ * null when the owner is on this host. A foreign-host owner cannot be probed,
+ * so it counts as live for as long as its file exists (see `isOwnerLive`): a
+ * file left behind by a project copied or synced from another machine, or by
+ * a host that was renamed, blocks forever, and deleting that file is the only
+ * way out. The refusal therefore has to name the host and the file.
+ * `thisHostname` is a parameter so a test can stand in for the host.
+ */
+export function foreignHostOwnerRemedy(
+  info: BridgeOwnerInfo,
+  projectPath: string,
+  thisHostname: string = osHostname(),
+): { note: string; solution: string } | null {
+  if (info.hostname === thisHostname) return null;
+  const ownerFile = join(bridgeOwnersDir(projectPath), bridgeOwnerFileName(info));
+  return {
+    note: ` That session was registered from another host ("${info.hostname}"; this host is "${thisHostname}"), so this server cannot check whether it is still running and treats it as live.`,
+    solution: `If that session is known to be gone (the project was copied or synced from another machine, or this host was renamed), delete its owner file ${ownerFile} and retry`,
+  };
 }
 
 interface OwnerFileEntry {
@@ -280,13 +312,15 @@ export class BridgeManager {
     if (bakedToken !== undefined) {
       const conflicting = this.liveAttachOwner(projectPath, true);
       if (conflicting) {
+        const foreign = foreignHostOwnerRemedy(conflicting, projectPath, this.hostnameFn());
         throw new BridgeAttachConflictError(
           `Another MCP session (server pid ${conflicting.pid}, attached mode) is already ` +
             `attached to this project. Only one attach session per project is supported, ` +
             `because attach mode bakes its port and token into the one shared bridge ` +
             `script. Stop that session first (stop_project there), then retry run_project ` +
-            `with attach: true.`,
+            `with attach: true.${foreign?.note ?? ''}`,
           conflicting,
+          foreign?.solution,
         );
       }
     }
@@ -564,7 +598,7 @@ export class BridgeManager {
   }
 
   private ownerFileName(): string {
-    return `${this.pid}-${this.instanceId}.json`;
+    return bridgeOwnerFileName({ pid: this.pid, instanceId: this.instanceId });
   }
 
   private isSelfOwnerFile(fileName: string): boolean {
