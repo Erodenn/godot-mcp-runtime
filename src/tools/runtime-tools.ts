@@ -188,7 +188,7 @@ export const runtimeToolDefinitions = [
             'If true, the game window is never shown on Windows and is moved off-screen after startup on other platforms; mouse input passes through to whatever is beneath it. Programmatic input (simulate_input, run_script) and screenshots stay fully active. It does not guarantee the game never takes keyboard focus. Not valid with attach: true.',
         },
         bridgePort: {
-          type: 'number',
+          type: 'integer',
           minimum: BRIDGE_PORT_MIN,
           maximum: BRIDGE_PORT_MAX,
           description:
@@ -295,7 +295,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached and left running. Other sessions keep running; none becomes current. Call it even after the game exited by itself: it frees the process slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors (condensed; null if not held); warnings leads when cleanup was not confirmed. Errors if no session.',
+      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached, not killed. Other sessions keep running; none becomes current. Call it even after a spawned game exited by itself: it frees the slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors; warnings leads if cleanup was unconfirmed. Errors if no session, as after an attached one ended by itself.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -316,7 +316,7 @@ export const runtimeToolDefinitions = [
           type: ['array', 'null'],
           items: { type: 'string' },
           description:
-            'Null when no logs are held: an attached session captures nothing, and a record that kept only a finished profiler capture gave its logs to the earlier stop.',
+            'Condensed to the diagnostic lines. Null when no logs are held: an attached session captures nothing, and a record that kept only a finished profiler capture gave its logs to the earlier stop.',
         },
         finalErrors: {
           type: ['array', 'null'],
@@ -1551,7 +1551,7 @@ export function handleGetDebugOutput(
   if (proc.hasExited) {
     response.exitCode = proc.exitCode;
     response.tip =
-      'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
+      'Process has exited. These logs are kept until stop_project, which frees the process slot, or until run_project starts this project again.';
   }
   // A visual profiling capture of a heavy scene floods stderr with an engine
   // error. Read cold, it looks like a game bug; say what it is where it shows.
