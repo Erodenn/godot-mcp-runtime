@@ -641,6 +641,50 @@ describe('multi-project runtime sessions', () => {
   );
 
   // -------------------------------------------------------------------------
+  // Spawning over this server's own attached session
+  // -------------------------------------------------------------------------
+
+  it('spawning over an attached session on the same project shuts its bridge down first', async () => {
+    const loopback = await startLoopback();
+    await runner.attachProject(projectA, loopback.port);
+    const attachedToken = (runner as unknown as { current: { token: string } }).current.token;
+
+    await startProject(projectA, PORT_A_RERUN);
+
+    // The user's Godot is told to stop listening, with the attached session's
+    // own token, before the spawned session takes the project.
+    expect(loopback.frames).toEqual([{ command: 'shutdown', token: attachedToken }]);
+    expect(runner.getSessionInfo(projectA)).toMatchObject({
+      mode: 'spawned',
+      bridgePort: PORT_A_RERUN,
+      replacedAttached: { bridgePort: loopback.port, shutdownAcknowledged: true },
+    });
+  });
+
+  it(
+    'records an attached bridge that did not acknowledge the shutdown',
+    async () => {
+      // Nothing listens on PORT_A, so the shutdown is never answered.
+      await runner.attachProject(projectA, PORT_A);
+
+      await startProject(projectA, PORT_A_RERUN);
+
+      expect(runner.getSessionInfo(projectA)?.replacedAttached).toEqual({
+        bridgePort: PORT_A,
+        shutdownAcknowledged: false,
+      });
+    },
+    STOP_CASE_TIMEOUT_MS,
+  );
+
+  it('a spawned start that replaced nothing attached records nothing', async () => {
+    await startProject(projectA, PORT_A, { exitOnKill: false });
+    await startProject(projectA, PORT_A_RERUN);
+
+    expect(runner.getSessionInfo(projectA)?.replacedAttached).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // Games are killed as a process tree
   // -------------------------------------------------------------------------
 

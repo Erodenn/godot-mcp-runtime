@@ -207,6 +207,22 @@ export interface RuntimeSession {
    * complete or has not run.
    */
   exitCleanupProblems: string[];
+  /**
+   * Set when this spawned session was started over this server's own attached
+   * session on the same project. Null otherwise.
+   */
+  replacedAttached: ReplacedAttachedSession | null;
+}
+
+/**
+ * What became of an attached session that a spawned start replaced. The Godot
+ * the user launched is still running either way; `shutdownAcknowledged` false
+ * means its bridge did not answer the `shutdown` command and is still
+ * listening on `bridgePort` with the replaced session's token.
+ */
+export interface ReplacedAttachedSession {
+  bridgePort: number | null;
+  shutdownAcknowledged: boolean;
 }
 
 /** Plain-data snapshot of one session, safe to hand to a tool handler. */
@@ -223,6 +239,8 @@ export interface RuntimeSessionInfo {
   /** A process, and so its stdout/stderr buffers, is retained. */
   hasRetainedLogs: boolean;
   profiling: boolean;
+  /** See {@link RuntimeSession.replacedAttached}. Absent means null. */
+  replacedAttached?: ReplacedAttachedSession | null;
 }
 
 export interface RuntimeSessionStatus {
@@ -831,12 +849,30 @@ export class GodotRunner {
     // projects keep running and are not touched.
     const key = sessionKey(projectPath);
     const previous = this.sessions.get(key) ?? null;
+    let replacedAttached: ReplacedAttachedSession | null = null;
     if (previous !== null) {
       this.beginSessionTransition(previous);
       this.closeProfiler(previous);
       if (previous.mode === 'spawned' && previous.process) {
         logDebug('Killing existing Godot process before starting a new one');
         terminateProcessTree(previous.process.process, this.killTreeDeps);
+      } else if (previous.mode === 'attached') {
+        // The Godot the user launched keeps running, and until its bridge is
+        // told to shut down it keeps listening with the old session's token.
+        // Same bounded request stop_project makes; whether it was answered is
+        // kept for run_project to report.
+        replacedAttached = {
+          bridgePort: previous.bridgePort,
+          shutdownAcknowledged: await this.shutdownAttachedBridge(previous),
+        };
+        // The shutdown was awaited: another start on this project may have
+        // registered its own record meanwhile, and it is not this start's to
+        // replace.
+        if (this.sessions.get(key) !== previous) {
+          throw new Error(
+            `The session on ${projectPath} was stopped or replaced while its attached session was being detached; nothing was launched.`,
+          );
+        }
       }
       // No bridge cleanup for the same path: the replacement re-injects over
       // the same owner file.
@@ -844,6 +880,7 @@ export class GodotRunner {
     }
 
     const session = this.createSession(projectPath, 'spawned');
+    session.replacedAttached = replacedAttached;
     const epoch = session.epoch;
     const previousCurrent = this.current;
     this.sessions.set(key, session);
@@ -1030,6 +1067,7 @@ export class GodotRunner {
       profiler: null,
       epoch: 0,
       exitCleanupProblems: [],
+      replacedAttached: null,
     };
   }
 
@@ -1138,6 +1176,7 @@ export class GodotRunner {
       exitCode: exited !== null ? exited.exitCode : null,
       hasRetainedLogs: session.process !== null,
       profiling: session.profiler !== null,
+      replacedAttached: session.replacedAttached,
     };
   }
 
@@ -1345,6 +1384,31 @@ export class GodotRunner {
     return this.stopSession(session);
   }
 
+  /**
+   * Ask an attached session's bridge to shut down, so the user's
+   * still-running Godot releases the port, then close the socket. Bounded by
+   * BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS and never throws: a bridge that does
+   * not answer does not stop the detach, it dies when the user closes Godot.
+   * Returns whether it acknowledged, read from the reply, because until it
+   * does the bridge is still listening with that session's token.
+   */
+  private async shutdownAttachedBridge(session: RuntimeSession): Promise<boolean> {
+    let shutdownAcknowledged = false;
+    try {
+      const reply = await this.sendCommandTo(
+        session,
+        'shutdown',
+        {},
+        BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS,
+      );
+      shutdownAcknowledged = isShutdownAcknowledged(reply);
+    } catch (err) {
+      logDebug(`Attached shutdown timed out or failed (continuing): ${err}`);
+    }
+    this.closeConnection();
+    return shutdownAcknowledged;
+  }
+
   private async stopSession(session: RuntimeSession): Promise<RuntimeStopResult | null> {
     this.beginSessionTransition(session);
     if (session.mode === null) {
@@ -1397,24 +1461,7 @@ export class GodotRunner {
     }
 
     if (session.mode === 'attached') {
-      // Ask the bridge to shut down so the user's still-running Godot
-      // releases the port. A timeout here does not stop the detach: the
-      // bridge then dies when the user closes Godot. Whether it answered is
-      // read from the reply and reported, because until it does the bridge is
-      // still listening with this session's token.
-      let shutdownAcknowledged = false;
-      try {
-        const reply = await this.sendCommandTo(
-          session,
-          'shutdown',
-          {},
-          BRIDGE_SHUTDOWN_ATTACHED_TIMEOUT_MS,
-        );
-        shutdownAcknowledged = isShutdownAcknowledged(reply);
-      } catch (err) {
-        logDebug(`Attached shutdown timed out or failed (continuing cleanup): ${err}`);
-      }
-      this.closeConnection();
+      const shutdownAcknowledged = await this.shutdownAttachedBridge(session);
       this.closeProfiler(session);
       const cleanupProblems = this.bridge.cleanup(session.projectPath);
       this.forgetSession(session);

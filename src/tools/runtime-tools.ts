@@ -4,6 +4,7 @@ import {
   BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS,
   BRIDGE_WAIT_ATTACHED_TIMEOUT_MS,
   type GodotRunner,
+  type ReplacedAttachedSession,
   type RuntimeSessionMode,
 } from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
@@ -901,6 +902,33 @@ function buildRunProjectResponse(session: {
   });
 }
 
+const REPLACED_ATTACHED_NOTE =
+  "This server's attached session on the project was detached first; the Godot process launched outside MCP is still running and is no longer controlled.";
+
+/**
+ * How a spawned start words the attached session it replaced, for each place
+ * an outcome is reported. Everything is empty when nothing was replaced. An
+ * unacknowledged shutdown is reported the way stop_project reports it: the
+ * replaced session's bridge is still listening.
+ */
+function describeReplacedAttached(replaced: ReplacedAttachedSession | null): {
+  warnings: string[];
+  messageNote: string;
+  errorLine: string;
+} {
+  if (replaced === null) return { warnings: [], messageNote: '', errorLine: '' };
+  const warnings = replaced.shutdownAcknowledged
+    ? []
+    : [
+        `${SHUTDOWN_UNACKNOWLEDGED_WARNING} It was this server's attached session on this project (bridge port ${replaced.bridgePort ?? 'unknown'}), replaced by this spawned one.`,
+      ];
+  return {
+    warnings,
+    messageNote: ` ${REPLACED_ATTACHED_NOTE}`,
+    errorLine: `\n${[REPLACED_ATTACHED_NOTE, ...warnings].join(' ')}`,
+  };
+}
+
 /**
  * Read and range-check the optional `bridgePort` argument. The one place the
  * port range is enforced for both session modes.
@@ -1112,6 +1140,13 @@ async function startSpawnedSession(
       isProfiling,
     );
 
+    // Read by project, not through the current pointer, and before the wait:
+    // every outcome below has to say what happened to an attached session
+    // this start replaced, the failures included.
+    const replaced = describeReplacedAttached(
+      runner.getSessionInfo(projectPath)?.replacedAttached ?? null,
+    );
+
     const bridgeResult = await runner.waitForBridge();
 
     if (!bridgeResult.ready) {
@@ -1126,7 +1161,7 @@ async function startSpawnedSession(
         if (!logsRetained) await runner.stopProject();
         return err(
           createErrorResponse(
-            `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}`,
+            `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}${replaced.errorLine}`,
             [
               logsRetained
                 ? 'Call get_debug_output for the full captured output of the exited process: it is kept until the next run_project or stop_project'
@@ -1166,7 +1201,7 @@ async function startSpawnedSession(
         `Check that the assigned bridge port (${assignedPort}) is not occupied by another Godot process`,
         'Retry run_project',
       ];
-      return err(createErrorResponse(lines.join('\n'), solutions));
+      return err(createErrorResponse(lines.join('\n') + replaced.errorLine, solutions));
     }
 
     // Read after readiness, not assumed from it: a game that exits in between
@@ -1179,7 +1214,7 @@ async function startSpawnedSession(
       const errorTail = lastErrors.length > 0 ? `\nLast stderr:\n${lastErrors.join('\n')}` : '';
       await runner.stopProject();
       return err(
-        createErrorResponse(`${SESSION_ENDED_AT_READY_MESSAGE}${errorTail}`, [
+        createErrorResponse(`${SESSION_ENDED_AT_READY_MESSAGE}${errorTail}${replaced.errorLine}`, [
           'Retry run_project',
           'If the game keeps exiting right after it starts, check its startup scripts and autoloads (list_autoloads)',
         ]),
@@ -1193,11 +1228,12 @@ async function startSpawnedSession(
     if (isProfiling) {
       message += ' Profiling enabled: use profile_project or start_profiler.';
     }
+    message += replaced.messageNote;
     return buildRunProjectResponse({
       projectPath,
       sessionMode: 'spawned',
       bridgePort: readyPort,
-      warnings,
+      warnings: [...replaced.warnings, ...warnings],
       message,
     });
   } catch (error: unknown) {

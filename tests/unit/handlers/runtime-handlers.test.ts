@@ -523,6 +523,88 @@ describe('handleRunProject bridge port', () => {
   });
 });
 
+describe('handleRunProject over an attached session on the same project', () => {
+  const REPLACED_ATTACH_PORT = 24680;
+
+  /** Make the fake report what the runner records when a spawn replaces an attached session. */
+  function reportReplacedAttached(fake: RuntimeFake, shutdownAcknowledged: boolean): void {
+    const runner = fake.asRunner as unknown as {
+      getSessionInfo: (projectPath: string) => unknown;
+    };
+    const original = runner.getSessionInfo.bind(runner);
+    runner.getSessionInfo = (projectPath: string) => ({
+      ...(original(projectPath) as object),
+      replacedAttached: { bridgePort: REPLACED_ATTACH_PORT, shutdownAcknowledged },
+    });
+  }
+
+  it('says the attached session was detached and leads with a warning when its bridge did not acknowledge', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    reportReplacedAttached(fake, false);
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    const payload = expectMatchesOutputSchema('run_project', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    const warning = (payload.warnings as string[])[0]!;
+    expect(warning).toContain('did not acknowledge shutdown');
+    expect(warning).toContain(`bridge port ${REPLACED_ATTACH_PORT}`);
+    expect(payload.message as string).toContain('attached session on the project was detached');
+  });
+
+  it('carries no warning when the replaced bridge acknowledged, and still says it was detached', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    reportReplacedAttached(fake, true);
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    const payload = expectMatchesOutputSchema('run_project', result);
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.message as string).toContain('attached session on the project was detached');
+  });
+
+  it('says so on a failed start too', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'timeout after 5s');
+    reportReplacedAttached(fake, false);
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    expectErrorMatching(result, /attached session on the project was detached/);
+    expectErrorMatching(result, /did not acknowledge shutdown/);
+  });
+
+  it('says nothing about an attached session when none was replaced', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    const payload = expectMatchesOutputSchema('run_project', result);
+    expect(payload).not.toHaveProperty('warnings');
+    expect(payload.message as string).not.toContain('attached session');
+  });
+});
+
 describe('handleRunProject bridge failure paths', () => {
   const PINNED_SPAWN_BRIDGE_PORT = 23456;
 
