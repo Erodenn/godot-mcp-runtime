@@ -60,6 +60,29 @@ const UNEXPLAINED_FAILURE_MESSAGE =
 
 /** Keys a structure schema node accepts. `has_property` is the snake_case spelling of `hasProperty`. */
 const SCHEMA_NODE_KEYS: readonly string[] = ['type', 'children', 'hasProperty', 'has_property'];
+/**
+ * Top-level keys the tool accepts, after `normalizeParameters` has folded the
+ * snake_case spellings. Anything else is a misspelling that would be dropped
+ * without a word, such as `scenepath` or a lone `check`, and the call would
+ * validate nothing it was asked to.
+ */
+const VALIDATE_TOP_LEVEL_KEYS: readonly string[] = [
+  'projectPath',
+  'scriptPath',
+  'source',
+  'scenePath',
+  'checks',
+  'targets',
+];
+/** Keys one `targets[]` item accepts, in both spellings: items are not normalized. */
+const VALIDATE_TARGET_KEYS: readonly string[] = [
+  'scriptPath',
+  'script_path',
+  'source',
+  'scenePath',
+  'scene_path',
+  'checks',
+];
 /** Keys a check item accepts, per check type. `node_path` is the snake_case spelling of `nodePath`. */
 const STRUCTURE_CHECK_KEYS: readonly string[] = ['type', 'schema'];
 const SIGNALS_CHECK_KEYS: readonly string[] = ['type', 'nodePath', 'node_path'];
@@ -85,7 +108,7 @@ export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script to catch parse errors. Give exactly one of scriptPath, source or scenePath, or a targets array (one process). checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets (warnings: diagnostics matching no target); an error has message, plus line or problem.",
+      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script. Give exactly one of scriptPath, source or scenePath, or a targets array (one process); an unknown key is an error. checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets; an invalid result always has an error.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -392,6 +415,19 @@ export async function handleValidate(
   if (!parsed.ok) return parsed;
   const { projectPath } = parsed.value;
 
+  const unknownKey = Object.keys(args).find((key) => !VALIDATE_TOP_LEVEL_KEYS.includes(key));
+  if (unknownKey !== undefined) {
+    return err(
+      createErrorResponse(
+        `Unknown parameter "${unknownKey}" (allowed: projectPath, scriptPath, source, scenePath, checks, targets)`,
+        [
+          `Check the spelling of "${unknownKey}": an unknown parameter is refused instead of ignored`,
+          'Give exactly one of scriptPath, source or scenePath, or a targets array',
+        ],
+      ),
+    );
+  }
+
   // Batch mode: targets array
   if (args.targets && Array.isArray(args.targets)) {
     // The batch branch reads `targets` and nothing else. A single-target
@@ -454,6 +490,24 @@ export async function handleValidate(
                   read === null
                     ? `targets[${i}] must be an object with exactly one of scriptPath, source, or scenePath`
                     : `targets[${i}].${mistyped} must be a string`,
+              },
+            ],
+          });
+          continue;
+        }
+        // A key the target does not take is a misspelling (`check` for `checks`):
+        // forwarded, the target would be validated without what it asked for and
+        // come back valid. It is this target's own failure; the rest still run.
+        const unknownTargetKey = Object.keys(raw as Record<string, unknown>).find(
+          (key) => !VALIDATE_TARGET_KEYS.includes(key),
+        );
+        if (unknownTargetKey !== undefined) {
+          const named = read.scenePath ?? read.scriptPath;
+          preErrors.set(i, {
+            target: typeof named === 'string' ? named : '',
+            errors: [
+              {
+                message: `targets[${i}]: unknown key "${unknownTargetKey}" (allowed: scriptPath, source, scenePath, checks)`,
               },
             ],
           });
@@ -943,6 +997,12 @@ export async function handleValidate(
         valid: false,
         errors: [...result.errors, ...checkErrors],
       };
+    }
+
+    // An invalid verdict always carries a reason, as it does in targets mode:
+    // valid:false with an empty errors array leaves the caller nothing to act on.
+    if (!result.valid && result.errors.length === 0) {
+      result = { valid: false, errors: [{ message: UNEXPLAINED_FAILURE_MESSAGE }] };
     }
 
     return createStructuredResponse(result);

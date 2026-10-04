@@ -110,6 +110,27 @@ describe('handleValidate', () => {
     expect(expectMatchesOutputSchema('validate', result)).toEqual({ valid: true, errors: [] });
   });
 
+  it('rejects an unknown top-level key by name and starts no process', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenepath: fixtureScenePath,
+    });
+    expectErrorMatching(result, /Unknown parameter "scenepath"/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('single mode never returns an invalid verdict with no errors', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({ valid: false, errors: [] }) });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      source: 'extends Node',
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(payload.valid).toBe(false);
+    expect((payload.errors as unknown[]).length).toBe(1);
+  });
+
   it('single mode with no result payload is an error response', async () => {
     // Nothing was validated, so there is no verdict to report: the batch and
     // combined branches already answer this with an error response.
@@ -285,7 +306,7 @@ describe('handleValidate batch mode', () => {
     });
     const result = await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
-      targets: [{ scenePath: fixtureScenePath }, { scenePth: 'typo.tscn' }, 7],
+      targets: [{ scenePath: fixtureScenePath }, {}, 7],
     });
     const payload = expectMatchesOutputSchema('validate', result);
     const results = payload.results as Array<{
@@ -301,6 +322,33 @@ describe('handleValidate batch mode', () => {
     );
     expect(results[2]?.valid).toBe(false);
     expect(results[2]?.errors[0]?.message).toMatch(/targets\[2\] must be an object/);
+    expect(fake.calls[0].params).toEqual({ targets: [{ scene_path: fixtureScenePath }] });
+  });
+
+  it('reports a target with an unknown key as its own failure while the others still validate', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        { scenePath: fixtureScenePath },
+        { scenePath: fixtureScenePath, check: [{ type: 'signals' }] },
+      ],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{
+      target: string;
+      valid: boolean;
+      errors: Array<{ message: string }>;
+    }>;
+    expect(results).toHaveLength(2);
+    expect(results[0]?.valid).toBe(true);
+    expect(results[1]?.valid).toBe(false);
+    expect(results[1]?.target).toBe(fixtureScenePath);
+    expect(results[1]?.errors[0]?.message).toBe(
+      'targets[1]: unknown key "check" (allowed: scriptPath, source, scenePath, checks)',
+    );
     expect(fake.calls[0].params).toEqual({ targets: [{ scene_path: fixtureScenePath }] });
   });
 
