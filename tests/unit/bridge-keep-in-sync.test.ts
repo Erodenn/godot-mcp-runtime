@@ -80,6 +80,68 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
 });
 
 /**
+ * The value serializer recurses through containers, and a Dictionary can hold
+ * itself. A Node test cannot run GDScript, so this reads the structure that
+ * keeps the recursion bounded: the engine-side behavior is covered by the
+ * Godot-backed integration run.
+ */
+describe('mcp_bridge.gd bounds the values it serializes', () => {
+  /** Body of one top-level `func`, up to the next top-level declaration. */
+  function gdFunctionBody(name: string): string {
+    const start = bridgeSource.indexOf(`\nfunc ${name}(`);
+    expect(start, `mcp_bridge.gd must define func ${name}`).toBeGreaterThanOrEqual(0);
+    const rest = bridgeSource.slice(start + 1);
+    const next = rest.slice(1).search(/\n(?:func |# |const |var )/);
+    return next === -1 ? rest : rest.slice(0, next + 1);
+  }
+
+  it('declares a depth bound for every serialization and size bounds for samples', () => {
+    expect(Number(gdConst('MAX_RESULT_DEPTH'))).toBeGreaterThan(0);
+    expect(Number(gdConst('MAX_SAMPLE_DEPTH'))).toBeGreaterThan(0);
+    expect(Number(gdConst('MAX_SAMPLE_DEPTH'))).toBeLessThanOrEqual(
+      Number(gdConst('MAX_RESULT_DEPTH')),
+    );
+    expect(Number(gdConst('MAX_SAMPLE_ELEMENTS'))).toBeGreaterThan(0);
+    expect(Number(gdConst('MAX_SAMPLE_STRING_CHARS'))).toBeGreaterThan(0);
+  });
+
+  it('recurses only through the bounded walker, which checks the depth in both container branches', () => {
+    const walker = gdFunctionBody('_serialize_bounded');
+    // No way back into an entry point, which would reset the bounds mid-walk.
+    expect(walker).not.toContain('_serialize_value(');
+    expect(walker).not.toContain('_serialize_sample(');
+    expect(walker.match(/if depth >= _serialize_depth_limit:/g)).toHaveLength(2);
+    expect(walker.match(/_serialize_bounded\(.+, depth \+ 1\)/g)).toHaveLength(2);
+    expect(walker.match(/if not _take_serialize_element\(\):/g)).toHaveLength(2);
+  });
+
+  it('marks every cut in the value instead of dropping it', () => {
+    const walker = gdFunctionBody('_serialize_bounded');
+    expect(walker.match(/TRUNCATED_DEPTH_MARKER %/g)).toHaveLength(2);
+    expect(walker).toContain('TRUNCATED_ELEMENTS_MARKER %');
+    expect(walker).toContain('TRUNCATED_ENTRIES_MARKER %');
+    expect(gdFunctionBody('_bound_text')).toContain('TRUNCATED_STRING_MARKER %');
+  });
+
+  it('samples watch and track values through the size-bounded entry point', () => {
+    const sampler = gdFunctionBody('_sample_one_watch');
+    expect(sampler).toContain('_serialize_sample(');
+    expect(sampler).not.toContain('_serialize_value(');
+    const sampleEntry = gdFunctionBody('_serialize_sample');
+    expect(sampleEntry).toContain('_serialize_depth_limit = MAX_SAMPLE_DEPTH');
+    expect(sampleEntry).toContain('_serialize_elements_left = MAX_SAMPLE_ELEMENTS');
+    expect(sampleEntry).toContain('_serialize_string_limit = MAX_SAMPLE_STRING_CHARS');
+  });
+
+  it('gives a run_script result the depth bound and no size bound', () => {
+    const resultEntry = gdFunctionBody('_serialize_value');
+    expect(resultEntry).toContain('_serialize_depth_limit = MAX_RESULT_DEPTH');
+    expect(resultEntry).toContain('_serialize_elements_left = SERIALIZE_UNLIMITED');
+    expect(resultEntry).toContain('_serialize_string_limit = SERIALIZE_UNLIMITED');
+  });
+});
+
+/**
  * The headless-operation result sentinel is the same kind of two-sided
  * contract: godot_operations.gd prints it, output-parsing.ts reads it. A
  * drifted marker leaves every operation printing a payload nobody extracts.

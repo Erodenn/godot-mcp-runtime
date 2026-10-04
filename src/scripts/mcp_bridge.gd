@@ -65,6 +65,31 @@ const MAX_TRACK_DURATION_MS := 180000
 const DEFAULT_TRACK_INTERVAL_MS := 250
 const DEFAULT_TRACK_DURATION_MS := 60000
 
+# Serialization bounds. _serialize_bounded walks containers recursively, and a
+# Dictionary or Array can hold itself, so with no depth bound one such value
+# recurses until the engine's stack runs out, inside the game. Every caller is
+# bounded in depth; a cut is written into the value as a marker string, never
+# dropped silently.
+#
+# A run_script result gets the depth bound only: it is one value the caller
+# asked for, and its size is theirs to choose.
+const MAX_RESULT_DEPTH := 32
+# A watch or track sample is taken again and again (a track up to
+# MAX_TRACK_SAMPLES times per entry, from _process), so it is bounded in size
+# as well: how deep it goes, how many container elements it holds in total, and
+# how long any one string in it is. Scalars and vectors, the values a sample is
+# meant for, are far inside all three.
+const MAX_SAMPLE_DEPTH := 4
+const MAX_SAMPLE_ELEMENTS := 32
+const MAX_SAMPLE_STRING_CHARS := 128
+# "No limit" for the two size bounds above, as _serialize_bounded reads them.
+const SERIALIZE_UNLIMITED := -1
+const TRUNCATED_DEPTH_MARKER := "<truncated: nested deeper than %d levels>"
+const TRUNCATED_ELEMENTS_MARKER := "<truncated: %d more elements>"
+const TRUNCATED_ENTRIES_KEY := "<truncated>"
+const TRUNCATED_ENTRIES_MARKER := "%d more entries"
+const TRUNCATED_STRING_MARKER := "<truncated: %d more characters>"
+
 # Where background mode parks the window: far enough off every monitor layout
 # that no part of it is on screen.
 const BACKGROUND_WINDOW_POSITION := Vector2i(-9999, -9999)
@@ -147,6 +172,14 @@ var _track_interval_ms: int = 0
 var _track_next_ms: int = 0
 var _track_until_ms: int = 0
 var _track_samples: Array = []
+
+# Bounds of the serialization in progress, set by _serialize_value and
+# _serialize_sample before they call _serialize_bounded. Members rather than
+# arguments because the element count is shared by the whole value, not by one
+# container. The walk never awaits, so two serializations cannot interleave.
+var _serialize_depth_limit: int = MAX_RESULT_DEPTH
+var _serialize_elements_left: int = SERIALIZE_UNLIMITED
+var _serialize_string_limit: int = SERIALIZE_UNLIMITED
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -1051,7 +1084,7 @@ func _sample_one_watch(spec: Variant) -> Variant:
 	var node := get_tree().root.get_node_or_null(NodePath(str(parts[0])))
 	if node == null:
 		return null
-	return _serialize_value(node.get_indexed(NodePath(str(parts[1]))))
+	return _serialize_sample(node.get_indexed(NodePath(str(parts[1]))))
 
 # --- Profiler track ---
 
@@ -1277,13 +1310,50 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	var serialized = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
 
+# A value the caller asked for once (a run_script result, a mouse position):
+# bounded in depth, so a container that holds itself cannot recurse without
+# end, and in nothing else.
 func _serialize_value(value: Variant) -> Variant:
+	_serialize_depth_limit = MAX_RESULT_DEPTH
+	_serialize_elements_left = SERIALIZE_UNLIMITED
+	_serialize_string_limit = SERIALIZE_UNLIMITED
+	return _serialize_bounded(value, 0)
+
+# A watch or track sample: bounded in depth, total container elements and
+# string length. See MAX_SAMPLE_DEPTH.
+func _serialize_sample(value: Variant) -> Variant:
+	_serialize_depth_limit = MAX_SAMPLE_DEPTH
+	_serialize_elements_left = MAX_SAMPLE_ELEMENTS
+	_serialize_string_limit = MAX_SAMPLE_STRING_CHARS
+	return _serialize_bounded(value, 0)
+
+# Cuts text to the string limit in force, with the number of characters cut.
+func _bound_text(text: String) -> String:
+	if _serialize_string_limit == SERIALIZE_UNLIMITED or text.length() <= _serialize_string_limit:
+		return text
+	return text.substr(0, _serialize_string_limit) + TRUNCATED_STRING_MARKER % (text.length() - _serialize_string_limit)
+
+# True when one more container element may be serialized, and counts it.
+func _take_serialize_element() -> bool:
+	if _serialize_elements_left == SERIALIZE_UNLIMITED:
+		return true
+	if _serialize_elements_left <= 0:
+		return false
+	_serialize_elements_left -= 1
+	return true
+
+# `depth` is how many containers enclose `value`. Call through _serialize_value
+# or _serialize_sample, which set the bounds this reads.
+func _serialize_bounded(value: Variant, depth: int) -> Variant:
 	if value == null:
 		return null
 
 	match typeof(value):
-		TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
+		TYPE_BOOL, TYPE_INT, TYPE_FLOAT:
 			return value
+		TYPE_STRING:
+			var text: String = value
+			return _bound_text(text)
 		TYPE_VECTOR2:
 			var v: Vector2 = value
 			return {"x": v.x, "y": v.y}
@@ -1300,16 +1370,28 @@ func _serialize_value(value: Variant) -> Variant:
 			var c: Color = value
 			return {"r": c.r, "g": c.g, "b": c.b, "a": c.a}
 		TYPE_DICTIONARY:
+			if depth >= _serialize_depth_limit:
+				return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
 			var d: Dictionary = value
 			var result := {}
+			var taken := 0
 			for key in d:
-				result[str(key)] = _serialize_value(d[key])
+				if not _take_serialize_element():
+					result[TRUNCATED_ENTRIES_KEY] = TRUNCATED_ENTRIES_MARKER % (d.size() - taken)
+					break
+				result[_bound_text(str(key))] = _serialize_bounded(d[key], depth + 1)
+				taken += 1
 			return result
 		TYPE_ARRAY:
+			if depth >= _serialize_depth_limit:
+				return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
 			var a: Array = value
 			var result := []
-			for item in a:
-				result.append(_serialize_value(item))
+			for i in a.size():
+				if not _take_serialize_element():
+					result.append(TRUNCATED_ELEMENTS_MARKER % (a.size() - i))
+					break
+				result.append(_serialize_bounded(a[i], depth + 1))
 			return result
 		TYPE_OBJECT:
 			# A freed Object is not null, and `is` raises on one. A profiler track
@@ -1324,9 +1406,11 @@ func _serialize_value(value: Variant) -> Variant:
 				var res: Resource = value
 				return {"class": res.get_class(), "path": res.resource_path}
 			else:
-				return str(value)
+				return _bound_text(str(value))
 		_:
-			return str(value)
+			# Everything else goes out as text, the packed arrays included, so
+			# the string limit is what bounds a sampled PackedByteArray.
+			return _bound_text(str(value))
 
 # --- Shutdown ---
 
