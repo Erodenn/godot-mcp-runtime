@@ -974,3 +974,86 @@ describe('handleGetSceneDependencies: a blank after the opening bracket', () => 
     expect(parsed.warnings?.[0]).toMatch(/1 .*ext_resource/);
   });
 });
+
+describe('handleCheckProject: name parsing and engine version', () => {
+  type CheckPayload = { name: string; warnings?: string[] };
+  const featuresProject = (features: string): string =>
+    `config_version=5\n\n[application]\nconfig/name="Versioned"\n${features}`;
+  const ENGINE_WARNING = /^Godot 4\.6 is newer than this project's config\/features version 4\.4:/;
+
+  async function check(project: string, godotVersion: string): Promise<CheckPayload> {
+    const dir = tmp.makeProject('check-version-', project);
+    const fake = createFakeRunner({ godotVersion });
+    const result = await handleCheckProject(fake.asRunner, { projectPath: dir });
+    expectMatchesOutputSchema('check_project', result);
+    return parseText<CheckPayload>(result);
+  }
+
+  it('ignores a commented config/name line', async () => {
+    const dir = tmp.makeProject(
+      'check-name-comment-',
+      'config_version=5\n\n[application]\n; config/name="Old"\nconfig/name="Real"\n',
+    );
+    const fake = createFakeRunner({ godotVersion: '4.4.stable' });
+    const parsed = parseText<CheckPayload>(
+      await handleCheckProject(fake.asRunner, { projectPath: dir }),
+    );
+    expect(parsed.name).toBe('Real');
+  });
+
+  it('falls back to the folder name when the only config/name line is a comment', async () => {
+    const dir = tmp.makeProject(
+      'check-name-only-comment-',
+      'config_version=5\n\n[application]\n; config/name="Old"\n',
+    );
+    const fake = createFakeRunner({ godotVersion: '4.4.stable' });
+    const parsed = parseText<CheckPayload>(
+      await handleCheckProject(fake.asRunner, { projectPath: dir }),
+    );
+    expect(parsed.name).toBe(dir.split(sep).pop());
+  });
+
+  it('unescapes a quote inside config/name', async () => {
+    const dir = tmp.makeProject(
+      'check-name-escape-',
+      'config_version=5\n\n[application]\nconfig/name="My \\"Quoted\\" Game"\n',
+    );
+    const fake = createFakeRunner({ godotVersion: '4.4.stable' });
+    const parsed = parseText<CheckPayload>(
+      await handleCheckProject(fake.asRunner, { projectPath: dir }),
+    );
+    expect(parsed.name).toBe('My "Quoted" Game');
+  });
+
+  it('warns when the engine is newer than the project features version', async () => {
+    const parsed = await check(
+      featuresProject('config/features=PackedStringArray("4.4", "Forward Plus")\n'),
+      '4.6.2.stable.official',
+    );
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings?.[0]).toMatch(ENGINE_WARNING);
+  });
+
+  it.each([
+    ['equal', '4.4.1.stable.official'],
+    ['older', '4.3.stable'],
+  ])('does not warn when the engine is %s', async (_label, engine) => {
+    const parsed = await check(
+      featuresProject('config/features=PackedStringArray("4.4", "Forward Plus")\n'),
+      engine,
+    );
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  it('does not warn when the project has no features version', async () => {
+    expect((await check(featuresProject(''), '4.6.2.stable')).warnings).toBeUndefined();
+    expect(
+      (
+        await check(
+          featuresProject('config/features=PackedStringArray("Forward Plus")\n'),
+          '4.6.2.stable',
+        )
+      ).warnings,
+    ).toBeUndefined();
+  });
+});

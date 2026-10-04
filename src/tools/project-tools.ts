@@ -19,7 +19,8 @@ import {
 import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { scanTscn } from '../utils/scene-parsing.js';
-import { readProjectSettings } from '../utils/project-godot.js';
+import { findSetting, readProjectSettings, scanProjectFile } from '../utils/project-godot.js';
+import { engineNewerThanProject } from '../utils/engine-version.js';
 
 function fileExtension(name: string): string {
   const dotIdx = name.lastIndexOf('.');
@@ -93,7 +94,7 @@ export const projectToolDefinitions = [
   {
     name: 'check_project',
     description:
-      "Get project metadata and the Godot version, plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session; runtime.projectPath names its project (null when none) and runtime.liveSessions lists all live sessions. With projectPath, runtime.project reports that project's session: live, exited or none. Returns: { name?, projectPath?, structure?, godotVersion, runtime }; warnings leads if structure is partial. Errors if projectPath lacks project.godot.",
+      "Get project metadata and the Godot version, plus a runtime block. runtime.activeSession, sessionMode and bridgeResponsive describe the current session, projectPath its project (null when none), liveSessions all live ones. With projectPath, runtime.project is that project's session: live, exited or none. Returns: { name?, projectPath?, structure?, godotVersion, runtime }; warnings leads if structure is partial or the engine is newer than the project. Errors if projectPath lacks project.godot.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -311,6 +312,10 @@ const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules'
 
 /** A header line the scene scanner could not read but that was meant as a dependency. */
 const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
+
+/** Where Godot keeps the project's display name. */
+const APPLICATION_SECTION = 'application';
+const CONFIG_NAME_KEY = 'config/name';
 
 /** The maxDepth value that lists every level. */
 const UNLIMITED_DEPTH = -1;
@@ -778,18 +783,30 @@ export async function handleCheckProject(
     let projectName = basename(parsed.value.projectPath);
     try {
       const projectFileContent = readFileSync(projectFile, 'utf8');
-      const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
-      if (configNameMatch && configNameMatch[1]) {
-        projectName = configNameMatch[1];
+      const nameSetting = findSetting(
+        scanProjectFile(projectFileContent),
+        APPLICATION_SECTION,
+        CONFIG_NAME_KEY,
+      );
+      if (typeof nameSetting?.value === 'string' && nameSetting.value !== '') {
+        projectName = nameSetting.value;
         logDebug(`Found project name in config: ${projectName}`);
       }
     } catch (error) {
       logDebug(`Error reading project file: ${error}`);
     }
 
+    const newer = engineNewerThanProject(version, parsed.value.projectPath);
+    const engineWarnings =
+      newer === null
+        ? []
+        : [
+            `Godot ${newer.engine.major}.${newer.engine.minor} is newer than this project's config/features version ${newer.project.major}.${newer.project.minor}: scenes saved through this server may be written in a format the project's engine predates.`,
+          ];
+
     return createStructuredResponse(
       leadWithWarnings({
-        warnings: summarizeWalkProblems(structureProblems),
+        warnings: [...summarizeWalkProblems(structureProblems), ...engineWarnings],
         name: projectName,
         projectPath: resolve(parsed.value.projectPath),
         godotVersion: version,
