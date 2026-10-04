@@ -102,7 +102,7 @@ export const projectToolDefinitions = [
         projectPath: {
           type: 'string',
           description:
-            'Path to the Godot project directory (optional - omit to get Godot version and runtime status only)',
+            'Path to the Godot project directory (optional - omit to get Godot version and runtime status only). An empty string is treated as omitted.',
         },
       },
       required: [],
@@ -286,7 +286,7 @@ export const projectToolDefinitions = [
         section: {
           type: 'string',
           description:
-            'Filter to a specific INI section (e.g. "display", "application"). Omit for all sections.',
+            'Filter to a specific INI section (e.g. "display", "application"). Omit for all sections; an empty string is treated as omitted.',
         },
       },
       required: ['projectPath'],

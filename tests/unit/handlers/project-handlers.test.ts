@@ -1092,3 +1092,31 @@ describe('handleSearchProject: maxResults', () => {
     expect(parsed.truncated).toBe(true);
   });
 });
+
+describe('empty string on an optional parameter', () => {
+  it('get_project_settings treats section "" as omitted', async () => {
+    const dir = tmp.makeProject(
+      'empty-section-',
+      'config_version=5\n\n[application]\nconfig/name="X"\n',
+    );
+    const withEmpty = parseText<{ settings: unknown; section?: string }>(
+      await handleGetProjectSettings({ projectPath: dir, section: '' }),
+    );
+    const omitted = parseText<{ settings: unknown; section?: string }>(
+      await handleGetProjectSettings({ projectPath: dir }),
+    );
+    expect(withEmpty).toEqual(omitted);
+    expect(withEmpty).not.toHaveProperty('section');
+  });
+
+  it('check_project treats projectPath "" as omitted', async () => {
+    const fake = createFakeRunner({ godotVersion: '4.4.stable' });
+    const withEmpty = parseText<Record<string, unknown>>(
+      await handleCheckProject(fake.asRunner, { projectPath: '' }),
+    );
+    const omitted = parseText<Record<string, unknown>>(await handleCheckProject(fake.asRunner, {}));
+    expect(withEmpty).toEqual(omitted);
+    expect(withEmpty).not.toHaveProperty('name');
+    expect(withEmpty).not.toHaveProperty('structure');
+  });
+});
