@@ -14,7 +14,7 @@
  */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, readFileSync, rmSync } from 'fs';
+import { cpSync, existsSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -24,7 +24,7 @@ import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
 import { handleGetSceneTree, handleSetNodeProperties } from '../../src/tools/node-tools.js';
-import { handleSaveScene } from '../../src/tools/scene-tools.js';
+import { handleAddNode, handleSaveScene } from '../../src/tools/scene-tools.js';
 
 const PLAYER_SCENE = 'player.tscn';
 const CASE_TIMEOUT_MS = 120000;
@@ -124,6 +124,95 @@ describe('a scene script that names an autoload survives a headless save', () =>
       const result = await handleGetSceneTree(runner, { projectPath, scenePath: PLAYER_SCENE });
       const tree = expectMatchesOutputSchema('get_scene_tree', result);
       expect(tree.script).toBe('res://player.gd');
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+const BROKEN_SCENE = 'broken_script.tscn';
+/** The backup location a loss warning names, project-relative with forward slashes. */
+const BACKUP_PATH_REGEX = /\.mcp\/godot-runtime\/scene-backups\/[^/\s]+\/[^\s]+\.tscn/;
+
+describe('a headless save that drops content says so and keeps the file as it was', () => {
+  itGodot(
+    'add_node on a scene whose script does not compile warns, backs the file up and still saves',
+    async () => {
+      // broken_script.gd names an identifier that exists nowhere, so the engine
+      // cannot load it and the save drops the stored export (and, on 4.6, the
+      // script line with it).
+      const before = sceneText(BROKEN_SCENE);
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: BROKEN_SCENE,
+        nodeType: 'Node2D',
+        nodeName: 'Added',
+      });
+      const payload = expectMatchesOutputSchema('add_node', result);
+
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      expect(payload.nodeName).toBe('Added');
+      expect(payload.nodePath).toBe('root/Added');
+      const warnings = payload.warnings as string[];
+      expect(warnings[0]).toMatch(/lost content this operation did not ask to change/);
+      const backup = BACKUP_PATH_REGEX.exec(warnings[0] ?? '');
+      expect(backup).not.toBeNull();
+      expect(warnings.some((entry) => /stored values of .*: .*\bspeed\b/.test(entry))).toBe(true);
+
+      expect(readFileSync(join(projectPath, ...backup![0].split('/')), 'utf8')).toBe(before);
+      expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+      // The save happened: the new node is in the file.
+      expect(sceneText(BROKEN_SCENE)).toContain('[node name="Added" type="Node2D" parent="."');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'add_node on a healthy scene reports no loss and writes no backup',
+    async () => {
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: PLAYER_SCENE,
+        nodeType: 'Node2D',
+        nodeName: 'Added',
+      });
+      const payload = expectMatchesOutputSchema('add_node', result);
+
+      // Not "no warnings": an engine newer than the project's config/features
+      // version adds its own entry.
+      const warnings = (payload.warnings ?? []) as string[];
+      expect(warnings.filter((entry) => /lost|no longer/.test(entry))).toEqual([]);
+      expect(existsSync(join(projectPath, '.mcp', 'godot-runtime', 'scene-backups'))).toBe(false);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'edits on the inherited and the instancing scene report no loss',
+    async () => {
+      // The shapes the comparison has to read as healthy: an inherited root,
+      // an override line, and an editable instance gaining its first override.
+      const derived = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: 'derived_unit.tscn',
+        updates: [{ nodePath: 'root/Leg', property: 'text', value: 'changed' }],
+      });
+      const host = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: 'host.tscn',
+        updates: [{ nodePath: 'root/Unit/Arm', property: 'position', value: { x: 7, y: 7 } }],
+      });
+      for (const [tool, result] of [
+        ['derived', derived],
+        ['host', host],
+      ] as const) {
+        const payload = expectMatchesOutputSchema('set_node_properties', result);
+        const warnings = (payload.warnings ?? []) as string[];
+        expect(
+          warnings.filter((entry) => /lost|no longer/.test(entry)),
+          tool,
+        ).toEqual([]);
+      }
+      expect(existsSync(join(projectPath, '.mcp', 'godot-runtime', 'scene-backups'))).toBe(false);
     },
     CASE_TIMEOUT_MS,
   );

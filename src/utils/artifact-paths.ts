@@ -16,6 +16,9 @@ import { join } from 'path';
  *     <project>/.mcp/godot-runtime/scripts/                 (run_script audit pairs, persists)
  *     <project>/.mcp/godot-runtime/validate/                (temp files, deleted per call)
  *     <project>/.mcp/godot-runtime/movies/<run id>/         (kept for `frames` and `video` runs, removed per call for `check`)
+ *     <project>/.mcp/godot-runtime/scene-backups/<run id>/<scene path>
+ *                                                            (a scene as it was before a save that dropped content;
+ *                                                             never removed by the server)
  *
  * `.gdignore` stays at the `.mcp/` level and covers the whole subtree; the
  * autoload under it still loads, because autoload resolution goes through
@@ -37,6 +40,7 @@ const SCREENSHOTS_DIR_NAME = 'screenshots' as const;
 const AUDIT_SCRIPTS_DIR_NAME = 'scripts' as const;
 const VALIDATE_DIR_NAME = 'validate' as const;
 const MOVIES_DIR_NAME = 'movies' as const;
+const SCENE_BACKUPS_DIR_NAME = 'scene-backups' as const;
 
 /** Basename given to --write-movie for a PNG sequence; Godot inserts the frame index before the extension. */
 export const MOVIE_FRAME_BASENAME = 'frame' as const;
@@ -146,6 +150,32 @@ export function movieOutputPath(
 export function movieAudioPath(projectPath: string, runId: string): string {
   const fileName = `${MOVIE_FRAME_BASENAME}.${MOVIE_AUDIO_EXTENSION}`;
   return join(movieRunDir(projectPath, runId), fileName);
+}
+
+/**
+ * `<project>/.mcp/godot-runtime/scene-backups` — one subdirectory per headless
+ * save that dropped content. Never cleaned by the server.
+ */
+export function sceneBackupsDir(projectPath: string): string {
+  return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, SCENE_BACKUPS_DIR_NAME);
+}
+
+/**
+ * Where the pre-save text of one scene is kept: the run directory followed by
+ * the scene's own project-relative segments, so two scenes with one basename
+ * never collide. `sceneRelPath` is a resolved `relPath` ('/' separators, no
+ * `..`), never a raw user string.
+ */
+export function sceneBackupPath(projectPath: string, runId: string, sceneRelPath: string): string {
+  return join(sceneBackupsDir(projectPath), runId, ...sceneRelPath.split('/'));
+}
+
+/**
+ * The same backup location in project-relative POSIX form, for the warning text
+ * a caller reads: identical on every host platform.
+ */
+export function sceneBackupRelPath(runId: string, sceneRelPath: string): string {
+  return `${NAMESPACE_RES_DIR}/${SCENE_BACKUPS_DIR_NAME}/${runId}/${sceneRelPath}`;
 }
 
 /**

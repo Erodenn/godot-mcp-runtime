@@ -90,6 +90,13 @@ export interface TscnHeader {
   raw: string;
   /** Property lines whose value is exactly one string, unescaped, by key. */
   stringProps: Map<string, string>;
+  /**
+   * Every other property line, by key: the text from the start of the value to
+   * the end of its line (or to the comment), trimmed and otherwise as written.
+   * A value that continues on later lines (a dictionary, mostly) is cut at the
+   * first one.
+   */
+  rawProps: Map<string, string>;
 }
 
 export interface TscnScan {
@@ -251,7 +258,14 @@ export function scanTscn(content: string): TscnScan {
       const parsed = parseHeader(content, headerAt, lineEnd);
       const raw = snippet(content.slice(headerAt, lineEnd));
       if (parsed.ok) {
-        current = { tag: parsed.tag, attrs: parsed.attrs, line, raw, stringProps: new Map() };
+        current = {
+          tag: parsed.tag,
+          attrs: parsed.attrs,
+          line,
+          raw,
+          stringProps: new Map(),
+          rawProps: new Map(),
+        };
         headers.push(current);
       } else {
         current = null;
@@ -296,11 +310,13 @@ export function scanTscn(content: string): TscnScan {
       const valueEnd = commentAt === -1 ? j : commentAt;
       let valueStart = equalsAt + 1;
       while (valueStart < valueEnd && isBlank(content[valueStart])) valueStart++;
-      if (content[valueStart] === '"') {
-        const quoted = readQuoted(content, valueStart, length);
-        if (quoted !== null && content.slice(quoted.end, valueEnd).trim() === '') {
-          current.stringProps.set(content.slice(i, equalsAt).trim(), quoted.value);
-        }
+      const key = content.slice(i, equalsAt).trim();
+      const quoted = content[valueStart] === '"' ? readQuoted(content, valueStart, length) : null;
+      if (quoted !== null && content.slice(quoted.end, valueEnd).trim() === '') {
+        current.stringProps.set(key, quoted.value);
+      } else {
+        const rawValue = content.slice(valueStart, valueEnd).trim();
+        if (rawValue !== '') current.rawProps.set(key, rawValue);
       }
     }
     line += countNewlines(content, i, Math.min(j, length)) + 1;

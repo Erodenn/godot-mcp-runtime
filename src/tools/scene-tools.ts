@@ -18,6 +18,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
+import { batchSceneWrites, inPlaceSceneWrite, loadSpriteTouch } from '../utils/scene-loss-guard.js';
 
 export const sceneToolDefinitions = [
   {
@@ -154,6 +155,7 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         nodePath: { type: 'string' },
         nodeType: { type: 'string' },
         texturePath: {
@@ -478,7 +480,11 @@ export async function handleAddNode(
       'If nodeType is a scene path, verify the file exists and loads (.tscn or .scn)',
     ],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath),
+    },
   );
 }
 
@@ -524,7 +530,13 @@ export async function handleLoadSprite(
     'Failed to load sprite',
     ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, {
+        touchedProperties: [loadSpriteTouch(nodePath.value)],
+      }),
+    },
   );
 }
 
@@ -559,7 +571,18 @@ export async function handleSaveScene(
     'Failed to save scene',
     ['Check if the scene file is valid'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: [
+        {
+          source: parsed.value.scenePath,
+          target: newScene ? newScene.relPath : parsed.value.scenePath,
+          touchedNodes: [],
+          deletedNodes: [],
+        },
+      ],
+    },
   );
 }
 
@@ -632,6 +655,10 @@ export async function handleBatchSceneOperations(
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: batchSceneWrites(operations.value),
+    },
   );
 }

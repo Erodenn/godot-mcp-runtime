@@ -22,6 +22,7 @@ import type { NodePath, ProjectPath, ScenePath } from '../utils/branded.js';
 import type { Result } from '../utils/result.js';
 import { ok, err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
+import { inPlaceSceneWrite, updateTouches } from '../utils/scene-loss-guard.js';
 
 // --- Tool definitions ---
 
@@ -68,6 +69,7 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         results: {
           type: 'array',
           items: {
@@ -130,7 +132,7 @@ export const nodeToolDefinitions = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'Present when an update succeeded on the loaded scene but the scene file does not store it (a script variable declared without @export). Each entry names the update index.',
+            'Present when an update succeeded on the loaded scene but the scene file does not store it (a script variable declared without @export), naming the update index, or when the save dropped content no update asked to change.',
         },
         results: {
           type: 'array',
@@ -225,6 +227,7 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         success: { type: 'boolean' },
         nodePath: {
           type: 'string',
@@ -314,6 +317,7 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         success: { type: 'boolean' },
         nodePath: { type: 'string' },
         newNodePath: { type: 'string' },
@@ -444,7 +448,11 @@ export async function handleDeleteNodes(
     'Failed to delete nodes',
     ['Check if the node paths are correct'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { deletedNodes: nodePaths }),
+    },
   );
 }
 
@@ -477,7 +485,11 @@ export async function handleSetNodeProperties(
     'Failed to set node properties',
     ['Check node paths and property names'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, updateTouches(updates.value)),
+    },
   );
 }
 
@@ -553,7 +565,13 @@ export async function handleAttachScript(
       'For a C# script, build the project (dotnet build, or Build in the Godot editor) so the class is in the compiled assembly, and make sure GODOT_PATH points at the Godot .NET build',
     ],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      // A new script replaces what the node stores (the old script's exports
+      // go with it), so the whole node is the request.
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { touchedNodes: [nodePath.value] }),
+    },
   );
 }
 
@@ -617,7 +635,11 @@ export async function handleDuplicateNode(
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath),
+    },
   );
 }
 
@@ -703,7 +725,11 @@ export async function handleConnectSignal(
     'Failed to connect signal',
     ['Ensure the signal exists on the source node and the method exists on the target node'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath),
+    },
   );
 }
 
@@ -730,6 +756,19 @@ export async function handleDisconnectSignal(
     'Failed to disconnect signal',
     ['Ensure the signal connection exists before trying to disconnect it'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, {
+        removedConnections: [
+          {
+            signal: parsed.value.signal,
+            from: parsed.value.nodePath,
+            to: parsed.value.targetNodePath,
+            method: parsed.value.method,
+          },
+        ],
+      }),
+    },
   );
 }

@@ -6,6 +6,9 @@ import {
   movieOutputPath,
   movieRunDir,
   moviesDir,
+  sceneBackupPath,
+  sceneBackupRelPath,
+  sceneBackupsDir,
 } from '../../src/utils/artifact-paths.js';
 
 describe('isServerOwnedBridgePath', () => {
@@ -60,5 +63,28 @@ describe('movie paths', () => {
 
   it('movieAudioPath names frame.wav', () => {
     expect(movieAudioPath(PROJECT, RUN_ID)).toBe(join(movieRunDir(PROJECT, RUN_ID), 'frame.wav'));
+  });
+});
+
+describe('scene backup paths', () => {
+  const PROJECT = join('proj', 'dir');
+  const RUN_ID = '1700000000000-abc';
+  const BACKUPS = join(PROJECT, '.mcp', 'godot-runtime', 'scene-backups');
+
+  it('sceneBackupsDir is .mcp/godot-runtime/scene-backups under the project', () => {
+    expect(sceneBackupsDir(PROJECT)).toBe(BACKUPS);
+  });
+
+  it('sceneBackupPath keeps the scene relative path under the run directory', () => {
+    expect(sceneBackupPath(PROJECT, RUN_ID, 'main.tscn')).toBe(join(BACKUPS, RUN_ID, 'main.tscn'));
+    expect(sceneBackupPath(PROJECT, RUN_ID, 'levels/a/main.tscn')).toBe(
+      join(BACKUPS, RUN_ID, 'levels', 'a', 'main.tscn'),
+    );
+  });
+
+  it('sceneBackupRelPath is the same location, project-relative with forward slashes', () => {
+    expect(sceneBackupRelPath(RUN_ID, 'levels/a/main.tscn')).toBe(
+      `.mcp/godot-runtime/scene-backups/${RUN_ID}/levels/a/main.tscn`,
+    );
   });
 });

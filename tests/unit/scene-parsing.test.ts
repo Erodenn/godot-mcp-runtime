@@ -9,6 +9,7 @@ import { join } from 'path';
 import {
   extractSceneScripts,
   collectSceneScriptsRecursive,
+  scanTscn,
 } from '../../src/utils/scene-parsing.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
@@ -170,5 +171,52 @@ describe('collectSceneScriptsRecursive', () => {
   it('returns [] when the root scene file is missing', () => {
     const dir = tmp.makeProject('subscene-root-missing-', 'config_version=5\n');
     expect(collectSceneScriptsRecursive(join(dir, 'missing.tscn'), dir)).toEqual([]);
+  });
+});
+
+describe('scanTscn rawProps', () => {
+  const scan = scanTscn(
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[node name="Main" type="Node2D"]',
+      'script = ExtResource("1_a")',
+      'position = Vector2(3, 4)  ; a comment',
+      'text = "plain string"',
+      'frames = ["a", ExtResource("2_b")]',
+      'metadata/table = {',
+      '"key": 1',
+      '}',
+      '',
+    ].join('\r\n'),
+  );
+  const node = scan.headers[1]!;
+
+  it('keeps a non-string value as written, by key', () => {
+    expect(node.rawProps.get('script')).toBe('ExtResource("1_a")');
+    expect(node.rawProps.get('frames')).toBe('["a", ExtResource("2_b")]');
+  });
+
+  it('stops at a comment and trims the line ending', () => {
+    expect(node.rawProps.get('position')).toBe('Vector2(3, 4)');
+  });
+
+  it('leaves a value that is one quoted string to stringProps', () => {
+    expect(node.stringProps.get('text')).toBe('plain string');
+    expect(node.rawProps.has('text')).toBe(false);
+  });
+
+  it('cuts a value that continues on later lines at the first one', () => {
+    expect(node.rawProps.get('metadata/table')).toBe('{');
+    expect(Array.from(node.rawProps.keys())).toEqual([
+      'script',
+      'position',
+      'frames',
+      'metadata/table',
+    ]);
+  });
+
+  it('gives a header with no properties an empty map', () => {
+    expect(scan.headers[0]!.rawProps.size).toBe(0);
   });
 });

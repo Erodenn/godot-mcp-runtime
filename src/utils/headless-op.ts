@@ -11,6 +11,7 @@ import {
 } from './output-parsing.js';
 import { ok, err } from './result.js';
 import { liveSessionRemedy } from './session-report.js';
+import { beginSceneGuard, finishSceneGuard, type SceneWriteIntent } from './scene-loss-guard.js';
 
 /** Max stderr diagnostic entries surfaced in an early-exit error message. */
 const MAX_STDERR_DIAGNOSTIC_LINES = 5;
@@ -262,6 +263,42 @@ function interpretOperationResult(
  * `classifyMarkedRun`): the replay would redo what it already saved. A marker
  * counts only as a line the script itself printed (see `stderrRequestsImport`).
  */
+export interface SceneOpOptions {
+  parseStdoutAsJson?: boolean;
+  mutatesSceneFile?: boolean;
+  /**
+   * The scene files this operation writes and what it asks to change in each.
+   * When given, the files are compared before and after (see
+   * `scene-loss-guard.ts`) and content lost outside that intent leads the
+   * payload as warnings.
+   */
+  sceneWrites?: SceneWriteIntent[];
+}
+
+/**
+ * Put `warnings` ahead of whatever the result already carries. A success keeps
+ * its payload and gains (or extends) a leading `warnings` array. A failure
+ * gains one more text block: the operation failed, but a file it wrote before
+ * failing is still on disk, and what that file lost is still worth saying.
+ */
+function prependWarnings(result: HandlerResult, warnings: string[]): HandlerResult {
+  if (warnings.length === 0) return result;
+  if (!result.ok) {
+    result.error.content.push({ type: 'text', text: warnings.join('\n') });
+    return result;
+  }
+  const payload = result.value.structuredContent;
+  if (payload === undefined) {
+    // A plain-text result has no payload to lead; the warnings still go out.
+    result.value.content.unshift({ type: 'text', text: warnings.join('\n') });
+    return result;
+  }
+  const existing = Array.isArray(payload.warnings) ? (payload.warnings as unknown[]) : [];
+  return createStructuredResponse(
+    leadWithWarnings({ ...payload, warnings: [...warnings, ...existing] }),
+  );
+}
+
 export async function executeSceneOp(
   runner: GodotRunner,
   operation: string,
@@ -270,14 +307,53 @@ export async function executeSceneOp(
   failurePrefix: string,
   emptyStdoutSolutions: string[],
   exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
-  options: { parseStdoutAsJson?: boolean; mutatesSceneFile?: boolean } = {},
+  options: SceneOpOptions = {},
 ): Promise<HandlerResult> {
   if (options.mutatesSceneFile) {
     const guard = rejectIfLiveSessionOnProject(runner, projectPath);
     if (guard) return guard;
   }
+  // Read before the first attempt and compared once after the last, so a
+  // cold-import retry is measured against the file as the caller left it, not
+  // against whatever the first attempt wrote.
+  const sceneGuard =
+    options.sceneWrites && options.sceneWrites.length > 0
+      ? beginSceneGuard(projectPath, options.sceneWrites)
+      : null;
+  const stderrSeen: string[] = [];
+  const result = await runSceneOp(
+    runner,
+    operation,
+    params,
+    projectPath,
+    failurePrefix,
+    emptyStdoutSolutions,
+    exceptionSolutions,
+    options,
+    stderrSeen,
+  );
+  // Every exit of the run comes through here, the refusals and the thrown
+  // spawn error included: a run that failed late may already have saved.
+  const lossWarnings =
+    sceneGuard === null ? [] : finishSceneGuard(sceneGuard, stderrSeen.join('\n'));
+  return prependWarnings(result, lossWarnings);
+}
+
+/** The run itself: one attempt, plus the cold-import retry. `stderrSeen` collects each attempt's stderr. */
+async function runSceneOp(
+  runner: GodotRunner,
+  operation: string,
+  params: OperationParams,
+  projectPath: string,
+  failurePrefix: string,
+  emptyStdoutSolutions: string[],
+  exceptionSolutions: string[],
+  options: SceneOpOptions,
+  stderrSeen: string[],
+): Promise<HandlerResult> {
   try {
     let { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
+    stderrSeen.push(stderr);
     let effectiveFailurePrefix = failurePrefix;
 
     // Check for the cold-import marker (may appear even if stdout has a JSON
@@ -322,6 +398,7 @@ export async function executeSceneOp(
         );
       }
       ({ stdout, stderr } = await runner.executeOperation(operation, params, projectPath));
+      stderrSeen.push(stderr);
       effectiveFailurePrefix = `${failurePrefix} (after the asset import step ran)`;
     }
 

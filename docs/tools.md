@@ -322,6 +322,33 @@ Each tool returns one JSON object, as `structuredContent` and as the same JSON i
 - `export_mesh_library`: `outputPath`, `itemCount` and `itemNames`, read from the library that was saved. A name in `meshItemNames` that matched no child, or matched a child with no mesh, is listed in a leading `warnings` entry instead of being dropped silently.
 - `batch_scene_operations`: `results[]` in input order. Every entry has `operation`, `scenePath` and either `success: true` or `error`, plus the fields the standalone tool returns: `nodeName`, `nodeType` and `nodePath` for `add_node`; `nodePath`, `nodeType` and `texturePath` for `load_sprite`; `updates[]` for `set_node_properties`; `savedScenePath` for `save`. A renamed `add_node` is reported in a top-level `warnings` entry that names the item index. Scenes are keyed by their normalized path, so `main.tscn` and `res://main.tscn` in one batch are the same scene and accumulate in one tree. Every mutated scene is saved once at the end; an entry whose scene could not be saved carries `error` instead of `success`, and a leading `warnings` entry names the scene. A `set_node_properties` entry stays `success: true` while at least one update landed, and when some failed a leading `warnings` entry (`operations[i]: N of M updates failed`) points at `results[i].updates`. With `abortOnError`, the operations after the first failure were never attempted and are listed as `{ operation, scenePath, skipped: true }`, so `results[]` still has one entry per operation; the same holds for the updates of one `set_node_properties` entry.
 
+### When a save drops content
+
+Every tool in this section and the next edits a scene by loading it, changing the loaded tree and saving it back. A save can leave out content the operation never touched: a script that does not compile takes its stored exports with it, for one. The engine cannot report this itself, because the tree it would be asked about is the one that already lost the content. So the server compares the scene file's text from before the operation with the text after it.
+
+When something is missing that the call did not ask to change, the call still succeeds and the file is still saved. The payload leads with `warnings`: one entry naming the scene and where the earlier file is, then one entry per loss, at most 8 per scene with a final `+N more`. On a call that fails after it wrote the file, the same lines are added to the error as a last text block.
+
+```
+Saved player.tscn, but the file lost content this operation did not ask to change. The file as it was before the save: .mcp/godot-runtime/scene-backups/1759543021934-6f1c.../player.tscn.
+"root" lost its script res://player.gd
+"root" lost stored values of res://player.gd: speed, hp
+```
+
+The file as it was before the save is copied to `.mcp/godot-runtime/scene-backups/<run id>/<scene path>` inside the project. The server never deletes these copies: remove them yourself once the scene is in order. A save-as to a path that held no file has nothing to copy, and the warning says so; the source scene is untouched in that case.
+
+What is reported:
+
+- The scene's `uid`, and the `uid` of a reference, when the file had one and no longer does.
+- A node that is no longer in the file, a scene that is no longer inherited, a node that no longer instances its scene, and a node whose type changed.
+- A reference a node held (`script`, a texture, any `ExtResource` or inline resource, also inside an array) that is gone or points elsewhere. Inline resources are followed to the references they hold themselves.
+- The stored values of a node whose script was lost or failed to load during the call.
+- An override of an instanced or inherited node that is gone, unless the scene it overrides holds the same value, which makes the override redundant.
+- A group a node is no longer in, and a signal connection that is no longer in the file.
+
+What the call asked for is never reported: the nodes `delete_nodes` removed and the connections that went with them, the property a `set_node_properties` update or `load_sprite` assigned, the node `attach_script` gave a new script, the connection `disconnect_signal` removed. On a node an update assigned to, vanished plain values are not reported either, since assigning one property can clear another.
+
+What is not compared, because a healthy save changes it: resource ids, `load_steps`, `unique_id`, the order of sections, added content, and plain values on a node whose script loaded (a value equal to its default is not written back). A changed value is not a loss and is not reported. Values that span several lines (dictionaries) are read to the end of their first line, so a reference inside one is not seen. Binary `.scn` scenes are not compared. `create_scene` and `export_mesh_library` replace or create a file, which is the request, so they are not compared either.
+
 ## Node Editing (headless)
 
 All mutation operations save automatically. Property and delete tools take always-array input - pass a single-element array for one-off operations, or many for batched work in one Godot process.
@@ -348,6 +375,7 @@ All mutation operations save automatically. Property and delete tools take alway
 - `delete_nodes`: `results[]`, one entry per path: `nodePath`, and `success: true` or `error`. A scene that cannot be loaded or saved is an error response. A node that belongs to an instanced scene (for example `root/Enemy/Hitbox` when `Enemy` is an instance) cannot be deleted from the scene that instances it, because the instance re-creates it on every load: that entry is an error naming the node, and the instance's own root stays deletable. A node that the scene inherits from a base scene (the scene's root is `instance=` of another scene) is refused the same way, because the base re-creates it on every load: that entry is an error saying to delete it in the base scene. A node the inheriting scene added itself is deletable.
 - `attach_script`: `success`, `nodePath` in the `root/...` form and `scriptPath` in project-relative form, whichever way each was passed.
 - `duplicate_node`: `success`, `nodePath` (the node that was copied) and `newNodePath`, where the duplicate is after the add, in the `root/...` form.
+- Every tool here that saves (`set_node_properties`, `delete_nodes`, `attach_script`, `duplicate_node`, `connect_signal`, `disconnect_signal`) leads its payload with `warnings` when the save dropped content the call did not ask to change. See "When a save drops content".
 - `get_node_signals`: `nodePath` in the `root/...` form, `nodeType` and `signals[]`, each with `name` and `connections[]` of `{ signal, target, method }`.
 - `connect_signal` and `disconnect_signal`: `nodePath`, `signal`, `targetNodePath`, `method` and `connected`. `connected` is not an echo of the request: after the save, the scene file is loaded again from disk and the connection is looked up in it. It is `true` after a connect and `false` after a disconnect. If that second load fails, `connected` is `null` and `warnings` leads the payload. A connect the saved scene does not hold, or a disconnect it still holds, is an error.
 

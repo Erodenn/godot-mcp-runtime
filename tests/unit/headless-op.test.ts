@@ -8,8 +8,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
+import { sceneBackupsDir } from '../../src/utils/artifact-paths.js';
+import { inPlaceSceneWrite } from '../../src/utils/scene-loss-guard.js';
+import { useTmpDirs } from '../helpers/tmp.js';
 import { leadWithWarnings } from '../../src/utils/structured-response.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
@@ -1125,6 +1129,173 @@ describe('leadWithWarnings', () => {
   it('leaves a non-array warnings value untouched', () => {
     const payload = { results: [], warnings: 'x' };
     expect(leadWithWarnings(payload)).toBe(payload);
+  });
+});
+
+describe('executeSceneOp scene loss guard', () => {
+  const tmp = useTmpDirs();
+  const SCENE = 'main.tscn';
+  const SCENE_BEFORE = [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://main.gd" id="1_abc"]',
+    '',
+    '[node name="Main" type="Node2D"]',
+    'script = ExtResource("1_abc")',
+    'speed = 9.0',
+    '',
+  ].join('\n');
+  const SCENE_HEALTHY = SCENE_BEFORE + '\n[node name="Added" type="Node2D" parent="."]\n';
+  const SCENE_LOSSY = [
+    '[gd_scene format=3]',
+    '',
+    '[node name="Main" type="Node2D"]',
+    '',
+    '[node name="Added" type="Node2D" parent="."]',
+    '',
+  ].join('\n');
+  const ADD_NODE_STDOUT = '{"nodeName":"Added","nodePath":"root/Added","nodeType":"Node2D"}';
+
+  /**
+   * A project holding SCENE, and a fake runner whose every executeOperation
+   * call writes the next entry of `sceneTexts` to it before answering, the way
+   * a headless save does.
+   */
+  function projectWithSavingRunner(
+    sceneTexts: string[],
+    options: Parameters<typeof createFakeRunner>[0] = { stdout: ADD_NODE_STDOUT },
+  ): { projectPath: string; fake: FakeRunner } {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, SCENE), SCENE_BEFORE, 'utf8');
+    const fake = createFakeRunner(options);
+    const runner = fake.asRunner;
+    const answer = runner.executeOperation.bind(runner);
+    let call = 0;
+    runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
+      const text = sceneTexts[call++];
+      if (text !== undefined) writeFileSync(join(projectPath, SCENE), text, 'utf8');
+      return answer(...args);
+    };
+    return { projectPath, fake };
+  }
+
+  function addNode(fake: FakeRunner, projectPath: string): ReturnType<typeof executeSceneOp> {
+    return executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      { scenePath: SCENE },
+      projectPath,
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true, mutatesSceneFile: true, sceneWrites: inPlaceSceneWrite(SCENE) },
+    );
+  }
+
+  it('leads the payload with the loss and keeps the pre-save file', async () => {
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY]);
+    const result = await addNode(fake, projectPath);
+
+    expect(hasError(result)).toBe(false);
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.nodeName).toBe('Added');
+    const warnings = payload.warnings as string[];
+    expect(warnings[0]).toMatch(/^Saved main\.tscn, but the file lost content/);
+    expect(warnings).toContain('"root" lost its script res://main.gd');
+    expect(warnings).toContain('"root" lost stored values of res://main.gd: speed');
+
+    const backup = /\.mcp\/godot-runtime\/scene-backups\/[^/]+\/main\.tscn/.exec(warnings[0] ?? '');
+    expect(backup).not.toBeNull();
+    expect(readFileSync(join(projectPath, ...backup![0].split('/')), 'utf8')).toBe(SCENE_BEFORE);
+    expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+    // The text block carries the same payload.
+    expect(JSON.parse(unwrap(result).content[0]?.text ?? '')).toEqual(payload);
+  });
+
+  it('puts the loss ahead of the warnings the operation reported itself', async () => {
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY], {
+      stdout: '{"nodeName":"Added","warnings":["renamed"]}',
+    });
+    const payload = unwrap(await addNode(fake, projectPath)).structuredContent as {
+      warnings: string[];
+    };
+    expect(payload.warnings[0]).toMatch(/scene-backups/);
+    expect(payload.warnings[payload.warnings.length - 1]).toBe('renamed');
+  });
+
+  it('adds nothing and writes no backup when the save lost nothing', async () => {
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_HEALTHY]);
+    const result = await addNode(fake, projectPath);
+
+    expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADD_NODE_STDOUT));
+    expect(existsSync(sceneBackupsDir(projectPath))).toBe(false);
+    expect(existsSync(join(projectPath, '.mcp'))).toBe(false);
+  });
+
+  it('compares against the file as it was before the first attempt when the import retry runs', async () => {
+    // The first attempt writes a lossy file and asks for an import; the retry
+    // writes the same lossy file again. Measured against the first attempt's
+    // output the retry would look clean.
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY, SCENE_LOSSY], {
+      responses: [
+        { stdout: '', stderr: '[ERROR] [IMPORT_NEEDED] res://x.png' },
+        { stdout: ADD_NODE_STDOUT },
+      ],
+    });
+    const result = await addNode(fake, projectPath);
+
+    expect(fake.calls).toHaveLength(2);
+    const payload = unwrap(result).structuredContent as { warnings: string[] };
+    expect(payload.warnings[0]).toMatch(/scene-backups/);
+    const backup = /\.mcp\/godot-runtime\/scene-backups\/[^/]+\/main\.tscn/.exec(
+      payload.warnings[0]!,
+    );
+    expect(readFileSync(join(projectPath, ...backup![0].split('/')), 'utf8')).toBe(SCENE_BEFORE);
+  });
+
+  it('still reports the loss when the operation itself failed after writing', async () => {
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY], {
+      stdout: '',
+      stderr: '[ERROR] something went wrong after the save',
+    });
+    const result = await addNode(fake, projectPath);
+
+    expectErrorMatching(result, /something went wrong after the save/);
+    const blocks = unwrap(result).content.map((block) => block.text ?? '');
+    expect(blocks[blocks.length - 1]).toMatch(/scene-backups/);
+  });
+
+  it('reads the scripts the engine failed to load from stderr', async () => {
+    // The script line survives (as it does on 4.5), only its value is gone.
+    const keptScript = SCENE_BEFORE.replace('speed = 9.0\n', '');
+    const { projectPath, fake } = projectWithSavingRunner([keptScript], {
+      stdout: ADD_NODE_STDOUT,
+      stderr: 'ERROR: Failed to load script "res://main.gd" with error "Parse error".',
+    });
+    const payload = unwrap(await addNode(fake, projectPath)).structuredContent as {
+      warnings: string[];
+    };
+    expect(payload.warnings).toContain('"root" lost stored values of res://main.gd: speed');
+  });
+
+  it('does not guard a scene path that escapes the project', async () => {
+    const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY]);
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      { scenePath: SCENE },
+      projectPath,
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      {
+        parseStdoutAsJson: true,
+        mutatesSceneFile: true,
+        sceneWrites: inPlaceSceneWrite('../outside.tscn'),
+      },
+    );
+    expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADD_NODE_STDOUT));
   });
 });
 
