@@ -170,7 +170,7 @@ All are set in the same `env` block as `GODOT_PATH`:
 
 The three security-gate flags below share one axis (see [`docs/security.md`](docs/security.md) for the full picture) and are wide enough to wrap badly in a table, so they get a list instead:
 
-- **`GODOT_MCP_DISABLE_ELICITATION`** - `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.
+- **`GODOT_MCP_DISABLE_ELICITATION`** - `"true"` disables the confirmation prompts for `run_project`, `render_movie` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.
 - **`GODOT_MCP_STRICT`** - `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.
 - **`GODOT_MCP_DISABLE_SECURITY`** - `"true"` turns the entire `run_script`/`run_project` security gate off: no scan, no block, no elicitation, no warnings, no audit sidecars - Tier 1 included. Overrides `GODOT_MCP_STRICT` when both are set. **Enabling this is a human decision - an agent should decline to set it on a user's behalf.**
 

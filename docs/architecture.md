@@ -38,7 +38,9 @@ src/
     ├── godot-variant.ts         # Variant subset the remote debugger speaks on the wire
     ├── project-godot.ts         # The one project.godot reader: statements, sections and line spans (scanProjectFile), and the settings view get_project_settings returns
     ├── autoload-ini.ts          # project.godot [autoload] primitives: parse, add, remove and update, located through project-godot.ts
-    ├── launch-scene.ts          # run/main_scene resolution for a launch that names no scene
+    ├── launch-scene.ts          # run/main_scene resolution for a launch that names no scene, including a uid:// value
+    ├── engine-version.ts        # Compares the running Godot's major.minor with the project's config/features version
+    ├── scene-loss-guard.ts      # Compares a scene file's text before and after a headless save and writes the scene-backups copy when content was lost
     ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
     ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
     ├── launch-gate.ts           # Pre-flight script scan + once-per-project launch confirmation, callable by any handler that launches a project
@@ -143,7 +145,7 @@ The shared script and autoload entry are created on the first live session's inj
 
 Attach mode allows at most one live attach owner per project, because it bakes its port and token into the one shared script: a second `run_project` with `attach: true` on a project another session has already attached to is refused before any write, naming the other session's pid. Spawned sessions carry no such limit, since they deliver their port through the environment and never bake anything.
 
-A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own. Only a missing registry directory counts as an empty registry. One that exists and cannot be listed, or that holds an owner file that cannot be read, is unknown: the edit guard, `render_movie` and `run_project` refuse with the reason, and a cleanup leaves the shared script and autoload entry in place instead of removing them.
+A headless scene-editing call also checks for another server's live session on the project, not just its own: if one is found, the call is refused with a message naming that session's pid and mode, since this session cannot stop a game it does not own. An owner registered from another host cannot be probed and counts as live, so that refusal also names the host and the owner file; deleting the file is the way out when the session is known to be gone (a project copied from another machine, or a renamed host). Only a missing registry directory counts as an empty registry. One that exists and cannot be listed, or that holds an owner file that cannot be read, is unknown: the edit guard, `render_movie` and `run_project` refuse with the reason, and a cleanup leaves the shared script and autoload entry in place instead of removing them.
 
 Accepted gaps: two servers racing a read-modify-write on `project.godot` in the same instant can still lose one edit (writing the owner file first keeps the window tiny, and the next inject from either side restores the entry); and an older server version sharing a project writes no owner file, so it is invisible to this registry.
 

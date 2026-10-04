@@ -132,4 +132,4 @@ For any PR that adds or changes a tool definition:
 - [ ] If discriminator: documented as load-bearing exception with rationale (§5)
 - [ ] `docs/tools.md` updated with the new/changed tool entry
 - [ ] If breaking (rename, drop, schema change): migration table entry in CHANGELOG / release notes
-- [ ] `npm run verify` passes (typecheck → lint → format:check → test → build)
+- [ ] `npm run verify` passes (typecheck → lint → format → test → build; `format` writes, so review the resulting diff)

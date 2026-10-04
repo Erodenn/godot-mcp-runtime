@@ -240,7 +240,7 @@ Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on 
 
 When enabled, the interactive confirmation is skipped and treated as accepted (**fail-open**):
 
-- `run_project`'s session-confirmation gate is bypassed; the project launches with a `warnings` entry recording the bypass.
+- The session-confirmation gate shared by `run_project` and `render_movie` is bypassed; the project launches with a `warnings` entry recording the bypass.
 - Tier 2 `run_script` findings proceed without a prompt, with the finding surfaced in `warnings` and audited as `elicit_bypassed`.
 - **Tier 1 hard-block primitives are unaffected**: they never elicit and always block. This flag only disables the "ask the user" prompts, not the static-analysis gate.
 
