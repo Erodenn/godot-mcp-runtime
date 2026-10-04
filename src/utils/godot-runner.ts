@@ -2291,7 +2291,13 @@ export class GodotRunner {
         if (opts.validatePong(parsed)) {
           if (opts.expectedPath && typeof parsed.project_path === 'string') {
             const bridgePath = normalizeForCompare(parsed.project_path);
-            if (bridgePath !== opts.expectedPath) {
+            // Compared with the session key's folding, not as spelled. The
+            // path the session was started with and the one Godot reports for
+            // `res://` are the same directory under two spellings whenever the
+            // drive letter or a directory name differs in case, and a
+            // case-sensitive compare would fail a healthy start as if another
+            // project's bridge had answered.
+            if (projectPathKey(bridgePath) !== projectPathKey(opts.expectedPath)) {
               return {
                 ready: false,
                 error: `Bridge reports project ${bridgePath}, expected ${opts.expectedPath}`,

@@ -155,6 +155,31 @@ describe('bridge readiness budget', () => {
     expect(harness.pings).toBe(1);
   });
 
+  // The path the session was started with and the one Godot reports for
+  // res:// can differ in drive-letter or directory case and in the trailing
+  // slash. That is the same project, under the same folding the session map
+  // uses.
+  it('accepts a pong whose project path differs from the expected one only in case and trailing slash', async () => {
+    const harness = pollWithStub(
+      () =>
+        Promise.resolve(JSON.stringify({ status: 'pong', project_path: 'D:/Games/My Project/' })),
+      { expectedPath: 'd:/games/my project' },
+    );
+    expect(await harness.poll()).toEqual({ ready: true });
+  });
+
+  it('still refuses a pong from a bridge that reports another project', async () => {
+    const harness = pollWithStub(
+      () => Promise.resolve(JSON.stringify({ status: 'pong', project_path: 'D:/Games/Other/' })),
+      { expectedPath: 'd:/games/my project' },
+    );
+    const result = await harness.poll();
+    expect(result.ready).toBe(false);
+    expect(result.error).toBe(
+      'Bridge reports project D:/Games/Other, expected d:/games/my project',
+    );
+  });
+
   it('returns a timeout error without an active spawned process instead of waiting', async () => {
     const runner = new GodotRunner();
     const started = Date.now();
