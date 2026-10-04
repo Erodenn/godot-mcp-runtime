@@ -214,6 +214,37 @@ describe('handleAddNode', () => {
     expect(payload.nodeName).toBe('@Foo@2');
   });
 
+  it('sends the properties value when it conflicts with a top-level shorthand', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ nodeName: 'Foo', nodeType: 'Node2D', nodePath: 'root/Foo' }),
+    });
+    await handleAddNode(fake.asRunner, {
+      ...validBase,
+      nodeType: 'Node2D',
+      nodeName: 'Foo',
+      position: { x: 1, y: 2 },
+      properties: { position: { x: 300, y: 400 } },
+    });
+    expect(fake.calls[0]?.params.properties).toEqual({ position: { x: 300, y: 400 } });
+  });
+
+  it('still sends a top-level shorthand that properties does not name', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ nodeName: 'Foo', nodeType: 'Node2D', nodePath: 'root/Foo' }),
+    });
+    await handleAddNode(fake.asRunner, {
+      ...validBase,
+      nodeType: 'Node2D',
+      nodeName: 'Foo',
+      position: { x: 1, y: 2 },
+      properties: { visible: false },
+    });
+    expect(fake.calls[0]?.params.properties).toEqual({
+      position: { x: 1, y: 2 },
+      visible: false,
+    });
+  });
+
   it('reports output with no result line as an error', async () => {
     const fake = createFakeRunner({
       stdout: "Node 'Foo' of type 'Node2D' added successfully",

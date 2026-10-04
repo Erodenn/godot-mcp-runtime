@@ -30,7 +30,9 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { errorText, hasError } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { handleAddNode } from '../../src/tools/scene-tools.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -113,6 +115,26 @@ describe('batch_scene_operations promoted spatial params', () => {
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toMatch(/position\s*=\s*Vector2\(300,\s*400\)/);
       expect(sceneText).not.toMatch(/position\s*=\s*Vector2\(1,\s*2\)/);
+    },
+    60000,
+  );
+
+  itGodot(
+    'standalone add_node: properties wins over a conflicting top-level position',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const result = await handleAddNode(runner, {
+        projectPath: tmpProject,
+        scenePath: 'main.tscn',
+        nodeType: 'StaticBody2D',
+        nodeName: 'StandaloneConflicted',
+        position: { x: 1, y: 2 },
+        properties: { position: { x: 300, y: 400 } },
+      });
+      expect(hasError(result), String(errorText(result))).toBe(false);
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toContain('position = Vector2(300, 400)');
+      expect(sceneText).not.toContain('position = Vector2(1, 2)');
     },
     60000,
   );

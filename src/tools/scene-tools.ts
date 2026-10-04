@@ -77,24 +77,29 @@ export const sceneToolDefinitions = [
         position: {
           type: 'object',
           description:
-            'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node',
+            'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node. Shorthand for properties.position; properties wins on a conflict.',
           properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
         rotation: {
           type: 'number',
           description:
-            'Rotation in radians, for a 2D node. On a 3D node rotation is a vector: pass it as properties.rotation, {"x", "y", "z"} in radians.',
+            'Rotation in radians, for a 2D node. On a 3D node rotation is a vector: pass it as properties.rotation, {"x", "y", "z"} in radians. Shorthand for properties.rotation; properties wins on a conflict.',
         },
         scale: {
           type: 'object',
           description:
-            'Scale: {"x": 2, "y": 2} on a 2D node, {"x": 2, "y": 2, "z": 2} on a 3D node',
+            'Scale: {"x": 2, "y": 2} on a 2D node, {"x": 2, "y": 2, "z": 2} on a 3D node. Shorthand for properties.scale; properties wins on a conflict.',
           properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
-        visible: { type: 'boolean', description: 'Whether the node is visible' },
+        visible: {
+          type: 'boolean',
+          description:
+            'Whether the node is visible. Shorthand for properties.visible; properties wins on a conflict.',
+        },
         modulate: {
           type: 'object',
-          description: 'Color modulation (e.g. {"r": 1, "g": 0, "b": 0, "a": 1})',
+          description:
+            'Color modulation (e.g. {"r": 1, "g": 0, "b": 0, "a": 1}). Shorthand for properties.modulate; properties wins on a conflict.',
           properties: {
             r: { type: 'number' },
             g: { type: 'number' },
@@ -105,7 +110,7 @@ export const sceneToolDefinitions = [
         properties: {
           type: 'object',
           description:
-            'Additional property values as a JSON object. Top-level params (position, rotation, etc.) take precedence over keys in this dict. An Object-typed property takes a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node; metadata/<name> and slash keys the node declares go straight into properties. Coercion and Packed*Array / Array[T] / Dictionary[K, V] element rules: Property Values in docs/tools.md.',
+            'Additional property values as a JSON object. A key here wins over the same top-level shorthand (position, rotation, scale, visible, modulate). An Object-typed property takes a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node; metadata/<name> and slash keys the node declares go straight into properties. Coercion and Packed*Array / Array[T] / Dictionary[K, V] element rules: Property Values in docs/tools.md.',
         },
       },
       required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
@@ -450,13 +455,15 @@ export async function handleAddNode(
   const properties = optionalObject(args, 'properties');
   if (!properties.ok) return properties;
 
-  // Merge promoted top-level params into properties dict
-  const mergedProps: OperationParams = { ...(properties.value ?? {}) };
+  // Merge promoted top-level params into the properties dict. `properties` wins,
+  // as on the batch path and in docs/tools.md.
+  const mergedProps: OperationParams = {};
   for (const key of PROMOTED_SPATIAL_PARAMS) {
     if (args[key] !== undefined) {
       mergedProps[key] = args[key];
     }
   }
+  Object.assign(mergedProps, properties.value ?? {});
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
