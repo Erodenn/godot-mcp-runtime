@@ -25,6 +25,7 @@ import {
 } from '../../src/utils/profiler.js';
 
 const THREAD = 1;
+const MS_PER_SECOND = 1000;
 
 type Row = [id: number, calls: number, selfSeconds: number, totalSeconds: number];
 
@@ -537,8 +538,7 @@ describe('DebuggerProfiler incomplete captures', () => {
   const TOTALS_TIMEOUT_ADVANCE_MS = 10_001;
   const GAP_BEFORE_LAST_FRAME_MS = 60;
   const IDLE_AFTER_LAST_FRAME_MS = 400;
-  const MEASURED_SECONDS_MIN = 0.03;
-  const MEASURED_SECONDS_MAX = 0.3;
+  const CLOCK_START_MS = 3_000_000;
 
   /** A capture with three usable frames, still open. */
   async function openCapture(): Promise<{ p: DebuggerProfiler; fake: FakeGodot }> {
@@ -638,24 +638,33 @@ describe('DebuggerProfiler incomplete captures', () => {
   });
 
   it('seconds is measured to the last folded frame when the capture did not close normally', async () => {
-    const { profiler: p, peer: fake } = await connectedProfiler();
-    const running = p.start(5, 512);
-    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
-    fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
-    fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
-    fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
-    await running;
-    await new Promise((resolve) => setTimeout(resolve, GAP_BEFORE_LAST_FRAME_MS));
-    fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 1, 0.001, 0.002]])]);
-    await new Promise((resolve) => setTimeout(resolve, IDLE_AFTER_LAST_FRAME_MS));
+    // Only the clock is fake, so the span between frames is exact on any runner:
+    // the sockets still run for real and no wall-clock sleep is involved.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(CLOCK_START_MS);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const running = p.start(5, 512);
+      await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+      fake.send(['servers:function_signature', THREAD, ['res://hot.gd::8::_burn', 0]]);
+      fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
+      fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+      await running;
+      vi.setSystemTime(CLOCK_START_MS + GAP_BEFORE_LAST_FRAME_MS);
+      fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 1, 0.001, 0.002]])]);
+      await drain(fake);
+      // A long idle after the last frame must not stretch the window.
+      vi.setSystemTime(CLOCK_START_MS + GAP_BEFORE_LAST_FRAME_MS + IDLE_AFTER_LAST_FRAME_MS);
 
-    const stopped = p.stop(10, 'selfMs');
-    fake.close();
-    await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
-    const result = await p.stop(10, 'selfMs');
-    expect(result.frames).toBe(2);
-    expect(result.seconds).toBeGreaterThan(MEASURED_SECONDS_MIN);
-    expect(result.seconds).toBeLessThan(MEASURED_SECONDS_MAX);
+      const stopped = p.stop(10, 'selfMs');
+      fake.close();
+      await expect(stopped).rejects.toMatchObject({ code: 'profile_disconnected' });
+      const result = await p.stop(10, 'selfMs');
+      expect(result.frames).toBe(2);
+      expect(result.seconds).toBe(GAP_BEFORE_LAST_FRAME_MS / MS_PER_SECOND);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a capture closed by the engine is complete and carries no warning', async () => {
@@ -712,6 +721,120 @@ describe('DebuggerProfiler incomplete captures', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+});
+
+describe('DebuggerProfiler captures nobody is waiting on', () => {
+  it('a peer that drops mid-capture keeps the folded frames readable and incomplete', async () => {
+    // start_profiler returned already: no wait is pending to finalize anything.
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, []),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0.016, [[0, 2, 0.002, 0.004]]),
+    ]);
+    expect(p.hasResult).toBe(false);
+
+    fake.close();
+    await waitUntil(() => p.hasResult, 'the disconnect closing out the capture');
+    expect(p.hasFrames).toBe(true);
+
+    const result = await p.stop(10, 'selfMs');
+    expect(result.complete).toBe(false);
+    expect(result.frames).toBe(2);
+    expect(Object.keys(result)[0]).toBe('warnings');
+    expect(result.warnings?.[0]).toMatch(/connection dropped/);
+    expect(result.rows[0]).toMatchObject({ function: '_burn', calls: 3 });
+  });
+
+  it('a peer that drops before any frame folded leaves the existing no-frames error', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    running.catch(() => undefined);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
+    // Only the discarded boundary frame arrives.
+    fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [[0, 1, 0.001, 0.002]])]);
+    fake.close();
+    await expect(running).rejects.toMatchObject({ code: 'profile_disconnected' });
+
+    expect(p.hasResult).toBe(true);
+    expect(p.hasFrames).toBe(false);
+    await expect(p.stop(10, 'selfMs')).rejects.toMatchObject({ code: 'profile_no_frames' });
+  });
+
+  it('closing the profiler with a capture open keeps the folded frames readable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+
+    p.close();
+    expect(p.hasResult).toBe(true);
+    const result = await p.stop(10, 'selfMs');
+    expect(result.complete).toBe(false);
+    expect(result.frames).toBe(1);
+  });
+
+  it('completes on a totals packet whose layout the frame parser would reject', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 2, 'profiler disable');
+    // Nothing a frame layout could parse: the sentinel's contents are never read.
+    fake.send(['servers:profile_total', THREAD, ['not', 'a', 'frame', 0.5]]);
+    const result = await stopped;
+
+    expect(result.complete).toBe(true);
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('ignores a late totals packet from an earlier capture that timed out', async () => {
+    const TOTALS_TIMEOUT_ADVANCE_MS = 10_001;
+    const FIRST_CAPTURE_COMMANDS = 2;
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const first = p.start(5, 512);
+    await feedStart(fake, first, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+
+    // The first capture is closed out by the totals timeout.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const timedOut = p.stop(10, 'selfMs');
+      await vi.advanceTimersByTimeAsync(TOTALS_TIMEOUT_ADVANCE_MS);
+      expect((await timedOut).complete).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(fake.commandsNamed('profiler:servers')).toHaveLength(FIRST_CAPTURE_COMMANDS);
+
+    // A second capture opens; the first one's totals arrive late, ahead of
+    // every packet the second capture's enable produced.
+    const second = p.start(5, 512);
+    await waitUntil(
+      () => fake.commandsNamed('profiler:servers').length >= FIRST_CAPTURE_COMMANDS + 1,
+      'second enable',
+    );
+    fake.send(['servers:profile_total', THREAD, frame(2, 0.016, [])]);
+    await feedStart(fake, second, [
+      frame(10, 0.016, []),
+      frame(11, 0.016, [[0, 3, 0.003, 0.006]]),
+      frame(12, 0.016, [[0, 4, 0.004, 0.008]]),
+    ]);
+    // The stale totals did not close the second capture.
+    expect(p.hasResult).toBe(false);
+
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(
+      () => fake.commandsNamed('profiler:servers').length >= FIRST_CAPTURE_COMMANDS + 2,
+      'second disable',
+    );
+    fake.send(['servers:profile_total', THREAD, frame(12, 0.016, [])]);
+    const result = await stopped;
+
+    expect(result.complete).toBe(true);
+    expect(result.frames).toBe(2);
+    expect(result.firstFrame).toBe(11);
+    expect(result.rows[0]).toMatchObject({ function: '_burn', calls: 7 });
   });
 });
 

@@ -534,6 +534,7 @@ describe('profiler track collection follows the session that ran the capture', (
       monitors: {
         samples: 1,
         ...Object.fromEntries(MONITOR_NAMES.map((name) => [name, MONITOR_STAT])),
+        pipelineCompilations: { duringCapture: 0, total: 0 },
       },
       visual: null,
       timeline: { bucketMs: 500, track: [SPEC], trackError, buckets: [] },

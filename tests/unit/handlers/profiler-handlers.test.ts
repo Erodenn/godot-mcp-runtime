@@ -76,12 +76,19 @@ const captureResult = {
   monitors: {
     samples: 2,
     ...Object.fromEntries(MONITOR_NAMES.map((name) => [name, MONITOR_STAT])),
-    pipelineCompilations: null,
+    pipelineCompilations: { duringCapture: 3, total: 10 },
     custom: [],
   },
   visual: null,
   timeline: null,
 };
+
+/** Every content entry of an error response: the message, then its solutions. */
+function errorAndSolutions(result: unknown): string {
+  return unwrap(result)
+    .content.map((entry) => entry.text ?? '')
+    .join(' | ');
+}
 
 function createProfilerFake(
   options: {
@@ -89,6 +96,8 @@ function createProfilerFake(
     exited?: boolean;
     /** A finished capture that stays readable after the game exits. */
     hasResult?: boolean;
+    /** Whether the current capture folded at least one frame. */
+    hasFrames?: boolean;
     throws?: Error;
     /** What `assertCanStart` refuses with: a busy profiler or a bad argument. */
     refuses?: ProfilerError;
@@ -116,6 +125,7 @@ function createProfilerFake(
   };
   const profiler = {
     hasResult: options.hasResult === true,
+    hasFrames: options.hasFrames === true,
     assertCanStart() {
       if (options.refuses) throw options.refuses;
     },
@@ -328,6 +338,26 @@ describe('handleProfileProject', () => {
 
     expectErrorMatching(result, /Could not start the track/);
     expect(fake.calls).toHaveLength(0);
+  });
+
+  it('profile_project points at stop_profiler when the game exits with frames folded', async () => {
+    const fake = createProfilerFake({
+      throws: new ProfilerError('profile_disconnected', 'Debugger disconnected'),
+      hasFrames: true,
+    });
+    const text = errorAndSolutions(await handleProfileProject(fake.asRunner, {}));
+
+    expect(text).toMatch(/call stop_profiler to read them as an incomplete capture/);
+  });
+
+  it('profile_project does not offer stop_profiler when the exit left no frames', async () => {
+    const fake = createProfilerFake({
+      throws: new ProfilerError('profile_disconnected', 'Debugger disconnected'),
+      hasFrames: false,
+    });
+    const text = errorAndSolutions(await handleProfileProject(fake.asRunner, {}));
+
+    expect(text).not.toMatch(/stop_profiler/);
   });
 
   it('stops the bridge track when the capture fails', async () => {
@@ -663,6 +693,141 @@ describe('handleStopProfiler', () => {
     expect(content.warnings![0]).toMatch(/^Monitors with no finite sample, reported as null:/);
     expect(content.warnings![0]).toContain('nodes');
     expect(content.warnings![0]).toContain('drawCallsInFrame');
+  });
+
+  it('warns when pipelineCompilations was not measured', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      monitors: { ...captureResult.monitors, pipelineCompilations: null },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(Object.keys(content)[0]).toBe('warnings');
+    expect(content.warnings).toEqual([
+      expect.stringMatching(/^monitors\.pipelineCompilations is null/),
+    ]);
+  });
+
+  it('warns when pipelineCompilations has a total but nothing to count from', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      monitors: {
+        ...captureResult.monitors,
+        pipelineCompilations: { duringCapture: null, total: 10 },
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toEqual([
+      expect.stringMatching(/^monitors\.pipelineCompilations\.duringCapture is null/),
+    ]);
+  });
+
+  it('warns when visual.hardware is null for a capture that measured render frames', async () => {
+    const NO_TIME = { avg: 1, max: 2 };
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      visual: {
+        hardware: null,
+        framesReceived: 30,
+        frames: 25,
+        gpuTimed: true,
+        truncatedFrames: 0,
+        stoppedAt: null,
+        cpuMs: NO_TIME,
+        gpuMs: NO_TIME,
+        areasReceived: 0,
+        areas: [],
+        worstFrame: null,
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toEqual([expect.stringMatching(/^visual\.hardware is null/)]);
+  });
+
+  it('counts the timeline intervals that held no monitor sample in one warning', async () => {
+    const bucket = (drawCalls: number | null): Record<string, unknown> => ({
+      t: 0,
+      frames: 30,
+      fps: 60,
+      frameMs: FRAME_STAT,
+      processMs: 1,
+      physicsMs: 1,
+      scriptMs: 1,
+      slowFrames: 0,
+      render: null,
+      drawCalls,
+      top: [],
+      track: null,
+    });
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      timeline: {
+        bucketMs: 500,
+        track: [],
+        trackError: null,
+        buckets: [bucket(120), bucket(null), bucket(118), bucket(null), bucket(null)],
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings).toHaveLength(1);
+    expect(content.warnings![0]).toMatch(/^timeline drawCalls is null in 3 of 5 intervals/);
+  });
+
+  it('adds no drawCalls warning when every interval has a sample', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      timeline: {
+        bucketMs: 1000,
+        track: [],
+        trackError: null,
+        buckets: [
+          {
+            t: 0,
+            frames: 60,
+            fps: 60,
+            frameMs: FRAME_STAT,
+            processMs: 1,
+            physicsMs: 1,
+            scriptMs: 1,
+            slowFrames: 0,
+            render: null,
+            drawCalls: 120,
+            top: [],
+            track: null,
+          },
+        ],
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    expect(unwrap(result).structuredContent).not.toHaveProperty('warnings');
   });
 
   it('adds no warnings to a clean capture', async () => {

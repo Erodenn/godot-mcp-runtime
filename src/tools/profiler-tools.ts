@@ -795,8 +795,9 @@ function trackWarnings(timeline: ProfileResult['timeline']): string[] {
 
 /**
  * A null that stands for "not measured" gets a sentence saying so, the same
- * as percentOfFrame does. Nulls inside one timeline interval are left alone:
- * they are per interval by design and would bury everything else.
+ * as percentOfFrame does. A timeline interval's other nulls (frameMs, render,
+ * track) are left alone: they are per interval by design and would bury
+ * everything else. `drawCalls` is the exception, summed into one sentence.
  */
 function unmeasuredWarnings(result: ProfileResult): string[] {
   const warnings: string[] = [];
@@ -814,6 +815,30 @@ function unmeasuredWarnings(result: ProfileResult): string[] {
     const missing = MONITOR_NAMES.filter((name) => monitors[name] === null);
     if (missing.length > 0) {
       warnings.push(`Monitors with no finite sample, reported as null: ${missing.join(', ')}.`);
+    }
+    if (monitors.pipelineCompilations === null) {
+      warnings.push(
+        'monitors.pipelineCompilations is null: no sample carried the pipeline compilation monitors, which Godot sends from 4.4 on. Nothing was measured, not zero compilations.',
+      );
+    } else if (monitors.pipelineCompilations.duringCapture === null) {
+      warnings.push(
+        'monitors.pipelineCompilations.duringCapture is null: a single monitor sample with none before it leaves nothing to count the growth from, so only the running total is known. Capture for two seconds or more.',
+      );
+    }
+  }
+  // A capture with no usable render frame already says nothing was measured.
+  if (result.visual !== null && result.visual.frames > 0 && result.visual.hardware === null) {
+    warnings.push(
+      'visual.hardware is null: the engine sent no CPU/GPU description for this session, so it is unknown, not absent.',
+    );
+  }
+  const timeline = result.timeline;
+  if (timeline !== null) {
+    const noSample = timeline.buckets.filter((bucket) => bucket.drawCalls === null).length;
+    if (noSample > 0) {
+      warnings.push(
+        `timeline drawCalls is null in ${noSample} of ${timeline.buckets.length} intervals: the engine samples its monitors once a second, so an interval shorter than that can hold none. It is not carried over from the interval before, because a draw call count is one frame's value. Use timelineMs of 1000 or more, or read monitors.drawCallsInFrame for the whole capture.`,
+      );
     }
   }
   return warnings;
@@ -849,7 +874,7 @@ function profilerResponse(
   );
 }
 
-function profilerFailure(error: unknown): ToolResponse {
+function profilerFailure(error: unknown, extraSolutions: string[] = []): ToolResponse {
   const message = getErrorMessage(error);
   if (!(error instanceof ProfilerError)) {
     return createErrorResponse(`Profiling failed: ${message}`, [
@@ -880,7 +905,7 @@ function profilerFailure(error: unknown): ToolResponse {
       'Report the Godot version - check_project returns it',
     ],
   };
-  return createErrorResponse(message, solutions[error.code]);
+  return createErrorResponse(message, [...extraSolutions, ...solutions[error.code]]);
 }
 
 // --- Handlers ---
@@ -935,7 +960,20 @@ export async function handleProfileProject(
   } catch (error: unknown) {
     // Stop the bridge sampling for a capture that will never read it.
     if (capture.track.length > 0) await collectTrack(runner, receiver);
-    return err(profilerFailure(error));
+    // The window closed the capture out when the connection dropped, so the
+    // frames it folded are still there to read.
+    const partial =
+      error instanceof ProfilerError && error.code === 'profile_disconnected' && receiver.hasFrames;
+    return err(
+      profilerFailure(
+        error,
+        partial
+          ? [
+              'The frames folded before the exit are kept: call stop_profiler to read them as an incomplete capture (complete: false)',
+            ]
+          : [],
+      ),
+    );
   }
 }
 

@@ -1372,6 +1372,11 @@ export class DebuggerProfiler {
     return this.capture?.result !== null && this.capture !== null;
   }
 
+  /** True when the current capture folded at least one frame, so reading it ranks something. */
+  get hasFrames(): boolean {
+    return this.capture !== null && this.capture.frames > 0;
+  }
+
   get connected(): boolean {
     return this.socket !== null && this.threadId !== null;
   }
@@ -1624,6 +1629,7 @@ export class DebuggerProfiler {
       this.autoStop();
     }
     this.clearAutoStop();
+    this.finalizeOpenCapture();
     this.rejectWaiters(new ProfilerError('profile_disconnected', 'Profiler closed'));
     this.socket?.destroy();
     this.socket = null;
@@ -1781,22 +1787,32 @@ export class DebuggerProfiler {
       if (bucket !== null) foldTimelineRender(bucket, render);
       return;
     }
-    if (name !== 'servers:profile_frame' && name !== 'servers:profile_total') return;
+    if (name === 'servers:profile_total') {
+      // The engine's own accumulated rows are capped by `captureLimit` exactly
+      // as the frame packets are, and carry nothing the frames did not already
+      // deliver � while top-N membership rotates between frames, so summing
+      // them covers strictly more functions. Verified against Godot: at a limit
+      // of 16 the frames saw 37 distinct functions and this packet only 16, and
+      // its call counts match our sums exactly. So this is a completion
+      // sentinel, not the source of the totals, and its layout is never parsed:
+      // an unusual one must not turn a complete capture into a failed one.
+      //
+      // A sentinel answers a disable, and the engine handles messages in the
+      // order it got them. So the sentinel of an earlier capture, closed out by
+      // timeout and answered late, always precedes every packet of this
+      // capture's own enable. Until one of those frame packets has arrived (the
+      // discarded boundary frame counts), a sentinel can only be that stale
+      // one, and finalizing on it would report a capture that has not run as
+      // complete. This rests on packet order, not on anything in the packet.
+      if (capture.framesReceived === 0) return;
+      this.finalize(capture, 'sentinel');
+      return;
+    }
+    if (name !== 'servers:profile_frame') return;
 
     const sample = parseFrame(data, this.signatures);
     const rows = sample.rows;
 
-    if (name === 'servers:profile_total') {
-      // The engine's own accumulated rows are capped by `captureLimit` exactly
-      // as the frame packets are, and carry nothing the frames did not already
-      // deliver — while top-N membership rotates between frames, so summing
-      // them covers strictly more functions. Verified against Godot: at a limit
-      // of 16 the frames saw 37 distinct functions and this packet only 16, and
-      // its call counts match our sums exactly. So this is a completion
-      // sentinel, not the source of the totals.
-      this.finalize(capture, 'sentinel');
-      return;
-    }
     if (this.state === 'starting') this.state = 'capturing';
     capture.framesReceived += 1;
     // Enabling the profiler inside a running VM call gives that first sample a
@@ -2055,7 +2071,25 @@ export class DebuggerProfiler {
     this.socket = null;
     this.rxChunks = [];
     this.rxLength = 0;
+    // A capture nobody is waiting on (`start_profiler`) would otherwise stay
+    // open forever: its totals can no longer arrive, `finalize` has no other
+    // caller, and the frames folded so far would be unreadable.
+    this.finalizeOpenCapture();
     this.rejectWaiters(new ProfilerError(code, reason));
+  }
+
+  /**
+   * Close out a capture that is still open because the connection is gone, so
+   * what it folded stays readable as an incomplete capture. One that folded no
+   * frame closes empty: `summarize` reports it as `profile_no_frames`.
+   */
+  private finalizeOpenCapture(): void {
+    const capture = this.capture;
+    if (capture === null || capture.result !== null) return;
+    if (this.state !== 'starting' && this.state !== 'capturing' && this.state !== 'stopping') {
+      return;
+    }
+    this.finalize(capture, 'disconnect');
   }
 
   // --- waiting ---
