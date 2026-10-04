@@ -12,24 +12,37 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-const REMOVE_MAX_RETRIES = 20;
+const REMOVE_BUDGET_MS = 10_000;
 const REMOVE_RETRY_DELAY_MS = 100;
+const RETRYABLE_REMOVE_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
+
+/** Block this thread for `ms` without spinning. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 /**
  * Remove a temp directory, retrying while something still holds it. On
  * Windows the suite starts Godot through a launcher exe, so killing a game
  * kills the launcher at once and the real Godot only dies a moment later (the
  * kill-on-close job object), still holding the directory: a bare `rmSync`
- * right after a stop fails with EBUSY. Node retries EBUSY/EPERM/ENOTEMPTY
- * itself with these options, for a budget of a couple of seconds.
+ * right after a stop fails with EBUSY. The retry is a loop of its own because
+ * `rmSync`'s `maxRetries` did not wait this case out (measured on Node 22).
  */
 export function removeTmpDir(dir: string): void {
-  rmSync(dir, {
-    recursive: true,
-    force: true,
-    maxRetries: REMOVE_MAX_RETRIES,
-    retryDelay: REMOVE_RETRY_DELAY_MS,
-  });
+  const deadline = Date.now() + REMOVE_BUDGET_MS;
+  for (;;) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === undefined || !RETRYABLE_REMOVE_CODES.has(code) || Date.now() >= deadline) {
+        throw error;
+      }
+      sleepSync(REMOVE_RETRY_DELAY_MS);
+    }
+  }
 }
 
 export interface TmpDirHandle {
