@@ -1796,6 +1796,29 @@ describe('handleRunScript', () => {
     expect(payload.tip as string).toContain('get_debug_output to review print() output');
   });
 
+  // The mode is the one captured at the gate. Read after the await it is null
+  // once the game has exited, and a script that raised on its way out would
+  // come back as a plain success with a null result.
+  it('still reports a runtime error when the spawned game exits while the script is in flight', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: null }), [
+      'SCRIPT ERROR: raised on the way out',
+    ]);
+    fake.setBridgeHook(() => {
+      fake.setSession({
+        mode: null,
+        projectPath: null,
+        process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
+      });
+    });
+
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+
+    expectErrorMatching(result, /Script runtime error detected[\s\S]*raised on the way out/);
+  });
+
   it('returns success and surfaces runtimeErrors as warnings when result is non-null', async () => {
     const dir = tmp.makeProject('run-script-');
     const fake = createRuntimeFake();
@@ -3254,7 +3277,7 @@ describe('handleTakeScreenshot pixel stats', () => {
 // ---------------------------------------------------------------------------
 
 describe('session auto-clear interactions', () => {
-  it('take_screenshot errors instead of resolving a null project path', async () => {
+  it('take_screenshot validates the path against the session captured at the gate when the game exits mid-call', async () => {
     const projectPath = tmp.make('mcp-autoclear-');
     const dir = screenshotsDir(projectPath);
     mkdirSync(dir, { recursive: true });
@@ -3265,7 +3288,8 @@ describe('session auto-clear interactions', () => {
     fake.setSession({ mode: 'spawned', projectPath, process: makeRunningProcess() });
     fake.setBridgeResponse(JSON.stringify({ path: shot, width: 1, height: 1 }));
     // The process exits while the screenshot command is in flight: the auto-clear nulls
-    // activeProjectPath, and the containment check runs after the await.
+    // activeProjectPath, and the containment check runs after the await. The
+    // bridge answered, so the file it saved is this session's screenshot.
     fake.setBridgeHook(() => {
       fake.setSession({
         mode: null,
@@ -3275,7 +3299,35 @@ describe('session auto-clear interactions', () => {
     });
 
     const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
-    expectErrorMatching(result, /session ended before the screenshot path/i);
+    expect(hasError(result)).toBe(false);
+    const payload = JSON.parse(unwrap(result).content[0]!.text!) as Record<string, unknown>;
+    expect(payload.projectPath).toBe(projectPath);
+    expect(payload.path).toBe(shot);
+  });
+
+  it('take_screenshot never validates against a session that became current after the gate', async () => {
+    const gateProject = tmp.make('mcp-gate-');
+    const otherProject = tmp.make('mcp-other-');
+    const otherDir = screenshotsDir(otherProject);
+    mkdirSync(otherDir, { recursive: true });
+    const otherShot = join(otherDir, 'shot.png');
+    writeFileSync(otherShot, 'png-data', 'utf8');
+
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: gateProject, process: makeRunningProcess() });
+    // A path under another project's screenshots directory, and that project
+    // is the current one by the time the answer is read.
+    fake.setBridgeResponse(JSON.stringify({ path: otherShot, width: 1, height: 1 }));
+    fake.setBridgeHook(() => {
+      fake.setSession({
+        mode: 'spawned',
+        projectPath: otherProject,
+        process: makeRunningProcess(),
+      });
+    });
+
+    const result = await handleTakeScreenshot(fake.asRunner, { responseMode: 'path_only' });
+    expectErrorMatching(result, /outside \.mcp\/godot-runtime\/screenshots\//);
   });
 
   it('run_project restarts after an auto-cleared session without double-cleaning', async () => {

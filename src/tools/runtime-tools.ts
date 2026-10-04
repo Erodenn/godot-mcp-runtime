@@ -1719,19 +1719,13 @@ export async function handleTakeScreenshot(
     // KEEP IN SYNC: src/scripts/mcp_bridge.gd `SCREENSHOT_DIR_RES_PATH` names
     // the directory the bridge saves into; this is the containment root that
     // decides what comes back. The two MUST move together.
-    const activeProjectPath = runner.activeProjectPath;
-    if (!activeProjectPath) {
-      return err(
-        createErrorResponse(
-          'The runtime session ended before the screenshot path could be validated.',
-          [
-            'Use get_debug_output to see why the Godot process exited',
-            'Call stop_project, then run_project again, and retry the screenshot',
-          ],
-        ),
-      );
-    }
-    const screenshotsRoot = resolve(screenshotsDir(activeProjectPath));
+    //
+    // The root is the project captured at the gate, the session the command
+    // was sent to. Reading the current session here, after the await, would
+    // validate against whatever is current by now, or against nothing when
+    // the game exited the moment it had answered: the file it saved is still
+    // this session's screenshot.
+    const screenshotsRoot = resolve(screenshotsDir(sessionProjectPath));
     if (!isUnderDir(screenshotsRoot, screenshotPath)) {
       return err(
         createErrorResponse(
@@ -2350,7 +2344,7 @@ export async function handleRunScript(
 
     // Detect false-positive success: GDScript has no try-catch, so runtime errors
     // return null and the real error only appears in stderr.
-    if (parsed.success && parsed.result === null && runner.activeSessionMode === 'spawned') {
+    if (parsed.success && parsed.result === null && sessionMode === 'spawned') {
       if (runtimeErrors.length > 0) {
         const errorContext = capRuntimeErrorLines(runtimeErrors).join('\n');
         return err(
@@ -2377,7 +2371,7 @@ export async function handleRunScript(
     // An attached session captures no stderr, so the check above cannot run
     // there: a script that raised and a script that returned null produce the
     // same frame. The result is reported, and so is what could not be seen.
-    if (parsed.success && parsed.result === null && runner.activeSessionMode === 'attached') {
+    if (parsed.success && parsed.result === null && sessionMode === 'attached') {
       return createStructuredResponse({
         warnings: [ATTACHED_NULL_RESULT_WARNING, ...warningsFromPolicy],
         projectPath: sessionProjectPath,
