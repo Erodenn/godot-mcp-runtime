@@ -12,7 +12,8 @@ import {
   LIKELY_BLANK_MAX_DOMINANT,
   LIKELY_BLANK_MIN_CHROMATIC,
   LIKELY_BLANK_MIN_DISTINCT,
-  MOTION_MIN_DIFFERENCE,
+  MOTION_CHANNEL_THRESHOLD,
+  MOTION_MIN_CHANGED_SAMPLES,
   showsMotion,
 } from '../../src/utils/pixel-stats.js';
 import { encodePng, invalidPng, solidRgba } from '../helpers/png-fixtures.js';
@@ -58,7 +59,7 @@ describe('computePixelStats', () => {
   });
 
   it('measures only the sampling grid', () => {
-    const size = 128;
+    const size = 256; // the grid steps by 2 at this size
     const data = solidRgba(size, size, [0, 0, 0, 255]);
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
@@ -84,9 +85,9 @@ describe('sampling grid', () => {
   });
 
   it.each([
-    [128, 128, 2],
-    [1152, 648, 13],
-    [1920, 1080, 22],
+    [128, 128, 1],
+    [1152, 648, 9],
+    [1920, 1080, 15],
   ])('steps %i x %i frames by %i', (width, height, expected) => {
     expect(sampleStep(width, height)).toBe(expected);
   });
@@ -97,9 +98,9 @@ describe('sampling grid', () => {
     expect(small.slice(0, 3)).toEqual([0, 4, 8]);
 
     const large: number[] = [];
-    expect(forEachSampleOffset(128, 128, (offset) => large.push(offset))).toBe(4096);
-    expect(large[1]).toBe(8);
-    expect(large[64]).toBe(1024);
+    expect(forEachSampleOffset(128, 128, (offset) => large.push(offset))).toBe(16384);
+    expect(large[1]).toBe(4);
+    expect(large[64]).toBe(256);
   });
 });
 
@@ -207,7 +208,10 @@ describe('computeFrameDifference', () => {
   const GRID_SIZE = 128;
   const OFF_GRID_PIXEL_X = 1;
   const OFF_GRID_PIXEL_Y = 1;
-  const ABOVE_THRESHOLD_MARGIN = 0.0001;
+  const WIDE_FRAME_WIDTH = 1920;
+  const WIDE_FRAME_HEIGHT = 1080;
+  const SUB_THRESHOLD_NOISE = MOTION_CHANNEL_THRESHOLD;
+  const OVER_THRESHOLD_STEP = MOTION_CHANNEL_THRESHOLD + 1;
 
   function frame(
     width: number,
@@ -217,25 +221,40 @@ describe('computeFrameDifference', () => {
     return { width, height, data: solidRgba(width, height, pixel) };
   }
 
-  it('returns 0 for identical frames', () => {
-    expect(computeFrameDifference(frame(4, 4, RED), frame(4, 4, RED))).toBe(0);
+  it('pins the motion constants', () => {
+    expect(MOTION_CHANNEL_THRESHOLD).toBe(8);
+    expect(MOTION_MIN_CHANGED_SAMPLES).toBe(1);
   });
 
-  it('returns 1 for black against white', () => {
-    expect(computeFrameDifference(frame(4, 4, BLACK), frame(4, 4, WHITE))).toBe(1);
+  it('returns 0 mean and no changed points for identical frames', () => {
+    const d = computeFrameDifference(frame(4, 4, RED), frame(4, 4, RED))!;
+    expect(d.mean).toBe(0);
+    expect(d.changedSamples).toBe(0);
+    expect(d.sampledPoints).toBe(16);
+    expect(showsMotion(d)).toBe(false);
   });
 
-  it('returns 0.25 when one of four pixels flips black to white', () => {
+  it('returns mean 1 and every point changed for black against white', () => {
+    const d = computeFrameDifference(frame(4, 4, BLACK), frame(4, 4, WHITE))!;
+    expect(d.mean).toBe(1);
+    expect(d.changedSamples).toBe(16);
+  });
+
+  it('returns mean 0.25 when one of four pixels flips black to white', () => {
     const a = frame(2, 2, BLACK);
     const b = frame(2, 2, BLACK);
     setPixel(b.data, 0, WHITE);
-    expect(computeFrameDifference(a, b)).toBe(0.25);
+    const d = computeFrameDifference(a, b)!;
+    expect(d.mean).toBe(0.25);
+    expect(d.changedSamples).toBe(1);
   });
 
   it('ignores alpha', () => {
     const a = frame(4, 4, [10, 20, 30, 255]);
     const b = frame(4, 4, [10, 20, 30, 0]);
-    expect(computeFrameDifference(a, b)).toBe(0);
+    const d = computeFrameDifference(a, b)!;
+    expect(d.mean).toBe(0);
+    expect(d.changedSamples).toBe(0);
   });
 
   it('returns null when the frames differ in size', () => {
@@ -245,17 +264,43 @@ describe('computeFrameDifference', () => {
   it('compares only the sampling grid', () => {
     const a = frame(GRID_SIZE, GRID_SIZE, BLACK);
     const b = frame(GRID_SIZE, GRID_SIZE, BLACK);
-    // The grid steps by 2 at this size, so (1, 1) is never visited.
-    setPixel(b.data, OFF_GRID_PIXEL_Y * GRID_SIZE + OFF_GRID_PIXEL_X, WHITE);
-    expect(computeFrameDifference(a, b)).toBe(0);
+    // Force a grid step of 2 by using a larger frame so (1, 1) is never visited.
+    const size = GRID_SIZE * 2;
+    const c = frame(size, size, BLACK);
+    const d = frame(size, size, BLACK);
+    expect(sampleStep(size, size)).toBeGreaterThan(1);
+    setPixel(d.data, OFF_GRID_PIXEL_Y * size + OFF_GRID_PIXEL_X, WHITE);
+    expect(computeFrameDifference(c, d)!.changedSamples).toBe(0);
+    expect(computeFrameDifference(a, b)!.mean).toBe(0);
   });
 
-  it('pins MOTION_MIN_DIFFERENCE at 0.0005', () => {
-    expect(MOTION_MIN_DIFFERENCE).toBe(0.0005);
+  it('shows motion when exactly one sampled point changed, even though the mean is tiny', () => {
+    const a = frame(WIDE_FRAME_WIDTH, WIDE_FRAME_HEIGHT, BLACK);
+    const b = frame(WIDE_FRAME_WIDTH, WIDE_FRAME_HEIGHT, BLACK);
+    setPixel(b.data, 0, WHITE);
+    const d = computeFrameDifference(a, b)!;
+    expect(d.changedSamples).toBe(1);
+    expect(d.mean).toBeLessThan(0.0005);
+    expect(showsMotion(d)).toBe(true);
   });
 
-  it('showsMotion is exclusive at the threshold', () => {
-    expect(showsMotion(MOTION_MIN_DIFFERENCE)).toBe(false);
-    expect(showsMotion(MOTION_MIN_DIFFERENCE + ABOVE_THRESHOLD_MARGIN)).toBe(true);
+  it('does not show motion for sub-threshold noise at every point', () => {
+    const a = frame(WIDE_FRAME_WIDTH, WIDE_FRAME_HEIGHT, [100, 100, 100, 255]);
+    const noisy = frame(WIDE_FRAME_WIDTH, WIDE_FRAME_HEIGHT, [
+      100 + SUB_THRESHOLD_NOISE,
+      100 - SUB_THRESHOLD_NOISE,
+      100 + SUB_THRESHOLD_NOISE,
+      255,
+    ]);
+    const d = computeFrameDifference(a, noisy)!;
+    expect(d.changedSamples).toBe(0);
+    expect(d.mean).toBeGreaterThan(0);
+    expect(showsMotion(d)).toBe(false);
+  });
+
+  it('counts a point whose single channel exceeds the threshold', () => {
+    const a = frame(4, 4, [100, 100, 100, 255]);
+    const b = frame(4, 4, [100, 100 + OVER_THRESHOLD_STEP, 100, 255]);
+    expect(computeFrameDifference(a, b)!.changedSamples).toBe(16);
   });
 });

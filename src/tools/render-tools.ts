@@ -43,8 +43,10 @@ import {
 } from '../utils/movie-process.js';
 import {
   computeFrameDifference,
+  MOTION_CHANNEL_THRESHOLD,
   measurePngFile,
   showsMotion,
+  type FrameDifference,
   type RgbaFrame,
 } from '../utils/pixel-stats.js';
 import { buildFramePreview } from '../utils/frame-preview.js';
@@ -171,12 +173,12 @@ export const renderToolDefinitions = [
         },
         motion: {
           type: ['number', 'null'],
-          description: 'Largest difference between consecutive sampled frames, 0 to 1.',
+          description:
+            'Largest mean RGB difference between consecutive sampled frames, 0 to 1. A small mover can read near 0 here; anyMotion is decided by changed sample count, not by this mean.',
         },
         anyMotion: {
           type: ['boolean', 'null'],
-          description:
-            'Null when no measured pair moved and a pair was not measured, or fewer than two frames were sampled.',
+          description: `True when some pair had at least one sampled point whose R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255. Null when no measured pair moved and a pair was not measured, or fewer than two frames were sampled.`,
         },
         motionPairs: {
           type: 'array',
@@ -185,9 +187,21 @@ export const renderToolDefinitions = [
             properties: {
               from: { type: 'number' },
               to: { type: 'number' },
-              difference: { type: ['number', 'null'] },
+              difference: {
+                type: ['number', 'null'],
+                description: 'Mean absolute RGB difference over the sampling grid, 0 to 1.',
+              },
+              changedSamples: {
+                type: ['number', 'null'],
+                description: `Sampled points where R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255. Null exactly where difference is null.`,
+              },
+              changedFraction: {
+                type: ['number', 'null'],
+                description:
+                  'changedSamples divided by the sampled points, 0 to 1. Null exactly where difference is null.',
+              },
             },
-            required: ['from', 'to', 'difference'],
+            required: ['from', 'to', 'difference', 'changedSamples', 'changedFraction'],
           },
         },
         samples: {
@@ -569,6 +583,10 @@ interface MotionPair {
   from: number;
   to: number;
   difference: number | null;
+  /** Sampled points that changed beyond the per-channel threshold; null where difference is. */
+  changedSamples: number | null;
+  /** changedSamples over the sampled points, 0 to 1; null where difference is. */
+  changedFraction: number | null;
   reason: string | null;
 }
 
@@ -620,13 +638,20 @@ function measureFrames(runDir: string, frameFiles: FrameFile[], inlineWanted: nu
     });
 
     if (previous !== null) {
-      let difference: number | null = null;
+      let difference: FrameDifference | null = null;
       let reason: string | null = PAIR_UNMEASURED_REASON;
       if (previous.frame !== null && frame !== null) {
         difference = computeFrameDifference(previous.frame, frame);
         reason = difference === null ? PAIR_SIZE_REASON : null;
       }
-      result.pairs.push({ from: previous.index, to: file.index, difference, reason });
+      result.pairs.push({
+        from: previous.index,
+        to: file.index,
+        difference: difference?.mean ?? null,
+        changedSamples: difference?.changedSamples ?? null,
+        changedFraction: difference ? difference.changedSamples / difference.sampledPoints : null,
+        reason,
+      });
     }
 
     if (inlineAt.has(order)) {
@@ -664,7 +689,13 @@ function summarizeMotion(pairs: MotionPair[]): {
 } {
   const differences = pairs.flatMap((p) => (p.difference === null ? [] : [p.difference]));
   const motion = differences.length > 0 ? Math.max(...differences) : null;
-  if (differences.some(showsMotion)) return { motion, anyMotion: true };
+  if (
+    pairs.some(
+      (p) => p.changedSamples !== null && showsMotion({ changedSamples: p.changedSamples }),
+    )
+  ) {
+    return { motion, anyMotion: true };
+  }
   const everyPairMeasured = pairs.length > 0 && differences.length === pairs.length;
   return { motion, anyMotion: everyPairMeasured ? false : null };
 }
@@ -892,6 +923,8 @@ function buildPngResponse(
       from: p.from,
       to: p.to,
       difference: p.difference,
+      changedSamples: p.changedSamples,
+      changedFraction: p.changedFraction,
     })),
     samples,
   };

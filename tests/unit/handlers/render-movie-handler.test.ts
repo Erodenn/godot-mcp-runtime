@@ -76,7 +76,13 @@ interface Payload {
   likelyBlank?: boolean | null;
   motion?: number | null;
   anyMotion?: boolean | null;
-  motionPairs?: Array<{ from: number; to: number; difference: number | null }>;
+  motionPairs?: Array<{
+    from: number;
+    to: number;
+    difference: number | null;
+    changedSamples: number | null;
+    changedFraction: number | null;
+  }>;
   samples?: Array<{ index: number; path?: string; stats: SampleStats | null }>;
   inlineFrames?: Array<{ index: number; width: number; height: number }>;
   framesKept?: boolean;
@@ -787,6 +793,11 @@ describe('render_movie check mode', () => {
     expect(payload.likelyBlank).toBe(false);
     expect(payload.anyMotion).toBe(true);
     expect(payload.motion).toBeGreaterThan(0);
+    for (const pair of payload.motionPairs!) {
+      expect(pair.changedSamples).toBeGreaterThan(0);
+      expect(pair.changedFraction).toBeGreaterThan(0);
+      expect(pair.changedFraction).toBeLessThanOrEqual(1);
+    }
     expect(payload.frameCount).toBe(TEST_FRAMES);
     expect(payload.framesKept).toBe(false);
 
@@ -835,6 +846,10 @@ describe('render_movie check mode', () => {
     );
     expect(payload.anyMotion).toBe(false);
     expect(payload.motion).toBe(0);
+    for (const pair of payload.motionPairs!) {
+      expect(pair.changedSamples).toBe(0);
+      expect(pair.changedFraction).toBe(0);
+    }
   });
 
   it('deletes its frames and the wav', async () => {
@@ -875,7 +890,11 @@ describe('render_movie check mode', () => {
       (p) => p.from === INVALID_SAMPLED_FRAME || p.to === INVALID_SAMPLED_FRAME,
     );
     expect(touching.length).toBeGreaterThan(0);
-    for (const pair of touching) expect(pair.difference).toBeNull();
+    for (const pair of touching) {
+      expect(pair.difference).toBeNull();
+      expect(pair.changedSamples).toBeNull();
+      expect(pair.changedFraction).toBeNull();
+    }
     expect(payload.anyMotion).toBe(true);
     expect(payload.measuredFrames).toBe(payload.samples!.length - 1);
 

@@ -15,8 +15,11 @@ import { getErrorMessage } from './error-response.js';
 import { ok, err, type Result } from './result.js';
 
 export const RGBA_BYTES_PER_PIXEL = 4;
-/** Sampling aims at about this many pixels per frame; the grid visits fewer than 4x this. */
-export const PIXEL_SAMPLE_TARGET = 4096;
+/**
+ * Sampling aims at about this many pixels per frame; the grid visits fewer than 4x this.
+ * At 1920x1080 the step is 15 px (9,216 points); it was 22 px (4,400 points) at a target of 4096.
+ */
+export const PIXEL_SAMPLE_TARGET = 8192;
 /** A pixel is chromatic when max(r,g,b) - min(r,g,b) exceeds this. */
 export const CHROMATIC_SPREAD_THRESHOLD = 8;
 /** Low bits dropped per channel before counting colors (4 bits kept). */
@@ -133,27 +136,50 @@ export function measurePngFile(filePath: string): Result<MeasuredFrame, string> 
 
 const RGB_CHANNELS = 3;
 const CHANNEL_MAX = 255;
-/** A sampled pair shows motion when its difference is above this fraction of full scale. */
-export const MOTION_MIN_DIFFERENCE = 0.0005;
-
 /**
- * Mean absolute R, G, B difference between two frames over the stats sampling
- * grid, 0..1. Alpha is ignored. Null when the sizes differ, because no
- * pairing of pixels is defined then.
+ * A sampled point counts as changed when any of its R, G, B channels differs by more than
+ * this (of 255). Above the +-1..2 steps that dithering and lossy encoders add to a still
+ * scene, and below the shift a real sprite, tint or fade produces.
  */
-export function computeFrameDifference(a: RgbaFrame, b: RgbaFrame): number | null {
-  if (a.width !== b.width || a.height !== b.height) return null;
-  let total = 0;
-  const sampled = forEachSampleOffset(a.width, a.height, (i) => {
-    for (let channel = 0; channel < RGB_CHANNELS; channel++) {
-      total += Math.abs(a.data[i + channel]! - b.data[i + channel]!);
-    }
-  });
-  if (sampled === 0) return null;
-  return total / (sampled * RGB_CHANNELS * CHANNEL_MAX);
+export const MOTION_CHANNEL_THRESHOLD = 8;
+/** A pair shows motion when at least this many sampled points changed. */
+export const MOTION_MIN_CHANGED_SAMPLES = 1;
+
+export interface FrameDifference {
+  /** Mean absolute R, G, B difference over the sampled points, 0..1. */
+  mean: number;
+  /** Sampled points where any channel moved by more than MOTION_CHANNEL_THRESHOLD. */
+  changedSamples: number;
+  /** Points on the sampling grid, so changedSamples / sampledPoints is the changed fraction. */
+  sampledPoints: number;
 }
 
-/** True when a frame difference is above the fixed no-motion threshold. */
-export function showsMotion(difference: number): boolean {
-  return difference > MOTION_MIN_DIFFERENCE;
+/**
+ * Compare two frames over the stats sampling grid. Alpha is ignored. Null when the
+ * sizes differ, because no pairing of pixels is defined then.
+ */
+export function computeFrameDifference(a: RgbaFrame, b: RgbaFrame): FrameDifference | null {
+  if (a.width !== b.width || a.height !== b.height) return null;
+  let total = 0;
+  let changedSamples = 0;
+  const sampled = forEachSampleOffset(a.width, a.height, (i) => {
+    let changed = false;
+    for (let channel = 0; channel < RGB_CHANNELS; channel++) {
+      const delta = Math.abs(a.data[i + channel]! - b.data[i + channel]!);
+      total += delta;
+      if (delta > MOTION_CHANNEL_THRESHOLD) changed = true;
+    }
+    if (changed) changedSamples++;
+  });
+  if (sampled === 0) return null;
+  return {
+    mean: total / (sampled * RGB_CHANNELS * CHANNEL_MAX),
+    changedSamples,
+    sampledPoints: sampled,
+  };
+}
+
+/** True when enough sampled points changed. Decided by count, not by the mean. */
+export function showsMotion(difference: Pick<FrameDifference, 'changedSamples'>): boolean {
+  return difference.changedSamples >= MOTION_MIN_CHANGED_SAMPLES;
 }
