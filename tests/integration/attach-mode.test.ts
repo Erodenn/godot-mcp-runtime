@@ -15,6 +15,7 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { showTestWindows } from '../helpers/run-project-or-skip.js';
 import { hasError, unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { createNullContext } from '../../src/utils/mcp-context.js';
@@ -113,7 +114,10 @@ describe('run_project attach mode', () => {
       expect(runner.activeSessionMode).toBe('attached');
 
       let spawnError: Error | null = null;
-      externalGodot = spawn(process.env.GODOT_PATH!, ['--path', tmpProject], { stdio: 'ignore' });
+      externalGodot = spawn(process.env.GODOT_PATH!, ['--path', tmpProject], {
+        stdio: 'ignore',
+        windowsHide: !showTestWindows(),
+      });
       externalGodot.once('error', (error) => {
         spawnError = error;
       });

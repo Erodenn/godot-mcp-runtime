@@ -62,6 +62,8 @@ Run `npm run install-hooks` once per clone. The pre-commit hook formats staged f
 
 See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint - it runs the suite plus typecheck, lint, format, and build in the same order CI does, applying formatting rather than checking it. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
 
+The integration suite hides game windows by default. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch them. On Windows a hidden window can still take keyboard focus intermittently, a known open issue.
+
 ## Architectural invariants
 
 These rules are not all encodable in the linter, but they hold across the codebase. Changes that violate them should be flagged in review.

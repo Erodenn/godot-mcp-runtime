@@ -115,6 +115,8 @@ $env:GODOT_PATH = "C:/path/to/godot.exe"; npm test
 
 CI installs Godot too: the `godot-integration` job in `.github/workflows/ci.yml` downloads Godot 4.5.1, 4.6.2 and 4.7.2 and runs the full suite with `GODOT_PATH` set, in a matrix separate from the Godot-less job that runs everywhere else. Locally, these tests skip cleanly unless you set `GODOT_PATH` yourself.
 
+The suite hides game windows by default: `runProjectOrSkip` launches with `background: true` unless a test passes its own value, and tests that spawn Godot themselves pass `windowsHide`. Both read `showTestWindows()` in `tests/helpers/run-project-or-skip.ts`. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch the windows. On Windows a hidden window can still take keyboard focus intermittently; this is a known open issue. `render_movie` always hides its window on Windows and is not affected by the variable.
+
 `GODOT_MONO_PATH` (a Godot .NET/Mono build) gates the opt-in C# case in `integration/script-attach-validation.test.ts` the same way `GODOT_PATH` gates the rest: skipped cleanly when unset, and also skipped when `dotnet` is not on `PATH`. CI never sets it. Set it alongside `GODOT_PATH` to also exercise the C# attach-script path locally:
 
 ```

@@ -70,9 +70,8 @@ describe('two GodotRunner sessions sharing one project', () => {
   itGodot(
     'A runs a session, restarts it without stopping, and B can act as a second concurrent session',
     async (ctx) => {
-      // 1. A runProject (background) + waitForBridge ready.
+      // 1. A runProject + waitForBridge ready.
       await runProjectOrSkip(runnerA, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
 
@@ -84,13 +83,11 @@ describe('two GodotRunner sessions sharing one project', () => {
       //    This is the exact #61 failure: a same-project restart used to skip
       //    re-adding the autoload entry and die on a bridge timeout.
       await runProjectOrSkip(runnerA, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
 
       // 4. B runProject too -> both ready; each answers ping.
       await runProjectOrSkip(runnerB, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
       expect(ownerFileCount()).toBe(2);

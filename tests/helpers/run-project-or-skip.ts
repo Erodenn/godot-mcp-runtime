@@ -18,8 +18,21 @@ import { isHeadlessEnvironmentError } from './godot-skip.js';
 
 const DEFAULT_BRIDGE_WAIT_MS = 20000;
 
+/** Set to `1` to let integration-test games show their windows. */
+export const SHOW_WINDOWS_ENV_VAR = 'GODOT_MCP_TEST_SHOW_WINDOWS';
+
+/**
+ * Whether integration-test games should show their windows. The one decision
+ * every launch path in the suite reads: `runProjectOrSkip` for background
+ * mode, and tests that spawn Godot themselves for `windowsHide`.
+ */
+export function showTestWindows(): boolean {
+  return process.env[SHOW_WINDOWS_ENV_VAR] === '1';
+}
+
 export interface RunProjectOrSkipOptions {
   scene?: string;
+  /** Default: true, unless GODOT_MCP_TEST_SHOW_WINDOWS=1. */
   background?: boolean;
   bridgePort?: number;
   profiling?: boolean;
@@ -46,7 +59,7 @@ export async function runProjectOrSkip(
   await runner.runProject(
     projectPath,
     scene ?? undefined,
-    opts.background ?? false,
+    opts.background ?? !showTestWindows(),
     opts.bridgePort,
     opts.profiling ?? false,
   );

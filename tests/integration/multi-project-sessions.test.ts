@@ -78,7 +78,6 @@ async function startSession(
 ): Promise<void> {
   await runProjectOrSkip(runner, ctx, projectPath, {
     scene: MARKER_SCENE,
-    background: true,
     waitMs: BRIDGE_WAIT_MS,
   });
 }
