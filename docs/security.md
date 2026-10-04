@@ -51,6 +51,9 @@ The server rejects the call. The bridge never sees the script (or the project ne
 | `ClassDB.class_call_static` | `tier1.reflection.ClassDB.class_call_static` |
 | `Object.set_script`         | `tier1.reflection.Object.set_script`         |
 | `Node.set_script`           | `tier1.reflection.Node.set_script`           |
+| `Callable(...)` constructor | `tier1.reflection.Callable`                  |
+
+`tier1.reflection.Callable` fires only when `Callable` is used as a call (`Callable(self, "run")`, `Callable.create(...)`). A type annotation such as `cb: Callable`, `-> Callable`, `Array[Callable]`, `is Callable` or `as Callable` is not a construction and does not match.
 
 ### Dynamic code & deserialization
 
@@ -67,13 +70,19 @@ The server rejects the call. The bridge never sees the script (or the project ne
 
 These primitives fire when the call's **whole first argument** does not classify as a lone string literal - not just its first token. `load("res://" + evil_var)` is non-literal (the argument is a string concatenated with a variable) even though a string literal appears first; only a call whose first argument is a single bare string token, like `load("res://main.tscn")`, classifies as literal and drops to Tier 3 (warn).
 
-| Primitive                          | Rule ID                                         |
-| ---------------------------------- | ----------------------------------------------- |
-| `load(non_literal)`                | `tier1.indirect.load.nonliteral`                |
-| `preload(non_literal)`             | `tier1.indirect.preload.nonliteral`             |
-| `ResourceLoader.load(non_literal)` | `tier1.indirect.ResourceLoader.load.nonliteral` |
-| `Object.call(non_literal, …)`      | `tier1.indirect.Object.call.nonliteral`         |
-| `Object.callv(non_literal, …)`     | `tier1.indirect.Object.callv.nonliteral`        |
+| Primitive                              | Rule ID                                          |
+| -------------------------------------- | ------------------------------------------------ |
+| `load(non_literal)`                    | `tier1.indirect.load.nonliteral`                 |
+| `preload(non_literal)`                 | `tier1.indirect.preload.nonliteral`              |
+| `ResourceLoader.load(non_literal)`     | `tier1.indirect.ResourceLoader.load.nonliteral`  |
+| `Object.call(non_literal, …)`          | `tier1.indirect.Object.call.nonliteral`          |
+| `Object.callv(non_literal, …)`         | `tier1.indirect.Object.callv.nonliteral`         |
+| `OS.call(non_literal, …)`              | `tier1.indirect.OS.call.nonliteral`              |
+| `Engine.call(non_literal, …)`          | `tier1.indirect.Engine.call.nonliteral`          |
+| `ClassDB.call(non_literal, …)`         | `tier1.indirect.ClassDB.call.nonliteral`         |
+| `ProjectSettings.call(non_literal, …)` | `tier1.indirect.ProjectSettings.call.nonliteral` |
+
+The `load`, `preload`, `str_to_var` and `bytes_to_var_with_objects` rules target GDScript global functions. They match only when the name is not preceded by a `.`: `save_manager.load(slot)`, `$SaveManager.load(slot)`, `get_node("Save").load(slot)` and `slots[i].load(d)` call a method of some other object and are not governed by them. The bare form `load(path_var)` is unchanged.
 
 ---
 
@@ -124,6 +133,14 @@ That anchor is also the only rule that reaches `cf.load(p)`. The Tier 1 `ConfigF
 
 `Image.save_png` / `save_jpg` / `save_webp` / `save_exr` go one step further: their idiomatic call form is `tex.get_image().save_png(p)`, where `get_image()` is itself a call sitting between the receiver and the write method. The tokenizer never chains across a call (see `src/utils/gdscript-scanner.ts`), so `save_png` surfaces as a bare identifier with no receiver information at all, not as a two-segment chain - a last-segment rule alone would miss it. These four rules additionally set `matchAsBareIdentifier`, so they fire on the bare identifier form too (`save_png(p)` with no receiver whatsoever also elicits). This is safe specifically because the four names are distinctive image-write verbs; it is not applied to `take_over_path`, `save_encrypted`, or `save_encrypted_pass` above, whose idiomatic forms are plain `receiver.method(...)` with no intervening call, so the ordinary last-segment match already reaches them without widening to a receiver-less match.
 
+### Reflection
+
+| Primitive                            | Rule ID                                      |
+| ------------------------------------ | -------------------------------------------- |
+| `set_script` (bare, receiver unseen) | `tier2.reflection.set_script.bareIdentifier` |
+
+`Object.set_script` and `Node.set_script` are Tier 1 only when the receiver is the literal class name. The common form is `node.set_script(s)` or `node.get_child(0).set_script(s)`, where a call or subscript sits in front of the method and the tokenizer sees a bare `set_script`; that form elicits at Tier 2 on any receiver.
+
 ### Network
 
 | Primitive                       | Rule ID                                   |
@@ -156,13 +173,17 @@ This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)
 
 Executes. Matched rules attach to a `warnings: string[]` array on the success response.
 
-| Primitive                                  | Rule ID                             |
-| ------------------------------------------ | ----------------------------------- |
-| `load("res://…")` (literal)                | `tier3.literal.load`                |
-| `preload("res://…")` (literal)             | `tier3.literal.preload`             |
-| `ResourceLoader.load("res://…")` (literal) | `tier3.literal.ResourceLoader.load` |
-| `Object.call("method_name", …)` (literal)  | `tier3.literal.Object.call`         |
-| `OS.alert`                                 | `tier3.os_alert`                    |
+| Primitive                                          | Rule ID                              |
+| -------------------------------------------------- | ------------------------------------ |
+| `load("res://…")` (literal)                        | `tier3.literal.load`                 |
+| `preload("res://…")` (literal)                     | `tier3.literal.preload`              |
+| `ResourceLoader.load("res://…")` (literal)         | `tier3.literal.ResourceLoader.load`  |
+| `Object.call("method_name", …)` (literal)          | `tier3.literal.Object.call`          |
+| `OS.call("method_name", …)` (literal)              | `tier3.literal.OS.call`              |
+| `Engine.call("method_name", …)` (literal)          | `tier3.literal.Engine.call`          |
+| `ClassDB.call("method_name", …)` (literal)         | `tier3.literal.ClassDB.call`         |
+| `ProjectSettings.call("method_name", …)` (literal) | `tier3.literal.ProjectSettings.call` |
+| `OS.alert`                                         | `tier3.os_alert`                     |
 
 Literal `load`/`preload`/`call` are extremely common in real game scripts; gating them in Tier 2 would condition users to click "yes" reflexively. The warn surface keeps the audit trail without blocking the idiom.
 

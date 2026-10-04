@@ -218,3 +218,63 @@ describe('tokenize: member chains across continuations and comments', () => {
     expect(() => tokenize('a ^')).not.toThrow();
   });
 });
+
+describe('tokenize: strings spanning lines', () => {
+  it('continues a regular string across a raw newline', () => {
+    const tokens = tokenize('var a = "x\nOS.execute"\nvar b = 1\n');
+    expect(tokens.filter((t) => t.kind === 'string')).toHaveLength(1);
+    expect(tokens.some((t) => t.text.startsWith('OS'))).toBe(false);
+    expect(tokens.find((t) => t.text === 'b')?.line).toBe(3);
+  });
+
+  it('tracks line and column for tokens after a multi-line string', () => {
+    const tokens = tokenize('"a\r\nb\rc"; OS.execute()\n');
+    const chain = tokens.find((t) => t.kind === 'memberChain');
+    expect(chain?.line).toBe(3);
+    expect(chain?.column).toBe(5);
+  });
+
+  it('keeps an escaped quote and an escaped newline inside the string', () => {
+    const tokens = tokenize('"a\\"b\\\nOS.execute"\nx\n');
+    expect(tokens.filter((t) => t.kind === 'string')).toHaveLength(1);
+    expect(tokens.some((t) => t.kind === 'memberChain')).toBe(false);
+    expect(tokens.find((t) => t.text === 'x')?.line).toBe(3);
+  });
+
+  it('handles triple-quoted, raw, string-name and quoted node-path forms', () => {
+    const src =
+      'a = """x\nOS.execute\n"""\nb = r"p\nOS.kill"\nc = &"n\nOS.kill"\nd = ^"n\nOS.kill"\ne = $"n\nOS.kill"\nz\n';
+    const tokens = tokenize(src);
+    expect(tokens.some((t) => t.kind === 'memberChain')).toBe(false);
+    expect(tokens.find((t) => t.text === 'z')?.line).toBe(12);
+  });
+
+  it('does not throw or loop on an unterminated string at end of input', () => {
+    for (const src of ['"abc', '"abc\n', "'", '"""abc', '^"abc', '$"abc', '"abc\\']) {
+      expect(() => tokenize(src)).not.toThrow();
+    }
+  });
+});
+
+describe('tokenize: precededByDot', () => {
+  const flag = (src: string, text: string): boolean | undefined =>
+    tokenize(src).find((t) => t.text === text)?.precededByDot;
+
+  it('is true for an identifier after a call, subscript or node path', () => {
+    expect(flag('get_node("a").load(x)\n', 'load')).toBe(true);
+    expect(flag('s[i].load(x)\n', 'load')).toBe(true);
+    expect(flag('$A.load(x)\n', 'load')).toBe(true);
+  });
+
+  it('sees past whitespace, newlines, continuations and comments', () => {
+    expect(flag('f() .  load(x)\n', 'load')).toBe(true);
+    expect(flag('(f().\n load(x))\n', 'load')).toBe(true);
+    expect(flag('f() . \\\n load(x)\n', 'load')).toBe(true);
+    expect(flag('(f(). # note\n load(x))\n', 'load')).toBe(true);
+  });
+
+  it('is false for a bare global call', () => {
+    expect(flag('load(x)\n', 'load')).toBe(false);
+    expect(flag('x = 1\nload(x)\n', 'load')).toBe(false);
+  });
+});

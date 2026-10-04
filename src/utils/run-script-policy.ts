@@ -111,6 +111,23 @@ interface PolicyRule {
    * only if the rule opted into `matchAsBareIdentifier` too.
    */
   matchLastSegment?: boolean;
+  /**
+   * Optional: the rule targets a GDScript global function (`load`, `preload`,
+   * `str_to_var`), so a token immediately preceded by a `.` member access is a
+   * method of some other receiver and never matches. The scanner leaves the
+   * name a bare identifier after a call, subscript or `$Node` path
+   * (`get_node("A").load(x)`, `$A.load(x)`), so without this a Tier 1 rule
+   * on `load` hard-blocks ordinary `save_manager.load(slot)`-style code. Never
+   * set on a method primitive (`set_script`, `save_png`): those must keep
+   * matching after a dot.
+   */
+  globalFunctionOnly?: boolean;
+  /**
+   * Optional: require the token to be used as a call, i.e. followed by `(`.
+   * For a class name whose constructor is the target (`Callable(self, "m")`)
+   * but which also appears as a type annotation (`cb: Callable`).
+   */
+  callOnly?: boolean;
   reason: string;
   solutions: string[];
 }
@@ -323,6 +340,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['Callable'],
     matchAsBareIdentifier: true,
+    callOnly: true,
     reason:
       'Callable(target, "method") constructs runtime dynamic dispatch that bypasses static analysis',
     solutions: ['Call the method directly by name instead of constructing a Callable'],
@@ -352,6 +370,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['str_to_var'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     reason: 'str_to_var deserializes GDScript values, including code-bearing types',
     solutions: ['Parse the input format manually'],
   },
@@ -360,6 +379,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['bytes_to_var_with_objects'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     reason: 'bytes_to_var_with_objects deserializes objects, including scripts',
     solutions: ['Use bytes_to_var (no _with_objects) for data-only deserialization'],
   },
@@ -401,6 +421,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['load'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     argumentKind: 'nonliteral',
     reason: 'load() with a non-literal path can be redirected to any resource',
     solutions: ['Pass a literal `res://...` path string to load()'],
@@ -410,6 +431,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['preload'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     argumentKind: 'nonliteral',
     reason: 'preload() with a non-literal path can be redirected',
     solutions: ['Pass a literal `res://...` path string to preload()'],
@@ -601,6 +623,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 3,
     chain: ['load'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     argumentKind: 'literal',
     reason: 'load() with a literal path can run _init code in the loaded resource',
     solutions: ['Verify the resource path is trusted'],
@@ -610,6 +633,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 3,
     chain: ['preload'],
     matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
     argumentKind: 'literal',
     reason: 'preload() with a literal path can run _init code in the loaded resource',
     solutions: ['Verify the resource path is trusted'],
@@ -952,6 +976,7 @@ function matchesBareIdentifier(tok: Token, rule: PolicyRule): boolean {
 }
 
 function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
+  if (rule.globalFunctionOnly && tok.precededByDot) return false;
   if (rule.matchLastSegment) {
     if (tok.kind === 'memberChain' && tok.chain && tok.chain.length >= 2) {
       return tok.chain[tok.chain.length - 1] === rule.chain[0];
@@ -999,6 +1024,8 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
       if (!tokenMatchesRule(tok, rule)) continue;
 
       const openParen = indexOfOpenParen(tokens, i);
+
+      if (rule.callOnly && openParen === -1) continue;
 
       if (rule.argumentKind) {
         if (openParen === -1) continue;

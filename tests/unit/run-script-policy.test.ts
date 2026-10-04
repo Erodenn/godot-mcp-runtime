@@ -759,3 +759,101 @@ describe('evaluateScript: chains split by a continuation or hidden by an operato
     expect(d.decision).toBe('ok');
   });
 });
+
+describe('evaluateScript: global-function rules ignore method calls', () => {
+  const methodForms = [
+    '$SaveManager.load(slot)',
+    'get_node("Save").load(slot)',
+    'slots[i].load(d)',
+    'ConfigFile.new().load(path)',
+    'save_manager.load(slot)',
+    'get_node("Save").preload(slot)',
+  ];
+
+  for (const form of methodForms) {
+    it(`does not hard-block ${form} through the load/preload rules`, () => {
+      const d = evalLine(form);
+      expect(d.matches.some((m) => m.ruleId.startsWith('tier1.indirect.'))).toBe(false);
+      expect(d.matches.some((m) => m.ruleId.startsWith('tier3.literal.'))).toBe(false);
+    });
+  }
+
+  it('leaves the non-strict decision ok for the plain method forms', () => {
+    expect(evalLine('$SaveManager.load(slot)').decision).toBe('ok');
+    expect(evalLine('get_node("Save").load(slot)').decision).toBe('ok');
+    expect(evalLine('slots[i].load(d)').decision).toBe('ok');
+  });
+
+  it('still hard-blocks the bare global functions', () => {
+    const load = evalLine('var r = load(path_var)');
+    expect(load.decision).toBe('hard_block');
+    expect(load.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+    expect(evalLine('var r = preload(x)').decision).toBe('hard_block');
+    expect(evalLine('var r = str_to_var(s)').decision).toBe('hard_block');
+    expect(evalLine('var r = bytes_to_var_with_objects(b)').decision).toBe('hard_block');
+  });
+
+  it('does not flag a method named str_to_var after a call', () => {
+    expect(evalLine('get_node("P").str_to_var(s)').decision).toBe('ok');
+  });
+
+  it('still blocks a global load that follows a statement ending in a dot-free line', () => {
+    expect(evaluateScript(VALID_PREFIX + 'var a = 1\n\tvar r = load(p)\n').decision).toBe(
+      'hard_block',
+    );
+  });
+
+  it('keeps matching method primitives after a call', () => {
+    const png = evalLine('tex.get_image().save_png(p)');
+    expect(png.matches.some((m) => m.ruleId === 'tier2.image.save_png')).toBe(true);
+    const script = evalLine('node.get_child(0).set_script(s)');
+    expect(
+      script.matches.some((m) => m.ruleId === 'tier2.reflection.set_script.bareIdentifier'),
+    ).toBe(true);
+  });
+});
+
+describe('evaluateScript: Callable fires on the constructor only', () => {
+  const nonCalls = [
+    'func on_done(cb: Callable) -> void:',
+    'var handler: Callable',
+    'func make() -> Callable:',
+    'var list: Array[Callable] = []',
+    'var ok = x is Callable',
+    'var c = x as Callable',
+  ];
+
+  for (const line of nonCalls) {
+    it(`does not block ${line}`, () => {
+      const d = evalLine(line);
+      expect(d.matches.some((m) => m.ruleId === 'tier1.reflection.Callable')).toBe(false);
+    });
+  }
+
+  it('still blocks Callable(self, "run")', () => {
+    expect(evalLine('var c = Callable(self, "run")').decision).toBe('hard_block');
+  });
+
+  it('still blocks Callable.create(...)', () => {
+    expect(evalLine('var c = Callable.create(self, "run")').decision).toBe('hard_block');
+  });
+});
+
+describe('evaluateScript: strings spanning raw newlines', () => {
+  it('finds OS.execute hidden by a string that ends on the next line', () => {
+    const d = evaluateScript('var a = "x\n"; OS.execute("cmd", [])\n');
+    expect(d.decision).toBe('hard_block');
+    const m = d.matches.find((x) => x.ruleId === 'tier1.direct_exec.OS.execute');
+    expect(m?.line).toBe(2);
+  });
+
+  it('does not fabricate a match from text inside a multi-line string', () => {
+    const d = evaluateScript('var a = "first\nOS.execute(1)\nlast"\nvar b = 2\n');
+    expect(d.decision).toBe('ok');
+    expect(d.matches).toEqual([]);
+  });
+
+  it('does not fabricate a match inside a multi-line single-quoted string', () => {
+    expect(evaluateScript("var a = 'first\nOS.execute(1)\nlast'\n").decision).toBe('ok');
+  });
+});

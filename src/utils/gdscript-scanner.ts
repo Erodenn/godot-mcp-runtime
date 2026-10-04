@@ -10,7 +10,7 @@
  * Not a full GDScript parser — we only need enough to:
  *  - Recognize comments (`#` to EOL).
  *  - Skip string-literal contents in all GDScript forms (`"..."`, `'...'`,
- *    `"""..."""`, `'''...'''`).
+ *    `"""..."""`, `'''...'''`). Every form may span lines.
  *  - Skip node-path literals (`$Foo/Bar`, `^"..."`) — their contents are
  *    Godot scene paths, not GDScript code. A `^` before anything but a quote
  *    is the XOR operator and is emitted as an `other` token.
@@ -50,6 +50,14 @@ export interface Token {
   text: string;
   /** For memberChain, the dotted segments in order: `OS.execute` → `['OS','execute']`. */
   chain?: string[];
+  /**
+   * For identifier and memberChain tokens: true when the token is immediately
+   * preceded by a `.` member access (past whitespace, newlines, continuations
+   * and comments). `get_node("A").load(x)` and `$A.load(x)` leave `load` as a
+   * bare identifier whose receiver the scanner cannot see; this flag is how a
+   * rule that targets a global function tells it apart from a method call.
+   */
+  precededByDot?: boolean;
   line: number;
   column: number;
 }
@@ -130,6 +138,75 @@ function skipWsAndNewlines(
 }
 
 /**
+ * Length of the line break at `pos` (2 for CRLF, 1 for LF or a bare CR, 0 when
+ * `pos` is not at a line break).
+ */
+function lineBreakLength(source: string, len: number, pos: number): number {
+  const c = source[pos];
+  if (c === '\n') return 1;
+  if (c === '\r') return pos + 1 < len && source[pos + 1] === '\n' ? 2 : 1;
+  return 0;
+}
+
+/**
+ * Consume a string body from `pos` (just past the opening delimiter) through
+ * the first unescaped `closer`, which is the quote for a regular string and
+ * three quotes for a triple-quoted one. Godot accepts a raw line break inside
+ * either form, so a body runs across lines; line/lineStart track every break
+ * crossed, escaped or not. An unterminated body runs to end of input.
+ */
+function skipStringBody(
+  source: string,
+  len: number,
+  pos: number,
+  closer: string,
+  line: number,
+  lineStart: number,
+): { pos: number; line: number; lineStart: number } {
+  while (pos < len) {
+    if (source[pos] === '\\' && pos + 1 < len) {
+      // Escaped character. An escaped line break continues the string.
+      const escapedBreak = lineBreakLength(source, len, pos + 1);
+      if (escapedBreak > 0) {
+        pos += 1 + escapedBreak;
+        line++;
+        lineStart = pos;
+      } else {
+        pos += 2;
+      }
+      continue;
+    }
+    const brk = lineBreakLength(source, len, pos);
+    if (brk > 0) {
+      pos += brk;
+      line++;
+      lineStart = pos;
+      continue;
+    }
+    if (source.startsWith(closer, pos)) {
+      pos += closer.length;
+      break;
+    }
+    pos++;
+  }
+  return { pos, line, lineStart };
+}
+
+/**
+ * True when the last non-newline token is a member-access `.`. Newlines are
+ * skipped to match how the chain builder joins across them; comments and
+ * continuations never produce tokens, so they are skipped by construction.
+ */
+function lastTokenIsDot(tokens: readonly Token[]): boolean {
+  for (let k = tokens.length - 1; k >= 0; k--) {
+    const t = tokens[k]!;
+    if (t.kind === 'newline') continue;
+    return t.kind === 'other' && t.text === '.';
+  }
+  return false;
+}
+
+/**
  * Tokens emitted by `tokenize`. Comments and string-literal contents are NOT
  * present — they are consumed silently. String literals as a whole are emitted
  * as a single `string` token so the policy can recognize "literal first
@@ -205,47 +282,19 @@ export function tokenize(source: string): Token[] {
       const quote = ch;
       // Triple-quoted?
       if (i + 2 < len && source[i + 1] === quote && source[i + 2] === quote) {
-        i += 3;
-        while (i < len) {
-          if (source[i] === '\\' && i + 1 < len) {
-            // Skip escaped char; track newlines inside the escape sequence.
-            if (source[i + 1] === '\n') {
-              line++;
-              lineStart = i + 2;
-            }
-            i += 2;
-            continue;
-          }
-          if (source[i] === '\n') {
-            line++;
-            lineStart = i + 1;
-            i++;
-            continue;
-          }
-          if (
-            source[i] === quote &&
-            i + 2 < len &&
-            source[i + 1] === quote &&
-            source[i + 2] === quote
-          ) {
-            i += 3;
-            break;
-          }
-          i++;
-        }
+        const body = skipStringBody(source, len, i + 3, quote.repeat(3), line, lineStart);
+        i = body.pos;
+        line = body.line;
+        lineStart = body.lineStart;
         tokens.push({ kind: 'string', text: '<triple-string>', line: startLine, column: startCol });
         continue;
       }
-      // Single-line string.
-      i++;
-      while (i < len && source[i] !== quote && source[i] !== '\n' && source[i] !== '\r') {
-        if (source[i] === '\\' && i + 1 < len) {
-          i += 2;
-          continue;
-        }
-        i++;
-      }
-      if (i < len && source[i] === quote) i++;
+      // Regular string. Ends at the matching unescaped quote, line breaks
+      // included: Godot compiles a string with a raw newline in it.
+      const body = skipStringBody(source, len, i + 1, quote, line, lineStart);
+      i = body.pos;
+      line = body.line;
+      lineStart = body.lineStart;
       tokens.push({ kind: 'string', text: '<string>', line: startLine, column: startCol });
       continue;
     }
@@ -257,10 +306,10 @@ export function tokenize(source: string): Token[] {
       const startCol = colOf(i);
       i++;
       if (i < len && (source[i] === '"' || source[i] === "'")) {
-        const quote = source[i]!;
-        i++;
-        while (i < len && source[i] !== quote && source[i] !== '\n') i++;
-        if (i < len && source[i] === quote) i++;
+        const body = skipStringBody(source, len, i + 1, source[i]!, line, lineStart);
+        i = body.pos;
+        line = body.line;
+        lineStart = body.lineStart;
       } else {
         while (i < len && isNodePathChar(source[i]!)) i++;
       }
@@ -280,17 +329,10 @@ export function tokenize(source: string): Token[] {
         i++;
         continue;
       }
-      i++;
-      const quote = source[i]!;
-      i++;
-      while (i < len && source[i] !== quote && source[i] !== '\n') {
-        if (source[i] === '\\' && i + 1 < len) {
-          i += 2;
-          continue;
-        }
-        i++;
-      }
-      if (i < len && source[i] === quote) i++;
+      const body = skipStringBody(source, len, i + 2, source[i + 1]!, line, lineStart);
+      i = body.pos;
+      line = body.line;
+      lineStart = body.lineStart;
       tokens.push({ kind: 'string', text: '<string-name>', line: startLine, column: startCol });
       continue;
     }
@@ -325,6 +367,7 @@ export function tokenize(source: string): Token[] {
       const startLine = line;
       const startCol = colOf(i);
       const start = i;
+      const precededByDot = lastTokenIsDot(tokens);
       while (i < len && isIdentPart(source[i]!)) i++;
       const first = source.slice(start, i);
       const chain: string[] = [first];
@@ -364,11 +407,18 @@ export function tokenize(source: string): Token[] {
           kind: 'memberChain',
           text: endText,
           chain,
+          precededByDot,
           line: startLine,
           column: startCol,
         });
       } else {
-        tokens.push({ kind: 'identifier', text: first, line: startLine, column: startCol });
+        tokens.push({
+          kind: 'identifier',
+          text: first,
+          precededByDot,
+          line: startLine,
+          column: startCol,
+        });
       }
       continue;
     }
