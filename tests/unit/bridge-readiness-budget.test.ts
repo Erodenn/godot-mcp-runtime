@@ -124,6 +124,31 @@ describe('bridge readiness budget', () => {
     expect(harness.pings).toBeGreaterThan(BRIDGE_CONNECTED_PING_FAILURE_LIMIT);
   });
 
+  it('does not count refusals from before the port accepted a connection', async () => {
+    // The normal attach flow: run_project is called, Godot is launched a few
+    // seconds later. Every ping before the listener exists is refused, then a
+    // connect succeeds and the first ping times out while the engine finishes
+    // starting, then the pong arrives.
+    const refusalsBeforeListening = BRIDGE_CONNECTED_PING_FAILURE_LIMIT + 2;
+    let calls = 0;
+    const harness = pollWithStub(() => {
+      calls += 1;
+      if (calls <= refusalsBeforeListening) {
+        return Promise.reject(new Error('connect ECONNREFUSED'));
+      }
+      observed.bridgeConnectObserved = true;
+      if (calls === refusalsBeforeListening + 1) {
+        return Promise.reject(new Error("Command 'ping' timed out"));
+      }
+      return Promise.resolve(JSON.stringify({ status: 'pong' }));
+    });
+    const observed = harness.runner as unknown as { bridgeConnectObserved: boolean };
+    observed.bridgeConnectObserved = false;
+
+    expect(await harness.poll()).toEqual({ ready: true });
+    expect(harness.pings).toBe(refusalsBeforeListening + 2);
+  });
+
   it('still reports readiness on the first valid pong', async () => {
     const harness = pollWithStub(() => Promise.resolve(JSON.stringify({ status: 'pong' })));
     expect(await harness.poll()).toEqual({ ready: true });

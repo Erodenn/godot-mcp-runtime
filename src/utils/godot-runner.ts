@@ -2074,8 +2074,9 @@ export class GodotRunner {
     extendedTimeoutMs?: number;
   }): Promise<{ ready: boolean; error?: string }> {
     const started = Date.now();
-    // Consecutive ping failures since the last connect, counted only while the
-    // extended budget is in force. See BRIDGE_CONNECTED_PING_FAILURE_LIMIT.
+    // Consecutive ping failures since the last answered ping, counted only
+    // once a TCP connect has been observed. See
+    // BRIDGE_CONNECTED_PING_FAILURE_LIMIT.
     let connectedPingFailures = 0;
 
     while (true) {
@@ -2126,8 +2127,11 @@ export class GodotRunner {
       } catch {
         // Expected: ping will fail until bridge is listening. Once a connect
         // has been observed it stops being expected, which is what the counter
-        // is for.
-        connectedPingFailures += 1;
+        // is for. Refusals from before anything listened are not counted: in
+        // the normal attach flow Godot is launched seconds after this wait
+        // began, and counting those would spend the whole limit before the
+        // listener exists, so its first slow pong would end the wait.
+        if (this.bridgeConnectObserved) connectedPingFailures += 1;
       }
 
       const interval =
