@@ -2130,6 +2130,19 @@ func _prepare_packed_array_elements(property: String, node_class: String, declar
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and %s holds integers" % [
 					property, node_class, i, str(element), type_string(declared)],
 			}
+		if _PACKED_INT_RANGE.has(declared):
+			var number := float(element)
+			var bounds: Array = _PACKED_INT_RANGE[declared]
+			# float(int64 max) rounds up to 2^63, which is itself out of range, so
+			# the 64-bit upper test is >=. The narrower bounds are exact floats.
+			var above_range: bool = number >= float(bounds[1]) if declared == TYPE_PACKED_INT64_ARRAY else number > float(bounds[1])
+			if number < float(bounds[0]) or above_range:
+				return {
+					"ok": false,
+					"value": null,
+					"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is outside the range %s holds (%d to %d)" % [
+						property, node_class, i, str(element), type_string(declared), bounds[0], bounds[1]],
+				}
 		out.append(element)
 	return {"ok": true, "value": out, "error": ""}
 
@@ -2138,6 +2151,38 @@ func _prepare_packed_array_elements(property: String, node_class: String, declar
 # otherwise the typed setter truncates it without a word.
 func _is_fractional_float(value) -> bool:
 	return typeof(value) == TYPE_FLOAT and value != floorf(value)
+
+# Integer vector types. A JSON object always coerces to the float vector, and the
+# typed setter then truncates each component, so (1.5, 2.7) on a Vector2i stores
+# (1, 2) without a word.
+const _INT_VECTOR_TYPES: Array = [TYPE_VECTOR2I, TYPE_VECTOR3I, TYPE_VECTOR4I]
+
+# Inclusive element range of each packed integer array. JSON numbers arrive as
+# floats and the typed setter wraps (PackedByteArray, PackedInt32Array) or
+# saturates (PackedInt64Array) an element outside the range, silently. Written
+# as ints so the error text can print them; the 64-bit minimum is spelled as a
+# sum because its magnitude does not fit an int literal.
+const _PACKED_INT_RANGE: Dictionary = {
+	TYPE_PACKED_BYTE_ARRAY: [0, 255],
+	TYPE_PACKED_INT32_ARRAY: [-2147483648, 2147483647],
+	TYPE_PACKED_INT64_ARRAY: [-9223372036854775807 - 1, 9223372036854775807],
+}
+
+# True for a Vector2, Vector3 or Vector4 with a component that has a fractional
+# part. Any other value (an integer vector included) has none.
+func _has_fractional_component(value) -> bool:
+	var components: Array = []
+	match typeof(value):
+		TYPE_VECTOR2:
+			components = [value.x, value.y]
+		TYPE_VECTOR3:
+			components = [value.x, value.y, value.z]
+		TYPE_VECTOR4:
+			components = [value.x, value.y, value.z, value.w]
+	for component in components:
+		if component != floorf(component):
+			return true
+	return false
 
 # Prefix of the node-level metadata entries Object.set() routes to set_meta().
 const _METADATA_PREFIX: String = "metadata/"
@@ -2503,6 +2548,13 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) is not a whole number, and the element type is %s" % [
 					property, node_class, i, str(element), type_string(elem_type)],
 			}
+		if elem_type in _INT_VECTOR_TYPES and _has_fractional_component(element):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': element %d of the array (%s) has fractional components, and the element type %s holds whole numbers" % [
+					property, node_class, i, str(element), type_string(elem_type)],
+			}
 		out.append(element)
 	# Builtin element type, so no class name and no script: Array[Node] and
 	# friends never reach here, since their element types have no
@@ -2587,6 +2639,9 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 			if value_type == TYPE_INT and _is_fractional_float(element):
 				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': value at key \"%s\" (%s) is not a whole number, and the value type is int" % [
 					property, node_class, str(raw_key), str(element)])
+			if value_type in _INT_VECTOR_TYPES and _has_fractional_component(element):
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': value at key \"%s\" (%s) has fractional components, and the value type %s holds whole numbers" % [
+					property, node_class, str(raw_key), str(element), type_string(value_type)])
 			element = type_convert(element, value_type)
 		typed_keys.append(key)
 		typed_values.append(element)
@@ -2772,6 +2827,12 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 				"ok": false,
 				"value": null,
 				"error": "Cannot set property '%s' on node of type '%s': expected a whole number for an int property, got %s" % [property, node.get_class(), str(coerced)],
+			}
+		if declared in _INT_VECTOR_TYPES and _has_fractional_component(coerced):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': expected whole-number components for %s, got %s" % [property, node.get_class(), type_string(declared), str(coerced)],
 			}
 
 	return {"ok": true, "value": coerced, "error": ""}

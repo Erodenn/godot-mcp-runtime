@@ -404,11 +404,11 @@ The conversion applies only when every component is a number. A dictionary such 
 
 ### Accepted widening conversions
 
-Godot performs these on store, so they are allowed: a whole-number float to int (a fractional one, such as `1.7` on an int property or inside an int array, errors instead of being truncated), string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), `Vector4` to `Vector4i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
+Godot performs these on store, so they are allowed: a whole-number float to int (a fractional one, such as `1.7` on an int property or inside an int array, errors instead of being truncated, and so does a fractional component such as `{ "x": 1.5, "y": 2 }` on a `Vector2i`, `Vector3i` or `Vector4i`), string to `NodePath` or `StringName`, bool to int or float, `Vector2` to `Vector2i` (and back), `Vector3` to `Vector3i` (and back), `Vector4` to `Vector4i` (and back), and `Array` to any `Packed*Array`. Everything else errors.
 
 ### Packed arrays
 
-`Array` to a `Packed*Array` conversion also applies per element: each element is coerced with the scalar rules above (`{"x": 1, "y": 2}` becomes `Vector2(1, 2)`, ints widen to floats in `PackedFloat32Array`, and so on). An element that cannot represent the packed element type (a string in a `PackedVector2Array`, a bool in a `PackedColorArray`) errors instead of storing Godot's silent zero value, and the error names the offending element index. An empty array clears the property.
+`Array` to a `Packed*Array` conversion also applies per element: each element is coerced with the scalar rules above (`{"x": 1, "y": 2}` becomes `Vector2(1, 2)`, ints widen to floats in `PackedFloat32Array`, and so on). An element that cannot represent the packed element type (a string in a `PackedVector2Array`, a bool in a `PackedColorArray`) errors instead of storing Godot's silent zero value, and the error names the offending element index. An element outside the range of an integer array errors too, because the typed setter would wrap or saturate it: `PackedByteArray` holds 0 to 255, `PackedInt32Array` -2147483648 to 2147483647, and `PackedInt64Array` the 64-bit range. A whole number written as a JSON float above 2^53 may already have lost precision before it reaches the tool. An empty array clears the property.
 
 ```json
 {
@@ -421,7 +421,7 @@ Godot performs these on store, so they are allowed: a whole-number float to int 
 
 ### Typed arrays
 
-A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, `Vector2`, `Vector2i`, `Vector3`, `Vector3i`, `Vector4`, `Vector4i` or `Color`. Widening applies within that set the way it does for scalars, so JSON ints land in an `Array[float]` and `{ "x": 1, "y": 2 }` lands in an `Array[Vector2i]`. An element that cannot represent `T` errors and the error names its index. An untyped `Array` accepts anything, unchanged.
+A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) takes a plain JSON array too, and the same element conversions apply when `T` is `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, `Vector2`, `Vector2i`, `Vector3`, `Vector3i`, `Vector4`, `Vector4i` or `Color`. Widening applies within that set the way it does for scalars, so JSON ints land in an `Array[float]` and `{ "x": 1, "y": 2 }` lands in an `Array[Vector2i]`. An element that cannot represent `T` errors and the error names its index, and so does an `Array[Vector2i]` (or `Vector3i`, `Vector4i`) element with a fractional component. An untyped `Array` accepts anything, unchanged.
 
 Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is rejected with an explicit error naming the element type. That is deliberate: `set()` does not convert an untyped array element by element for a typed property, it refuses the assignment and leaves an empty array behind while reporting nothing, so passing one through would be a silent drop reported as success. Use `run_script` for those.
 
@@ -429,7 +429,7 @@ Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is 
 
 A script-declared `Dictionary[K, V]` (for example `@export var stock: Dictionary[String, int]`) takes a plain JSON object. Godot 4.4 added the typed form, so on an older engine every dictionary is untyped and passes through unchanged. `set()` refuses an untyped dictionary on a typed property without an error, so the tool builds the typed dictionary itself and checks every entry before it assigns any.
 
-`V` follows the same rule as `T` for typed arrays: `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, the vector types and `Color`, with the same widening, and a fractional number for an `int` value is an error. An untyped (`Variant`) side takes the value as sent.
+`V` follows the same rule as `T` for typed arrays: `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, the vector types and `Color`, with the same widening, and a fractional number for an `int` value, or a fractional component for an integer vector value, is an error. An untyped (`Variant`) side takes the value as sent.
 
 JSON object keys are always strings, so `K` must be one that can be built from a string: `String`, `StringName`, `NodePath`, `int` (the key `"1"` becomes `1`, and `"a"` errors) or `float`. Any other `K` is rejected with an explicit error pointing at `run_script`. A value that cannot represent `V` errors and names its key, and two keys that become the same `K` (`"1"` and `"01"` on an `int` key) error instead of dropping one. An empty object gives an empty typed dictionary.
 

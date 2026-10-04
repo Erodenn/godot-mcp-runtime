@@ -1481,3 +1481,96 @@ describe('typed Dictionary[K, V] properties', () => {
     AUTHORED_CASE_TIMEOUT_MS,
   );
 });
+
+// inventory.gd declares Dictionary[K, V] exports, so the script (and with it
+// every case below) needs an engine that has them.
+describe('integer vectors and packed integer arrays', () => {
+  itGodot(
+    'rejects a fractional component on a Vector2i',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+      const before = inventoryText(project);
+
+      const entry = await setInventoryProperty(project, 'cell', { x: 1.5, y: 2 });
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/whole-number components for Vector2i/);
+      expect(inventoryText(project)).toBe(before);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'stores whole-number components on a Vector2i',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'cell', { x: 1, y: 2 });
+
+      expect(entry.error).toBeUndefined();
+      expect(entry.success).toBe(true);
+      expect(inventoryText(project)).toContain('cell = Vector2i(1, 2)');
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a PackedByteArray element above 255 and names its index',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+      const before = inventoryText(project);
+
+      const entry = await setInventoryProperty(project, 'bytes', [1, 256]);
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/element 1 of the array .*outside the range/);
+      expect(inventoryText(project)).toBe(before);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a negative PackedByteArray element',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'bytes', [-1]);
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/element 0 of the array .*outside the range/);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a PackedInt32Array element past the 32-bit maximum',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'ids32', [2147483648]);
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/outside the range PackedInt32Array holds/);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'accepts the bounds of a PackedByteArray',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'bytes', [0, 255]);
+
+      expect(entry.error).toBeUndefined();
+      expect(entry.success).toBe(true);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+});
