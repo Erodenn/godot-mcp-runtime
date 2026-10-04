@@ -30,8 +30,10 @@ import { cpSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot } from '../helpers/godot-skip.js';
-import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
+import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
+import { handleSetNodeProperties } from '../../src/tools/node-tools.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
@@ -1364,5 +1366,118 @@ describe('typed Array[T] element coercion', () => {
       expect(sceneText).toMatch(/points\s*=\s*Array\[Vector2\]\(\[Vector2\(7(\.0)?, 8(\.0)?\)\]\)/);
     },
     60000,
+  );
+});
+
+const INVENTORY_SCENE = 'inventory.tscn';
+/** Dictionary[K, V] exists from this Godot minor (major 4) onward. */
+const TYPED_DICTIONARY_MIN_MINOR = 4;
+const AUTHORED_CASE_TIMEOUT_MS = 120000;
+
+/** A tmp copy of the editor-authored fixture, tracked for cleanup. */
+function makeAuthoredProject(): string {
+  const dst = join(tmpdir(), `godot-mcp-authored-${randomBytes(6).toString('hex')}`);
+  cpSync(authoredFixtureProjectPath, dst, { recursive: true });
+  tmpDirs.push(dst);
+  return dst;
+}
+
+/** Set one property on the inventory root and return that update's result entry. */
+async function setInventoryProperty(
+  project: string,
+  property: string,
+  value: unknown,
+): Promise<{ success?: boolean; error?: string }> {
+  const result = await handleSetNodeProperties(runner, {
+    projectPath: project,
+    scenePath: INVENTORY_SCENE,
+    updates: [{ nodePath: 'root', property, value }],
+  });
+  const payload = expectMatchesOutputSchema('set_node_properties', result);
+  const results = payload.results as Array<{ success?: boolean; error?: string }>;
+  return results[0] ?? {};
+}
+
+function inventoryText(project: string): string {
+  return readFileSync(join(project, INVENTORY_SCENE), 'utf-8');
+}
+
+describe('typed Dictionary[K, V] properties', () => {
+  itGodot(
+    'stores a JSON object on a Dictionary[String, int] as a typed dictionary',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'stock', { hp: 3, mp: 4 });
+
+      expect(entry.error).toBeUndefined();
+      expect(entry.success).toBe(true);
+      expect(inventoryText(project)).toContain('stock = Dictionary[String, int]({');
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'converts the string keys of a Dictionary[int, float] to ints',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+
+      const entry = await setInventoryProperty(project, 'by_id', { '1': 1.5 });
+
+      expect(entry.error).toBeUndefined();
+      expect(entry.success).toBe(true);
+      expect(inventoryText(project)).toContain('by_id = Dictionary[int, float]({');
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a value that is not an int and names its key',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+      const before = inventoryText(project);
+
+      const entry = await setInventoryProperty(project, 'stock', { hp: 'x' });
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/key "hp"/);
+      expect(inventoryText(project)).toBe(before);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a fractional value for an int dictionary',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+      const before = inventoryText(project);
+
+      const entry = await setInventoryProperty(project, 'stock', { hp: 1.5 });
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/not a whole number/);
+      expect(inventoryText(project)).toBe(before);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'rejects a key that is not a number on an int-keyed dictionary',
+    async (ctx) => {
+      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+      const project = makeAuthoredProject();
+      const before = inventoryText(project);
+
+      const entry = await setInventoryProperty(project, 'by_id', { a: 1 });
+
+      expect(entry.success).toBeUndefined();
+      expect(entry.error).toMatch(/key "a" is not a whole number/);
+      expect(inventoryText(project)).toBe(before);
+    },
+    AUTHORED_CASE_TIMEOUT_MS,
   );
 });

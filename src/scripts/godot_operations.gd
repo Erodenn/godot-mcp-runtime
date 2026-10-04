@@ -2298,11 +2298,12 @@ const _PACKED_ARRAY_ELEMENT_TYPE: Dictionary = {
 # dict into a Vector2/Color, so a Dictionary element type could never be honoured
 # here and claiming a row for it would be a lie. Kept as its own
 # table so scalar compat widening and element widening stay independently
-# editable, and so the typed-Array[T] path can share it. An element type absent
-# from this table is REJECTED by both element paths, never accepted: the packed
-# path treats the miss as an internal inconsistency, and the typed-Array[T] path
-# cannot build the typed container it would need, so passing the raw untyped
-# Array to set() would store an empty array while reporting success.
+# editable, and so the typed-Array[T] and Dictionary[K, V] paths can share it.
+# An element type absent from this table is REJECTED by all three element
+# paths, never accepted: the packed path treats the miss as an internal
+# inconsistency, and the typed-Array[T] and typed-Dictionary paths cannot build
+# the typed container they would need, so passing the raw untyped value to set()
+# would store an empty container while reporting success.
 const _ELEMENT_TYPE_COMPAT: Dictionary = {
 	TYPE_BOOL: [TYPE_BOOL, TYPE_INT, TYPE_FLOAT],
 	TYPE_INT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
@@ -2516,6 +2517,89 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 		}
 	return {"ok": true, "value": typed, "error": ""}
 
+# Dictionary[K, V] arrived in Godot 4.4. Before it, a typed dictionary cannot
+# exist, and the methods _prepare_typed_dictionary calls on one do not either.
+const _TYPED_DICTIONARY_MIN_MINOR := 4
+
+# Key types a typed Dictionary can have and still be built from a JSON object,
+# whose keys are always strings. TYPE_NIL is an untyped (Variant) key.
+const _JSON_KEY_TYPES: Array = [TYPE_NIL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
+
+func _engine_has_typed_dictionaries() -> bool:
+	var version := Engine.get_version_info()
+	return int(version.major) > 4 or (int(version.major) == 4 and int(version.minor) >= _TYPED_DICTIONARY_MIN_MINOR)
+
+# Failure result of _prepare_typed_dictionary.
+func _typed_dictionary_error(message: String) -> Dictionary:
+	return {"ok": false, "value": null, "error": message, "typed": false}
+
+# Helper: build the typed Dictionary[K, V] a script-declared typed dictionary
+# property needs, from a raw JSON object. Returns {"ok", "value", "error",
+# "typed"}; typed is false when the property is not a typed dictionary, and the
+# caller then keeps the raw value. node.set() with an untyped dictionary on a
+# typed property is refused without an error, so the container is built here:
+# the current value is duplicated and cleared (which keeps its key and value
+# types without a typed-dictionary constructor, a compile error below 4.4) and
+# each entry is converted to the declared types. Every entry is validated before
+# anything is assigned, because assigning a wrong-typed value raises and aborts
+# this function. `current` is deliberately untyped so the file compiles on
+# engines that predate Dictionary.is_typed().
+# JSON object keys are always strings, so a typed key must be buildable from one:
+# the String family, int and float. A TYPE_NIL side is an untyped (Variant) side
+# and takes the value as it was sent.
+func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) -> Dictionary:
+	var current = node.get(property)
+	if not _engine_has_typed_dictionaries() or typeof(current) != TYPE_DICTIONARY or not current.is_typed():
+		return {"ok": true, "value": null, "error": "", "typed": false}
+	var node_class := node.get_class()
+	var key_type: int = current.get_typed_key_builtin()
+	var value_type: int = current.get_typed_value_builtin()
+	if not (key_type in _JSON_KEY_TYPES):
+		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': it is a Dictionary keyed by %s, and keys of that type cannot be built from JSON object keys. Assign it with run_script instead." % [
+			property, node_class, type_string(key_type)])
+	if value_type != TYPE_NIL and not _ELEMENT_TYPE_COMPAT.has(value_type):
+		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': it is a Dictionary with values of %s, and values of that type cannot be built from JSON. Assign it with run_script instead." % [
+			property, node_class, type_string(value_type)])
+
+	var typed_keys: Array = []
+	var typed_values: Array = []
+	for raw_key in raw:
+		var key = raw_key
+		if key_type == TYPE_INT:
+			if not str(raw_key).is_valid_int():
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': key \"%s\" is not a whole number, and the dictionary is keyed by int" % [
+					property, node_class, str(raw_key)])
+			key = int(str(raw_key))
+		elif key_type == TYPE_FLOAT:
+			if not str(raw_key).is_valid_float():
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': key \"%s\" is not a number, and the dictionary is keyed by float" % [
+					property, node_class, str(raw_key)])
+			key = float(str(raw_key))
+		elif key_type != TYPE_NIL:
+			key = type_convert(raw_key, key_type)
+		var element = raw[raw_key]
+		if value_type != TYPE_NIL:
+			element = _coerce_property_value(element)
+			var accepted: Array = _ELEMENT_TYPE_COMPAT[value_type]
+			if not (typeof(element) in accepted):
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': value at key \"%s\" (%s) cannot be coerced to the value type %s" % [
+					property, node_class, str(raw_key), str(element), type_string(value_type)])
+			if value_type == TYPE_INT and _is_fractional_float(element):
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': value at key \"%s\" (%s) is not a whole number, and the value type is int" % [
+					property, node_class, str(raw_key), str(element)])
+			element = type_convert(element, value_type)
+		typed_keys.append(key)
+		typed_values.append(element)
+
+	var typed = current.duplicate()
+	typed.clear()
+	for i in range(typed_keys.size()):
+		typed[typed_keys[i]] = typed_values[i]
+	if typed.size() != raw.size():
+		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': two keys of the object became the same %s key, so the dictionary could not be built" % [
+			property, node_class, type_string(key_type)])
+	return {"ok": true, "value": typed, "error": "", "typed": true}
+
 # Helper: coerce and validate a raw JSON value against a node's declared
 # property type before it is assigned via node.set(). Returns
 # {"ok": bool, "value": Variant, "error": String}.
@@ -2603,6 +2687,17 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 			if not typed_prep.ok:
 				return {"ok": false, "value": null, "error": typed_prep.error}
 			coerced = typed_prep.value
+
+	# A script-declared Dictionary[K, V] refuses an untyped dictionary the same way
+	# a typed Array does: set() leaves it unchanged or empty and reports nothing.
+	# An untyped Dictionary property (or an engine without typed dictionaries)
+	# comes back with typed false and keeps the raw value.
+	if declared == TYPE_DICTIONARY and typeof(coerced) == TYPE_DICTIONARY:
+		var dict_prep = _prepare_typed_dictionary(node, property, coerced)
+		if not dict_prep.ok:
+			return {"ok": false, "value": null, "error": dict_prep.error}
+		if dict_prep.typed:
+			coerced = dict_prep.value
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):

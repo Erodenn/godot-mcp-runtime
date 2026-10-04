@@ -112,7 +112,7 @@ export const nodeToolDefinitions = [
               },
               value: {
                 description:
-                  'New property value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. Packed*Array and script-declared Array[T] properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); an element that cannot represent the element type errors with its index instead of silently storing zeros. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node.',
+                  'New property value. Vector2/Vector3/Color auto-convert from {"x","y"} / {"x","y","z"} / {"r","g","b","a"} objects; primitives pass through. Packed*Array and script-declared Array[T] properties take a plain array and the element conversions apply per element (e.g. [{"x":10,"y":20}, ...] for Polygon2D.polygon); a script-declared Dictionary[K, V] takes a plain object (keys are strings, converted to K); an element that cannot represent the element type errors with its index or key instead of silently storing zeros. Object-typed properties (e.g. CollisionShape2D.shape) take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null to clear; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node.',
               },
             },
             required: ['nodePath', 'property', 'value'],

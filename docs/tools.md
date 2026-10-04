@@ -425,6 +425,14 @@ A script-declared `Array[T]` (for example `@export var points: Array[Vector2]`) 
 
 Any other `T` (a class, a Resource, an enum, `Dictionary`, a nested `Array`) is rejected with an explicit error naming the element type. That is deliberate: `set()` does not convert an untyped array element by element for a typed property, it refuses the assignment and leaves an empty array behind while reporting nothing, so passing one through would be a silent drop reported as success. Use `run_script` for those.
 
+### Typed dictionaries
+
+A script-declared `Dictionary[K, V]` (for example `@export var stock: Dictionary[String, int]`) takes a plain JSON object. Godot 4.4 added the typed form, so on an older engine every dictionary is untyped and passes through unchanged. `set()` refuses an untyped dictionary on a typed property without an error, so the tool builds the typed dictionary itself and checks every entry before it assigns any.
+
+`V` follows the same rule as `T` for typed arrays: `bool`, `int`, `float`, `String`, `StringName`, `NodePath`, the vector types and `Color`, with the same widening, and a fractional number for an `int` value is an error. An untyped (`Variant`) side takes the value as sent.
+
+JSON object keys are always strings, so `K` must be one that can be built from a string: `String`, `StringName`, `NodePath`, `int` (the key `"1"` becomes `1`, and `"a"` errors) or `float`. Any other `K` is rejected with an explicit error pointing at `run_script`. A value that cannot represent `V` errors and names its key, and two keys that become the same `K` (`"1"` and `"01"` on an `int` key) error instead of dropping one. An empty object gives an empty typed dictionary.
+
 ### Values a scene file cannot store
 
 `null` is accepted only on an Object-typed property (where it clears the value), on an untyped `Variant` property, and on a `metadata/<name>` key (where it removes the entry). On any other declared type it errors, since the typed setter would store that type's zero value. A name that exists on the node but has no entry in its property list (a script constant, or a value served by `_get`) is an error too, because there is nothing a scene file could hold for it.
