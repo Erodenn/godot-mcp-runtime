@@ -1057,3 +1057,38 @@ describe('handleCheckProject: name parsing and engine version', () => {
     ).toBeUndefined();
   });
 });
+
+describe('handleSearchProject: maxResults', () => {
+  const MATCH_COUNT = 3;
+
+  function makeSearchProject(): string {
+    const dir = tmp.makeProject('search-max-');
+    writeFileSync(join(dir, 'a.gd'), 'needle\nneedle\nneedle\n', 'utf8');
+    return dir;
+  }
+
+  async function search(dir: string, maxResults: unknown) {
+    return handleSearchProject({ projectPath: dir, pattern: 'needle', maxResults });
+  }
+
+  it.each([[0], [-1], [1.5], ['5']])('rejects maxResults %j', async (value) => {
+    const result = await search(makeSearchProject(), value);
+    expectErrorMatching(result, /maxResults/);
+  });
+
+  it('reports truncated false when exactly maxResults matches exist', async () => {
+    const parsed = parseText<{ matches: unknown[]; truncated: boolean }>(
+      await search(makeSearchProject(), MATCH_COUNT),
+    );
+    expect(parsed.matches).toHaveLength(MATCH_COUNT);
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it('reports truncated true when one more match exists than maxResults', async () => {
+    const parsed = parseText<{ matches: unknown[]; truncated: boolean }>(
+      await search(makeSearchProject(), MATCH_COUNT - 1),
+    );
+    expect(parsed.matches).toHaveLength(MATCH_COUNT - 1);
+    expect(parsed.truncated).toBe(true);
+  });
+});

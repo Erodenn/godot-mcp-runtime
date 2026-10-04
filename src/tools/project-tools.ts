@@ -191,7 +191,7 @@ export const projectToolDefinitions = [
   {
     name: 'search_project',
     description:
-      'Plain-text (substring) search across project files. Use to find references, callers or signatures. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text), truncated, filesSearched and fileTypes. warnings leads when no file had a searched extension or a path could not be read. Errors if pattern holds a line break.',
+      'Plain-text (substring) search across project files. Use to find references, callers or signatures. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults integer >= 1, default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text), truncated, filesSearched and fileTypes. warnings leads when no file had a searched extension or a path could not be read. Errors if pattern holds a line break.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -204,7 +204,10 @@ export const projectToolDefinitions = [
           description: 'File extensions to search (default: ["gd", "tscn", "cs", "gdshader"])',
         },
         caseSensitive: { type: 'boolean', description: 'Case-sensitive search (default: false)' },
-        maxResults: { type: 'number', description: 'Maximum matches to return (default: 100)' },
+        maxResults: {
+          type: 'number',
+          description: 'Maximum matches to return, an integer of 1 or more (default: 100)',
+        },
       },
       required: ['projectPath', 'pattern'],
     },
@@ -316,6 +319,11 @@ const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
 /** Where Godot keeps the project's display name. */
 const APPLICATION_SECTION = 'application';
 const CONFIG_NAME_KEY = 'config/name';
+
+/** Matches `search_project` returns when `maxResults` is omitted. */
+const DEFAULT_SEARCH_MAX_RESULTS = 100;
+/** The smallest `maxResults` that returns anything. */
+const MIN_SEARCH_MAX_RESULTS = 1;
 
 /** The maxDepth value that lists every level. */
 const UNLIMITED_DEPTH = -1;
@@ -582,11 +590,13 @@ function searchInFiles(
         for (const [i, line] of lines.entries()) {
           const haystack = caseSensitive ? line : line.toLowerCase();
           if (haystack.includes(needle)) {
-            matches.push({ file: childRelPath, lineNumber: i + 1, line });
-            if (matches.length >= maxResults) {
+            // A match past the limit is what makes the result truncated, so a
+            // search with exactly maxResults matches is complete.
+            if (matches.length === maxResults) {
               truncated = true;
               return;
             }
+            matches.push({ file: childRelPath, lineNumber: i + 1, line });
           }
         }
       }
@@ -893,7 +903,14 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
 
     const maxResultsResult = optionalNumber(args, 'maxResults');
     if (!maxResultsResult.ok) return maxResultsResult;
-    const maxResults = maxResultsResult.value ?? 100;
+    const maxResults = maxResultsResult.value ?? DEFAULT_SEARCH_MAX_RESULTS;
+    if (!Number.isInteger(maxResults) || maxResults < MIN_SEARCH_MAX_RESULTS) {
+      return err(
+        createErrorResponse(`maxResults must be an integer of ${MIN_SEARCH_MAX_RESULTS} or more`, [
+          `Omit maxResults for the default of ${DEFAULT_SEARCH_MAX_RESULTS}, or pass a whole number of ${MIN_SEARCH_MAX_RESULTS} or more`,
+        ]),
+      );
+    }
 
     const problems = newWalkProblems();
     const result = searchInFiles(
