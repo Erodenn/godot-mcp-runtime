@@ -18,7 +18,7 @@ import { cpSync, existsSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot } from '../helpers/godot-skip.js';
+import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
 import { authoredFixtureProjectPath } from '../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
@@ -213,6 +213,39 @@ describe('a headless save that drops content says so and keeps the file as it wa
         ).toEqual([]);
       }
       expect(existsSync(join(projectPath, '.mcp', 'godot-runtime', 'scene-backups'))).toBe(false);
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+/** The engine version the authored fixture's project.godot states in config/features. */
+const AUTHORED_FEATURE_VERSION = { major: 4, minor: 5 };
+
+describe('a scene mutation on a project an older engine saved says so', () => {
+  itGodot(
+    'add_node warns exactly when the engine is newer than config/features',
+    async () => {
+      const engine = await engineMajorMinor();
+      const engineIsNewer =
+        engine.major > AUTHORED_FEATURE_VERSION.major ||
+        (engine.major === AUTHORED_FEATURE_VERSION.major &&
+          engine.minor > AUTHORED_FEATURE_VERSION.minor);
+
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: PLAYER_SCENE,
+        nodeType: 'Node2D',
+        nodeName: 'Added',
+      });
+      const payload = expectMatchesOutputSchema('add_node', result);
+      const versionWarnings = ((payload.warnings ?? []) as string[]).filter((entry) =>
+        /config\/features version 4\.5/.test(entry),
+      );
+      expect(versionWarnings).toHaveLength(engineIsNewer ? 1 : 0);
+      if (engineIsNewer) {
+        expect(Object.keys(payload)[0]).toBe('warnings');
+        expect(versionWarnings[0]).toContain(`Godot ${engine.major}.${engine.minor} is newer`);
+      }
     },
     CASE_TIMEOUT_MS,
   );

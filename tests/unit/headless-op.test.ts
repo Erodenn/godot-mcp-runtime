@@ -1299,6 +1299,104 @@ describe('executeSceneOp scene loss guard', () => {
   });
 });
 
+describe('executeSceneOp engine-newer-than-project warning', () => {
+  const tmp = useTmpDirs();
+  const PROJECT_AT_4_5 =
+    'config_version=5\n\n[application]\n\nconfig/features=PackedStringArray("4.5", "GL Compatibility")\n';
+  const VERSION_WARNING =
+    "Godot 4.6 is newer than this project's config/features version 4.5: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example).";
+
+  function run(
+    godotVersion: string,
+    stdout: string,
+    options: Parameters<typeof executeSceneOp>[7],
+    projectContent = PROJECT_AT_4_5,
+  ): ReturnType<typeof executeSceneOp> {
+    const projectPath = tmp.makeProject('engine-newer-', projectContent);
+    return executeSceneOp(
+      createFakeRunner({ stdout, godotVersion }).asRunner,
+      'add_node',
+      { scenePath: 'main.tscn' },
+      projectPath,
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      options,
+    );
+  }
+  const MUTATION = { parseStdoutAsJson: true, mutatesSceneFile: true };
+
+  it('leads a mutation payload with the warning when the engine is newer', async () => {
+    const result = await run('4.6.2.stable.official.71f334935', '{"nodeName":"N"}', MUTATION);
+    const payload = unwrap(result).structuredContent as Record<string, unknown>;
+    expect(Object.keys(payload)).toEqual(['warnings', 'nodeName']);
+    expect(payload.warnings).toEqual([VERSION_WARNING]);
+  });
+
+  it("puts it ahead of the operation's own warnings", async () => {
+    const result = await run('4.6.2.stable', '{"nodeName":"N","warnings":["renamed"]}', MUTATION);
+    const payload = unwrap(result).structuredContent as { warnings: string[] };
+    expect(payload.warnings).toEqual([VERSION_WARNING, 'renamed']);
+  });
+
+  it('adds nothing when the engine matches the project', async () => {
+    const result = await run('4.5.1.stable', '{"nodeName":"N"}', MUTATION);
+    expect(unwrap(result).structuredContent).toEqual({ nodeName: 'N' });
+  });
+
+  it('adds nothing when the project states no version', async () => {
+    const result = await run('4.6.2.stable', '{"nodeName":"N"}', MUTATION, 'config_version=5\n');
+    expect(unwrap(result).structuredContent).toEqual({ nodeName: 'N' });
+  });
+
+  it('adds nothing to an operation that does not mutate a scene file', async () => {
+    const result = await run('4.6.2.stable', '{"name":"Main"}', { parseStdoutAsJson: true });
+    expect(unwrap(result).structuredContent).toEqual({ name: 'Main' });
+  });
+
+  it('adds nothing to an error response', async () => {
+    const result = await run('4.6.2.stable', '', MUTATION);
+    expect(hasError(result)).toBe(true);
+    expect(
+      unwrap(result)
+        .content.map((block) => block.text ?? '')
+        .join('\n'),
+    ).not.toContain('config/features');
+  });
+
+  it('comes after a dropped-content warning', async () => {
+    const projectPath = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
+    const scenePath = join(projectPath, 'main.tscn');
+    writeFileSync(
+      scenePath,
+      '[gd_scene format=3 uid="uid://before"]\n\n[node name="Main" type="Node2D"]\n',
+      'utf8',
+    );
+    const fake = createFakeRunner({ stdout: '{"nodeName":"N"}', godotVersion: '4.6.2.stable' });
+    const runner = fake.asRunner;
+    const answer = runner.executeOperation.bind(runner);
+    runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
+      writeFileSync(scenePath, '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n', 'utf8');
+      return answer(...args);
+    };
+    const result = await executeSceneOp(
+      runner,
+      'add_node',
+      { scenePath: 'main.tscn' },
+      projectPath,
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { ...MUTATION, sceneWrites: inPlaceSceneWrite('main.tscn') },
+    );
+    const payload = unwrap(result).structuredContent as { warnings: string[] };
+    expect(payload.warnings).toHaveLength(3);
+    expect(payload.warnings[0]).toMatch(/scene-backups/);
+    expect(payload.warnings[1]).toBe('The scene lost its uid uid://before');
+    expect(payload.warnings[2]).toBe(VERSION_WARNING);
+  });
+});
+
 describe('findLiveSessionOnProject', () => {
   const OTHER_PID = 4242;
 

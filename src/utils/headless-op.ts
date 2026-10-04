@@ -11,6 +11,7 @@ import {
 } from './output-parsing.js';
 import { ok, err } from './result.js';
 import { liveSessionRemedy } from './session-report.js';
+import { engineNewerThanProject, readProjectFeatureVersion } from './engine-version.js';
 import { beginSceneGuard, finishSceneGuard, type SceneWriteIntent } from './scene-loss-guard.js';
 
 /** Max stderr diagnostic entries surfaced in an early-exit error message. */
@@ -245,24 +246,6 @@ function interpretOperationResult(
   return ok({ content: [{ type: 'text', text: payload ?? stripOperationSentinel(stdout) }] });
 }
 
-/**
- * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
- * operation. Used by the 15 scene/node mutation handlers in tools/scene-tools.ts
- * and tools/node-tools.ts to eliminate identical error-handling duplication.
- *
- * Handlers retain control of: parameter normalization, project/scene validation,
- * field validation, and constructing the `params` object — those run before the
- * call. Returns the canonical `Result<ToolSuccessPayload, ToolResponse>` shape;
- * the dispatch edge maps it back to the MCP wire envelope.
- *
- * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `IMPORT_NEEDED_MARKER`)
- * by running `runner.importAssets` and retrying the operation exactly once,
- * capped structurally rather than by a loop — a marker on the retried run
- * falls through to normal error handling instead of importing again. A run
- * that already reported applied work is never retried at all (see
- * `classifyMarkedRun`): the replay would redo what it already saved. A marker
- * counts only as a line the script itself printed (see `stderrRequestsImport`).
- */
 export interface SceneOpOptions {
   parseStdoutAsJson?: boolean;
   mutatesSceneFile?: boolean;
@@ -299,6 +282,51 @@ function prependWarnings(result: HandlerResult, warnings: string[]): HandlerResu
   );
 }
 
+/**
+ * The warning for a project last saved by an older engine than the one doing
+ * this save, or null when the versions are in order or either is unknown. The
+ * project's version is read first: a project that states none costs no engine
+ * probe.
+ */
+async function engineNewerWarning(
+  runner: GodotRunner,
+  projectPath: string,
+): Promise<string | null> {
+  try {
+    if (readProjectFeatureVersion(projectPath) === null) return null;
+    const newer = engineNewerThanProject(await runner.getVersion(), projectPath);
+    if (newer === null) return null;
+    const { engine, project } = newer;
+    return `Godot ${engine.major}.${engine.minor} is newer than this project's config/features version ${project.major}.${project.minor}: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example).`;
+  } catch {
+    // A version that cannot be read is not a reason to fail a finished save.
+    return null;
+  }
+}
+
+/**
+ * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
+ * operation. Used by the 15 scene/node mutation handlers in tools/scene-tools.ts
+ * and tools/node-tools.ts to eliminate identical error-handling duplication.
+ *
+ * Handlers retain control of: parameter normalization, project/scene validation,
+ * field validation, and constructing the `params` object — those run before the
+ * call. Returns the canonical `Result<ToolSuccessPayload, ToolResponse>` shape;
+ * the dispatch edge maps it back to the MCP wire envelope.
+ *
+ * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `IMPORT_NEEDED_MARKER`)
+ * by running `runner.importAssets` and retrying the operation exactly once,
+ * capped structurally rather than by a loop — a marker on the retried run
+ * falls through to normal error handling instead of importing again. A run
+ * that already reported applied work is never retried at all (see
+ * `classifyMarkedRun`): the replay would redo what it already saved. A marker
+ * counts only as a line the script itself printed (see `stderrRequestsImport`).
+ *
+ * Two kinds of warning are put ahead of the payload after the run, in this
+ * order: what the save dropped that the operation did not ask to change (when
+ * `sceneWrites` is given, see `scene-loss-guard.ts`), then the engine being
+ * newer than the project (for every operation that mutates a scene file).
+ */
 export async function executeSceneOp(
   runner: GodotRunner,
   operation: string,
@@ -334,9 +362,14 @@ export async function executeSceneOp(
   );
   // Every exit of the run comes through here, the refusals and the thrown
   // spawn error included: a run that failed late may already have saved.
-  const lossWarnings =
-    sceneGuard === null ? [] : finishSceneGuard(sceneGuard, stderrSeen.join('\n'));
-  return prependWarnings(result, lossWarnings);
+  const warnings = sceneGuard === null ? [] : finishSceneGuard(sceneGuard, stderrSeen.join('\n'));
+  // Only a save that happened is worth the version note: an error response
+  // already says the operation did not complete.
+  if (options.mutatesSceneFile && result.ok && result.value.structuredContent !== undefined) {
+    const versionWarning = await engineNewerWarning(runner, projectPath);
+    if (versionWarning !== null) warnings.push(versionWarning);
+  }
+  return prependWarnings(result, warnings);
 }
 
 /** The run itself: one attempt, plus the cold-import retry. `stderrSeen` collects each attempt's stderr. */

@@ -8,7 +8,7 @@
  */
 
 import { afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -22,6 +22,22 @@ export interface TmpDirHandle {
 }
 
 const DEFAULT_PROJECT_GODOT = 'config_version=5\n';
+
+const FEATURES_LINE_REGEX = /^config\/features=.*\r?\n/m;
+
+/**
+ * Remove the `config/features` line from a tmp copy's project.godot, so the
+ * project states no engine version. Every scene mutation on a project whose
+ * stated version is older than the running engine leads with a warning; a test
+ * that asserts an exact payload, or the absence of `warnings`, calls this
+ * right after copying a fixture so its assertions hold on every engine in the
+ * CI matrix. Never call it on a committed fixture directory.
+ */
+export function dropProjectFeatureVersion(projectDir: string): void {
+  const projectFile = join(projectDir, 'project.godot');
+  const content = readFileSync(projectFile, 'utf8');
+  writeFileSync(projectFile, content.replace(FEATURES_LINE_REGEX, ''), 'utf8');
+}
 
 /**
  * Register an `afterEach` cleanup hook for tmp dirs created during the

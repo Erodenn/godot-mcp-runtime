@@ -15,6 +15,7 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { dropProjectFeatureVersion } from '../helpers/tmp.js';
 import { hasError } from '../helpers/assertions.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
@@ -57,6 +58,9 @@ beforeAll(async () => {
 beforeEach(() => {
   projectPath = join(tmpdir(), `godot-mcp-payloads-${randomBytes(6).toString('hex')}`);
   cpSync(fixtureProjectPath, projectPath, { recursive: true });
+  // These tests assert exact payloads. Without a stated engine version the
+  // newer-engine warning stays out of them on every engine CI runs.
+  dropProjectFeatureVersion(projectPath);
   tmpDirs.push(projectPath);
 });
 

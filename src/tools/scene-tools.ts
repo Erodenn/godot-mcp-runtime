@@ -41,6 +41,7 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         success: { type: 'boolean' },
         scenePath: {
           type: 'string',

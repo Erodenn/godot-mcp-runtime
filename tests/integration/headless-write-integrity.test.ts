@@ -23,6 +23,7 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { dropProjectFeatureVersion } from '../helpers/tmp.js';
 import { errorText, hasError } from '../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
@@ -94,6 +95,9 @@ beforeAll(async () => {
 beforeEach(() => {
   projectPath = join(tmpdir(), `godot-mcp-integrity-${randomBytes(6).toString('hex')}`);
   cpSync(fixtureProjectPath, projectPath, { recursive: true });
+  // These tests assert exact warnings. Without a stated engine version the
+  // newer-engine warning stays out of them on every engine CI runs.
+  dropProjectFeatureVersion(projectPath);
   tmpDirs.push(projectPath);
 });
 
