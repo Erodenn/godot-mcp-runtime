@@ -120,7 +120,15 @@ $env:GODOT_PATH = "C:/path/to/godot.exe"; npm test
 
 CI installs Godot too: the `godot-integration` job in `.github/workflows/ci.yml` downloads Godot 4.5.1, 4.6.2 and 4.7.2 and runs the full suite with `GODOT_PATH` set, in a matrix separate from the Godot-less job that runs everywhere else. Locally, these tests skip cleanly unless you set `GODOT_PATH` yourself.
 
-The suite hides game windows by default: `runProjectOrSkip` launches with `background: true` unless a test passes its own value, and tests that spawn Godot themselves pass `windowsHide`. Both read `showTestWindows()` in `tests/helpers/run-project-or-skip.ts`. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch the windows. On Windows a hidden window can still take keyboard focus intermittently; this is a known open issue. `render_movie` always hides its window on Windows and is not affected by the variable.
+The suite hides game windows by default: `runProjectOrSkip` launches with `background: true` unless a test passes its own value, and tests that spawn Godot themselves pass `windowsHide`. Both read `showTestWindows()` in `tests/helpers/run-project-or-skip.ts`. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch the windows. `render_movie` always hides its window on Windows and is not affected by the variable.
+
+### Private desktop on Windows
+
+Godot takes keyboard focus on startup even when its window is hidden. On Windows the suite therefore starts every Godot process on a private Win32 desktop, where it cannot. On first run it compiles a small helper from `tests/helpers/private-desktop-launcher.cs` (cached under `node_modules/.cache/godot-mcp-runtime-tests/`), and `tests/helpers/private-desktop-global-setup.ts` points `GODOT_PATH` at that helper for every test process, with the real path in `GODOT_MCP_TEST_LAUNCH_TARGET`. Nothing under `src/` knows about it. The run prints one `[tests] private desktop:` line to stderr saying whether it is on and, if not, why.
+
+- `GODOT_MCP_TEST_SHOW_WINDOWS=1` turns it off and shows the windows.
+- When the compiler (`csc.exe` in the .NET Framework directory) is unavailable, the suite falls back to hidden windows, which can still take focus.
+- Anything a game pops up (a dialog, a crash box) appears on the private desktop, where it cannot be seen. If a test hangs under the launcher, re-run it with `GODOT_MCP_TEST_SHOW_WINDOWS=1`.
 
 `GODOT_MONO_PATH` (a Godot .NET/Mono build) gates the opt-in C# case in `integration/script-attach-validation.test.ts` the same way `GODOT_PATH` gates the rest: skipped cleanly when unset, and also skipped when `dotnet` is not on `PATH`. CI never sets it. Set it alongside `GODOT_PATH` to also exercise the C# attach-script path locally:
 

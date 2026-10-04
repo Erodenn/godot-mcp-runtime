@@ -62,7 +62,9 @@ Run `npm run install-hooks` once per clone. The pre-commit hook formats staged f
 
 See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint - it runs the suite plus typecheck, lint, format, and build in the same order CI does, applying formatting rather than checking it. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
 
-The integration suite hides game windows by default. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch them. On Windows a hidden window can still take keyboard focus intermittently, a known open issue.
+The integration suite hides game windows by default. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch them.
+
+On Windows the suite compiles a small helper from `tests/helpers/private-desktop-launcher.cs` on first run (cached under `node_modules/.cache`) and starts every Godot process on a private desktop, so test runs do not take keyboard focus. `GODOT_MCP_TEST_SHOW_WINDOWS=1` turns this off. When the compiler is unavailable the suite falls back to hidden windows, which can still take focus. Anything a game pops up (a dialog, a crash box) appears on the private desktop where it cannot be seen, so a test that hangs under the launcher should be re-run with the opt-out. Details are in `tests/README.md`.
 
 ## Architectural invariants
 
