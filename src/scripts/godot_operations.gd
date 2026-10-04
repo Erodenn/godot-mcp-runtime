@@ -398,13 +398,39 @@ func load_scene_instance(scene_path: String):
 		log_error(last_scene_load_error)
 		return null
 
-	var instance = scene.instantiate()
+	var instance = _instantiate_packed(scene, true)
 	if not instance:
 		last_scene_load_error = "Failed to instantiate scene: " + full_path
 		log_error(last_scene_load_error)
 		return null
 
 	return instance
+
+# PackedScene.pack() can only tell an override from an inherited value when the
+# nodes carry the scene state they were instantiated from, and instantiate()
+# records that state only when asked for an edit state. Without it a save
+# flattens an inherited scene (its root loses instance=) and writes every
+# non-default property of an editable instance. Edit states exist in editor
+# builds only; an export-template binary gets the plain instantiate.
+func _instantiate_packed(scene: PackedScene, as_main_scene: bool) -> Node:
+	if not OS.has_feature("editor"):
+		return scene.instantiate()
+	var edit_state := PackedScene.GEN_EDIT_STATE_MAIN if as_main_scene else PackedScene.GEN_EDIT_STATE_INSTANCE
+	return scene.instantiate(edit_state)
+
+# Root of the scene this scene inherits from, freshly instantiated, or null
+# when the scene is not inherited. The caller frees it.
+func _instantiate_base_scene(scene_path: String) -> Node:
+	var full_path := normalize_scene_path(scene_path)
+	if full_path.is_empty():
+		return null
+	var packed = load(full_path)
+	if packed == null or not (packed is PackedScene):
+		return null
+	var base = packed.get_state().get_node_instance(0)
+	if base == null or not (base is PackedScene):
+		return null
+	return base.instantiate()
 
 # Helper to find a node by path. Accepts "root", ".", "" (all → scene_root),
 # the actual scene root's name (e.g. "Main"), or a path with either as the first
@@ -537,7 +563,7 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 	var packed = load(scene_full_path)
 	if packed == null or not (packed is PackedScene):
 		return {"ok": false, "error": "Failed to load scene: " + scene_full_path}
-	var instanced = packed.instantiate()
+	var instanced = _instantiate_packed(packed, false)
 	if instanced == null:
 		return {"ok": false, "error": "Failed to instantiate scene: " + scene_full_path}
 	return {"ok": true, "node": instanced}
@@ -850,6 +876,9 @@ func delete_nodes(params):
 	var node_paths: Array = params.node_paths
 	var results: Array = []
 	var any_deleted := false
+	# A node the base scene defines is rebuilt from the base on every load, so a
+	# deletion here would be reported saved and come back.
+	var base_root = _instantiate_base_scene(params.scene_path)
 
 	for node_path in node_paths:
 		var entry = {"nodePath": node_path}
@@ -863,6 +892,8 @@ func delete_nodes(params):
 			# made here would be reported saved and come back. The instance's own
 			# root is owned by this scene and stays deletable.
 			entry["error"] = "Node '%s' belongs to an instanced scene (or is not owned by this scene) and cannot be deleted from here; edit the scene it comes from" % node_path
+		elif base_root != null and base_root.has_node(scene_root.get_path_to(node)):
+			entry["error"] = "Node '%s' is inherited from the scene this one extends and cannot be deleted from here: it is re-created on every load. Delete it in the base scene." % node_path
 		else:
 			var parent = node.get_parent()
 			parent.remove_child(node)
@@ -870,6 +901,9 @@ func delete_nodes(params):
 			entry["success"] = true
 			any_deleted = true
 		results.append(entry)
+
+	if base_root != null:
+		base_root.free()
 
 	if any_deleted:
 		if not save_scene_to_path(scene_root, params.scene_path):
@@ -891,6 +925,8 @@ func delete_nodes(params):
 # serialize a second, shadowing node ([node name="Inner" type=... parent="A"])
 # instead of an override, duplicating the node on reload and losing the
 # override entirely on a second write.
+# The edit state _instantiate_packed asks for does not replace this mark: an
+# inner edit without set_editable_instance is still dropped on pack.
 func _claim_for_serialization(scene_root: Node, target: Node) -> void:
 	var cur := target.get_parent()
 	while cur != null and cur != scene_root:
