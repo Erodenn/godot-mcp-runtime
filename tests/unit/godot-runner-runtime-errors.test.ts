@@ -15,6 +15,9 @@ import type { GodotProcess } from '../../src/utils/godot-runner.js';
 import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
 import { installSession } from '../helpers/session-install.js';
 
+/** Actions in a batch whose only stderr output is their boundary lines. */
+const BOUNDARY_ONLY_ACTIONS = 3;
+
 function makeFakeProcess(opts: { errors?: string[]; totalErrorsWritten?: number }): GodotProcess {
   const errors = opts.errors ?? [];
   return {
@@ -178,8 +181,8 @@ describe('GodotRunner.ingestStderrChunk', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'SCRIPT ERROR: bo');
     runner.ingestStderrChunk(proc, 'om on line 4\n');
-    expect(proc.errors).toEqual(['SCRIPT ERROR: boom on line 4', '']);
-    expect(proc.totalErrorsWritten).toBe(2);
+    expect(proc.errors).toEqual(['SCRIPT ERROR: boom on line 4']);
+    expect(proc.totalErrorsWritten).toBe(1);
   });
 
   it('recognizes an action-boundary sentinel split across two chunks', () => {
@@ -195,8 +198,10 @@ describe('GodotRunner.ingestStderrChunk', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'a\n');
     runner.ingestStderrChunk(proc, 'b\n');
-    expect(proc.errors).toEqual(['a', '', 'b', '']);
-    expect(proc.totalErrorsWritten).toBe(4);
+    // The empty string after a final newline is not a line: nothing is
+    // retained for it, and the next chunk starts a line of its own.
+    expect(proc.errors).toEqual(['a', 'b']);
+    expect(proc.totalErrorsWritten).toBe(2);
   });
 
   it('ignores an empty chunk without marking the tail incomplete', () => {
@@ -204,7 +209,64 @@ describe('GodotRunner.ingestStderrChunk', () => {
     runner.ingestStderrChunk(proc, 'a');
     runner.ingestStderrChunk(proc, '');
     runner.ingestStderrChunk(proc, 'bc\n');
-    expect(proc.errors).toEqual(['abc', '']);
+    expect(proc.errors).toEqual(['abc']);
+  });
+
+  it('retains no carriage return and no blank line from Windows line endings', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    // One line per chunk, the way a Windows pipe delivers them.
+    runner.ingestStderrChunk(proc, 'first\r\n');
+    runner.ingestStderrChunk(proc, '\r\n');
+    runner.ingestStderrChunk(proc, 'second\r\nthird\r\n');
+    expect(proc.errors).toEqual(['first', 'second', 'third']);
+    expect(proc.totalErrorsWritten).toBe(3);
+  });
+
+  it('rejoins a line whose chunk boundary fell between the carriage return and the newline', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'SCRIPT ERROR: boom\r');
+    expect(proc.errors).toEqual(['SCRIPT ERROR: boom']);
+    runner.ingestStderrChunk(proc, '\nnext\r\n');
+    expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'next']);
+    expect(proc.totalErrorsWritten).toBe(2);
+  });
+
+  it('leaves no empty entry where a boundary line was stripped', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    // Each printerr arrives as its own CRLF-terminated chunk.
+    for (let action = 0; action < BOUNDARY_ONLY_ACTIONS; action += 1) {
+      runner.ingestStderrChunk(proc, `${ACTION_BOUNDARY_SENTINEL} ${action}\r\n`);
+    }
+    runner.ingestStderrChunk(proc, 'SCRIPT ERROR: after the batch\r\n');
+    expect(proc.errors).toEqual(['SCRIPT ERROR: after the batch']);
+    expect(proc.actionBoundaries).toEqual([
+      { index: 0, seq: 0 },
+      { index: 1, seq: 0 },
+      { index: 2, seq: 0 },
+    ]);
+  });
+
+  it('does not treat the line after a complete boundary tail as its continuation', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    // The boundary is the last thing in its chunk, with no newline yet. It is
+    // recorded at once and nothing is left marked incomplete, so the next
+    // chunk cannot pop the unrelated line before it.
+    runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} 0`);
+    runner.ingestStderrChunk(proc, 'b\n');
+    expect(proc.errors).toEqual(['a', 'b']);
+    expect(proc.actionBoundaries).toEqual([{ index: 0, seq: 1 }]);
+    expect(proc.totalErrorsWritten).toBe(2);
+  });
+});
+
+describe('GodotRunner.ingestStdoutChunk', () => {
+  it('retains whole lines with no carriage return, no blank line and no split line', () => {
+    const runner = new GodotRunner();
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStdoutChunk(proc, 'Godot Engine v4\r\n\r\nhalf a ');
+    expect(proc.output).toEqual(['Godot Engine v4', 'half a ']);
+    runner.ingestStdoutChunk(proc, 'line\r\nlast\r\n');
+    expect(proc.output).toEqual(['Godot Engine v4', 'half a line', 'last']);
   });
 });
 
@@ -275,6 +337,30 @@ describe('GodotRunner.collectActionErrors', () => {
     );
     const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
     expect(collected.buckets).toEqual([[], ['SCRIPT ERROR: from action 1']]);
+    expect(collected.sentinelTimedOut).toBe(false);
+  });
+
+  it('still attributes each error to its action when lines end in CRLF and blank lines sit between them', async () => {
+    installSession(runner, { process: makeFakeProcess({ errors: [], totalErrorsWritten: 0 }) });
+    const capture = runner.beginActionErrorCapture();
+    for (const chunk of [
+      'SCRIPT ERROR: from action 0\r\n',
+      '\r\n',
+      `${ACTION_BOUNDARY_SENTINEL} 0\r\n`,
+      `${ACTION_BOUNDARY_SENTINEL} 1\r\n`,
+      '\r\n',
+      'SCRIPT ERROR: from action 2\r\n',
+      `${ACTION_BOUNDARY_SENTINEL} 2\r\n`,
+    ]) {
+      runner.ingestStderrChunk(runner.activeProcess, chunk);
+    }
+    const collected = await runner.collectActionErrors(capture, 3, FAST_DRAIN_MS);
+    expect(collected.buckets).toEqual([
+      ['SCRIPT ERROR: from action 0'],
+      [],
+      ['SCRIPT ERROR: from action 2'],
+    ]);
+    expect(collected.trailing).toEqual([]);
     expect(collected.sentinelTimedOut).toBe(false);
   });
 });

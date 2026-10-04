@@ -31,6 +31,7 @@ import {
   normalizeForCompare,
   normalizeExitCode,
   projectPathKey,
+  splitOutputChunk,
 } from './output-parsing.js';
 import { checkDisplayAvailable, type ResolvedProjectPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
@@ -121,6 +122,8 @@ const IMPORT_TIMEOUT_MS = 300000;
 
 // Retained-line cap on the session stderr ring buffer.
 const STDERR_RING_LIMIT_LINES = 500;
+// Retained-line cap on the session stdout ring buffer.
+const STDOUT_RING_LIMIT_LINES = 500;
 // The bridge's TCP response can land before its stderr has drained, so the
 // final action boundary is waited for on a short bounded poll rather than
 // assumed present.
@@ -147,6 +150,8 @@ export interface GodotProcess {
    * completes. `ingestStderrChunk` pops and rejoins it in that case.
    */
   stderrTailIncomplete?: boolean;
+  /** The same for `output`, kept by `ingestStdoutChunk`. */
+  stdoutTailIncomplete?: boolean;
 }
 
 /** Opaque handle returned by `beginActionErrorCapture`. */
@@ -971,12 +976,7 @@ export class GodotRunner {
       };
 
       proc.stdout?.on('data', (data: Buffer) => {
-        const lines = data.toString().split('\n');
-        output.push(...lines);
-        if (output.length > 500) output.splice(0, output.length - 500);
-        lines.forEach((line: string) => {
-          if (line.trim()) logDebug(`[Godot stdout] ${line}`);
-        });
+        this.ingestStdoutChunk(godotProcess, data.toString());
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
@@ -1948,71 +1948,90 @@ export class GodotRunner {
    * Public only so unit tests can drive ingestion without spawning Godot; the
    * production caller is the session stderr handler in `runProject`.
    *
-   * A `'data'` event boundary can land mid-line, splitting one Godot stderr
-   * line into two chunks. Every existing test here passes a chunk with no
-   * trailing newline and expects the final segment retained immediately, so
-   * this cannot withhold a trailing partial line the way a conventional carry
-   * buffer would - that would turn every one of those tests red. Instead it
-   * emits eagerly and coalesces retroactively: a chunk lacking a trailing
-   * newline marks `proc.stderrTailIncomplete`, and the next chunk pops that
-   * tail back off, prepends it to its own first segment, and re-runs
-   * `parseActionBoundary` on the rejoined text - which is the entire fix, since
-   * a sentinel split across the boundary is unrecognizable in either half.
+   * What is retained is lines, not `split('\n')` segments. A line has no
+   * terminator left on it (the `\r` Windows writes before the `\n` is removed
+   * with it), the empty string after a chunk's final newline is not a line,
+   * and a blank line is not retained. Without that, a Windows log alternated
+   * between `text\r` and `''`, and every stripped boundary line left a `''`
+   * behind, which is what `get_debug_output`'s `limit` then counted.
+   *
+   * A `'data'` event boundary can land mid-line. The text after a chunk's last
+   * newline is retained at once, so a reader sees it, and it is marked with
+   * `proc.stderrTailIncomplete`; the next chunk pops it back off, continues it,
+   * and only then decides what the finished line is. That is how a sentinel
+   * split across two chunks is recognized: it is unrecognizable in either half.
+   * A tail that already reads as a complete boundary is recorded as one at
+   * once and is not held back for a continuation, because the bridge writes
+   * each boundary in one `printerr` and the batch is waiting on it.
    *
    * Why the bookkeeping stays correct:
-   * - `totalErrorsWritten`: the pop decrements before the rejoined line's push
-   *   increments, landing exactly where an unsplit chunk would have left it.
-   *   A reader sampling between the two chunks sees the truncated line and a
-   *   count including it (today's behavior); the pop-then-push realigns it
-   *   with no drift.
-   * - `actionBoundaries[].seq`: an incomplete tail is by definition the last
-   *   segment of its chunk, so no mark can have been recorded after it -
-   *   every existing mark's `seq` is <= the popped line's index and the pop
-   *   cannot invalidate one. A mark from the rejoined line itself gets its
-   *   `seq` from the already-decremented counter, which is correct.
-   * - `STDERR_RING_LIMIT_LINES`: the incomplete tail is the newest line and
-   *   the trim removes from the front, so it is never the line trimmed; the
-   *   `proc.errors.length > 0` guard below covers the degenerate case anyway.
-   * - Process exit with a dangling partial line: nothing to flush. The eager
-   *   emit already put it in `errors`, so `stop_project` and
-   *   `get_debug_output` see it exactly as they do today. No flush-on-close
-   *   handler is added; eager emission is what makes one unnecessary.
-   * - `\r\n` on Windows: unchanged on purpose. `parseActionBoundary` already
-   *   trims each line, so a sentinel with a trailing `\r` still parses. A
-   *   chunk boundary falling between `\r` and `\n` produces a tail ending in
-   *   `\r`, then a next chunk whose first segment is `''`; the rejoin yields
-   *   the same text and the following empty line lands as it would unsplit.
-   *   Retained lines are not stripped of `\r` here - that would change the
-   *   text every existing stderr assertion compares against.
-   * - Trailing empty segment: `'a\n'.split('\n')` is `['a', '']` and the `''`
-   *   is pushed and counted today. `endsWith('\n')` marks the tail complete in
-   *   that case, so the quirk is preserved byte for byte.
+   * - `totalErrorsWritten` counts retained lines only. The pop decrements
+   *   before the finished line's push increments, so the count lands where an
+   *   unsplit chunk would have left it. Boundaries and blank lines are never
+   *   counted, so dropping them shifts no window.
+   * - `actionBoundaries[].seq`: an incomplete tail is the last thing its chunk
+   *   retained, so no mark was recorded after it and the pop invalidates none.
+   *   A mark from the finished line takes its `seq` from the already
+   *   decremented counter.
+   * - `STDERR_RING_LIMIT_LINES`: the trim removes from the front and the
+   *   incomplete tail is the newest line, so it is never the line trimmed.
+   * - Process exit with a dangling partial line: nothing to flush, it is
+   *   already in `errors`.
    */
   ingestStderrChunk(proc: GodotProcess, text: string): void {
     if (text === '') return;
-    const segments = text.split('\n');
+    let carried: string | null = null;
     if (proc.stderrTailIncomplete && proc.errors.length > 0) {
-      const poppedTail = proc.errors.pop()!;
+      carried = proc.errors.pop()!;
       proc.totalErrorsWritten -= 1;
-      segments[0] = poppedTail + segments[0];
     }
-    for (const line of segments) {
+    const { complete, partial } = splitOutputChunk(text, carried);
+    const recordBoundary = (line: string): boolean => {
       const boundaryIndex = parseActionBoundary(line);
-      if (boundaryIndex !== null) {
-        if (!proc.actionBoundaries) proc.actionBoundaries = [];
-        proc.actionBoundaries.push({ index: boundaryIndex, seq: proc.totalErrorsWritten });
-        continue;
-      }
+      if (boundaryIndex === null) return false;
+      if (!proc.actionBoundaries) proc.actionBoundaries = [];
+      proc.actionBoundaries.push({ index: boundaryIndex, seq: proc.totalErrorsWritten });
+      return true;
+    };
+    const retain = (line: string): void => {
       proc.errors.push(line);
       proc.totalErrorsWritten += 1;
+      logDebug(`[Godot stderr] ${line}`);
+    };
+    for (const line of complete) {
+      if (recordBoundary(line) || line.trim() === '') continue;
+      retain(line);
     }
-    proc.stderrTailIncomplete = !text.endsWith('\n');
+    proc.stderrTailIncomplete = false;
+    if (partial !== null && !recordBoundary(partial)) {
+      retain(partial);
+      proc.stderrTailIncomplete = true;
+    }
     if (proc.errors.length > STDERR_RING_LIMIT_LINES) {
       proc.errors.splice(0, proc.errors.length - STDERR_RING_LIMIT_LINES);
     }
-    segments.forEach((line: string) => {
-      if (line.trim()) logDebug(`[Godot stderr] ${line}`);
-    });
+  }
+
+  /**
+   * Fold one raw stdout chunk into a spawned session's `output` buffer, under
+   * the same line rules as {@link ingestStderrChunk}: no terminator left on a
+   * line, no blank lines, and a line split across two chunks is one entry.
+   * The only writer of `GodotProcess.output`.
+   */
+  ingestStdoutChunk(proc: GodotProcess, text: string): void {
+    if (text === '') return;
+    const carried = proc.stdoutTailIncomplete && proc.output.length > 0 ? proc.output.pop()! : null;
+    const { complete, partial } = splitOutputChunk(text, carried);
+    for (const line of complete) {
+      if (line.trim() === '') continue;
+      proc.output.push(line);
+      logDebug(`[Godot stdout] ${line}`);
+    }
+    proc.stdoutTailIncomplete = partial !== null;
+    if (partial !== null) proc.output.push(partial);
+    if (proc.output.length > STDOUT_RING_LIMIT_LINES) {
+      proc.output.splice(0, proc.output.length - STDOUT_RING_LIMIT_LINES);
+    }
   }
 
   /**
