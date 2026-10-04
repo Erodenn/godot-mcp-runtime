@@ -225,3 +225,83 @@ describe('runLaunchGate pre-flight scan', () => {
     expect(warnings).not.toMatch(/OS\.execute/);
   });
 });
+
+describe('runLaunchGate uid:// resolution', () => {
+  const SCENE_UID = 'uid://scenemain00001';
+  const SCRIPT_UID = 'uid://scriptauto0001';
+  const TIER1_SCRIPT = 'extends Node\nfunc _ready():\n\tOS.execute("x")\n';
+  const gate = (dir: string) =>
+    runLaunchGate({ projectPath: dir, confirm: false, toolName: 'run_project' }, makeContext());
+
+  function writeUidScene(dir: string, name: string, uid: string, scriptName: string): void {
+    writeFileSync(
+      join(dir, name),
+      `[gd_scene load_steps=2 format=3 uid="${uid}"]\n\n[ext_resource type="Script" path="res://${scriptName}" id="1"]\n\n[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n`,
+      'utf8',
+    );
+  }
+
+  it('scans the scripts of a uid main scene and reports a Tier 1 primitive', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-main-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    writeUidScene(dir, 'menu.tscn', SCENE_UID, 'menu.gd');
+    writeFileSync(join(dir, 'menu.gd'), TIER1_SCRIPT, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/menu\.gd.*OS\.execute/);
+    expect(warnings).not.toMatch(/could not be resolved/);
+  });
+
+  it('warns that an unknown uid could not be resolved', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-unknown-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    const warnings = warningsOf(await gate(dir));
+    expect(warnings).toContainEqual(
+      expect.stringMatching(
+        new RegExp(
+          `Launch scene ${SCENE_UID} could not be resolved to a file \\(.*\\); scene-script scan skipped\\.`,
+        ),
+      ),
+    );
+  });
+
+  it('scans both files that carry one uid and notes it', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-twice-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    writeUidScene(dir, 'one.tscn', SCENE_UID, 'one.gd');
+    writeUidScene(dir, 'two.tscn', SCENE_UID, 'two.gd');
+    writeFileSync(join(dir, 'one.gd'), TIER1_SCRIPT, 'utf8');
+    writeFileSync(join(dir, 'two.gd'), TIER1_SCRIPT, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/one\.gd.*OS\.execute/);
+    expect(warnings).toMatch(/two\.gd.*OS\.execute/);
+    expect(warnings).toMatch(/2 files carry/);
+  });
+
+  it('resolves a uid autoload through its .gd.uid sidecar', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-autoload-',
+      `config_version=5\n\n[autoload]\nMyAuto="*${SCRIPT_UID}"\n`,
+    );
+    writeFileSync(join(dir, 'auto.gd'), TIER1_SCRIPT, 'utf8');
+    writeFileSync(join(dir, 'auto.gd.uid'), `${SCRIPT_UID}\n`, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/auto\.gd.*OS\.execute/);
+  });
+
+  it('warns that a uid autoload nothing carries was not scanned', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-autoload-missing-',
+      `config_version=5\n\n[autoload]\nMyAuto="*${SCRIPT_UID}"\n`,
+    );
+    const warnings = warningsOf(await gate(dir));
+    expect(warnings).toContainEqual(
+      expect.stringMatching(/Autoload MyAuto \(uid:\/\/scriptauto0001\) was not scanned/),
+    );
+  });
+});

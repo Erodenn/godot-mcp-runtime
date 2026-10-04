@@ -34,7 +34,7 @@ import {
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
 import { collectSceneScripts } from './scene-parsing.js';
-import { resolveLaunchScene } from './launch-scene.js';
+import { findFilesByUid, isUidReference, resolveLaunchScene } from './launch-scene.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */
@@ -215,6 +215,41 @@ export async function runLaunchGate(
     }
   };
 
+  // The scene the launch runs. An explicit scene takes precedence over the
+  // main scene; a main scene is resolved by `resolveLaunchScene`, which can
+  // answer with several files (one uid, several carriers) or none.
+  const scanLaunchScene = (): void => {
+    const scenes: string[] = [];
+    if (request.scene) {
+      scenes.push(request.scene.absPath);
+    } else {
+      const launch = resolveLaunchScene(absProjectPath);
+      if (launch.kind === 'none') {
+        scanWarnings.push(
+          'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
+        );
+        return;
+      }
+      if (launch.kind === 'unresolved') {
+        scanWarnings.push(
+          `Launch scene ${launch.value} could not be resolved to a file (${launch.reason}); scene-script scan skipped.`,
+        );
+        return;
+      }
+      scanWarnings.push(...launch.notes);
+      scenes.push(...launch.absPaths);
+    }
+    for (const scenePath of scenes) {
+      if (!existsSync(scenePath)) {
+        scanWarnings.push(
+          `Configured launch scene not found at ${scenePath}; scene-script scan skipped.`,
+        );
+      } else {
+        scanScene(scenePath);
+      }
+    }
+  };
+
   try {
     const projectGodot = projectGodotPath(absProjectPath);
     if (existsSync(projectGodot)) {
@@ -231,38 +266,47 @@ export async function runLaunchGate(
         // mode, hard-reject the launch. An McpBridge entry pointing anywhere
         // this server does not own is a user's own autoload and still scans.
         if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
-        const lowered = entry.path.toLowerCase();
-        const isScript = lowered.endsWith(GDSCRIPT_EXTENSION);
-        const isScene = lowered.endsWith(SCENE_EXTENSION);
-        if (!isScript && !isScene) {
-          scanWarnings.push(
-            `Autoload ${entry.name} (${entry.path}) was not scanned: only ${GDSCRIPT_EXTENSION} scripts and ${SCENE_EXTENSION} scenes are scanned`,
-          );
-          continue;
+        // A uid:// path is looked up before its extension is read: the file a
+        // uid names is found by the uid, and may be several files.
+        let targets: string[];
+        if (isUidReference(entry.path)) {
+          const found = findFilesByUid(absProjectPath, entry.path);
+          if (found.paths.length === 0) {
+            const cause = found.complete
+              ? 'no scene or .uid file in the project carries it'
+              : 'the uid search was cut short before a file carrying it was found';
+            scanWarnings.push(`Autoload ${entry.name} (${entry.path}) was not scanned: ${cause}`);
+            continue;
+          }
+          if (found.paths.length > 1) {
+            scanWarnings.push(
+              `Autoload ${entry.name} (${entry.path}): ${found.paths.length} files carry this uid and all were scanned`,
+            );
+          }
+          targets = found.paths;
+        } else {
+          const autoloadFile = resolveProjectPath(absProjectPath, entry.path);
+          if (!autoloadFile) {
+            scanWarnings.push(
+              `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
+            );
+            continue;
+          }
+          targets = [autoloadFile.absPath];
         }
-        const autoloadFile = resolveProjectPath(absProjectPath, entry.path);
-        if (!autoloadFile) {
-          scanWarnings.push(
-            `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
-          );
-          continue;
+        for (const target of targets) {
+          const lowered = target.toLowerCase();
+          if (lowered.endsWith(GDSCRIPT_EXTENSION)) scanScriptPath(target);
+          else if (lowered.endsWith(SCENE_EXTENSION)) scanScene(target);
+          else {
+            scanWarnings.push(
+              `Autoload ${entry.name} (${entry.path}) was not scanned: only ${GDSCRIPT_EXTENSION} scripts and ${SCENE_EXTENSION} scenes are scanned`,
+            );
+          }
         }
-        if (isScript) scanScriptPath(autoloadFile.absPath);
-        else scanScene(autoloadFile.absPath);
       }
     }
-    const launchScene = request.scene ? request.scene.absPath : resolveLaunchScene(absProjectPath);
-    if (launchScene === null) {
-      scanWarnings.push(
-        'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
-      );
-    } else if (!existsSync(launchScene)) {
-      scanWarnings.push(
-        `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
-      );
-    } else {
-      scanScene(launchScene);
-    }
+    scanLaunchScene();
   } catch (error) {
     // Whatever the loop above had not reached was not scanned, and nothing
     // names it. That is a failed scan, not a kind of file the scan skips.
