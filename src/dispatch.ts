@@ -136,7 +136,11 @@ export async function dispatchToolCall(
   args: OperationParams,
   ctx: McpContext = createNullContext(),
 ): Promise<ToolResponse> {
-  const handler = toolDispatch[toolName as ToolName] as ToolHandler | undefined;
+  // Own keys only: `constructor`, `toString` and `__proto__` resolve on the
+  // table through Object.prototype and would be called as handlers.
+  const handler = Object.hasOwn(toolDispatch, toolName)
+    ? (toolDispatch[toolName as ToolName] as ToolHandler)
+    : undefined;
   if (!handler) {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }

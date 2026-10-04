@@ -41,6 +41,16 @@ describe('unknown tool dispatch', () => {
     });
   });
 
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'rejects the Object.prototype name "%s" with MethodNotFound',
+    async (name) => {
+      await expect(dispatchToolCall(dummyRunner, name, {})).rejects.toMatchObject({
+        code: ErrorCode.MethodNotFound,
+        message: expect.stringContaining(name),
+      });
+    },
+  );
+
   it('throws an instance of McpError', async () => {
     await expect(dispatchToolCall(dummyRunner, 'no_such_tool', {})).rejects.toBeInstanceOf(
       McpError,
