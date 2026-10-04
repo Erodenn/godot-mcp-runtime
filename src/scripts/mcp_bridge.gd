@@ -65,6 +65,10 @@ const MAX_TRACK_DURATION_MS := 180000
 const DEFAULT_TRACK_INTERVAL_MS := 250
 const DEFAULT_TRACK_DURATION_MS := 60000
 
+# Where background mode parks the window: far enough off every monitor layout
+# that no part of it is on screen.
+const BACKGROUND_WINDOW_POSITION := Vector2i(-9999, -9999)
+
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
 # Signals observed on a click_element target for the duration of the action.
@@ -163,11 +167,21 @@ func _ready() -> void:
 		print("McpBridge: Listening on TCP port %d" % port)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
+		# Setting BORDERLESS after the window exists removes the frame but keeps
+		# the outer rectangle, so the client area grows to the old outer size.
+		# The viewport's final transform then stops being the identity and every
+		# injected coordinate lands off target. Reading the size first and putting
+		# it back afterwards keeps the transform an identity. On Windows the flag
+		# change also calls ShowWindow, which would re-show a window the server
+		# spawned hidden, so BORDERLESS is not set there at all.
+		var size_before := DisplayServer.window_get_size()
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true)
-		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true)
-		DisplayServer.window_set_position(Vector2i(-9999, -9999))
-		print("McpBridge: Background mode active - window hidden, physical input blocked")
+		if OS.get_name() != "Windows":
+			DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true)
+			DisplayServer.window_set_size(size_before)
+		DisplayServer.window_set_position(BACKGROUND_WINDOW_POSITION)
+		print("McpBridge: Background mode active - physical input blocked")
 
 func _process(_delta: float) -> void:
 	if not _track_watch.is_empty():
