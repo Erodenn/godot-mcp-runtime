@@ -5,9 +5,10 @@ import type { SpawnOptions } from 'child_process';
  * - `headless`: a short-lived `--headless` run (version probe, headless
  *   operation, asset import). It has no window.
  * - `run`: the game for `run_project`. Its window is the point.
+ * - `run-background`: the game for `run_project` with `background: true`.
  * - `editor`: the editor GUI for `launch_editor`.
  */
-export type GodotSpawnKind = 'headless' | 'run' | 'editor';
+export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'editor';
 
 /**
  * Spawn options for one kind of Godot process. The single place they are
@@ -25,9 +26,14 @@ export type GodotSpawnKind = 'headless' | 'run' | 'editor';
  * console under that flag, the child never attaches to ours. Whether it does
  * for a GUI-subsystem binary is not settled by the documentation, so this is
  * the cheap measure, not a proven cure. A headless run has no window to lose,
- * so it gets the flag. The game and the editor must not: a hidden show-window
- * state could hide the window the user asked for, so `run` and `editor` never
- * carry the key at all. The option is ignored outside Windows.
+ * so it gets the flag. `run` and `editor` never hide, because their windows
+ * must show, so they never carry the key at all. `run-background` hides
+ * because the caller asked for a game nobody looks at; the window is never
+ * shown, while rendering, screenshots and injected input still work. A
+ * no-focus flag at window creation cannot be combined with the hidden
+ * show-state (such a window is shown anyway), which is why the focus flags
+ * stay in the bridge. The option is ignored outside Windows, where the bridge
+ * moves the window off-screen instead.
  *
  * Every kind keeps piped stdio. A Godot whose standard handles are not pipes
  * writes its ordinary output to the parent console instead, which is the same
@@ -38,6 +44,8 @@ export type GodotSpawnKind = 'headless' | 'run' | 'editor';
  * painted over. The tests cover the options returned here and nothing else.
  */
 export function godotSpawnOptions(kind: GodotSpawnKind): SpawnOptions {
-  if (kind === 'headless') return { stdio: 'pipe', windowsHide: true };
+  if (kind === 'headless' || kind === 'run-background') {
+    return { stdio: 'pipe', windowsHide: true };
+  }
   return { stdio: 'pipe' };
 }

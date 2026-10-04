@@ -10,12 +10,16 @@
 import { describe, it, expect } from 'vitest';
 import { godotSpawnOptions, type GodotSpawnKind } from '../../src/utils/godot-spawn-options.js';
 
-const ALL_KINDS: readonly GodotSpawnKind[] = ['headless', 'run', 'editor'];
+const ALL_KINDS: readonly GodotSpawnKind[] = ['headless', 'run', 'run-background', 'editor'];
 const WINDOWED_KINDS: readonly GodotSpawnKind[] = ['run', 'editor'];
 
 describe('godotSpawnOptions', () => {
   it('headless spawns hide their console window', () => {
     expect(godotSpawnOptions('headless')).toEqual({ stdio: 'pipe', windowsHide: true });
+  });
+
+  it('the background run spawn hides its window', () => {
+    expect(godotSpawnOptions('run-background')).toEqual({ stdio: 'pipe', windowsHide: true });
   });
 
   it('the run and editor spawns never ask for a hidden window', () => {

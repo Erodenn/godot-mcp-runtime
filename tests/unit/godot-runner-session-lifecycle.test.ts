@@ -764,6 +764,20 @@ describe('spawn options reach child_process.spawn', () => {
     expect(options.env).toMatchObject({ MCP_BRIDGE_PORT: String(SPAWN_CASE_BRIDGE_PORT) });
   });
 
+  it('runProject with background hides the window and sets MCP_BACKGROUND', async () => {
+    spawnMock.mockReturnValue(makeFakeChildProcess());
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+
+    const projectPath = tmp.makeProject('godot-mcp-spawn-');
+    await runner.runProject(projectPath, undefined, true, SPAWN_CASE_BRIDGE_PORT);
+
+    const options = spawnOptions();
+    expect(options.stdio).toBe('pipe');
+    expect(options.windowsHide).toBe(true);
+    expect(options.env).toMatchObject({ MCP_BACKGROUND: '1' });
+  });
+
   it('a headless spawn hides its console window', async () => {
     const proc = makeFakeChildProcess();
     spawnMock.mockReturnValue(proc);

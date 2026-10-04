@@ -181,7 +181,7 @@ func _ready() -> void:
 			DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true)
 			DisplayServer.window_set_size(size_before)
 		DisplayServer.window_set_position(BACKGROUND_WINDOW_POSITION)
-		print("McpBridge: Background mode active - physical input blocked")
+		print("McpBridge: Background mode active - window off-screen, mouse input passes through")
 
 func _process(_delta: float) -> void:
 	if not _track_watch.is_empty():

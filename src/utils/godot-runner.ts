@@ -872,7 +872,7 @@ export class GodotRunner {
       const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
       logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
       const spawnOptions: SpawnOptions = {
-        ...godotSpawnOptions('run'),
+        ...godotSpawnOptions(background ? 'run-background' : 'run'),
         env: {
           ...process.env,
           MCP_SESSION_TOKEN: sessionToken,

@@ -115,6 +115,10 @@ const BRIDGE_PORT_MAX = 65535;
 
 // run_project parameters that only mean something when this server spawns
 // Godot itself. Attach mode rejects them instead of silently ignoring them.
+/** What a background-mode run says about itself in its success and failure text. */
+const BACKGROUND_MODE_NOTE =
+  'Background mode: window not shown on Windows, moved off-screen elsewhere; mouse input passes through';
+
 const SPAWN_ONLY_RUN_PROJECT_PARAMS = ['scene', 'background', 'profiling'] as const;
 
 type ScreenshotResponseMode = (typeof SCREENSHOT_RESPONSE_MODES)[number];
@@ -180,7 +184,7 @@ export const runtimeToolDefinitions = [
         background: {
           type: 'boolean',
           description:
-            'If true, hides the Godot window off-screen and blocks all physical keyboard and mouse input, while keeping programmatic input (simulate_input, run_script) and screenshots fully active. Useful for automated agent-driven testing where the window should not be visible or interactive. Not valid with attach: true.',
+            'If true, the game window is never shown on Windows and is moved off-screen after startup on other platforms; mouse input passes through to whatever is beneath it. Programmatic input (simulate_input, run_script) and screenshots stay fully active. It does not guarantee the game never takes keyboard focus. Not valid with attach: true.',
         },
         bridgePort: {
           type: 'number',
@@ -1143,7 +1147,7 @@ async function startSpawnedSession(
         errorTail,
       ];
       if (isBackground) {
-        lines.push('- Background mode: window hidden, physical input blocked');
+        lines.push(`- ${BACKGROUND_MODE_NOTE}`);
       }
       // Read the port before the teardown: stopProject clears it.
       const assignedPort = runner.activeBridgePort;
@@ -1177,7 +1181,7 @@ async function startSpawnedSession(
 
     let message = 'Godot project started and the MCP bridge is ready.';
     if (isBackground) {
-      message += ' Background mode: window hidden, physical input blocked.';
+      message += ` ${BACKGROUND_MODE_NOTE}.`;
     }
     if (isProfiling) {
       message += ' Profiling enabled: use profile_project or start_profiler.';
