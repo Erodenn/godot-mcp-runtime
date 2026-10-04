@@ -457,6 +457,11 @@ describe('no silent fallback', () => {
     expect(text).toMatch(/session ended during this call/);
     expect(text).toContain(a);
     expect(text).toContain('switch_project');
+    // The attached record is gone, so stop_project would only error: the
+    // advice must not send the caller there.
+    expect(text).not.toMatch(/call stop_project/i);
+    expect(text).toContain('stop_project and get_debug_output would both report no session');
+    expect(text).toContain('run_project with attach: true again');
   });
 
   it('keeps the single-project wording when no other session is live', async () => {

@@ -115,15 +115,29 @@ export function runtimeCommandFailure(
   const status = runner.getRuntimeSessionStatus();
   if (status.state === 'live') return createErrorResponse(message, solutions);
   const others = otherLiveSessionsClause(status);
-  const ended =
-    isExitedCurrent(status) && status.current !== null
-      ? `The session ended during this call: the Godot process exited (project ${status.current.projectPath}, exit code ${status.current.exitCode ?? 'unknown'}).`
-      : 'The session ended during this call and no session is current now.';
-  return createErrorResponse(`${message}\n${ended}${others}`, [
-    ...solutions,
-    ...(others === '' ? [] : [SWITCH_PROJECT_SOLUTION]),
-  ]);
+  const switchSolution = others === '' ? [] : [SWITCH_PROJECT_SOLUTION];
+  if (isExitedCurrent(status) && status.current !== null) {
+    return createErrorResponse(
+      `${message}\nThe session ended during this call: the Godot process exited (project ${status.current.projectPath}, exit code ${status.current.exitCode ?? 'unknown'}).${others}`,
+      [...solutions, ...switchSolution],
+    );
+  }
+  // Nothing is left of the session: a spawned one that exits keeps its record,
+  // so this is an attached session whose bridge went away, or one that was
+  // stopped while the command was in flight. The caller's own solutions speak
+  // of stop_project and get_debug_output, and both would only report that
+  // there is no session.
+  return createErrorResponse(
+    `${message}\nThe session ended during this call and no session is current now.${others}`,
+    [...SESSION_GONE_SOLUTIONS, ...switchSolution],
+  );
 }
+
+const SESSION_GONE_SOLUTIONS = [
+  'Nothing is left to stop or to read logs from: stop_project and get_debug_output would both report no session',
+  "If this was an attached session, its bridge disconnected and was removed from the project: check the Godot process's own output, then call run_project with attach: true again and relaunch Godot while that call waits",
+  'Otherwise call run_project to start a new session',
+];
 
 /**
  * How to stop this server's own live session on a project, which may not be

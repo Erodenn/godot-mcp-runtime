@@ -1116,14 +1116,21 @@ async function startSpawnedSession(
 
     if (!bridgeResult.ready) {
       if (runner.activeProcess && runner.activeProcess.hasExited) {
-        // Tear down the spawned-mode session state so a retry of run_project
-        // works without an intervening stop_project.
-        await runner.stopProject();
+        // A process that exited by itself has already cleared its own session
+        // (mode, port, token, bridge artifacts) and kept its logs, and
+        // runProject replaces such a record on a retry. Stopping it here would
+        // only throw those logs away. A session that still has a mode is the
+        // other case: the process never started (a spawn 'error'), nothing
+        // cleared it, and the stop is what removes the injected bridge.
+        const logsRetained = runner.activeSessionMode === null;
+        if (!logsRetained) await runner.stopProject();
         return err(
           createErrorResponse(
             `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}`,
             [
-              'Check get_debug_output for runtime errors',
+              logsRetained
+                ? 'Call get_debug_output for the full captured output of the exited process: it is kept until the next run_project or stop_project'
+                : 'The stderr quoted above is everything that was captured: the session was torn down, so get_debug_output has nothing more',
               'Verify a display server is available (Wayland/X11)',
               'Check for broken autoloads with list_autoloads',
               'Retry run_project once the underlying issue is resolved',
@@ -1275,11 +1282,15 @@ async function startAttachedSession(
       // Tear down the attached-mode session state so a retry of run_project
       // works without an intervening stop_project.
       await runner.stopProject();
+      // What is true after this failure: the teardown above removed the bridge
+      // script and the autoload entry, and every attach bakes a new token (and
+      // a new port unless bridgePort is given). A Godot that started during
+      // this wait therefore holds values no retry will accept.
       const solutions = [
-        'If you are launching Godot yourself, start the launch in parallel with run_project with attach: true next time so the wait absorbs the startup - do not sequentialize',
-        'If a human is launching Godot, retry run_project with attach: true once they have launched - bridge.inject is idempotent',
-        'If Godot is already running but was launched before the bridge was injected, restart it (autoloads are read at startup)',
-        `Check that no other Godot project is occupying the assigned bridge port (${assignedPort})`,
+        'Retry run_project with attach: true and launch Godot while that call is waiting (in parallel, or right after issuing it), so Godot reads the freshly injected autoload at startup',
+        'A Godot process started before or during this failed attempt cannot be attached to: this attempt removed its bridge, and a retry injects a new token. Close it, or restart it once the retry is waiting',
+        'Passing the same bridgePort on the retry does not help, because the token changes with every attach',
+        `Check that no other process is occupying the assigned bridge port (${assignedPort})`,
       ];
       const registeredLine = bridgeRegistered
         ? ''
@@ -1299,8 +1310,8 @@ async function startAttachedSession(
       await runner.stopProject();
       return err(
         createErrorResponse(SESSION_ENDED_AT_READY_MESSAGE, [
-          'Retry run_project with attach: true once the Godot process is running',
-          'If Godot closed right after it started, launch it again and check its own output',
+          'Retry run_project with attach: true and launch Godot while that call is waiting: the bridge was removed, so a Godot already running cannot be attached to',
+          'If Godot closed right after it started, check its own output for the reason',
         ]),
       );
     }
@@ -2150,6 +2161,8 @@ const ATTACHED_NULL_RESULT_WARNING =
   "Script returned null in an attached session. Runtime errors cannot be observed there (Godot's output is not captured), so this may be a script that raised; check the Godot process's own output.";
 const RUN_SCRIPT_TIP =
   'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.';
+const RUN_SCRIPT_TIP_ATTACHED =
+  "Call take_screenshot to verify any visual changes. print() output from your script goes to the Godot process's own output: an attached session captures none of it, so get_debug_output has nothing to show.";
 
 export async function handleRunScript(
   runner: GodotRunner,
@@ -2162,6 +2175,10 @@ export async function handleRunScript(
   const session = requireRuntimeSession(runner, wording);
   if (!session.ok) return session;
   const sessionProjectPath = session.value.projectPath;
+  // Captured at the gate with the path: what the payload says about the
+  // session is what the session was when the call was admitted.
+  const sessionMode = session.value.mode;
+  const tip = sessionMode === 'attached' ? RUN_SCRIPT_TIP_ATTACHED : RUN_SCRIPT_TIP;
 
   const scriptResult = requireString(args, 'script');
   if (!scriptResult.ok) return scriptResult;
@@ -2351,7 +2368,7 @@ export async function handleRunScript(
           'Script returned null. If unexpected, check get_debug_output for runtime errors - GDScript does not propagate exceptions.',
           ...warningsFromPolicy,
         ],
-        tip: RUN_SCRIPT_TIP,
+        tip,
       };
       return createStructuredResponse(leadWithWarnings(nullPayload));
     }
@@ -2365,7 +2382,7 @@ export async function handleRunScript(
         projectPath: sessionProjectPath,
         success: true,
         result: null,
-        tip: RUN_SCRIPT_TIP,
+        tip,
       });
     }
 
@@ -2373,7 +2390,7 @@ export async function handleRunScript(
       projectPath: sessionProjectPath,
       success: true,
       result: parsed.result,
-      tip: RUN_SCRIPT_TIP,
+      tip,
     };
     // Only the runtime-error lines are capped: they are the unbounded part,
     // and the count entry names the log that holds the rest of them.

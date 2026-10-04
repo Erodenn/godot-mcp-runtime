@@ -546,8 +546,51 @@ describe('handleRunProject bridge failure paths', () => {
       acceptingContext(),
     );
     expectErrorMatching(result, /exited before the MCP bridge could initialize/);
-    // Handler must tear down before returning so retry works cleanly.
+    // Nothing cleared this session (it still has a mode: the process never
+    // started), so the handler tears it down and says the logs are gone.
     expect(fake.stopCalls()).toBe(1);
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).toContain('get_debug_output has nothing more');
+  });
+
+  it('keeps the logs of a game that exited by itself during startup, and a retry needs no stop_project', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'Process exited with code 1 before bridge was ready.');
+    // The state the runner's own exit handler leaves: mode cleared, process
+    // retained with its logs.
+    const crashed = makeRunningProcess({ hasExited: true, exitCode: 1 });
+    crashed.errors.push('SCRIPT ERROR: startup crash');
+    fake.setRunProjectAfterHook(() => {
+      fake.setSession({ mode: null, projectPath: null, process: crashed });
+    });
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+
+    expectErrorMatching(result, /exited before the MCP bridge could initialize/);
+    expect(fake.stopCalls()).toBe(0);
+    expect(unwrap(result).content[1]?.text ?? '').toContain('Call get_debug_output');
+    // The advice holds: the logs are still readable.
+    const logs = handleGetDebugOutput(fake.asRunner, {});
+    expect(hasError(logs)).toBe(false);
+    expect(JSON.parse(unwrap(logs).content[0]!.text!).errors).toContain(
+      'SCRIPT ERROR: startup crash',
+    );
+
+    // And a retry starts a session with no stop_project in between.
+    fake.setBridgeReady(true);
+    fake.setRunProjectAfterHook(null);
+    const retry = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
+    expect(hasError(retry)).toBe(false);
+    expect(fake.stopCalls()).toBe(0);
   });
 
   it('returns "bridge did not respond" error and tears down when bridge times out', async () => {
@@ -1738,6 +1781,19 @@ describe('handleRunScript', () => {
     const payload = expectMatchesOutputSchema('run_script', result);
     expect(payload).not.toHaveProperty('warnings');
     expect(payload.result).toBe(7);
+    // get_debug_output captures nothing in an attached session, so the tip
+    // must not send the caller there for print() output.
+    expect(payload.tip as string).toContain('get_debug_output has nothing to show');
+  });
+
+  it('points a spawned session at get_debug_output for print() output', async () => {
+    const dir = tmp.makeProject('run-script-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 7 }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(payload.tip as string).toContain('get_debug_output to review print() output');
   });
 
   it('returns success and surfaces runtimeErrors as warnings when result is non-null', async () => {
@@ -2622,6 +2678,12 @@ describe('handleRunProject attach mode', () => {
     });
     expectErrorMatching(result, /bridge is not ready/);
     expect(fake.stopCalls()).toBe(1);
+    // The teardown removed the bridge and a retry bakes a new token, so the
+    // advice must not say a Godot launched meanwhile can simply be retried on.
+    const solutionsText = unwrap(result).content[1]?.text ?? '';
+    expect(solutionsText).not.toContain('idempotent');
+    expect(solutionsText).toContain('launch Godot while that call is waiting');
+    expect(solutionsText).toContain('the token changes with every attach');
   });
 
   it('names the assigned bridge port in the not-ready solutions, read before the teardown clears it', async () => {
