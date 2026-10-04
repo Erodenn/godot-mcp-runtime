@@ -1,4 +1,4 @@
-import { normalize } from 'path';
+import { normalize, resolve } from 'path';
 
 // A force-killed process can report its exit code as the unsigned 32-bit
 // representation of a negative signal-kill status (e.g. 4294967295 for -1).
@@ -26,6 +26,17 @@ export function normalizeExitCode(code: number | null): number | null {
  */
 export function normalizeForCompare(p: string): string {
   return normalize(p).replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+/**
+ * One key per project directory, whichever way its path was spelled: resolved
+ * to absolute, separators and trailing slash folded, case folded. The session
+ * map (`sessionKey`) and the bridge's orphan-repair cache both key on it, so a
+ * path given with forward slashes and the same path resolved by Node land on
+ * the same entry.
+ */
+export function projectPathKey(projectPath: string): string {
+  return normalizeForCompare(resolve(projectPath)).toLowerCase();
 }
 
 /**

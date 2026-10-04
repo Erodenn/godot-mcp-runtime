@@ -648,6 +648,52 @@ describe('BridgeManager.repairOrphaned stranded artifacts', () => {
       'McpBridge="*res://game/my_own_bridge.gd"',
     );
   });
+
+  // A hand-edited project.godot can carry spaces around the `=`. That is still
+  // the entry Godot loads, so it is still a stranded one.
+  it('finds a stranded entry written with spaces around the equals sign', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: `config_version=5\n\n[autoload]\nMcpBridge = "*${BRIDGE_SCRIPT_RES_PATH}"\n`,
+    });
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+
+    manager.repairOrphaned(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge');
+  });
+
+  // cleanup tells its caller the next headless call retries a removal it could
+  // not confirm. Headless tools pass the path as the caller spelled it, while
+  // inject and cleanup get the resolved one, so the retry only happens when
+  // the "already checked" cache folds the two spellings together.
+  it('retries a removal cleanup could not confirm when the next call spells the path differently', () => {
+    let failRemoval = false;
+    const { projectPath, manager } = setupProject({
+      managerOptions: {
+        removeAutoloadEntry: (projectFile, name) => {
+          if (failRemoval) throw new Error('project.godot is locked');
+          return removeAutoloadEntry(projectFile, name);
+        },
+      },
+    });
+    // Same directory, another spelling: forward slashes and a trailing slash.
+    const respelled = `${projectPath.replace(/\\/g, '/')}/`;
+    const projectFile = join(projectPath, 'project.godot');
+
+    // A headless call on the clean project caches it as checked.
+    manager.repairOrphaned(respelled);
+
+    manager.inject(projectPath, TEST_PORT);
+    failRemoval = true;
+    const problems = manager.cleanup(projectPath);
+    expect(problems.join(' ')).toContain('could not be removed from project.godot');
+    expect(readFileSync(projectFile, 'utf8')).toContain('McpBridge=');
+
+    failRemoval = false;
+    manager.repairOrphaned(respelled);
+
+    expect(readFileSync(projectFile, 'utf8')).not.toContain('McpBridge');
+  });
 });
 
 // ---------------------------------------------------------------------------

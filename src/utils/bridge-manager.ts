@@ -12,6 +12,7 @@ import { hostname as osHostname } from 'os';
 import { randomBytes } from 'crypto';
 import { logDebug } from './logger.js';
 import { writeFileAtomicSync } from './atomic-write.js';
+import { projectPathKey } from './output-parsing.js';
 import {
   addAutoloadEntry,
   normalizeAutoloadPath,
@@ -358,7 +359,7 @@ export class BridgeManager {
 
     // Disk state just changed under us; the next repairOrphaned check for
     // this project must re-read it rather than trust the cached verdict.
-    this.repairedProjects.delete(projectPath);
+    this.repairedProjects.delete(projectPathKey(projectPath));
   }
 
   /**
@@ -389,7 +390,7 @@ export class BridgeManager {
         `this session's bridge owner file could not be removed (${ownerFileFailure}), so the project still lists this session as running until this server process exits`,
       );
     }
-    this.repairedProjects.delete(projectPath);
+    this.repairedProjects.delete(projectPathKey(projectPath));
 
     let liveOwners: OwnerFileEntry[];
     try {
@@ -449,21 +450,29 @@ export class BridgeManager {
    * can be misclassified as stranded.
    */
   repairOrphaned(projectPath: string): void {
-    if (this.repairedProjects.has(projectPath)) return;
+    // Keyed by the folded path, not the argument: headless tools pass the
+    // path as the caller spelled it (forward slashes on Windows) while inject
+    // and cleanup are called with the resolved one. Keyed by the raw string,
+    // their invalidation would miss the spelling that was cached, and the
+    // retry `cleanup` promises would never run.
+    const cacheKey = projectPathKey(projectPath);
+    if (this.repairedProjects.has(cacheKey)) return;
     const projectFile = join(projectPath, 'project.godot');
     if (!existsSync(projectFile)) return;
     try {
       const liveOwners = this.readLiveOwners(projectPath);
       if (liveOwners.length > 0) {
-        this.repairedProjects.add(projectPath);
+        this.repairedProjects.add(cacheKey);
         return;
       }
 
       const scriptPresent =
         existsSync(bridgeScriptAbsPath(projectPath)) ||
         existsSync(join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME));
-      const content = readFileSync(projectFile, 'utf8');
-      const entryPresent = content.includes(`${BRIDGE_AUTOLOAD_NAME}=`);
+      // Read with the project.godot grammar, the same reader the removal
+      // uses: a hand-edited `McpBridge = "..."` is an entry too, and a
+      // substring test for `McpBridge=` would miss it.
+      const entryPresent = this.readBridgeAutoload(projectFile) !== undefined;
       const stranded = entryPresent || scriptPresent;
       if (stranded) {
         const problems = this.removeBridgeArtifacts(projectPath);
@@ -475,7 +484,7 @@ export class BridgeManager {
         }
         logDebug('Cleaned up stranded McpBridge artifacts');
       }
-      this.repairedProjects.add(projectPath);
+      this.repairedProjects.add(cacheKey);
     } catch (err) {
       logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
     }

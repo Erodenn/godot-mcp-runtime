@@ -30,6 +30,7 @@ import {
   extractOperationPayload,
   normalizeForCompare,
   normalizeExitCode,
+  projectPathKey,
 } from './output-parsing.js';
 import { checkDisplayAvailable, type ResolvedProjectPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
@@ -166,7 +167,7 @@ export type RuntimeSessionMode = 'spawned' | 'attached';
 
 /** Map key for a project: one normalization for the runner, the edit guard and the tools. */
 export function sessionKey(projectPath: string): string {
-  return normalizeForCompare(resolve(projectPath)).toLowerCase();
+  return projectPathKey(projectPath);
 }
 
 /**
