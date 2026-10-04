@@ -14,6 +14,20 @@ Contents:
 
 `project.godot` also carries one InputMap action, `probe_move`, bound to W by `physical_keycode` (the Godot editor's default binding style). `tests/integration/simulate-input-observed.test.ts` launches the probe scene by rewriting `run/main_scene` in its own temp copy of the project, so `main.tscn` stays the main scene for everything else.
 
+## `godot-authored-project/`
+
+A project laid out the way the Godot editor writes one: a registered autoload, a scene uid and ext_resource uids, an inherited scene and typed exports. The minimal fixture above is hand-trimmed and hides every bug that depends on those. Copy it to a tmp dir before mutating (`authoredFixtureProjectPath` in `tests/helpers/fixture-paths.ts`). `config/features` names 4.5.
+
+Contents and what each file is for:
+- `project.godot`: registers the `GameState` autoload (`game_state.gd`, `var score := 7`)
+- `player.tscn`, `player.gd`, `player.gd.uid`: root script reads the `GameState` autoload (it only compiles when autoload globals exist), stored `speed = 9.0`, a scene uid, a script uid on the ext_resource, and a `Body` `Sprite2D` child
+- `base_unit.tscn`: plain scene with an `Arm` `Sprite2D` and a `Leg` `Label` that carry non-default properties
+- `derived_unit.tscn`: inherits `base_unit.tscn` (root is `instance=`), overrides `Arm.position` and adds its own `Extra` child
+- `host.tscn`: instances `base_unit.tscn` as `Unit` with a position override, for edits inside an instanced child
+- `inventory.tscn`, `inventory.gd`: typed exports (`Dictionary[String, int]`, `Dictionary[int, float]`, `Vector2i`, `PackedByteArray`, `PackedInt32Array`); needs Godot 4.4+ because of the typed dictionaries
+- `broken_script.tscn`, `broken_script.gd`: a script that cannot compile (undeclared identifier) with a stored `speed = 9.0`, the deterministic case for a save that drops content
+- `notes.txt`: a plain text file under `res://`, not an importable resource
+
 ## `godot-profiling-project/`
 
 The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).

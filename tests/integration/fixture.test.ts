@@ -56,3 +56,36 @@ describe('tests/fixtures/godot-project: fixture health', () => {
     expect(existsSync(join(fixturePath, 'motion_static.tscn'))).toBe(true);
   });
 });
+
+describe('tests/fixtures/godot-authored-project: fixture health', () => {
+  const authoredPath = join(here, '..', 'fixtures', 'godot-authored-project');
+  const authoredFiles = [
+    'project.godot',
+    'game_state.gd',
+    'player.gd',
+    'player.gd.uid',
+    'player.tscn',
+    'base_unit.tscn',
+    'derived_unit.tscn',
+    'host.tscn',
+    'inventory.gd',
+    'inventory.tscn',
+    'broken_script.gd',
+    'broken_script.tscn',
+    'notes.txt',
+  ];
+
+  it.each(authoredFiles)('%s exists', (file) => {
+    expect(existsSync(join(authoredPath, file))).toBe(true);
+  });
+
+  it('player.tscn header carries the scene uid', () => {
+    const content = readFileSync(join(authoredPath, 'player.tscn'), 'utf8');
+    expect(content.split('\n')[0]).toContain('uid="uid://clomui4eibwiq"');
+  });
+
+  it('project.godot registers the GameState autoload', () => {
+    const content = readFileSync(join(authoredPath, 'project.godot'), 'utf8');
+    expect(content).toContain('GameState="*res://game_state.gd"');
+  });
+});
