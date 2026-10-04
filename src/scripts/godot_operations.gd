@@ -3021,21 +3021,86 @@ func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionar
 	missing.append_array(probe.missing)
 	needs_import.append_array(probe.needs_import)
 
+# _prepare_property_value loads a res:// string only on an Object-typed
+# property. On any other declared type the value is stored as the string (or
+# dictionary, or array) it is, so nothing in it is an asset reference.
+# Unknown targets answer true: probing too much asks for an import, probing
+# too little lets a cold asset surface after earlier operations have saved.
+func _value_may_load_asset(node: Object, property: String) -> bool:
+	if node == null:
+		return true
+	if property.begins_with(_METADATA_PREFIX):
+		return false
+	var descriptor = _find_property_descriptor(node, property)
+	return descriptor != null and descriptor.type == TYPE_OBJECT
+
 # Collect the free-form property VALUES one batch operation can assign, for the
 # res://-string walk. add_node's properties dict and each set_node_properties
 # update value both reach _prepare_property_value, which loads a res:// string
 # on an Object-typed property -- a reference found only at assignment time
 # would emit its [IMPORT_NEEDED] mid-batch, after earlier operations had
 # already mutated.
-func _prepass_value_roots(op: Dictionary, op_name) -> Array:
+#
+# Only the values whose target property is Object-typed are returned (see
+# _value_may_load_asset), so a res:// string stored in a String property is not
+# mistaken for an asset. A batch whose values name no res:// path loads nothing.
+# The target of a set_node_properties update is looked up in `probe_scenes`
+# (normalized scene path -> instance or null), loaded on first use; the caller
+# owns those instances and frees them.
+func _prepass_value_roots(op: Dictionary, op_name, probe_scenes: Dictionary) -> Array:
 	var value_roots: Array = []
 	if op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
-		value_roots.append(op.properties)
+		var found: Array = []
+		_collect_res_paths(op.properties, found)
+		if found.is_empty():
+			return []
+		var made = _instantiate_node_type(str(op.get("node_type", "")))
+		if not made.ok:
+			value_roots.append(op.properties)
+			return value_roots
+		var kept: Dictionary = {}
+		for key in op.properties:
+			if _value_may_load_asset(made.node, str(key)):
+				kept[key] = op.properties[key]
+		if not (made.node is RefCounted):
+			made.node.free()
+		value_roots.append(kept)
 	elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
+		var update_values: Array = []
 		for update in op.updates:
 			if typeof(update) == TYPE_DICTIONARY and update.has("value"):
+				update_values.append(update)
+		var found_in_updates: Array = []
+		for update in update_values:
+			_collect_res_paths(update.value, found_in_updates)
+		if found_in_updates.is_empty():
+			return []
+		var scene_root = null
+		var scene_key := normalize_scene_path(str(op.get("scene_path", "")))
+		if scene_key != "":
+			if not probe_scenes.has(scene_key):
+				probe_scenes[scene_key] = load_scene_instance(scene_key)
+			scene_root = probe_scenes[scene_key]
+		for update in update_values:
+			var node = null
+			if scene_root != null and typeof(update.get("node_path", null)) == TYPE_STRING:
+				node = find_node_by_path(scene_root, update.node_path)
+			if _value_may_load_asset(node, str(update.get("property", ""))):
 				value_roots.append(update.value)
 	return value_roots
+
+# Exit the batch when the pre-pass found a file that is missing or an asset that
+# was never imported. Returns true when it did (the caller returns at once).
+func _prepass_refuses(missing: Array, needs_import: Array) -> bool:
+	if missing.size() > 0:
+		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(missing))
+		quit(1)
+		return true
+	if needs_import.size() > 0:
+		_report_import_needed("batch", ", ".join(needs_import))
+		quit(1)
+		return true
+	return false
 
 # Execute multiple scene operations in a single headless process
 # Scenes are loaded once and cached in memory; mutations accumulate until a save op
@@ -3052,18 +3117,27 @@ func batch_scene_operations(params: Dictionary) -> void:
 
 	# Pre-pass: probe everything the batch will load, for the cold-import state
 	# and for missing files, BEFORE any mutation is applied. Two kinds of value
-	# are walked and they are not interchangeable:
+	# are walked and they are not interchangeable, in two phases:
 	#
-	#   1. Path PARAMETERS -- scene_path, load_sprite's texture_path, and an
+	#   A. Path PARAMETERS -- scene_path, load_sprite's texture_path, and an
 	#      add_node node_type that names a scene. Their convention is
 	#      project-relative or res://, so each is normalized through
 	#      normalize_scene_path (the helper its apply site uses) and then
 	#      classified. See _prepass_path_param.
-	#   2. Free-form property VALUES -- add_node's properties dict and each
+	#   B. Free-form property VALUES -- add_node's properties dict and each
 	#      set_node_properties update value, at any depth, inline resource specs
 	#      included. There only a res:// string is a resource reference, because
-	#      that is the only form _prepare_property_value loads; a bare string is
-	#      a string. See _collect_res_paths.
+	#      that is the only form _prepare_property_value loads, and only on an
+	#      Object-typed property; a bare string is a string, and so is a res://
+	#      string stored in a String property. See _collect_res_paths and
+	#      _value_may_load_asset.
+	#
+	# Phase B has to know each value's target property type, so it instantiates
+	# the node an add_node creates and loads the scene a set_node_properties
+	# edits. It runs only after phase A proved the dependencies of every scene
+	# and asset parameter are present and imported, so loading a scene there
+	# cannot trip over a cold dependency. The probe scenes are freed before the
+	# main loop, which loads its own instances.
 	#
 	# Missing files are checked first, across the whole batch: a batch that
 	# would otherwise import and then refuse mid-way is worse than refusing up
@@ -3097,19 +3171,22 @@ func batch_scene_operations(params: Dictionary) -> void:
 			if _is_scene_path(node_type):
 				_prepass_path_param(node_type, true, seen_paths, prepass_needs_import, prepass_missing)
 
+	if _prepass_refuses(prepass_missing, prepass_needs_import):
+		return
+
+	var probe_scenes: Dictionary = {}
+	for op in params.operations:
+		if typeof(op) != TYPE_DICTIONARY:
+			continue
 		var res_paths: Array = []
-		for value_root in _prepass_value_roots(op, op_name):
+		for value_root in _prepass_value_roots(op, op.get("operation", ""), probe_scenes):
 			_collect_res_paths(value_root, res_paths)
 		for raw_path in res_paths:
 			_prepass_path_param(str(raw_path), false, seen_paths, prepass_needs_import, prepass_missing)
-
-	if prepass_missing.size() > 0:
-		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(prepass_missing))
-		quit(1)
-		return
-	if prepass_needs_import.size() > 0:
-		_report_import_needed("batch", ", ".join(prepass_needs_import))
-		quit(1)
+	for probe_key in probe_scenes:
+		if probe_scenes[probe_key] != null:
+			probe_scenes[probe_key].free()
+	if _prepass_refuses(prepass_missing, prepass_needs_import):
 		return
 
 	for op in params.operations:

@@ -18,7 +18,7 @@ import { describe, beforeAll, expect } from 'vitest';
 import { cpSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { itGodot } from '../helpers/godot-skip.js';
-import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { useTmpDirs, type TmpDirHandle } from '../helpers/tmp.js';
 import { minimalPng } from '../helpers/png-fixtures.js';
 import { stripExitLeakNoise } from '../helpers/engine-noise.js';
@@ -480,6 +480,67 @@ describe('batch cold-import pre-pass, caller-shaped references (integration)', (
         'FirstProbe',
         'SubInstance',
       ]);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('batch cold-import pre-pass, res:// strings on non-Object properties (integration)', () => {
+  const tmp = useTmpDirs();
+
+  /** A tmp copy of the authored fixture: notes.txt is on disk and was never imported. */
+  function makeAuthoredProject(): string {
+    const project = tmp.make('godot-mcp-authored-');
+    cpSync(authoredFixtureProjectPath, project, { recursive: true });
+    return project;
+  }
+
+  /** True when the call left no sign of an asset import in the project. */
+  function importedNothing(project: string): boolean {
+    return (
+      !existsSync(join(project, 'notes.txt.import')) &&
+      !existsSync(join(project, '.godot', 'imported'))
+    );
+  }
+
+  itGodot(
+    'stores a res:// string on a String property without importing it',
+    async () => {
+      const project = makeAuthoredProject();
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'set_node_properties',
+          scenePath: 'player.tscn',
+          updates: [{ nodePath: 'root', property: 'note', value: 'res://notes.txt' }],
+        },
+      ]);
+
+      expect(results[0]?.success).toBe(true);
+      expect(readFileSync(join(project, 'player.tscn'), 'utf8')).toContain(
+        'note = "res://notes.txt"',
+      );
+      expect(importedNothing(project)).toBe(true);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'stores a res:// string on a metadata key without importing it',
+    async () => {
+      const project = makeAuthoredProject();
+
+      const results = await runBatchThroughHandler(project, [
+        {
+          operation: 'set_node_properties',
+          scenePath: 'player.tscn',
+          updates: [{ nodePath: 'root', property: 'metadata/source', value: 'res://notes.txt' }],
+        },
+      ]);
+
+      expect(results[0]?.success).toBe(true);
+      expect(readFileSync(join(project, 'player.tscn'), 'utf8')).toContain('res://notes.txt');
+      expect(importedNothing(project)).toBe(true);
     },
     IMPORT_TEST_TIMEOUT_MS,
   );
