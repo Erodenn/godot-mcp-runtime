@@ -10,6 +10,13 @@ import { inflateSync } from 'zlib';
  * interlaced).
  */
 
+/** Bytes in an IHDR payload: width, height, bit depth, color type, compression, filter, interlace. */
+const IHDR_DATA_LENGTH = 13;
+/** Largest side accepted. 8K frames are 7680 x 4320, so this leaves 2x headroom. */
+export const PNG_MAX_DIMENSION = 16384;
+/** Largest pixel count accepted: 8192 x 8192, twice an 8K frame. Bounds the inflate and output buffers. */
+export const PNG_MAX_PIXELS = 8192 * 8192;
+
 function paethPredictor(a: number, b: number, c: number): number {
   const p = a + b - c;
   const pa = Math.abs(p - a);
@@ -47,6 +54,11 @@ export function decodePng(buffer: Buffer): DecodedPng {
     const data = buffer.subarray(offset + 8, offset + 8 + length);
 
     if (type === 'IHDR') {
+      if (data.length < IHDR_DATA_LENGTH) {
+        throw new Error(
+          `PNG IHDR chunk truncated: ${data.length} bytes, expected ${IHDR_DATA_LENGTH}`,
+        );
+      }
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
       bitDepth = data[8]!;
@@ -69,12 +81,31 @@ export function decodePng(buffer: Buffer): DecodedPng {
     throw new Error('Interlaced PNG is not supported');
   }
 
+  if (width === 0 || height === 0) {
+    throw new Error(`PNG has zero dimensions: ${width}x${height}`);
+  }
+  if (width > PNG_MAX_DIMENSION || height > PNG_MAX_DIMENSION || width * height > PNG_MAX_PIXELS) {
+    throw new Error(
+      `PNG dimensions ${width}x${height} exceed the supported maximum (${PNG_MAX_DIMENSION} per side, ${PNG_MAX_PIXELS} pixels)`,
+    );
+  }
+
   const channels = colorType === 6 ? 4 : 3;
   const bytesPerPixel = channels;
   const stride = width * bytesPerPixel;
-  const raw = inflateSync(Buffer.concat(idatChunks));
-  if (raw.length < height * (stride + 1)) {
-    throw new Error(`PNG data truncated: ${raw.length} bytes, expected ${height * (stride + 1)}`);
+  const expectedRawLength = height * (stride + 1);
+  // The cap is the exact expected size, so a small file cannot inflate past it.
+  let raw: Buffer;
+  try {
+    raw = inflateSync(Buffer.concat(idatChunks), { maxOutputLength: expectedRawLength });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') {
+      throw new Error(`PNG data inflates beyond the expected ${expectedRawLength} bytes`);
+    }
+    throw error;
+  }
+  if (raw.length < expectedRawLength) {
+    throw new Error(`PNG data truncated: ${raw.length} bytes, expected ${expectedRawLength}`);
   }
 
   const out = new Uint8Array(width * height * 4);

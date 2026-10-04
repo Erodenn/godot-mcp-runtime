@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { deflateSync } from 'zlib';
-import { decodePng } from '../../src/utils/png-decoder.js';
+import { decodePng, PNG_MAX_DIMENSION, PNG_MAX_PIXELS } from '../../src/utils/png-decoder.js';
 
 /** Build a minimal valid PNG from raw RGBA pixel data (colorType 6). */
 function buildPng(width: number, height: number, rgba: Uint8Array): Buffer {
@@ -142,5 +142,57 @@ describe('decodePng', () => {
   it('rejects 16-bit depth', () => {
     const png = wrapChunks(1, 1, 16, 6, deflateSync(Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0])));
     expect(() => decodePng(png)).toThrow(/Unsupported PNG format/);
+  });
+  describe('bounds', () => {
+    const TINY_IDAT = deflateSync(Buffer.from([0, 0, 0, 0, 0]));
+    const SIGNATURE_LENGTH = 8;
+    const TRUNCATED_IHDR_BYTES = 8;
+
+    it('rejects a side above the maximum before inflating', () => {
+      const png = wrapChunks(PNG_MAX_DIMENSION + 1, 1, 8, 6, TINY_IDAT);
+      expect(() => decodePng(png)).toThrow(/exceed the supported maximum/);
+    });
+
+    it('rejects a pixel count above the maximum before inflating', () => {
+      const side = Math.floor(Math.sqrt(PNG_MAX_PIXELS)) + 1;
+      expect(side).toBeLessThanOrEqual(PNG_MAX_DIMENSION);
+      const png = wrapChunks(side, side, 8, 6, TINY_IDAT);
+      expect(() => decodePng(png)).toThrow(/exceed the supported maximum/);
+    });
+
+    it('rejects 4-billion-pixel declared dimensions', () => {
+      const png = wrapChunks(0xffffffff, 0xffffffff, 8, 6, TINY_IDAT);
+      expect(() => decodePng(png)).toThrow(/exceed the supported maximum/);
+    });
+
+    it('rejects zero width and zero height', () => {
+      expect(() => decodePng(wrapChunks(0, 4, 8, 6, TINY_IDAT))).toThrow(/zero dimensions/);
+      expect(() => decodePng(wrapChunks(4, 0, 8, 6, TINY_IDAT))).toThrow(/zero dimensions/);
+    });
+
+    it('rejects an IDAT that inflates beyond the expected size', () => {
+      // 1x1 RGBA expects 5 raw bytes; this stream inflates to 4 MiB of zeros.
+      const bomb = deflateSync(Buffer.alloc(4 * 1024 * 1024));
+      expect(bomb.length).toBeLessThan(10 * 1024);
+      expect(() => decodePng(wrapChunks(1, 1, 8, 6, bomb))).toThrow(/inflates beyond/);
+    });
+
+    it('rejects a truncated IHDR', () => {
+      const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      expect(signature.length).toBe(SIGNATURE_LENGTH);
+      const png = Buffer.concat([
+        signature,
+        chunk('IHDR', Buffer.alloc(TRUNCATED_IHDR_BYTES)),
+        chunk('IDAT', TINY_IDAT),
+        chunk('IEND', Buffer.alloc(0)),
+      ]);
+      expect(() => decodePng(png)).toThrow(/IHDR chunk truncated/);
+    });
+
+    it('still decodes a frame at the 8K size class declaration', () => {
+      // Dimensions within bounds are not rejected up front (stream is truncated, so it fails later).
+      const png = wrapChunks(7680, 4320, 8, 6, TINY_IDAT);
+      expect(() => decodePng(png)).toThrow(/truncated/);
+    });
   });
 });
