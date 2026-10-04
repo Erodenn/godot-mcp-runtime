@@ -15,6 +15,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 import { normalizeExitCode } from './output-parsing.js';
+import { godotSpawnOptions } from './godot-spawn-options.js';
 
 /** Each captured stream keeps only its last this many characters. */
 export const MOVIE_OUTPUT_CAPTURE_MAX_CHARS = 64 * 1024;
@@ -166,10 +167,7 @@ export function runMovieProcess(
     };
 
     try {
-      proc = deps.spawn(godotPath, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-      });
+      proc = deps.spawn(godotPath, args, godotSpawnOptions('movie'));
     } catch (error) {
       finish({
         exitCode: null,

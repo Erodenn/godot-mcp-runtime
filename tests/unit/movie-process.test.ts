@@ -59,7 +59,11 @@ describe('runMovieProcess', () => {
     expect(deps.spawnMock).toHaveBeenCalledWith(
       '/fake/godot',
       ['--path', '/p'],
-      expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
+      expect.objectContaining({
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      }),
     );
   });
 

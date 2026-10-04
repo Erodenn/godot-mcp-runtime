@@ -10,7 +10,13 @@
 import { describe, it, expect } from 'vitest';
 import { godotSpawnOptions, type GodotSpawnKind } from '../../src/utils/godot-spawn-options.js';
 
-const ALL_KINDS: readonly GodotSpawnKind[] = ['headless', 'run', 'run-background', 'editor'];
+const ALL_KINDS: readonly GodotSpawnKind[] = [
+  'headless',
+  'run',
+  'run-background',
+  'movie',
+  'editor',
+];
 const WINDOWED_KINDS: readonly GodotSpawnKind[] = ['run', 'editor'];
 
 describe('godotSpawnOptions', () => {
@@ -20,6 +26,14 @@ describe('godotSpawnOptions', () => {
 
   it('the background run spawn hides its window', () => {
     expect(godotSpawnOptions('run-background')).toEqual({ stdio: 'pipe', windowsHide: true });
+  });
+
+  it('the movie spawn hides its window and leads its own process group outside Windows', () => {
+    expect(godotSpawnOptions('movie')).toEqual({
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
   });
 
   it('the run and editor spawns never ask for a hidden window', () => {
@@ -34,7 +48,10 @@ describe('godotSpawnOptions', () => {
 
   it('every kind keeps piped stdio', () => {
     for (const kind of ALL_KINDS) {
-      expect(godotSpawnOptions(kind).stdio, kind).toBe('pipe');
+      const { stdio } = godotSpawnOptions(kind);
+      // The movie run ignores stdin and pipes both output streams.
+      const expected = kind === 'movie' ? ['ignore', 'pipe', 'pipe'] : 'pipe';
+      expect(stdio, kind).toEqual(expected);
     }
   });
 

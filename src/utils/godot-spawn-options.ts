@@ -6,9 +6,11 @@ import type { SpawnOptions } from 'child_process';
  *   operation, asset import). It has no window.
  * - `run`: the game for `run_project`. Its window is the point.
  * - `run-background`: the game for `run_project` with `background: true`.
+ * - `movie`: the bounded movie-writer run for `render_movie`. It renders in a
+ *   real window nobody needs to see, and it is killed as a process tree.
  * - `editor`: the editor GUI for `launch_editor`.
  */
-export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'editor';
+export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'movie' | 'editor';
 
 /**
  * Spawn options for one kind of Godot process. The single place they are
@@ -27,7 +29,7 @@ export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'editor';
  * for a GUI-subsystem binary is not settled by the documentation, so this is
  * the cheap measure, not a proven cure. A headless run has no window to lose,
  * so it gets the flag. `run` and `editor` never hide, because their windows
- * must show, so they never carry the key at all. `run-background` hides
+ * must show, so they never carry the key at all. `movie` and `run-background` hide
  * because the caller asked for a game nobody looks at; the window is never
  * shown, while rendering, screenshots and injected input still work. A
  * no-focus flag at window creation cannot be combined with the hidden
@@ -46,6 +48,15 @@ export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'editor';
 export function godotSpawnOptions(kind: GodotSpawnKind): SpawnOptions {
   if (kind === 'headless' || kind === 'run-background') {
     return { stdio: 'pipe', windowsHide: true };
+  }
+  // Stdin is ignored and the child leads its own process group outside
+  // Windows, so a timeout can signal the whole group (see killProcessTree).
+  if (kind === 'movie') {
+    return {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    };
   }
   return { stdio: 'pipe' };
 }
