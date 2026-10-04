@@ -26,7 +26,7 @@ import type { ActionBoundaryMark } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
 import { cleanStdout, normalizeForCompare, normalizeExitCode } from './output-parsing.js';
-import { checkDisplayAvailable, validateSubPath } from './path-validation.js';
+import { checkDisplayAvailable, type ResolvedProjectPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
 
@@ -777,7 +777,7 @@ export class GodotRunner {
 
   async runProject(
     projectPath: string,
-    scene?: string,
+    scene?: ResolvedProjectPath,
     background: boolean = false,
     bridgePort?: number,
     profiling: boolean = false,
@@ -864,9 +864,9 @@ export class GodotRunner {
         cmdArgs.push('--remote-debug', `tcp://127.0.0.1:${profiler.port}`);
         logDebug(`Profiling enabled (debugger port ${profiler.port})`);
       }
-      if (scene && validateSubPath(projectPath, scene)) {
-        logDebug(`Adding scene parameter: ${scene}`);
-        cmdArgs.push(scene);
+      if (scene) {
+        logDebug(`Adding scene parameter: ${scene.resPath}`);
+        cmdArgs.push(scene.resPath);
       }
 
       const portSource = bridgePort !== undefined ? 'explicit' : 'auto';

@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
+import { resolveProjectPath } from '../../src/utils/path-validation.js';
 import { runLaunchGate, MAX_SCAN_WARNINGS_SHOWN } from '../../src/utils/launch-gate.js';
 import type { Elicitor, ElicitorResult } from '../../src/utils/mcp-context.js';
 import { makeContext } from '../helpers/runtime-fakes.js';
@@ -176,7 +177,47 @@ describe('runLaunchGate pre-flight scan', () => {
       'utf8',
     );
     const result = await runLaunchGate(
-      { projectPath: dir, scene: 'other.tscn', confirm: false, toolName: 'run_project' },
+      {
+        projectPath: dir,
+        scene: resolveProjectPath(dir, 'other.tscn')!,
+        confirm: false,
+        toolName: 'run_project',
+      },
+      makeContext(),
+    );
+    const warnings = warningsOf(result).join('\n');
+    expect(warnings).toMatch(/other_only\.gd.*HTTPRequest/);
+    expect(warnings).not.toMatch(/OS\.execute/);
+  });
+
+  it('scans the scene named by an absolute scene argument', async () => {
+    const dir = tmp.makeProject(
+      'gate-abs-scene-',
+      `config_version=5\n\n[application]\n${MAIN_SCENE_SETTING}`,
+    );
+    writeFileSync(join(dir, 'main_only.gd'), 'extends Node\n\tOS.execute("x")\n', 'utf8');
+    writeFileSync(
+      join(dir, 'other_only.gd'),
+      'extends Node\nfunc _ready():\n\tvar h = HTTPRequest.new()\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main_only.gd" id="1"]\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'other.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://other_only.gd" id="1"]\n',
+      'utf8',
+    );
+    const result = await runLaunchGate(
+      {
+        projectPath: dir,
+        scene: resolveProjectPath(dir, join(dir, 'other.tscn'))!,
+        confirm: false,
+        toolName: 'run_project',
+      },
       makeContext(),
     );
     const warnings = warningsOf(result).join('\n');

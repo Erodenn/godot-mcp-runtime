@@ -31,7 +31,7 @@
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { projectGodotPath, stripResPrefix } from './path-validation.js';
+import { projectGodotPath } from './path-validation.js';
 import { walkIniSection } from './autoload-ini.js';
 
 /** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
@@ -340,27 +340,29 @@ export function readMainSceneFromProject(projectDir: string): string | null {
 }
 
 /**
- * Pick the scene that `run_project` will actually launch.
- *
- * Resolution order:
- *  1. Explicit `sceneArg` (caller's `scene` parameter) — already validated by
- *     `validateSubPath` before being passed here. Returned as an absolute path.
- *  2. `run/main_scene` from project.godot, with `res://` stripped and joined
- *     to the project root.
- *  3. null — no scene to scan. Caller logs a warning and skips the scene-script
- *     scan; autoload scan still runs.
- *
- * Returns an absolute filesystem path. Does NOT verify the file exists; the
- * caller's `existsSync` check produces the warning if the resolved path is
- * stale.
+ * Absolute path of a reference read out of a project file (`res://x`; a
+ * hand-edited `run/main_scene` may omit the prefix). The input is file content,
+ * not a user string, so no containment check applies here.
  */
-export function resolveLaunchScene(projectDir: string, sceneArg?: string | null): string | null {
-  if (sceneArg) {
-    return join(projectDir, stripResPrefix(sceneArg));
-  }
+function resReferenceToAbs(projectDir: string, resPath: string): string {
+  const rel = resPath.startsWith(TSCN_RES_PREFIX) ? resPath.slice(TSCN_RES_PREFIX.length) : resPath;
+  return join(projectDir, rel);
+}
+
+/**
+ * The scene a launch with no explicit `scene` argument runs: `run/main_scene`
+ * from project.godot, joined to the project root. A launch that names a scene
+ * resolves it with `resolveProjectPath` instead and never comes through here.
+ *
+ * Returns an absolute filesystem path, or null when the project has no main
+ * scene (the caller logs a warning and skips the scene-script scan; the
+ * autoload scan still runs). Does NOT verify the file exists; the caller's
+ * `existsSync` check produces the warning if the path is stale.
+ */
+export function resolveLaunchScene(projectDir: string): string | null {
   const main = readMainSceneFromProject(projectDir);
   if (!main) return null;
-  return join(projectDir, stripResPrefix(main));
+  return resReferenceToAbs(projectDir, main);
 }
 
 // --- Script collection ---
@@ -466,12 +468,12 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
         const path = resPathOf(header.attrs);
         const lowered = path === null ? '' : path.toLowerCase();
         if (path !== null && lowered.endsWith(GDSCRIPT_EXTENSION)) {
-          scripts.add(join(projectDir, stripResPrefix(path)));
+          scripts.add(resReferenceToAbs(projectDir, path));
         } else if (path !== null && SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
-          walk(join(projectDir, stripResPrefix(path)));
+          walk(resReferenceToAbs(projectDir, path));
         } else if (type === 'PackedScene') {
           if (path === null) skip(`PackedScene ext_resource has no res:// path: ${header.raw}`);
-          else walk(join(projectDir, stripResPrefix(path)));
+          else walk(resReferenceToAbs(projectDir, path));
         } else if (SCRIPT_TYPE_HINTS.has(type)) {
           if (path === null) skip(`Script ext_resource has no res:// path: ${header.raw}`);
           else skip(`script ${path} is not GDScript and is not scanned`);
@@ -523,7 +525,7 @@ export function extractSceneScripts(scenePath: string, projectDir: string): stri
     if (header.tag !== 'ext_resource') continue;
     const path = resPathOf(header.attrs);
     if (path === null || !path.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) continue;
-    result.push(join(projectDir, stripResPrefix(path)));
+    result.push(resReferenceToAbs(projectDir, path));
   }
   return result;
 }

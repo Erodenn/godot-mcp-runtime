@@ -17,6 +17,8 @@ The same thing has the same name in every payload:
 
 Inside a listing of things that have a path of their own (files, scene tree nodes, UI elements, scene dependencies, autoloads) the entry's field is plain `path`.
 
+Every tool that takes a project file path (`scenePath`, `texturePath`, `scriptPath`, `newPath`, `outputPath`, `autoloadPath`, `scene`, a `nodeType` that names a scene, a `validate` target) accepts the same spellings: a bare relative path (`scenes/main.tscn`), `./scenes/main.tscn`, `res://scenes/main.tscn`, an absolute path inside the project, and backslash separators. Anything containing `..`, a second URI scheme (`uid://`), the project root itself, or an absolute path outside the project is an error.
+
 A path field is the normalized form, read back after the operation, with one exception. A per-item entry repeats the path the caller sent, so each entry can be matched to its input: the `nodePath` in a `results[]` entry of `set_node_properties`, `delete_nodes` and `get_node_properties`, the `nodePath` in a batch entry's `updates[]`, and the `scenePath` of a batch entry. `get_scene_dependencies` repeats the `scenePath` it was given as well. Every spelling these tools accept is accepted back.
 
 The fields a tool returns on every success are listed as `required` in its `outputSchema`. A field that is present only in some cases (`warnings`, `exitCode`, `still_held`) is not.
@@ -47,7 +49,7 @@ The fields a tool returns on every success are listed as `required` in its `outp
 
 `run_project` waits for the bridge before returning success, so runtime tools are usable immediately after the call returns. A spawned session waits up to 30 s for the bridge and aborts immediately if the child process exits first. With `attach: true` it waits up to 20 s for the externally launched Godot process to start listening, and up to 45 s total once a connection has been observed, so a large project's cold start is absorbed. That ceiling sits under the 60 s default per-request timeout most MCP clients use, so the failure is reported by the server rather than cut off by the client. If something is listening on the port but answers no ping at all, the wait gives up after eight consecutive failures instead of spending the whole budget, and says so. If you (the agent) are launching Godot yourself, kick the launch off in parallel with the `run_project` call so the wait absorbs Godot's startup - don't sequentialize. If a human is launching Godot and they don't make it inside the window, retry `run_project` with `attach: true` (`bridge.inject` is idempotent). Both modes auto-select a free bridge port when `bridgePort` is omitted; pass `bridgePort` to pin a specific port. A first cold launch on a large project (hundreds of scripts) is the case the longer budget exists for.
 
-`scene` must name a scene file: a project-relative path ending in `.tscn` or `.scn`, in lower case. Godot runs a command-line scene only when it carries a scene extension and silently runs the project's main scene for anything else, so any other value is an error before the scan, the confirmation and the launch. `bridgePort`, `background` and `profiling` are checked at the same point, so a call that cannot launch never asks for confirmation.
+`scene` accepts the spellings listed under Response conventions and must name a scene file: a path ending in `.tscn` or `.scn`, in lower case. Godot runs a command-line scene only when it carries a scene extension and silently runs the project's main scene for anything else, so any other value is an error before the scan, the confirmation and the launch. `bridgePort`, `background` and `profiling` are checked at the same point, so a call that cannot launch never asks for confirmation.
 
 Attach mode spawns nothing, so `scene`, `background` and `profiling` are rejected alongside `attach: true` rather than ignored, and `get_debug_output` has nothing to return. The pre-flight script scan runs in both modes; the launch confirmation prompt runs only when the server spawns the project. Only one attach session per project is supported at a time. An attached session whose Godot was closed ends by itself on the next tool call; calling `stop_project` after that returns its no-session error, and nothing is left to clean up.
 
@@ -158,7 +160,7 @@ It launches the project, so it goes through the same pre-flight scan and the sam
 
 | Parameter      | Default | Notes                                                         |
 | -------------- | ------- | ------------------------------------------------------------- |
-| `scene`        | main    | Project-relative scene file ending in `.tscn` or `.scn`       |
+| `scene`        | main    | Scene file ending in `.tscn` or `.scn`, in any spelling above |
 | `mode`         | `check` | `check`, `frames` or `video`                                  |
 | `frames`       | 30      | 2 to 600. The run is budgeted at 30 s plus 250 ms per frame   |
 | `fps`          | 30      | 1 to 120. Game time covered is `frames / fps` seconds         |

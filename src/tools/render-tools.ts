@@ -9,8 +9,8 @@ import {
   checkDisplayAvailable,
   isUnderDir,
   projectGodotPath,
-  stripResPrefix,
-  validateSubPath,
+  resolveProjectPath,
+  type ResolvedProjectPath,
 } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse } from '../utils/structured-response.js';
@@ -274,7 +274,7 @@ export function buildMovieArgs(o: {
   outputPath: string;
   fps: number;
   frames: number;
-  scene?: string;
+  scene?: ResolvedProjectPath;
 }): string[] {
   const args = [
     '--path',
@@ -288,7 +288,7 @@ export function buildMovieArgs(o: {
     String(o.frames),
   ];
   if (o.scene !== undefined) {
-    args.push('res://' + stripResPrefix(o.scene).replace(/\\/g, '/'));
+    args.push(o.scene.resPath);
   }
   return args;
 }
@@ -322,7 +322,7 @@ export function measuredFramePositions(frameCount: number): number[] {
 // --- Argument parsing ---
 
 interface RenderOptions {
-  scene: string | undefined;
+  scene: ResolvedProjectPath | undefined;
   mode: RenderMovieMode;
   frames: number;
   fps: number;
@@ -363,8 +363,10 @@ function parseRenderOptions(
 ): Result<RenderOptions, ToolResponse> {
   const scene = optionalString(args, 'scene');
   if (!scene.ok) return scene;
+  let resolvedScene: ResolvedProjectPath | undefined;
   if (scene.value !== undefined) {
-    if (!validateSubPath(projectRoot, scene.value)) {
+    const resolved = resolveProjectPath(projectRoot, scene.value);
+    if (!resolved) {
       return err(
         createErrorResponse(
           `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
@@ -372,9 +374,9 @@ function parseRenderOptions(
         ),
       );
     }
-    const notAScene = rejectNonSceneLaunchArg(scene.value);
+    const notAScene = rejectNonSceneLaunchArg(resolved.relPath);
     if (notAScene) return err(notAScene);
-    if (!existsSync(join(projectRoot, stripResPrefix(scene.value)))) {
+    if (!existsSync(resolved.absPath)) {
       return err(
         createErrorResponse(`Scene file does not exist: ${scene.value}`, [
           'Check the path with get_project_files',
@@ -382,6 +384,7 @@ function parseRenderOptions(
         ]),
       );
     }
+    resolvedScene = resolved;
   }
 
   const rawMode = args.mode ?? DEFAULT_MOVIE_MODE;
@@ -433,7 +436,7 @@ function parseRenderOptions(
   }
 
   return ok({
-    scene: scene.value,
+    scene: resolvedScene,
     mode,
     frames: frames.value,
     fps: fps.value,
@@ -750,7 +753,7 @@ export interface RenderMovieDeps {
 interface RunContext {
   runner: GodotRunner;
   root: string;
-  scene: string | undefined;
+  scene: ResolvedProjectPath | undefined;
   options: RenderOptions;
   runId: string;
   runDir: string;
@@ -860,7 +863,7 @@ function buildVideoResponse(rc: RunContext, result: MovieProcessResult): Handler
     ...(warnings.length > 0 ? { warnings } : {}),
     mode: rc.options.mode,
     projectPath: rc.root,
-    ...(rc.scene !== undefined ? { scene: rc.scene } : {}),
+    ...(rc.scene !== undefined ? { scene: rc.scene.relPath } : {}),
     fps: rc.options.fps,
     framesRequested: rc.options.frames,
     statsAvailable: false,
@@ -910,7 +913,7 @@ function buildPngResponse(
     ...(warnings.length > 0 ? { warnings } : {}),
     mode: rc.options.mode,
     projectPath: rc.root,
-    ...(rc.scene !== undefined ? { scene: rc.scene } : {}),
+    ...(rc.scene !== undefined ? { scene: rc.scene.relPath } : {}),
     fps: rc.options.fps,
     framesRequested: rc.options.frames,
     statsAvailable: true,

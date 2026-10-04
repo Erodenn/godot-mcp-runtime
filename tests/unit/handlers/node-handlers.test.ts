@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { join } from 'path';
 import {
   handleDeleteNodes,
   handleSetNodeProperties,
@@ -913,5 +914,26 @@ describe('handleGetNodeSignals', () => {
     const parsed = JSON.parse(text);
     expect(parsed.nodePath).toBe('root/Button');
     expect(parsed.signals[0].name).toBe('pressed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path spellings: res://, absolute-inside, forwarded as project-relative
+// ---------------------------------------------------------------------------
+
+describe('attach_script accepts every project path spelling', () => {
+  it.each([
+    ['res://', (p: string) => `res://${p}`],
+    ['absolute', (p: string) => join(fixtureProjectPath, p)],
+  ] as const)('scenePath and scriptPath as %s are forwarded relative', async (_l, spell) => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleAttachScript(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: spell(fixtureScenePath),
+      nodePath: 'root/Node',
+      scriptPath: spell('placeholder.gd'),
+    });
+    expect(fake.calls[0]?.params.scenePath).toBe(fixtureScenePath);
+    expect(fake.calls[0]?.params.scriptPath).toBe('placeholder.gd');
   });
 });

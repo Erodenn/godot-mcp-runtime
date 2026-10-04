@@ -29,7 +29,7 @@ vi.mock('../../src/utils/bridge-protocol.js', async () => {
 });
 vi.mock('../../src/utils/path-validation.js', async () => {
   const actual = await vi.importActual('../../src/utils/path-validation.js');
-  return { ...actual, checkDisplayAvailable: () => true, validateSubPath: () => false };
+  return { ...actual, checkDisplayAvailable: () => true };
 });
 vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {

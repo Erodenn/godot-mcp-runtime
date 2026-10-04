@@ -3,7 +3,7 @@
  *
  * Godot resolves `res://../x` outward to a real file on disk, so a path that
  * escapes the project root is not merely invalid -- it reads and writes real
- * files outside the project. The Node-side validators (validateSubPath and
+ * files outside the project. The Node-side validators (resolveProjectPath and
  * friends) cover the standalone handlers, but batch_scene_operations forwards
  * its operations to the GDScript layer raw, so containment has to hold there
  * too. normalize_scene_path is the single choke point every path funnels
@@ -74,7 +74,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
     'batch load_sprite rejects a texturePath that escapes the project root',
     async () => {
       // The batch path reaches _apply_load_sprite without passing through
-      // handleLoadSprite's validateSubPath call, so the guard must be
+      // handleLoadSprite's resolveProjectPath call, so the guard must be
       // engine-side.
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       const outside = plantOutside(tmpProject, 'outside.png', 'not-a-real-png');

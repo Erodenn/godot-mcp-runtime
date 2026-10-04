@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
+import type { ResolvedProjectPath } from '../../../src/utils/path-validation.js';
 import {
   handleGetDebugOutput,
   handleStopProject,
@@ -172,6 +173,7 @@ function createRuntimeFake(): RuntimeFake {
   let bridgeHook: (() => void) | null = null;
   let stopCallCount = 0;
   let runProjectCallCount = 0;
+  let lastRunProjectScene: ResolvedProjectPath | undefined;
   let attachProjectCallCount = 0;
   let actionErrorBuckets: string[][] = [];
   let actionErrorTrailing: string[] = [];
@@ -251,11 +253,12 @@ function createRuntimeFake(): RuntimeFake {
     activeBridgePort: null as number | null,
     async runProject(
       projectPath: string,
-      _scene?: string,
+      scene?: ResolvedProjectPath,
       _background?: boolean,
       bridgePort?: number,
     ) {
       runProjectCallCount++;
+      lastRunProjectScene = scene;
       if (runProjectError) throw runProjectError;
       state.activeSessionMode = 'spawned';
       state.activeProjectPath = projectPath;
@@ -310,6 +313,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     runProjectCalls() {
       return runProjectCallCount;
+    },
+    lastRunProjectScene() {
+      return lastRunProjectScene;
     },
     attachProjectCalls() {
       return attachProjectCallCount;
@@ -2312,6 +2318,37 @@ describe('handleRunProject security pre-flight', () => {
     );
     expect(hasError(result)).toBe(false);
     expect(runProjectPayload(result).warnings).toBeUndefined();
+  });
+
+  it.each([
+    ['res://', () => 'res://other.tscn'],
+    ['absolute', (dir: string) => join(dir, 'other.tscn')],
+  ])('accepts a %s scene and scans and launches the same file', async (_label, spell) => {
+    const dir = tmp.makeProject(
+      'run-project-scene-spelling-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(dir, 'attack.gd'), 'extends Node\nfunc _ready():\n\tOS.execute("x")\n');
+    writeFileSync(join(dir, 'clean.gd'), 'extends Node\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n',
+    );
+    writeFileSync(
+      join(dir, 'other.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://clean.gd" id="1"]\n',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene: spell(dir) },
+      acceptingContext(),
+    );
+    expect(hasError(result)).toBe(false);
+    expect(runProjectPayload(result).warnings).toBeUndefined();
+    expect(fake.lastRunProjectScene()?.resPath).toBe('res://other.tscn');
   });
 
   // Godot runs a positional argument as the scene only when it ends in a scene

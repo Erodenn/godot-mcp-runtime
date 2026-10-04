@@ -80,6 +80,44 @@ describe('handleListAutoloads', () => {
 // handleAddAutoload
 // ---------------------------------------------------------------------------
 
+describe('handleAddAutoload path spellings', () => {
+  it.each([
+    ['res://', 'res://x.gd'],
+    ['bare', 'x.gd'],
+  ])('writes one res:// line for a %s path', async (_label, spelling) => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Thing',
+      autoloadPath: spelling,
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Thing="*res://x.gd"');
+  });
+
+  it('writes a res:// line for an absolute path inside the project', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Thing',
+      autoloadPath: join(dir, 'x.gd'),
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Thing="*res://x.gd"');
+  });
+
+  it('update_autoload with an absolute path inside the project writes res://', async () => {
+    const dir = makeTmpProjectWithAutoload('Thing', 'old.gd');
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'Thing',
+      autoloadPath: join(dir, 'new.gd'),
+    });
+    expect(hasError(result)).toBe(false);
+    expect(readProjectGodot(dir)).toContain('Thing="*res://new.gd"');
+  });
+});
+
 describe('handleAddAutoload', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleAddAutoload({

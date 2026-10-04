@@ -422,7 +422,7 @@ describe('handleValidate batch mode', () => {
   });
 
   it('short-circuits and reports per-target failure when batch scriptPath contains ..', async () => {
-    // Regression: validateSubPath ran in single-target mode but the batch
+    // Regression: path validation ran in single-target mode but the batch
     // branch built snakeTargets without it. An agent could pass a traversal
     // path and bypass the documented path-traversal protection.
     const fake = createFakeRunner();
@@ -816,5 +816,51 @@ describe('handleValidate check shapes', () => {
     });
     expectErrorMatching(structure, /unknown key "nodePath" on a structure check/);
     expect(fake.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path spellings: res://, absolute-inside
+// ---------------------------------------------------------------------------
+
+describe('validate accepts every project path spelling', () => {
+  const absolute = (p: string) => join(fixtureProjectPath, p);
+
+  it.each([
+    ['res://', (p: string) => `res://${p}`],
+    ['absolute', absolute],
+  ] as const)('single scriptPath and scenePath as %s are forwarded relative', async (_l, spell) => {
+    const script = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
+    await handleValidate(script.asRunner, {
+      projectPath: fixtureProjectPath,
+      scriptPath: spell('placeholder.gd'),
+    });
+    expect(script.calls[0]?.params).toEqual({ scriptPath: 'placeholder.gd' });
+
+    const scene = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
+    await handleValidate(scene.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: spell(fixtureScenePath),
+    });
+    expect(scene.calls[0]?.params).toEqual({ scenePath: fixtureScenePath });
+  });
+
+  it('batch targets keep the caller spelling, except absolute paths go relative', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
+    await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        { scriptPath: 'res://placeholder.gd' },
+        { scriptPath: absolute('placeholder.gd') },
+        { scenePath: absolute(fixtureScenePath) },
+      ],
+    });
+    expect(fake.calls[0]?.params).toEqual({
+      targets: [
+        { script_path: 'res://placeholder.gd' },
+        { script_path: 'placeholder.gd' },
+        { scene_path: fixtureScenePath },
+      ],
+    });
   });
 });

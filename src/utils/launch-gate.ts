@@ -11,7 +11,7 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
-import { join, relative, resolve } from 'path';
+import { relative, resolve } from 'path';
 import type { ToolResponse } from '../mcp.types.js';
 import { isServerOwnedBridgePath } from './artifact-paths.js';
 import { parseAutoloadSection } from './autoload-ini.js';
@@ -28,8 +28,8 @@ import {
   isUnderDir,
   LAUNCH_SCENE_EXTENSIONS,
   projectGodotPath,
-  stripResPrefix,
-  validateSubPath,
+  resolveProjectPath,
+  type ResolvedProjectPath,
 } from './path-validation.js';
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
@@ -68,8 +68,8 @@ export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
 export interface LaunchGateRequest {
   /** Validated project directory; resolved to an absolute path inside. */
   projectPath: string;
-  /** Validated project-relative scene. Undefined scans `run/main_scene`. */
-  scene?: string | undefined;
+  /** Resolved launch scene. Undefined scans `run/main_scene`. */
+  scene?: ResolvedProjectPath | undefined;
   /** Run the once-per-project session confirmation. */
   confirm: boolean;
   /** Names the caller in the prompt, the refusals and the warnings. */
@@ -230,8 +230,7 @@ export async function runLaunchGate(
         // mode, hard-reject the launch. An McpBridge entry pointing anywhere
         // this server does not own is a user's own autoload and still scans.
         if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
-        const stripped = stripResPrefix(entry.path);
-        const lowered = stripped.toLowerCase();
+        const lowered = entry.path.toLowerCase();
         const isScript = lowered.endsWith(GDSCRIPT_EXTENSION);
         const isScene = lowered.endsWith(SCENE_EXTENSION);
         if (!isScript && !isScene) {
@@ -240,18 +239,18 @@ export async function runLaunchGate(
           );
           continue;
         }
-        if (!validateSubPath(absProjectPath, stripped)) {
+        const autoloadFile = resolveProjectPath(absProjectPath, entry.path);
+        if (!autoloadFile) {
           scanWarnings.push(
             `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
           );
           continue;
         }
-        const filePath = join(absProjectPath, stripped);
-        if (isScript) scanScriptPath(filePath);
-        else scanScene(filePath);
+        if (isScript) scanScriptPath(autoloadFile.absPath);
+        else scanScene(autoloadFile.absPath);
       }
     }
-    const launchScene = resolveLaunchScene(absProjectPath, request.scene);
+    const launchScene = request.scene ? request.scene.absPath : resolveLaunchScene(absProjectPath);
     if (launchScene === null) {
       scanWarnings.push(
         'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',

@@ -1,10 +1,10 @@
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath } from '../utils/path-validation.js';
+import { resolveProjectPath, type ResolvedProjectPath } from '../utils/path-validation.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 import {
@@ -215,6 +215,17 @@ function writeTempGdScript(
   const absPath = join(tempDir, name);
   writeFileSync(absPath, source, 'utf8');
   return { resPath: `${VALIDATE_RES_DIR}/${name}`, absPath };
+}
+
+/**
+ * The spelling a batch target is forwarded in. GDScript echoes the forwarded
+ * string back as the result's `target`, so the caller's own spelling is kept
+ * (a bare path or a `res://` path reads back as given). An absolute path is the
+ * exception: GDScript cannot resolve it, so it travels as the project-relative
+ * path and that is what the result reports.
+ */
+function batchTargetSpelling(resolved: ResolvedProjectPath): string {
+  return isAbsolute(resolved.input) ? resolved.relPath : resolved.input;
 }
 
 /** A stderr diagnostic that named no res:// file. */
@@ -509,7 +520,8 @@ export async function handleValidate(
           tempFiles.push(absPath);
           snakeTargets.push({ script_path: resPath });
         } else if (t.scriptPath) {
-          if (!validateSubPath(projectPath, t.scriptPath)) {
+          const scriptTarget = resolveProjectPath(projectPath, t.scriptPath);
+          if (!scriptTarget) {
             preErrors.set(i, {
               target: t.scriptPath,
               errors: [
@@ -520,10 +532,11 @@ export async function handleValidate(
               ],
             });
           } else {
-            snakeTargets.push({ script_path: t.scriptPath });
+            snakeTargets.push({ script_path: batchTargetSpelling(scriptTarget) });
           }
         } else if (t.scenePath) {
-          if (!validateSubPath(projectPath, t.scenePath)) {
+          const sceneTarget = resolveProjectPath(projectPath, t.scenePath);
+          if (!sceneTarget) {
             preErrors.set(i, {
               target: t.scenePath,
               errors: [
@@ -539,7 +552,7 @@ export async function handleValidate(
             // hasProperty on the way out, so pre-converting here would
             // double-convert.
             const accepted: { scene_path: string; checks?: unknown[] } = {
-              scene_path: t.scenePath,
+              scene_path: batchTargetSpelling(sceneTarget),
             };
             if (tChecks) accepted.checks = tChecks;
             snakeTargets.push(accepted);
@@ -757,49 +770,53 @@ export async function handleValidate(
     );
   }
 
-  let tempFile = false;
   let resolvedScriptPath: string | undefined;
   let resolvedScenePath: string | undefined;
+  let tempFileAbsPath: string | undefined;
 
   try {
     if (sourceResult.value) {
-      const { resPath } = writeTempGdScript(projectPath, sourceResult.value, 'validate_temp');
+      const { resPath, absPath } = writeTempGdScript(
+        projectPath,
+        sourceResult.value,
+        'validate_temp',
+      );
       resolvedScriptPath = resPath;
-      tempFile = true;
+      tempFileAbsPath = absPath;
     } else if (scriptPathResult.value) {
-      if (!validateSubPath(projectPath, scriptPathResult.value)) {
+      const script = resolveProjectPath(projectPath, scriptPathResult.value);
+      if (!script) {
         return err(
           createErrorResponse('Invalid scriptPath', [
             'Provide a valid relative path without ".." that stays inside the project directory',
           ]),
         );
       }
-      const fullPath = join(projectPath, scriptPathResult.value);
-      if (!existsSync(fullPath)) {
+      if (!existsSync(script.absPath)) {
         return err(
           createErrorResponse(`Script file does not exist: ${scriptPathResult.value}`, [
             'Ensure the path is correct relative to the project directory',
           ]),
         );
       }
-      resolvedScriptPath = scriptPathResult.value;
+      resolvedScriptPath = script.relPath;
     } else if (scenePathResult.value) {
-      if (!validateSubPath(projectPath, scenePathResult.value)) {
+      const scene = resolveProjectPath(projectPath, scenePathResult.value);
+      if (!scene) {
         return err(
           createErrorResponse('Invalid scenePath', [
             'Provide a valid relative path without ".." that stays inside the project directory',
           ]),
         );
       }
-      const fullPath = join(projectPath, scenePathResult.value);
-      if (!existsSync(fullPath)) {
+      if (!existsSync(scene.absPath)) {
         return err(
           createErrorResponse(`Scene file does not exist: ${scenePathResult.value}`, [
             'Ensure the path is correct relative to the project directory',
           ]),
         );
       }
-      resolvedScenePath = scenePathResult.value;
+      resolvedScenePath = scene.relPath;
     }
 
     // A scenePath plus checks is one Godot process, not two. validate_batch
@@ -937,10 +954,9 @@ export async function handleValidate(
       ]),
     );
   } finally {
-    if (tempFile && resolvedScriptPath) {
-      const tempFilePath = join(projectPath, resolvedScriptPath);
+    if (tempFileAbsPath) {
       try {
-        unlinkSync(tempFilePath);
+        unlinkSync(tempFileAbsPath);
       } catch {
         // Ignore cleanup errors
       }

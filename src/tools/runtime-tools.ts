@@ -9,7 +9,11 @@ import {
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
+import {
+  resolveProjectPath,
+  isUnderDir,
+  type ResolvedProjectPath,
+} from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
@@ -1039,8 +1043,10 @@ async function startSpawnedSession(
   const scene = optionalString(args, 'scene');
   if (!scene.ok) return scene;
 
+  let resolvedScene: ResolvedProjectPath | undefined;
   if (scene.value !== undefined) {
-    if (!validateSubPath(projectPath, scene.value)) {
+    const resolved = resolveProjectPath(projectPath, scene.value);
+    if (!resolved) {
       return err(
         createErrorResponse(
           `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
@@ -1048,8 +1054,9 @@ async function startSpawnedSession(
         ),
       );
     }
-    const notAScene = rejectNonSceneLaunchArg(scene.value);
+    const notAScene = rejectNonSceneLaunchArg(resolved.relPath);
     if (notAScene) return err(notAScene);
+    resolvedScene = resolved;
   }
 
   // Every argument is read before the gate: a launch that cannot happen must
@@ -1067,7 +1074,7 @@ async function startSpawnedSession(
   const isProfiling = profiling.value === true;
 
   const gate = await runLaunchGate(
-    { projectPath, scene: scene.value, confirm: true, toolName: 'run_project' },
+    { projectPath, scene: resolvedScene, confirm: true, toolName: 'run_project' },
     ctx,
   );
   if (!gate.ok) return gate;
@@ -1087,7 +1094,13 @@ async function startSpawnedSession(
   }
 
   try {
-    await runner.runProject(projectPath, scene.value, isBackground, bridgePort.value, isProfiling);
+    await runner.runProject(
+      projectPath,
+      resolvedScene,
+      isBackground,
+      bridgePort.value,
+      isProfiling,
+    );
 
     const bridgeResult = await runner.waitForBridge();
 

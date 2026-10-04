@@ -11,14 +11,14 @@
  */
 
 import { existsSync } from 'fs';
-import { join } from 'path';
 import type { OperationParams, ToolResponse } from '../mcp.types.js';
 import { createErrorResponse } from './error-response.js';
 import { ok, err, type Result } from './result.js';
 import type { NodePath, ProjectPath, ScenePath } from './branded.js';
 import {
   validatePath,
-  validateSubPath,
+  resolveProjectPath,
+  type ResolvedProjectPath,
   validateNodePath as validateNodePathShape,
   projectGodotPath,
 } from './path-validation.js';
@@ -262,7 +262,10 @@ export function parseProjectArgs(
 export function parseSceneArgs(
   args: OperationParams,
   opts?: { requireExists?: boolean },
-): Result<{ projectPath: ProjectPath; scenePath: ScenePath }, ToolResponse> {
+): Result<
+  { projectPath: ProjectPath; scenePath: ScenePath; scene: ResolvedProjectPath },
+  ToolResponse
+> {
   const project = parseProjectArgs(args);
   if (!project.ok) return project;
 
@@ -283,7 +286,8 @@ export function parseSceneArgs(
       ]),
     );
   }
-  if (!validateSubPath(project.value.projectPath, raw)) {
+  const scene = resolveProjectPath(project.value.projectPath, raw);
+  if (!scene) {
     return err(
       createErrorResponse('Invalid scene path', [
         'Provide a valid relative path without ".." that stays inside the project directory',
@@ -291,8 +295,7 @@ export function parseSceneArgs(
     );
   }
   if (requireExists) {
-    const sceneFullPath = join(project.value.projectPath, raw);
-    if (!existsSync(sceneFullPath)) {
+    if (!existsSync(scene.absPath)) {
       return err(
         createErrorResponse(`Scene file does not exist: ${raw}`, [
           'Ensure the scene path is correct',
@@ -301,7 +304,11 @@ export function parseSceneArgs(
       );
     }
   }
-  return ok({ projectPath: project.value.projectPath, scenePath: raw as ScenePath });
+  return ok({
+    projectPath: project.value.projectPath,
+    scenePath: scene.relPath as ScenePath,
+    scene,
+  });
 }
 
 /**

@@ -308,6 +308,21 @@ describe('render_movie arguments', () => {
     expect(args[args.length - 1]).toBe('res://sub/level.tscn');
   });
 
+  it('accepts res:// and absolute scene spellings and reports the relative path', async () => {
+    const { dir, runner, stub, handler } = setup();
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    writeFileSync(join(dir, 'sub', 'level.tscn'), '[gd_scene format=3]\n');
+    for (const spelling of ['res://sub/level.tscn', join(dir, 'sub', 'level.tscn')]) {
+      stub.calls.length = 0;
+      const payload = payloadOf(
+        await handler(runner, { projectPath: dir, scene: spelling }, NO_GATE),
+      );
+      const args = stub.calls[0]!.args;
+      expect(args[args.length - 1]).toBe('res://sub/level.tscn');
+      expect(payload.scene).toBe('sub/level.tscn');
+    }
+  });
+
   it('never passes --headless or --resolution', async () => {
     const { dir, runner, stub, handler } = setup();
     payloadOf(await handler(runner, { projectPath: dir }, NO_GATE));

@@ -1,4 +1,4 @@
-import { join, resolve, sep } from 'path';
+import { isAbsolute, join, relative, resolve, sep } from 'path';
 
 /**
  * Check whether a display server (X11 / Wayland) is available on the current
@@ -17,31 +17,53 @@ export function validatePath(path: string): boolean {
   return true;
 }
 
+/** Godot's project-root URI scheme. */
+const RES_PREFIX = 'res://';
+/** Any URI scheme separator; a second one in a path is a smuggled scheme (`uid://`, `res://res://`). */
+const URI_SCHEME_SEPARATOR = '://';
+
 /**
- * Strip a leading `res://` (Godot's project-root URI) from a project resource
- * path. Returns the input unchanged if no prefix is present.
+ * A user-supplied project sub-path, resolved once. Callers pick the field that
+ * matches where the value is going instead of re-deriving it from the raw
+ * string.
  */
-export function stripResPrefix(path: string): string {
-  return path.startsWith('res://') ? path.slice('res://'.length) : path;
+export interface ResolvedProjectPath {
+  /** Caller's spelling. Error messages and documented per-item echoes only. */
+  readonly input: string;
+  /** Project-relative, '/' separators, no 'res://', no './', never empty. Forwarded to GDScript. */
+  readonly relPath: string;
+  /** Absolute filesystem path (platform separators). Every fs call uses this. */
+  readonly absPath: string;
+  /** 'res://' + relPath. Written to project.godot and passed on the Godot command line. */
+  readonly resPath: string;
 }
 
 /**
- * Stricter check for paths that must stay inside `projectPath`. Rejects `..`
- * (via `validatePath`) and absolute paths that escape the project root.
- * `path.join('/project', '/etc/passwd')` resolves to `/etc/passwd`, so the
- * basic `..`-substring check alone permits absolute-path traversal.
- *
- * Tolerates a leading `res://` by stripping it before resolving — autoload
- * entries and resource paths use this prefix.
+ * Resolve a user-supplied path that must stay inside `projectPath`. Accepts a
+ * bare relative path, `./x`, `res://x`, an absolute path inside the project,
+ * and backslash separators. Returns null for anything else: empty or non-string
+ * input, `..` (via `validatePath`), a second URI scheme, the project root
+ * itself, or an absolute path that escapes the root
+ * (`path.join('/project', '/etc/passwd')` is `/etc/passwd`, so the `..`
+ * substring check alone permits absolute-path traversal).
  */
-export function validateSubPath(projectPath: string, userPath: string): boolean {
-  if (!validatePath(userPath)) return false;
-  const stripped = stripResPrefix(userPath);
-  if (!stripped) return false;
-  const projectRoot = resolve(projectPath);
-  const resolved = resolve(projectRoot, stripped);
-  const tail = projectRoot === sep ? sep : projectRoot + sep;
-  return resolved === projectRoot || resolved.startsWith(tail);
+export function resolveProjectPath(
+  projectPath: string,
+  userPath: string,
+): ResolvedProjectPath | null {
+  if (typeof userPath !== 'string' || userPath === '' || !validatePath(userPath)) return null;
+  const candidate = (
+    userPath.startsWith(RES_PREFIX) ? userPath.slice(RES_PREFIX.length) : userPath
+  ).replace(/\\/g, '/');
+  if (candidate === '' || candidate.includes(URI_SCHEME_SEPARATOR)) return null;
+
+  const root = resolve(projectPath);
+  const absPath = resolve(root, candidate);
+  const rel = relative(root, absPath);
+  if (rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return null;
+
+  const relPath = rel.split(sep).join('/');
+  return { input: userPath, relPath, absPath, resPath: RES_PREFIX + relPath };
 }
 
 /**
@@ -65,7 +87,7 @@ export function isLaunchScenePath(scene: string): boolean {
  * Validate a Godot scene-tree path (NodePath). Scene-tree paths are a
  * separate namespace from filesystem paths — they address nodes inside
  * a scene, not files on disk, so the project-root containment check
- * in `validateSubPath` does not apply.
+ * in `resolveProjectPath` does not apply.
  *
  * Rejects empty strings and `..` segments. Accepts both relative
  * (`root/Player`) and absolute (`/root/Player`) Godot forms; the

@@ -13,20 +13,9 @@ import {
   extractSceneScripts,
   collectSceneScriptsRecursive,
 } from '../../src/utils/scene-parsing.js';
-import { stripResPrefix } from '../../src/utils/path-validation.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();
-
-describe('stripResPrefix', () => {
-  it('removes the leading res:// scheme', () => {
-    expect(stripResPrefix('res://foo/bar.gd')).toBe('foo/bar.gd');
-  });
-
-  it('returns the input unchanged when no res:// prefix', () => {
-    expect(stripResPrefix('foo/bar.gd')).toBe('foo/bar.gd');
-  });
-});
 
 describe('readMainSceneFromProject', () => {
   it('returns the main scene from [application]', () => {
@@ -65,22 +54,7 @@ describe('readMainSceneFromProject', () => {
 });
 
 describe('resolveLaunchScene', () => {
-  it('prefers an explicit sceneArg over run/main_scene', () => {
-    const dir = tmp.makeProject(
-      'launch-scene-',
-      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
-    );
-    const resolved = resolveLaunchScene(dir, 'scenes/other.tscn');
-    expect(resolved).toBe(join(dir, 'scenes/other.tscn'));
-  });
-
-  it('strips res:// from an explicit sceneArg', () => {
-    const dir = tmp.makeProject('launch-scene-', 'config_version=5\n');
-    const resolved = resolveLaunchScene(dir, 'res://scenes/other.tscn');
-    expect(resolved).toBe(join(dir, 'scenes/other.tscn'));
-  });
-
-  it('falls back to run/main_scene when sceneArg is omitted', () => {
+  it('reads run/main_scene', () => {
     const dir = tmp.makeProject(
       'launch-scene-',
       'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
@@ -88,7 +62,7 @@ describe('resolveLaunchScene', () => {
     expect(resolveLaunchScene(dir)).toBe(join(dir, 'main.tscn'));
   });
 
-  it('returns null when no scene is configured and none provided', () => {
+  it('returns null when no scene is configured', () => {
     const dir = tmp.makeProject('launch-scene-', 'config_version=5\n');
     expect(resolveLaunchScene(dir)).toBeNull();
   });

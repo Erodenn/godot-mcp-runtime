@@ -1100,11 +1100,11 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
   if (!parsed.ok) return parsed;
 
   try {
-    const sceneFullPath = join(parsed.value.projectPath, parsed.value.scenePath);
-    const scan = scanTscn(readFileSync(sceneFullPath, 'utf8'));
+    const { scene } = parsed.value;
+    const scan = scanTscn(readFileSync(scene.absPath, 'utf8'));
     if (!scan.isTextResource) {
       return err(
-        createErrorResponse(`${parsed.value.scenePath} is not a text scene or resource file`, [
+        createErrorResponse(`${scene.input} is not a text scene or resource file`, [
           'Binary .scn and .res files cannot be read here; use a .tscn or .tres file',
         ]),
       );
@@ -1134,7 +1134,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
         ? [`${unreadLines} ext_resource line(s) could not be read and are not listed`]
         : [];
     return createStructuredResponse(
-      leadWithWarnings({ warnings, scenePath: parsed.value.scenePath, dependencies }),
+      leadWithWarnings({ warnings, scenePath: scene.input, dependencies }),
     );
   } catch (error: unknown) {
     return err(

@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import { resolveProjectPath, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -182,7 +182,8 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
   const autoloadPath = requireString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
 
-  if (!validateSubPath(parsed.value.projectPath, autoloadPath.value)) {
+  const resolvedAutoload = resolveProjectPath(parsed.value.projectPath, autoloadPath.value);
+  if (!resolvedAutoload) {
     return err(
       createErrorResponse('Invalid autoload path', [
         'Provide a valid relative path or res:// URI that stays inside the project directory',
@@ -209,7 +210,7 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
     addAutoloadEntry(
       projectFile,
       autoloadName.value,
-      autoloadPath.value,
+      resolvedAutoload.resPath,
       isSingleton,
       projectFileContent,
     );
@@ -283,10 +284,11 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   const autoloadPath = optionalString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
 
-  if (
-    autoloadPath.value !== undefined &&
-    !validateSubPath(parsed.value.projectPath, autoloadPath.value)
-  ) {
+  const resolvedAutoload =
+    autoloadPath.value === undefined
+      ? undefined
+      : resolveProjectPath(parsed.value.projectPath, autoloadPath.value);
+  if (autoloadPath.value !== undefined && !resolvedAutoload) {
     return err(
       createErrorResponse('Invalid autoload path', [
         'Provide a valid relative path or res:// URI that stays inside the project directory',
@@ -302,7 +304,7 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
     const updated = updateAutoloadEntry(
       projectFile,
       autoloadName.value,
-      autoloadPath.value,
+      resolvedAutoload?.resPath,
       singleton.value,
     );
     if (!updated) {

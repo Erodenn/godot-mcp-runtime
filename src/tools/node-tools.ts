@@ -1,9 +1,8 @@
 import { existsSync } from 'fs';
-import { join } from 'path';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath } from '../utils/path-validation.js';
+import { resolveProjectPath } from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseSceneArgs,
@@ -521,15 +520,15 @@ export async function handleAttachScript(
 
   const scriptPath = requireString(args, 'scriptPath');
   if (!scriptPath.ok) return scriptPath;
-  if (!validateSubPath(parsed.value.projectPath, scriptPath.value)) {
+  const script = resolveProjectPath(parsed.value.projectPath, scriptPath.value);
+  if (!script) {
     return err(
       createErrorResponse('Valid scriptPath is required', [
         'Provide a relative script path that stays inside the project directory',
       ]),
     );
   }
-  const scriptFullPath = join(parsed.value.projectPath, scriptPath.value);
-  if (!existsSync(scriptFullPath)) {
+  if (!existsSync(script.absPath)) {
     return err(
       createErrorResponse(`Script file does not exist: ${scriptPath.value}`, [
         'Create the script file first',
@@ -540,7 +539,7 @@ export async function handleAttachScript(
   const params = {
     scenePath: parsed.value.scenePath,
     nodePath: nodePath.value,
-    scriptPath: scriptPath.value,
+    scriptPath: script.relPath,
   };
   return executeSceneOp(
     runner,

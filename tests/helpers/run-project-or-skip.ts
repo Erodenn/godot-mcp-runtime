@@ -13,6 +13,7 @@
 
 import type { TestContext } from 'vitest';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
+import { resolveProjectPath } from '../../src/utils/path-validation.js';
 import { isHeadlessEnvironmentError } from './godot-skip.js';
 
 const DEFAULT_BRIDGE_WAIT_MS = 20000;
@@ -38,9 +39,13 @@ export async function runProjectOrSkip(
   projectPath: string,
   opts: RunProjectOrSkipOptions = {},
 ): Promise<{ ready: true }> {
+  const scene = opts.scene === undefined ? undefined : resolveProjectPath(projectPath, opts.scene);
+  if (opts.scene !== undefined && !scene) {
+    throw new Error(`runProjectOrSkip: scene is not a project sub-path: ${opts.scene}`);
+  }
   await runner.runProject(
     projectPath,
-    opts.scene,
+    scene ?? undefined,
     opts.background ?? false,
     opts.bridgePort,
     opts.profiling ?? false,

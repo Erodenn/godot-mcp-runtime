@@ -1,9 +1,8 @@
-import { join } from 'path';
 import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath } from '../utils/path-validation.js';
+import { resolveProjectPath } from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -430,7 +429,10 @@ export async function handleAddNode(
   // A scene-path nodeType is a filesystem path, so it gets the same
   // project-root containment check every other path input does -- Godot
   // resolves `res://../x.tscn` to a real file outside the project.
-  if (isScenePath(nodeType.value) && !validateSubPath(parsed.value.projectPath, nodeType.value)) {
+  const nodeTypeScene = isScenePath(nodeType.value)
+    ? resolveProjectPath(parsed.value.projectPath, nodeType.value)
+    : undefined;
+  if (nodeTypeScene === null) {
     return err(
       createErrorResponse(`Scene path escapes the project root: ${nodeType.value}`, [
         'Use a path relative to the project root (e.g. "scenes/enemy.tscn")',
@@ -454,7 +456,7 @@ export async function handleAddNode(
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
-    nodeType: nodeType.value,
+    nodeType: nodeTypeScene ? nodeTypeScene.relPath : nodeType.value,
     nodeName: nodeName.value,
   };
   if (args.parentNodePath !== undefined) {
@@ -492,15 +494,15 @@ export async function handleLoadSprite(
 
   const texturePath = requireString(args, 'texturePath');
   if (!texturePath.ok) return texturePath;
-  if (!validateSubPath(parsed.value.projectPath, texturePath.value)) {
+  const texture = resolveProjectPath(parsed.value.projectPath, texturePath.value);
+  if (!texture) {
     return err(
       createErrorResponse('Valid texturePath is required', [
         'Provide a relative texture path that stays inside the project directory',
       ]),
     );
   }
-  const textureFullPath = join(parsed.value.projectPath, texturePath.value);
-  if (!existsSync(textureFullPath)) {
+  if (!existsSync(texture.absPath)) {
     return err(
       createErrorResponse(`Texture file does not exist: ${texturePath.value}`, [
         'Ensure the texture path is correct',
@@ -511,7 +513,7 @@ export async function handleLoadSprite(
   const params = {
     scenePath: parsed.value.scenePath,
     nodePath: nodePath.value,
-    texturePath: texturePath.value,
+    texturePath: texture.relPath,
   };
   return executeSceneOp(
     runner,
@@ -535,7 +537,10 @@ export async function handleSaveScene(
 
   const newPath = optionalString(args, 'newPath');
   if (!newPath.ok) return newPath;
-  if (newPath.value && !validateSubPath(parsed.value.projectPath, newPath.value)) {
+  const newScene = newPath.value
+    ? resolveProjectPath(parsed.value.projectPath, newPath.value)
+    : undefined;
+  if (newScene === null) {
     return err(
       createErrorResponse('Invalid newPath', [
         'Provide a valid relative path without ".." that stays inside the project directory',
@@ -544,7 +549,7 @@ export async function handleSaveScene(
   }
 
   const params: OperationParams = { scenePath: parsed.value.scenePath };
-  if (newPath.value) params.newPath = newPath.value;
+  if (newScene) params.newPath = newScene.relPath;
   return executeSceneOp(
     runner,
     'save_scene',
@@ -567,7 +572,8 @@ export async function handleExportMeshLibrary(
 
   const outputPath = requireString(args, 'outputPath');
   if (!outputPath.ok) return outputPath;
-  if (!validateSubPath(parsed.value.projectPath, outputPath.value)) {
+  const output = resolveProjectPath(parsed.value.projectPath, outputPath.value);
+  if (!output) {
     return err(
       createErrorResponse('Valid outputPath is required', [
         'Provide an output path for the .res file that stays inside the project directory',
@@ -580,7 +586,7 @@ export async function handleExportMeshLibrary(
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
-    outputPath: outputPath.value,
+    outputPath: output.relPath,
   };
   if (meshItemNames.value) {
     params.meshItemNames = meshItemNames.value;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { join } from 'path';
 import {
   handleCreateScene,
   handleAddNode,
@@ -565,5 +566,72 @@ describe('handleBatchSceneOperations', () => {
     const payload = expectMatchesOutputSchema('batch_scene_operations', result);
     expect(Object.keys(payload)[0]).toBe('warnings');
     expect(payload.results).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path spellings: res://, absolute-inside, forwarded as project-relative
+// ---------------------------------------------------------------------------
+
+describe('scene tools accept every project path spelling', () => {
+  const spellings = [
+    ['res://', (p: string) => `res://${p}`],
+    ['absolute', (p: string) => join(fixtureProjectPath, p)],
+  ] as const;
+
+  it.each(spellings)(
+    'scenePath as %s reaches Godot as the relative path',
+    async (_label, spell) => {
+      const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+      await handleSaveScene(fake.asRunner, {
+        projectPath: fixtureProjectPath,
+        scenePath: spell(fixtureScenePath),
+      });
+      expect(fake.calls[0]?.params.scenePath).toBe(fixtureScenePath);
+    },
+  );
+
+  it.each(spellings)('load_sprite texturePath as %s is forwarded relative', async (_l, spell) => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleLoadSprite(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Sprite',
+      texturePath: spell('placeholder.png'),
+    });
+    expect(fake.calls[0]?.params.texturePath).toBe('placeholder.png');
+  });
+
+  it.each(spellings)('save_scene newPath as %s is forwarded relative', async (_l, spell) => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleSaveScene(fake.asRunner, { ...validBase, newPath: spell('copy.tscn') });
+    expect(fake.calls[0]?.params.newPath).toBe('copy.tscn');
+  });
+
+  it.each(spellings)(
+    'export_mesh_library outputPath as %s is forwarded relative',
+    async (_l, spell) => {
+      const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+      await handleExportMeshLibrary(fake.asRunner, { ...validBase, outputPath: spell('lib.res') });
+      expect(fake.calls[0]?.params.outputPath).toBe('lib.res');
+    },
+  );
+
+  it.each(spellings)(
+    'add_node scene-path nodeType as %s is forwarded relative',
+    async (_l, spell) => {
+      const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+      await handleAddNode(fake.asRunner, {
+        ...validBase,
+        nodeType: spell('input_probe.tscn'),
+        nodeName: 'Probe',
+      });
+      expect(fake.calls[0]?.params.nodeType).toBe('input_probe.tscn');
+    },
+  );
+
+  it('add_node leaves a class-name nodeType untouched', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleAddNode(fake.asRunner, { ...validBase, nodeType: 'Node2D', nodeName: 'Foo' });
+    expect(fake.calls[0]?.params.nodeType).toBe('Node2D');
   });
 });

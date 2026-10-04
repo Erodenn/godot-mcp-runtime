@@ -5,12 +5,7 @@ import {
   convertCamelToSnakeCase,
   OPAQUE_VALUE_KEYS,
 } from '../../src/utils/parameter-conversion.js';
-import {
-  validatePath,
-  validateSubPath,
-  validateNodePath,
-  isUnderDir,
-} from '../../src/utils/path-validation.js';
+import { validatePath, validateNodePath, isUnderDir } from '../../src/utils/path-validation.js';
 import { extractGdError, createErrorResponse } from '../../src/utils/error-response.js';
 import {
   extractJson,
@@ -273,67 +268,6 @@ describe('validatePath', () => {
 
   it('accepts absolute paths', () => {
     expect(validatePath('/abs/path/to/project')).toBe(true);
-  });
-});
-
-describe('validateSubPath', () => {
-  const project = resolve('/project');
-
-  it('rejects empty paths', () => {
-    expect(validateSubPath(project, '')).toBe(false);
-  });
-
-  it('rejects paths containing ..', () => {
-    expect(validateSubPath(project, '../etc/passwd')).toBe(false);
-    expect(validateSubPath(project, 'foo/../../bar')).toBe(false);
-  });
-
-  it('rejects absolute paths that escape the project', () => {
-    expect(validateSubPath(project, '/etc/passwd')).toBe(false);
-    expect(validateSubPath(project, resolve('/elsewhere/file.gd'))).toBe(false);
-  });
-
-  it('accepts simple sub-paths', () => {
-    expect(validateSubPath(project, 'scenes/main.tscn')).toBe(true);
-  });
-
-  it('accepts nested sub-paths', () => {
-    expect(validateSubPath(project, 'a/b/c/d.gd')).toBe(true);
-  });
-
-  it('accepts an absolute path that resolves inside the project', () => {
-    const inside = resolve(project, 'sub/file.gd');
-    expect(validateSubPath(project, inside)).toBe(true);
-  });
-
-  it('tolerates a leading res:// prefix', () => {
-    expect(validateSubPath(project, 'res://autoload/foo.gd')).toBe(true);
-  });
-
-  it('rejects a res:// path that escapes via ..', () => {
-    expect(validateSubPath(project, 'res://../escape.gd')).toBe(false);
-  });
-
-  it('rejects a res:// prefix on its own', () => {
-    expect(validateSubPath(project, 'res://')).toBe(false);
-  });
-
-  it('does not match a sibling directory with the same prefix', () => {
-    // path.resolve('/project', '../project-evil') would equal '/project-evil',
-    // which must not pass the startsWith(projectRoot + sep) check.
-    expect(validateSubPath(project, '../project-evil/file.gd')).toBe(false);
-  });
-
-  // POSIX-only: on Windows `resolve('/')` returns the current drive root
-  // (e.g. `C:\\`), so `projectRoot === sep` never holds and the new branch
-  // is unreachable. The regression only matters on POSIX-style roots.
-  const itPosix = process.platform === 'win32' ? it.skip : it;
-  itPosix('handles projectRoot === filesystem root without breaking the prefix check', () => {
-    // Without the tail special-case, projectRoot + sep would be '//' and every
-    // absolute path under '/' would be rejected because '/etc/passwd' does not
-    // start with '//'. The tail computation must collapse to sep so paths
-    // beneath the filesystem root resolve correctly.
-    expect(validateSubPath(sep, '/etc/passwd')).toBe(true);
   });
 });
 
