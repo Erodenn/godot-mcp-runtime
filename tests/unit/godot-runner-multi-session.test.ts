@@ -859,15 +859,44 @@ describe('multi-project runtime sessions', () => {
     // A server shutdown landing in that window finds a record with no process.
     await runner.stopAllSessions();
     expect(runner.listSessions()).toEqual([]);
+    // The stop removes what the start injected by itself: the server may exit
+    // before the start ever resumes, and the exit-time cleanup no longer has a
+    // record for this project to visit.
+    expect(bridge.cleanupCalls).toEqual([projectA]);
+    runner.cleanupBridgeArtifactsSync();
+    expect(bridge.cleanupCalls).toEqual([projectA]);
 
     resolveProfiler(profiler);
 
     await expect(pending).rejects.toThrow(/stopped or replaced while it was starting/);
     expect(spawnMock).not.toHaveBeenCalled();
     expect(profiler.close).toHaveBeenCalledTimes(1);
-    expect(bridge.cleanupCalls).toEqual([projectA]);
+    // The resumed start cleans once more; that second pass finds nothing left.
+    expect(bridge.cleanupCalls).toEqual([projectA, projectA]);
     expect(runner.listSessions()).toEqual([]);
     expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  it('a start whose injection threw part-way still withdraws it when the spawn then fails', async () => {
+    // The swallowed kind of inject failure: the owner file is written before
+    // project.godot is touched, so a throw there leaves a live owner claim.
+    (runner as unknown as { bridge: { inject: (path: string) => void } }).bridge.inject = (
+      path: string,
+    ) => {
+      bridge.injectCalls.push(path);
+      throw new Error('EPERM: operation not permitted, open project.godot');
+    };
+    spawnMock.mockImplementation(() => {
+      throw new Error('spawn godot ENOENT');
+    });
+
+    await expect(runner.runProject(projectA, undefined, false, PORT_A)).rejects.toThrow(
+      'spawn godot ENOENT',
+    );
+
+    expect(bridge.injectCalls).toEqual([projectA]);
+    expect(bridge.cleanupCalls).toEqual([projectA]);
+    expect(runner.listSessions()).toEqual([]);
   });
 
   // -------------------------------------------------------------------------

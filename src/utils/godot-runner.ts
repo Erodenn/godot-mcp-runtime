@@ -849,7 +849,13 @@ export class GodotRunner {
     this.sessions.set(key, session);
     this.setCurrent(session);
 
-    let injected = false;
+    // Set the moment inject is called, not when it returns, as in
+    // attachProject: inject writes its owner file first, so one that throws
+    // part-way (the swallowed kind below) has left a live owner claim on the
+    // project. If a later step of this start then fails, that claim has to be
+    // withdrawn, or every other server is told a session is running here
+    // until this server exits.
+    let injectAttempted = false;
     let processSpawned = false;
     try {
       const port = bridgePort ?? (await findFreePort());
@@ -860,9 +866,9 @@ export class GodotRunner {
       session.token = sessionToken;
       session.bridgePort = port;
 
+      injectAttempted = true;
       try {
         this.bridge.inject(projectPath, port);
-        injected = true;
       } catch (err) {
         // A name collision with a user's own McpBridge autoload, and an owner
         // registry that could not be read, are the inject failures the caller
@@ -966,7 +972,7 @@ export class GodotRunner {
       const heldCurrent = this.current === session;
       this.appendCleanupProblems(
         err,
-        this.discardFailedStart(session, injected || previous !== null),
+        this.discardFailedStart(session, injectAttempted || previous !== null),
       );
       if (!processSpawned && heldCurrent) this.restoreCurrentAfterFailedStart(previousCurrent);
       throw err;
@@ -1427,8 +1433,27 @@ export class GodotRunner {
     const tracked = session.process;
     if (!tracked) {
       // Only a start that has not spawned yet looks like this (a shutdown
-      // arriving inside the start's own awaits). There is nothing to kill.
+      // arriving inside the start's own awaits). There is nothing to kill,
+      // but the start may already have injected: its owner file and the
+      // McpBridge entry are on the project. The start removes them when it
+      // resumes and finds its record gone, and a server shutdown can exit
+      // before it ever resumes, after which nothing visits this project
+      // (the exit-time cleanup walks the session map, and this record is
+      // about to leave it). So they are removed here; the resumed start's own
+      // cleanup then finds nothing left to do.
+      // A record gets its port in the statement before inject is called, so
+      // one with no port yet has injected nothing and is left alone.
       this.closeProfiler(session);
+      if (session.bridgePort !== null) {
+        try {
+          const problems = this.bridge.cleanup(session.projectPath);
+          if (problems.length > 0) {
+            logDebug(`Bridge cleanup for a start stopped mid-flight: ${problems.join('; ')}`);
+          }
+        } catch (err) {
+          logDebug(`Bridge cleanup for a start stopped mid-flight failed (ignored): ${err}`);
+        }
+      }
       this.forgetSession(session);
       return null;
     }
