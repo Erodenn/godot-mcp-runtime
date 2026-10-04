@@ -18,7 +18,8 @@ import {
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
-import { readQuoted, scanTscn } from '../utils/scene-parsing.js';
+import { scanTscn } from '../utils/scene-parsing.js';
+import { readProjectSettings } from '../utils/project-godot.js';
 
 function fileExtension(name: string): string {
   const dotIdx = name.lastIndexOf('.');
@@ -591,182 +592,6 @@ function searchInFiles(
   return { matches, truncated, filesSearched, typedFiles };
 }
 
-// --- Project helper: project settings parser ---
-
-type SettingsValue = string | number | boolean | null;
-
-interface ParsedSettings {
-  settings: Record<string, Record<string, SettingsValue>>;
-  warnings: string[];
-}
-
-/** Settings keys that precede every section header are reported under this name. */
-const GLOBAL_SECTION = '__global__';
-
-/** Longest slice of an unparsed line quoted in a warning. */
-const UNPARSED_LINE_SNIPPET_MAX = 120;
-
-// Godot section headers are a bare identifier-ish name in brackets on its own
-// line (e.g. "[input]"), never containing commas or spaces the way a
-// multi-line array/dict literal's closing lines can. Used only to cap a runaway
-// multi-line value at the next real section boundary.
-const SECTION_HEADER_REGEX = /^\[[A-Za-z0-9_/.]+\]$/;
-
-/** A statement-level header: any bracketed line, the test `walkIniSection` applies. */
-const SECTION_LINE_REGEX = /^\[.*\]$/;
-
-const NUMBER_VALUE_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
-
-/** Outside a string, starts a comment that runs to the end of the line. */
-const COMMENT_START = ';';
-
-/**
- * The section a statement line opens, or null when the line is not a header.
- * A comment may follow the closing bracket, as Godot's own parser allows.
- */
-function sectionNameOf(line: string): string | null {
-  const commentAt = line.indexOf(COMMENT_START);
-  if (commentAt !== -1) {
-    const statement = line.slice(0, commentAt).trimEnd();
-    if (SECTION_LINE_REGEX.test(statement)) return statement.slice(1, -1);
-  }
-  return SECTION_LINE_REGEX.test(line) ? line.slice(1, -1) : null;
-}
-
-interface RawValue {
-  raw: string;
-  /** Index of the line break that ended the value, or the content length. */
-  end: number;
-  unterminated: boolean;
-}
-
-/**
- * Read one value starting at `start` (just after the `=`). Quoted strings keep
- * their backslash escapes and may span lines; `{ [ (` depth is tracked outside
- * strings, and the value ends at the first line break at depth zero outside a
- * string. While inside brackets, a following line that is a section header ends
- * the value as unterminated, so a malformed file cannot swallow the rest of it.
- * A `;` outside a string starts a comment that runs to the end of its line, as
- * it does for Godot's own parser: the comment is left out of the value, and a
- * quote or bracket inside it opens nothing.
- */
-function readRawValue(content: string, start: number): RawValue {
-  const length = content.length;
-  let depth = 0;
-  let inString = false;
-  let kept = '';
-  let keptFrom = start;
-  let i = start;
-  const valueUpTo = (end: number): string => (kept + content.slice(keptFrom, end)).trim();
-  while (i < length) {
-    const ch = content[i]!;
-    if (inString) {
-      if (ch === '\\') {
-        i += 2;
-        continue;
-      }
-      if (ch === '"') inString = false;
-      i++;
-      continue;
-    }
-    if (ch === COMMENT_START) {
-      kept += content.slice(keptFrom, i);
-      const commentEnd = content.indexOf('\n', i);
-      i = commentEnd === -1 ? length : commentEnd;
-      keptFrom = i;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === '{' || ch === '[' || ch === '(') {
-      depth++;
-    } else if ((ch === '}' || ch === ']' || ch === ')') && depth > 0) {
-      depth--;
-    } else if (ch === '\n') {
-      if (depth === 0) return { raw: valueUpTo(i), end: i, unterminated: false };
-      const nextEnd = content.indexOf('\n', i + 1);
-      const nextLine = content.slice(i + 1, nextEnd === -1 ? length : nextEnd).trim();
-      if (SECTION_HEADER_REGEX.test(nextLine)) {
-        return { raw: valueUpTo(i), end: i, unterminated: true };
-      }
-    }
-    i++;
-  }
-  return { raw: valueUpTo(length), end: length, unterminated: inString || depth > 0 };
-}
-
-/**
- * Convert a trimmed, non-empty raw value. A lone quoted string is unescaped;
- * `true`, `false` and plain numbers are typed; everything else (constructors
- * such as `PackedStringArray(...)`, arrays, dictionaries) stays its raw text.
- */
-function convertSettingsValue(raw: string): SettingsValue {
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (raw.startsWith('"')) {
-    const quoted = readQuoted(raw, 0, raw.length);
-    return quoted !== null && quoted.end === raw.length ? quoted.value : raw;
-  }
-  return NUMBER_VALUE_REGEX.test(raw) ? Number(raw) : raw;
-}
-
-function parseProjectSettings(projectFilePath: string): ParsedSettings {
-  const content = readFileSync(projectFilePath, 'utf8');
-  const settings: ParsedSettings['settings'] = Object.create(null);
-  const warnings: string[] = [];
-  const unparsed: string[] = [];
-  let currentSection = GLOBAL_SECTION;
-
-  let pos = 0;
-  while (pos < content.length) {
-    const newlineAt = content.indexOf('\n', pos);
-    const lineEnd = newlineAt === -1 ? content.length : newlineAt;
-    const rawLine = content.slice(pos, lineEnd);
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith(COMMENT_START) || line.startsWith('#')) {
-      pos = lineEnd + 1;
-      continue;
-    }
-    const sectionName = sectionNameOf(line);
-    if (sectionName !== null) {
-      currentSection = sectionName;
-      pos = lineEnd + 1;
-      continue;
-    }
-    const equalsAt = rawLine.indexOf('=');
-    const key = equalsAt === -1 ? '' : rawLine.slice(0, equalsAt).trim();
-    if (key === '') {
-      unparsed.push(line);
-      pos = lineEnd + 1;
-      continue;
-    }
-
-    const value = readRawValue(content, pos + equalsAt + 1);
-    pos = value.end + 1;
-    const location = `${currentSection}/${key}`;
-    if (value.unterminated) {
-      warnings.push(
-        `Value of ${location} is unterminated and was returned as far as it could be read`,
-      );
-    }
-    let converted: SettingsValue = null;
-    if (value.raw === '') {
-      if (!value.unterminated) warnings.push(`Value of ${location} is empty and is null`);
-    } else {
-      converted = convertSettingsValue(value.raw);
-    }
-    const section = (settings[currentSection] ??= Object.create(null));
-    section[key] = converted;
-  }
-
-  if (unparsed.length > 0) {
-    warnings.push(
-      `${unparsed.length} line(s) could not be parsed and were skipped; first: ${unparsed[0]!.slice(0, UNPARSED_LINE_SNIPPET_MAX)}`,
-    );
-  }
-  return { settings, warnings };
-}
-
 // --- Handlers ---
 
 export async function handleListProjects(args: OperationParams): Promise<HandlerResult> {
@@ -1155,7 +980,9 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const { settings: allSettings, warnings: parseWarnings } = parseProjectSettings(projectFile);
+    const { settings: allSettings, warnings: parseWarnings } = readProjectSettings(
+      readFileSync(projectFile, 'utf8'),
+    );
     if (section.value) {
       const sectionData = Object.hasOwn(allSettings, section.value)
         ? allSettings[section.value]
