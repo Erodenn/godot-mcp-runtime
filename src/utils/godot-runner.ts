@@ -1738,12 +1738,7 @@ export class GodotRunner {
         // (peer.handling gate), so a slow command's late response would
         // otherwise correlate against the next command we send. The next
         // sendCommand lazy-reconnects.
-        if (this.socket) {
-          const sock = this.socket;
-          this.socket = null;
-          sock.removeAllListeners();
-          sock.destroy();
-        }
+        if (this.socket) this.discardSocket(this.socket);
         this.resetRxBuffer();
         settle(
           new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
@@ -1790,8 +1785,7 @@ export class GodotRunner {
             const header = readBytesFromChunks(this.rxChunks, FRAME_HEADER_BYTES);
             const firstLen = header.readUInt32BE(0);
             if (firstLen > MAX_FRAME_BYTES) {
-              this.socket = null;
-              sock.destroy();
+              this.discardSocket(sock);
               settle(
                 new BridgeDisconnectedError(
                   `Bridge frame header advertises ${firstLen} bytes, exceeds limit ${MAX_FRAME_BYTES}`,
@@ -1820,8 +1814,7 @@ export class GodotRunner {
               }
             } catch (parseErr) {
               const message = parseErr instanceof Error ? parseErr.message : String(parseErr);
-              this.socket = null;
-              sock.destroy();
+              this.discardSocket(sock);
               settle(new BridgeDisconnectedError(`Bridge framing error: ${message}`));
             }
           });
@@ -1901,6 +1894,25 @@ export class GodotRunner {
       sock.destroy();
     }
     this.socketSession = null;
+    this.resetRxBuffer();
+  }
+
+  /**
+   * Drop a socket this side has given up on: a command timed out on it, or it
+   * delivered a frame that cannot be read. The listeners go before the
+   * destroy. A destroyed socket still emits `'close'` a tick later, and a
+   * `'close'` handler left on it would settle whichever command is in flight
+   * by then with a disconnect it never had (in attached mode that is the
+   * probe ping, and a failed probe ends a live session), and would null the
+   * reference to the socket that replaced this one.
+   */
+  private discardSocket(sock: net.Socket): void {
+    if (this.socket === sock) this.socket = null;
+    sock.removeAllListeners();
+    // An 'error' with no listener is thrown; one arriving on a socket nobody
+    // is waiting on any more must not take the server down.
+    sock.on('error', () => {});
+    sock.destroy();
     this.resetRxBuffer();
   }
 

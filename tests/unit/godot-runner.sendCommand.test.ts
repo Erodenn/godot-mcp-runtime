@@ -2,8 +2,23 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as net from 'net';
 import type { AddressInfo } from 'net';
 import { GodotRunner, BridgeDisconnectedError } from '../../src/utils/godot-runner.js';
-import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
+import {
+  encodeFrame,
+  parseFrames,
+  FRAME_HEADER_BYTES,
+  MAX_FRAME_BYTES,
+} from '../../src/utils/bridge-protocol.js';
 import { currentRecord, installSession } from '../helpers/session-install.js';
+
+/** Long enough for a destroyed socket's 'close' event to have been delivered. */
+const STALE_CLOSE_WINDOW_MS = 50;
+
+/** A frame header advertising one byte more than any frame may carry. */
+function oversizedFrameHeader(): Buffer {
+  const header = Buffer.alloc(FRAME_HEADER_BYTES);
+  header.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
+  return header;
+}
 
 interface MockBridge {
   port: number;
@@ -12,6 +27,8 @@ interface MockBridge {
   nextFrame(): Promise<string>;
   /** Send a framed JSON response back to the most recently connected peer. */
   reply(payload: string): void;
+  /** Send bytes as they are, unframed, to the most recently connected peer. */
+  replyRaw(bytes: Buffer): void;
   /** Close the most recently connected peer (no response). */
   closePeer(): void;
   /** Stop accepting new connections; existing peers stay alive. */
@@ -61,6 +78,10 @@ async function startMockBridge(): Promise<MockBridge> {
     reply(payload) {
       if (!currentPeer) throw new Error('No connected peer');
       currentPeer.write(encodeFrame(payload));
+    },
+    replyRaw(bytes) {
+      if (!currentPeer) throw new Error('No connected peer');
+      currentPeer.write(bytes);
     },
     closePeer() {
       if (currentPeer) currentPeer.destroy();
@@ -171,6 +192,41 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     bridge.reply('{"this":"is the fresh reply"}');
     const r = JSON.parse(await next);
     expect(r).toEqual({ this: 'is the fresh reply' });
+  });
+
+  // A socket that delivered an unreadable frame is destroyed, and a destroyed
+  // socket still emits 'close' a tick later. With its listeners left on, that
+  // 'close' settled whichever command was in flight by then: in attached mode
+  // the probe ping, whose failure ends a live session.
+  it('an oversized frame header drops the socket without a listener left to fail the next command', async () => {
+    const first = runner.sendCommand('first');
+    await bridge.nextFrame();
+    bridge.replyRaw(oversizedFrameHeader());
+    await expect(first).rejects.toThrow(/exceeds limit/);
+    await expect(first).rejects.toBeInstanceOf(BridgeDisconnectedError);
+
+    // Sent at once, the way the attached-mode probe follows a failure.
+    const next = runner.sendCommand('ping');
+    const recv = await bridge.nextFrame();
+    expect(JSON.parse(recv)).toEqual({ command: 'ping' });
+    await new Promise((resolve) => setTimeout(resolve, STALE_CLOSE_WINDOW_MS));
+    bridge.reply('{"status":"pong"}');
+    await expect(next).resolves.toContain('pong');
+  });
+
+  it('a garbage frame behind a valid one drops the socket the same way', async () => {
+    const first = runner.sendCommand('first');
+    await bridge.nextFrame();
+    // One write: a complete frame, then a header no frame may carry. The
+    // parser throws on the second header before it hands back the first frame.
+    bridge.replyRaw(Buffer.concat([encodeFrame('{"ok":true}'), oversizedFrameHeader()]));
+    await expect(first).rejects.toThrow(/Bridge framing error/);
+
+    const next = runner.sendCommand('ping');
+    await bridge.nextFrame();
+    await new Promise((resolve) => setTimeout(resolve, STALE_CLOSE_WINDOW_MS));
+    bridge.reply('{"status":"pong"}');
+    await expect(next).resolves.toContain('pong');
   });
 
   it('handles a large response (1 MiB+) that would have been truncated under UDP', async () => {
