@@ -25,7 +25,12 @@ import {
 import type { ActionBoundaryMark } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
-import { cleanStdout, normalizeForCompare, normalizeExitCode } from './output-parsing.js';
+import {
+  cleanStdout,
+  extractOperationPayload,
+  normalizeForCompare,
+  normalizeExitCode,
+} from './output-parsing.js';
 import { checkDisplayAvailable, type ResolvedProjectPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
@@ -45,6 +50,11 @@ export class BridgeDisconnectedError extends Error {
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// First line godot_operations.gd prints to stderr once it has started dispatching
+// an operation. KEEP IN SYNC with the log_info("Operation: ...") call in
+// _run_from_cmdline in src/scripts/godot_operations.gd.
+const OPERATION_STARTED_MARKER = '[INFO] Operation:';
 
 // Bridge readiness polling
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
@@ -699,7 +709,10 @@ export class GodotRunner {
 
     // If the process produced no operation output but has errors, initialization
     // failed before the script ran. Autoload errors are the most common cause.
-    const operationRan = stdout.trim().length > 0 || stderr.includes('[INFO] Operation:');
+    // The engine banner is on stdout, so "stdout is not empty" is true for every
+    // run. The script's own first line is the evidence that dispatch started.
+    const operationRan =
+      stderr.includes(OPERATION_STARTED_MARKER) || extractOperationPayload(stdout) !== null;
     if (!operationRan && (stderr.includes('ERROR:') || stderr.includes('SCRIPT ERROR:'))) {
       throw new Error(
         `Headless Godot failed before the operation could run - likely an autoload initialization error.\n` +

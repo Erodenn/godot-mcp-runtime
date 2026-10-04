@@ -131,7 +131,7 @@ The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a
    - Call the runner
    - Return `ok(...)` on success or `err(createErrorResponse(...))` on failure (`src/utils/result.ts`)
 3. Export the handler and add an entry mapping the tool name to the handler in the `toolDispatch` table in `src/dispatch.ts`.
-4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_init()`.
+4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_run_from_cmdline()`.
 5. Add a unit test for any pure helper logic; add an integration test if the tool touches scene files.
 
 ## Modifying an existing tool

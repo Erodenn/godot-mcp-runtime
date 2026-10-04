@@ -26,7 +26,20 @@ const OPERATION_RESULT_SENTINEL := "MCP_OPERATION_RESULT:"
 func emit_result(payload) -> void:
 	print(OPERATION_RESULT_SENTINEL + JSON.stringify(payload))
 
-func _init():
+# MainLoop._initialize runs after the engine has registered the project's
+# autoload singletons as GDScript globals and before any autoload _ready.
+# In _init they do not exist yet, so a scene script that names one fails to
+# compile and the save writes the node without its script.
+# The work is in a callee on purpose: a runtime error aborts only the function
+# it happens in, so the quit() below always runs. An error raised in this
+# body would leave the process running until the Node side kills it.
+func _initialize():
+	_run_from_cmdline()
+	quit()
+
+# Parse the command line and dispatch the one operation it names. Entry point
+# of every headless run: register new operations in the match below.
+func _run_from_cmdline() -> void:
 	var args = OS.get_cmdline_args()
 
 	# Check for debug flag
@@ -56,6 +69,8 @@ func _init():
 	var operation = args[operation_index]
 	var params_json = args[params_index]
 
+	# KEEP IN SYNC with OPERATION_STARTED_MARKER in src/utils/godot-runner.ts: the
+	# Node side reads this line as proof that dispatch started.
 	log_info("Operation: " + operation)
 	log_debug("Params JSON: " + params_json)
 
@@ -122,9 +137,6 @@ func _init():
 			log_error("Unknown operation: " + operation)
 			quit(1)
 			return
-
-	quit()
-	return
 
 # Logging functions.
 # Every one of these writes to stderr. stdout carries one thing only: the
