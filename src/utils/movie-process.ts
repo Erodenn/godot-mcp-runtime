@@ -11,17 +11,17 @@
  * is adapted from PR 63 by Mickael Canevet.
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 import { normalizeExitCode } from './output-parsing.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
+import { killProcessTree, type KillTreeDeps } from './process-tree.js';
 
 /** Each captured stream keeps only its last this many characters. */
 export const MOVIE_OUTPUT_CAPTURE_MAX_CHARS = 64 * 1024;
 /** After a timeout kill, how long to wait for the process to report closing before giving up. */
 export const MOVIE_KILL_GRACE_MS = 5000;
-const TASKKILL_TIMEOUT_MS = 5000;
 
 export interface MovieProcessResult {
   /** Normalized exit code; null when the process did not exit on its own or never started. */
@@ -44,59 +44,9 @@ export type RunMovieProcess = (
   timeoutMs: number,
 ) => Promise<MovieProcessResult>;
 
-export interface KillTreeDeps {
-  platform: NodeJS.Platform;
-  spawnSync: typeof spawnSync;
-  kill: (pid: number, signal: NodeJS.Signals) => void;
-}
-
-const defaultKillTreeDeps: KillTreeDeps = {
-  platform: process.platform,
-  spawnSync,
-  kill: (pid, signal) => {
-    process.kill(pid, signal);
-  },
-};
-
-/**
- * Kill a process and everything it started. On Windows that is
- * `taskkill /T /F`; elsewhere the child leads its own process group (it was
- * spawned detached), so the group is signalled. Falls back to killing the
- * process alone. Never throws.
- */
-export function killProcessTree(
-  proc: Pick<ChildProcess, 'pid' | 'kill'>,
-  deps: KillTreeDeps = defaultKillTreeDeps,
-): void {
-  const pid = proc.pid;
-  if (pid === undefined) return;
-  if (deps.platform === 'win32') {
-    try {
-      const result = deps.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-        timeout: TASKKILL_TIMEOUT_MS,
-      });
-      if (result.error || result.status !== 0) proc.kill();
-    } catch {
-      killQuietly(() => proc.kill());
-    }
-    return;
-  }
-  try {
-    deps.kill(-pid, 'SIGKILL');
-  } catch {
-    killQuietly(() => proc.kill('SIGKILL'));
-  }
-}
-
-function killQuietly(kill: () => void): void {
-  try {
-    kill();
-  } catch (error) {
-    logDebug(`Non-fatal: could not kill the movie process: ${getErrorMessage(error)}`);
-  }
-}
+// The tree kill lives in process-tree.ts, shared with the session games.
+// Re-exported so this module stays the one import for the movie run.
+export { killProcessTree, type KillTreeDeps };
 
 export interface MovieProcessDeps {
   spawn: typeof spawn;

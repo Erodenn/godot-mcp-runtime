@@ -18,13 +18,16 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { registerProcessLifecycle } from '../../src/utils/process-lifecycle.js';
 import type { LifecycleProcess } from '../../src/utils/process-lifecycle.js';
-import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { GodotRunner, type GodotProcess } from '../../src/utils/godot-runner.js';
 import { bridgeDir, bridgeScriptAbsPath, mcpDir } from '../../src/utils/artifact-paths.js';
 import { projectGodotPath } from '../../src/utils/path-validation.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { installSession } from '../helpers/session-install.js';
 
 type Listener = (...args: never[]) => void;
+
+/** Pid of a fake child; the OS kill calls are faked, nothing real is signalled. */
+const STILL_RUNNING_GAME_PID = 43299;
 
 interface FakeProcess extends LifecycleProcess {
   emit(event: string): void;
@@ -169,6 +172,46 @@ describe('registerProcessLifecycle', () => {
       expect(existsSync(bridgeDir(projectPath))).toBe(false);
       expect(existsSync(mcpDir(projectPath))).toBe(true);
     }
+  });
+
+  it("kills a spawned game that is still running from the 'exit' handler, before its bridge is removed", () => {
+    const projectPath = tmp.makeProject('godot-mcp-exit-kill-');
+    const order: string[] = [];
+    const child = { pid: STILL_RUNNING_GAME_PID, kill: () => true };
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath,
+      process: {
+        process: child as unknown as GodotProcess['process'],
+        output: [],
+        errors: [],
+        totalErrorsWritten: 0,
+        exitCode: null,
+        hasExited: false,
+        sessionToken: 'exit-kill-token',
+      },
+    });
+    const internals = runner as unknown as {
+      killTreeDeps: unknown;
+      bridge: { cleanup(projectPath: string): string[] };
+    };
+    internals.killTreeDeps = {
+      platform: 'win32',
+      spawnSync: (_command: string, args: string[]) => {
+        order.push(`taskkill ${args.join(' ')}`);
+        return { status: 0 };
+      },
+      kill: () => {},
+    };
+    const realCleanup = internals.bridge.cleanup.bind(internals.bridge);
+    internals.bridge.cleanup = (path: string): string[] => {
+      order.push('bridge cleanup');
+      return realCleanup(path);
+    };
+
+    proc.emit('exit');
+
+    expect(order).toEqual([`taskkill /PID ${STILL_RUNNING_GAME_PID} /T /F`, 'bridge cleanup']);
   });
 
   it("does not throw from the 'exit' handler when there is no active project", () => {

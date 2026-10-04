@@ -74,6 +74,14 @@ export function registerProcessLifecycle(opts: {
   proc.stdin.on('close', startShutdown);
 
   proc.on('exit', () => {
+    // Games first: one still running would otherwise outlive the server while
+    // its bridge is removed from under it. A graceful shutdown has already
+    // stopped every session, so this only finds what that path missed.
+    try {
+      opts.runner.killSpawnedProcessesSync();
+    } catch {
+      // Exit handlers must not throw.
+    }
     try {
       opts.runner.cleanupBridgeArtifactsSync();
     } catch {

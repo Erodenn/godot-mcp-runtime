@@ -639,6 +639,108 @@ describe('multi-project runtime sessions', () => {
     STOP_CASE_TIMEOUT_MS,
   );
 
+  // -------------------------------------------------------------------------
+  // Games are killed as a process tree
+  // -------------------------------------------------------------------------
+
+  /** A pid for a fake child; nothing real is signalled, the OS calls are faked. */
+  const FAKE_GAME_PID = 43210;
+  const FAKE_OTHER_GAME_PID = 43211;
+
+  /** Replace the runner's OS kill calls with recorders for a Windows host. */
+  function fakeWindowsTreeKill(onTaskkill: () => void = () => {}): { taskkillPids: string[] } {
+    const taskkillPids: string[] = [];
+    (runner as unknown as { killTreeDeps: unknown }).killTreeDeps = {
+      platform: 'win32',
+      spawnSync: (_command: string, args: string[]) => {
+        taskkillPids.push(args[1] ?? '');
+        onTaskkill();
+        return { status: 0 };
+      },
+      kill: () => {},
+    };
+    return { taskkillPids };
+  }
+
+  async function startProjectWithPid(
+    projectPath: string,
+    port: number,
+    pid: number,
+    opts: { exitOnKill: boolean } = { exitOnKill: false },
+  ): Promise<FakeChildProcess> {
+    const child = makeFakeChildProcess(opts);
+    (child as unknown as { pid: number }).pid = pid;
+    queuedChildren.push(child);
+    await runner.runProject(projectPath, undefined, false, port);
+    return child;
+  }
+
+  it(
+    'stopProject kills the spawned game as a tree, not the one pid it holds',
+    async () => {
+      // The tree kill is what ends the process; report the exit as it would.
+      let child: FakeChildProcess | null = null;
+      const kills = fakeWindowsTreeKill(() => {
+        queueMicrotask(() => child?.emit('exit', null));
+      });
+      child = await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+
+      const result = await runner.stopProject();
+
+      expect(result).toMatchObject({ mode: 'spawned', projectPath: projectA });
+      expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID)]);
+      // taskkill succeeded, so the bare single-pid kill was never needed.
+      expect(child.kill).not.toHaveBeenCalled();
+    },
+    STOP_CASE_TIMEOUT_MS,
+  );
+
+  it('re-running a project kills the superseded game as a tree', async () => {
+    const kills = fakeWindowsTreeKill();
+    const first = await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+
+    await startProjectWithPid(projectA, PORT_A_RERUN, FAKE_OTHER_GAME_PID);
+
+    expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID)]);
+    expect(first.kill).not.toHaveBeenCalled();
+  });
+
+  it('killSpawnedProcessesSync kills every running spawned game and leaves the rest alone', async () => {
+    const kills = fakeWindowsTreeKill();
+    const exited = await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+    await startProjectWithPid(projectB, PORT_B, FAKE_OTHER_GAME_PID);
+    await runner.attachProject(projectC, PORT_C);
+    exited.emit('exit', 0);
+
+    runner.killSpawnedProcessesSync();
+
+    // A already exited and C is not this server's process: only B is killed.
+    expect(kills.taskkillPids).toEqual([String(FAKE_OTHER_GAME_PID)]);
+  });
+
+  it('killSpawnedProcessesSync never throws, and goes on to the next game', async () => {
+    const taskkillPids: string[] = [];
+    (runner as unknown as { killTreeDeps: unknown }).killTreeDeps = {
+      platform: 'win32',
+      spawnSync: (_command: string, args: string[]) => {
+        taskkillPids.push(args[1] ?? '');
+        throw new Error('taskkill is not available');
+      },
+      kill: () => {},
+    };
+    const childA = await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+    const childB = await startProjectWithPid(projectB, PORT_B, FAKE_OTHER_GAME_PID);
+    childA.kill.mockImplementation(() => {
+      throw new Error('kill EPERM');
+    });
+
+    expect(() => runner.killSpawnedProcessesSync()).not.toThrow();
+
+    expect(taskkillPids).toEqual([String(FAKE_GAME_PID), String(FAKE_OTHER_GAME_PID)]);
+    // With taskkill unavailable the single process is still killed.
+    expect(childB.kill).toHaveBeenCalledTimes(1);
+  });
+
   it('stopAllSessions releases a finished profiler capture kept by an exited session', async () => {
     // A stop of an already-exited session keeps a finished capture readable.
     // At shutdown nothing will read it, so the record must not outlive the call.

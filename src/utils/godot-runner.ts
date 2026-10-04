@@ -34,6 +34,12 @@ import {
 import { checkDisplayAvailable, type ResolvedProjectPath } from './path-validation.js';
 import { convertCamelToSnakeCase } from './parameter-conversion.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
+import {
+  defaultKillTreeDeps,
+  killProcessTree,
+  terminateProcessTree,
+  type KillTreeDeps,
+} from './process-tree.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -392,6 +398,8 @@ export class GodotRunner {
    * or forgotten. Never moved to another session implicitly.
    */
   private current: RuntimeSession | null = null;
+  /** How session games are killed. A field so tests can substitute the OS calls. */
+  private killTreeDeps: KillTreeDeps = defaultKillTreeDeps;
 
   private socket: net.Socket | null = null;
   /**
@@ -825,7 +833,7 @@ export class GodotRunner {
       this.closeProfiler(previous);
       if (previous.mode === 'spawned' && previous.process) {
         logDebug('Killing existing Godot process before starting a new one');
-        previous.process.process.kill();
+        terminateProcessTree(previous.process.process, this.killTreeDeps);
       }
       // No bridge cleanup for the same path: the replacement re-injects over
       // the same owner file.
@@ -1202,6 +1210,43 @@ export class GodotRunner {
     }
   }
 
+  /**
+   * Force a process and its children down. Never throws. A process with no
+   * pid never started, so there is no tree to walk and `kill` is a no-op.
+   */
+  private forceKillProcessTree(proc: ChildProcess): void {
+    if (proc.pid !== undefined) {
+      killProcessTree(proc, this.killTreeDeps);
+      return;
+    }
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // already dead
+    }
+  }
+
+  /**
+   * Synchronous, never-throwing kill of every spawned game still running, for
+   * the `process.on('exit')` handler. A graceful shutdown has already stopped
+   * every session by then; this is for the exits that skip it (a stop that
+   * threw, an uncaught error), where the games would otherwise outlive the
+   * server with nothing left to stop them. Attached sessions are not this
+   * server's processes and are left running. The bridge `shutdown` command is
+   * not sent: there is no event loop left to send it on.
+   */
+  killSpawnedProcessesSync(): void {
+    for (const session of [...this.sessions.values()]) {
+      const tracked = session.process;
+      if (session.mode !== 'spawned' || tracked === null || tracked.hasExited) continue;
+      try {
+        this.forceKillProcessTree(tracked.process);
+      } catch {
+        // Exit handlers must not throw; there is nowhere left to report to.
+      }
+    }
+  }
+
   async attachProject(projectPath: string, bridgePort?: number): Promise<void> {
     // Resolve relative paths for the same reason as runProject — pollBridge
     // compares against the absolute path the bridge reports.
@@ -1372,17 +1417,17 @@ export class GodotRunner {
 
     logDebug('Stopping Godot process');
     const proc = tracked.process;
-    proc.kill();
+    // The pid may be a wrapper (the Windows *_console.exe, a launcher), so the
+    // kill takes the tree: killing the wrapper alone would report a stop while
+    // the real game keeps running and holding the bridge port.
+    terminateProcessTree(proc, this.killTreeDeps);
 
-    // Wait up to BRIDGE_PROCESS_EXIT_TIMEOUT_MS for graceful exit; otherwise SIGKILL.
+    // Wait up to BRIDGE_PROCESS_EXIT_TIMEOUT_MS for the exit; otherwise force
+    // the whole tree down.
     if (!tracked.hasExited) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
-          try {
-            proc.kill('SIGKILL');
-          } catch {
-            // already dead
-          }
+          this.forceKillProcessTree(proc);
           resolve();
         }, BRIDGE_PROCESS_EXIT_TIMEOUT_MS);
         proc.once('exit', () => {
