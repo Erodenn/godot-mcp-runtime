@@ -13,10 +13,12 @@ import { randomBytes } from 'crypto';
 import { logDebug } from './logger.js';
 import { writeFileAtomicSync } from './atomic-write.js';
 import { projectPathKey } from './output-parsing.js';
+import { readProcessStartIdentity, startIdentityQuerySpawns } from './process-start-time.js';
 import {
   addAutoloadEntry,
   normalizeAutoloadPath,
   parseAutoloads,
+  parseAutoloadAssignments,
   removeAutoloadEntry,
   updateAutoloadEntry,
 } from './autoload-ini.js';
@@ -112,10 +114,40 @@ const BAKED_PORT_REGEX = /const PORT := \d+/;
 // this at its shipped `""` default.
 const BAKED_TOKEN_REGEX = /const SESSION_TOKEN_BAKED := "[^"]*"/;
 
+/**
+ * How long an answer to "is this pid still the owner" is reused on a platform
+ * where asking runs a helper program. The registry is read on every headless
+ * operation, and one program per read would be felt. Every answer is kept,
+ * "unknown" included: a helper that is blocked or slow fails the same way on
+ * the next read, and unknown already counts as live. The answer is not kept
+ * for longer: the owner can die and its pid be handed out again between two
+ * reads, and an answer cached for good would then count the newcomer as the
+ * owner for as long as this server runs.
+ *
+ * Cost of one registry read on Windows with one owner under another pid:
+ * cold, one PowerShell run, a few hundred milliseconds as a rule and at most
+ * START_IDENTITY_QUERY_TIMEOUT_MS (5 s); warm, inside this window, nothing.
+ */
+const OWNER_IDENTITY_CACHE_TTL_MS = 30000;
+
+/**
+ * This process's own start identity under the default reader, by pid. It
+ * cannot change while the process runs, so it is read once for every
+ * `BridgeManager` in the process.
+ */
+const ownStartIdentityByPid = new Map<number, string | null>();
+
 /** Random bytes composing an `instanceId`, hex-encoded (16 hex chars). */
 const OWNER_INSTANCE_ID_BYTES = 8;
 
 export type BridgeSessionMode = 'spawned' | 'attached';
+
+/**
+ * How a caller wants the owner registry read: `'prune'` removes the owner
+ * files of sessions whose process is gone, as every ordinary read does;
+ * `'read-only'` gives the same answer and unlinks nothing.
+ */
+export type OwnerRegistryRead = 'prune' | 'read-only';
 
 /**
  * One registry entry: a live session's claim on the shared bridge artifacts
@@ -130,6 +162,14 @@ export interface BridgeOwnerInfo {
   hostname: string;
   mode: BridgeSessionMode;
   startedAt: string;
+  /**
+   * The owner process's start identity, read from the operating system when
+   * the file was written (see process-start-time.ts). Compared for equality
+   * with the identity of whatever holds `pid` now. Absent when it could not
+   * be read, and in a file written by a build that predates the field: the
+   * owner is then judged by its pid alone.
+   */
+  processStart?: string;
   port: number;
   token?: string;
 }
@@ -161,6 +201,13 @@ export function foreignHostOwnerRemedy(
   };
 }
 
+/** The shape of `removeAutoloadEntry`, as `BridgeManager` calls it. */
+type RemoveAutoloadEntryFn = (
+  projectFile: string,
+  name: string,
+  shouldRemove?: (entryPath: string) => boolean,
+) => boolean;
+
 interface OwnerFileEntry {
   fileName: string;
   info: BridgeOwnerInfo;
@@ -174,7 +221,16 @@ export interface BridgeManagerOptions {
   hostname?: () => string;
   pid?: () => number;
   /** Stands in for `removeAutoloadEntry`, so a test can make that one step fail. */
-  removeAutoloadEntry?: (projectFile: string, name: string) => boolean;
+  removeAutoloadEntry?: RemoveAutoloadEntryFn;
+  /**
+   * Start identity of the process holding a pid, or null when it cannot be
+   * read. Default: the platform reader in process-start-time.ts.
+   */
+  processStartIdentity?: (pid: number) => string | null;
+  /** Whether `processStartIdentity` is costly enough to cache. Default: per platform. */
+  cacheProcessStartIdentity?: boolean;
+  /** Clock for the owner-identity cache. Default: `Date.now`. */
+  now?: () => number;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -207,6 +263,7 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
     typeof v.hostname === 'string' &&
     (v.mode === 'spawned' || v.mode === 'attached') &&
     typeof v.startedAt === 'string' &&
+    (v.processStart === undefined || typeof v.processStart === 'string') &&
     typeof v.port === 'number' &&
     (v.token === undefined || typeof v.token === 'string')
   );
@@ -228,14 +285,17 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
  * inject and removed only by the last live session's cleanup, tracked via one
  * owner file per live session (see `BridgeOwnerInfo`). An owner is "live"
  * when its hostname doesn't match this host (unknowable, so treated
- * conservatively as live) or its pid answers a liveness probe; dead owner
- * files are pruned opportunistically on every registry read.
+ * conservatively as live), or when its pid answers a liveness probe and the
+ * process holding that pid is not known to be a different one
+ * (see `pidStillBelongsToOwner`); dead owner files are pruned
+ * opportunistically on every registry read.
  *
  * Accepted gap on `project.godot`: two servers doing read-modify-write on it
  * in the same instant can still lose one edit — there is no file lock.
  * Writing the owner file before touching project.godot (see `inject`) makes
  * that window tiny, and the next `inject` from either side restores the
- * entry if it was lost.
+ * entry if it was lost. A cleanup racing a sibling's inject is not part of
+ * that gap: see `removeUnclaimedArtifacts`.
  *
  * Accepted gap on cross-version coexistence: an older server version running
  * concurrently on the same project writes no owner file, so this instance
@@ -253,7 +313,27 @@ export class BridgeManager {
   private readonly pid: number;
   private readonly hostnameFn: () => string;
   private readonly isProcessAliveFn: (pid: number) => boolean;
-  private readonly removeAutoloadEntryFn: (projectFile: string, name: string) => boolean;
+  private readonly removeAutoloadEntryFn: RemoveAutoloadEntryFn;
+  private readonly processStartIdentityFn: (pid: number) => string | null;
+  /** True when the reader is the platform one, whose answer for this pid is shared process-wide. */
+  private readonly usesDefaultIdentityReader: boolean;
+  private readonly cacheProcessStartIdentity: boolean;
+  private readonly nowFn: () => number;
+  /**
+   * Answers to "does this pid still belong to the owner that recorded this
+   * identity", keyed by both, with when each lapses. Keyed by the recorded
+   * identity as well as the pid: a pid handed to a new server inside the
+   * window is a different question and is asked afresh.
+   */
+  private readonly ownerVerdicts = new Map<string, { belongs: boolean; until: number }>();
+  /** This instance's own start identity once read; undefined until then. */
+  private ownStartIdentity: string | null | undefined;
+  /**
+   * False while a cleanup runs from the process exit handler. A helper
+   * program started there blocks the exit for as long as it runs, so only
+   * answers already in hand are used.
+   */
+  private helperProgramsAllowed = true;
 
   constructor(
     private bridgeScriptPath: string,
@@ -264,26 +344,44 @@ export class BridgeManager {
     this.hostnameFn = options.hostname ?? (() => osHostname());
     this.isProcessAliveFn = options.isProcessAlive ?? defaultIsProcessAlive;
     this.removeAutoloadEntryFn = options.removeAutoloadEntry ?? removeAutoloadEntry;
+    this.usesDefaultIdentityReader = options.processStartIdentity === undefined;
+    this.processStartIdentityFn =
+      options.processStartIdentity ?? ((pid) => readProcessStartIdentity(pid));
+    this.cacheProcessStartIdentity =
+      options.cacheProcessStartIdentity ?? startIdentityQuerySpawns(process.platform);
+    this.nowFn = options.now ?? (() => Date.now());
   }
 
   /**
-   * @param bakedToken Session token to bake into the on-disk script, for
-   *   attach-mode sessions where Node cannot set the env var on a Godot
-   *   process the user launched themselves. Spawned sessions deliver the
-   *   token via `MCP_SESSION_TOKEN` instead and should omit this so the
-   *   rendered script carries no baked attach owner (fail-open only when no
-   *   token is configured at all).
+   * Everything about an inject that can refuse, checked without changing the
+   * project: the shipped template is usable, `McpBridge` is not a user's own
+   * autoload, no other live session holds the one attach slot, and the owner
+   * registry can be read. A start runs this before it stops or replaces
+   * anything, so a refusal costs the project nothing it had. The registry
+   * read prunes dead owner files, as every registry read does; nothing else
+   * is written.
+   *
+   * Whether `project.godot` can be written is deliberately not probed. The
+   * write is a temp file plus a rename, which needs the directory to be
+   * writable and not the file, and no permission probe predicts that on every
+   * platform and filesystem without refusing a write that would have worked.
+   * A write that does fail fails the inject, and the caller withdraws what
+   * the inject had written (`GodotRunner.discardFailedStart`). A start that
+   * replaces a session on the same project writes nothing there in any case:
+   * the entry that session registered is already present.
+   *
+   * @param attach True for an attach-mode start, which is the only kind the
+   *   one-attach-owner rule applies to.
+   * @returns The template text, for `commitInject`.
    * @throws {BridgeAutoloadCollisionError} if an `[autoload]` entry named
    *   McpBridge already exists and points at a path this server does not own
-   *   (a name collision with user code). Callers must not swallow this one.
-   * @throws {BridgeAttachConflictError} if `bakedToken` is supplied and
-   *   another live attach session already owns this project. Thrown before
-   *   any write.
+   *   (a name collision with user code).
+   * @throws {BridgeAttachConflictError} if `attach` and another live attach
+   *   session already owns this project.
    * @throws {BridgeRegistryUnreadableError} if the owner registry exists and
-   *   cannot be read, because which attach owner to render for is then
-   *   unknown.
+   *   cannot be read, because who else is on the project is then unknown.
    */
-  inject(projectPath: string, port: number, bakedToken?: string): void {
+  precheckInject(projectPath: string, attach: boolean): string {
     const template = readFileSync(this.bridgeScriptPath, 'utf8');
     if (!BAKED_PORT_REGEX.test(template)) {
       throw new Error(
@@ -296,8 +394,6 @@ export class BridgeManager {
       );
     }
 
-    // Collision check runs before any write so a refusal leaves no artifacts
-    // behind.
     const projectFile = join(projectPath, 'project.godot');
     const existingEntry = this.findBridgeAutoload(projectFile);
     if (existingEntry !== undefined && !isServerOwnedBridgePath(existingEntry)) {
@@ -309,8 +405,12 @@ export class BridgeManager {
       );
     }
 
-    if (bakedToken !== undefined) {
-      const conflicting = this.liveAttachOwner(projectPath, true);
+    // Read in both modes: an unreadable registry refuses a spawned start too.
+    const liveOwners = this.readLiveOwners(projectPath);
+    if (attach) {
+      const conflicting = liveOwners
+        .filter((e) => !this.isSelfOwnerFile(e.fileName))
+        .find((e) => e.info.mode === 'attached')?.info;
       if (conflicting) {
         const foreign = foreignHostOwnerRemedy(conflicting, projectPath, this.hostnameFn());
         throw new BridgeAttachConflictError(
@@ -324,6 +424,37 @@ export class BridgeManager {
         );
       }
     }
+    return template;
+  }
+
+  /**
+   * Precheck, then commit. The precheck is repeated by every caller that ran
+   * it earlier and then awaited: the project can have changed since.
+   *
+   * @param bakedToken Session token to bake into the on-disk script, for
+   *   attach-mode sessions where Node cannot set the env var on a Godot
+   *   process the user launched themselves. Spawned sessions deliver the
+   *   token via `MCP_SESSION_TOKEN` instead and should omit this so the
+   *   rendered script carries no baked attach owner (fail-open only when no
+   *   token is configured at all).
+   * @throws Whatever `precheckInject` throws, before any write, and any
+   *   filesystem failure of the commit. A commit that fails part-way may have
+   *   left this session's owner file and the shared script behind: the caller
+   *   runs `cleanup` (see `GodotRunner.discardFailedStart`).
+   */
+  inject(projectPath: string, port: number, bakedToken?: string): void {
+    const template = this.precheckInject(projectPath, bakedToken !== undefined);
+    this.commitInject(projectPath, port, bakedToken, template);
+  }
+
+  /** The writes of an inject. Call only after `precheckInject` passed. */
+  private commitInject(
+    projectPath: string,
+    port: number,
+    bakedToken: string | undefined,
+    template: string,
+  ): void {
+    const projectFile = join(projectPath, 'project.godot');
 
     // .gdignore must exist before a .gd file lands under .mcp/, and on every
     // inject rather than only once — a project can be missing it if a git
@@ -332,15 +463,20 @@ export class BridgeManager {
     BridgeManager.ensureMcpGdignore(projectPath);
     mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
 
-    // Owner file lands BEFORE project.godot is touched, so a concurrent
-    // cleanup from a sibling session sees this session and does not tear the
-    // shared artifacts down underneath it.
+    // Owner file lands BEFORE the shared script and project.godot are looked
+    // at, so a concurrent cleanup from a sibling session sees this session:
+    // either its registry read finds this file and it leaves the shared
+    // artifacts alone, or it has already removed them and the checks below
+    // find them missing and write them again (see `removeUnclaimedArtifacts`
+    // for the other half).
+    const processStart = this.readOwnStartIdentity();
     const ownerInfo: BridgeOwnerInfo = {
       pid: this.pid,
       instanceId: this.instanceId,
       hostname: this.hostnameFn(),
       mode: bakedToken !== undefined ? 'attached' : 'spawned',
       startedAt: new Date().toISOString(),
+      ...(processStart !== null ? { processStart } : {}),
       port,
       ...(bakedToken !== undefined ? { token: bakedToken } : {}),
     };
@@ -363,15 +499,31 @@ export class BridgeManager {
     this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
 
     BridgeManager.ensureGitignored(projectPath);
-
-    // Re-read rather than reuse the collision-check read above: a sibling
-    // session may have added or migrated the entry since, and acting on the
-    // stale value would add a duplicate McpBridge line.
-    const currentEntry = this.findBridgeAutoload(projectFile);
-    if (currentEntry !== undefined && !isServerOwnedBridgePath(currentEntry)) {
+    this.ensureBridgeEntry(projectFile, () => {
       // Withdraw the owner file written above, or it would hold sibling
       // servers' edit guards closed for a session that never started.
       this.unlinkQuietly(this.ownerFilePath(projectPath));
+    });
+
+    // Disk state just changed under us; the next repairOrphaned check for
+    // this project must re-read it rather than trust the cached verdict.
+    this.repairedProjects.delete(projectPathKey(projectPath));
+  }
+
+  /**
+   * Make project.godot register `McpBridge` at this server's script: add the
+   * entry when it is missing, repoint it when it names an older location, and
+   * leave it when it is already right. Reads the file itself rather than
+   * trusting an earlier read: a sibling session may have added or migrated
+   * the entry since, and acting on a stale value would add a duplicate line.
+   *
+   * @throws {BridgeAutoloadCollisionError} when the entry is a user's own,
+   *   after calling `beforeCollisionThrow`.
+   */
+  private ensureBridgeEntry(projectFile: string, beforeCollisionThrow: () => void): void {
+    const currentEntry = this.findBridgeAutoload(projectFile);
+    if (currentEntry !== undefined && !isServerOwnedBridgePath(currentEntry)) {
+      beforeCollisionThrow();
       throw new BridgeAutoloadCollisionError(
         `project.godot registers an autoload named ${BRIDGE_AUTOLOAD_NAME} at ` +
           `${currentEntry}, which this server does not own. The ${BRIDGE_AUTOLOAD_NAME} ` +
@@ -390,10 +542,6 @@ export class BridgeManager {
     } else {
       logDebug('Bridge autoload already present, skipping injection');
     }
-
-    // Disk state just changed under us; the next repairOrphaned check for
-    // this project must re-read it rather than trust the cached verdict.
-    this.repairedProjects.delete(projectPathKey(projectPath));
   }
 
   /**
@@ -405,11 +553,10 @@ export class BridgeManager {
    * Only when no live owners remain at all does the shared script and
    * autoload entry get removed.
    *
-   * Must stay fully synchronous and never throw: `GodotRunner
-   * .cleanupBridgeArtifactsSync` calls this from a `process.on('exit')`
-   * handler, where there is no event loop left and nowhere to report a
-   * failure to. Every step is independently try/caught and best-effort, as
-   * the prior single-owner implementation was.
+   * Must stay fully synchronous and never throw: `cleanupAtExit` runs this
+   * from a `process.on('exit')` handler, where there is no event loop left
+   * and nowhere to report a failure to. Every step is independently
+   * try/caught and best-effort.
    *
    * Returns the steps that were attempted and not confirmed, as sentences a
    * caller can show: empty when everything this session owed the project was
@@ -455,8 +602,24 @@ export class BridgeManager {
       return problems;
     }
 
-    problems.push(...this.removeBridgeArtifacts(projectPath));
+    problems.push(...this.removeUnclaimedArtifacts(projectPath));
     return problems;
+  }
+
+  /**
+   * `cleanup` for the `process.on('exit')` handler: the same steps, with no
+   * helper program run to tell whether another owner's pid was reused. An
+   * owner whose answer is not already in hand counts as live, so the shared
+   * artifacts stay in place for it; if it was in fact dead, the next headless
+   * operation on the project removes them (`repairOrphaned`).
+   */
+  cleanupAtExit(projectPath: string): string[] {
+    this.helperProgramsAllowed = false;
+    try {
+      return this.cleanup(projectPath);
+    } finally {
+      this.helperProgramsAllowed = true;
+    }
   }
 
   /**
@@ -506,10 +669,10 @@ export class BridgeManager {
       // Read with the project.godot grammar, the same reader the removal
       // uses: a hand-edited `McpBridge = "..."` is an entry too, and a
       // substring test for `McpBridge=` would miss it.
-      const entryPresent = this.readBridgeAutoload(projectFile) !== undefined;
+      const entryPresent = this.readBridgeAssignments(projectFile).length > 0;
       const stranded = entryPresent || scriptPresent;
       if (stranded) {
-        const problems = this.removeBridgeArtifacts(projectPath);
+        const problems = this.removeUnclaimedArtifacts(projectPath);
         if (problems.length > 0) {
           // Not cached as clean: the next headless operation tries again,
           // which is the retry `cleanup` promises a caller it reported to.
@@ -535,6 +698,19 @@ export class BridgeManager {
    */
   listOtherLiveOwners(projectPath: string): BridgeOwnerInfo[] {
     return this.readLiveOwners(projectPath)
+      .filter((e) => !this.isSelfOwnerFile(e.fileName))
+      .map((e) => e.info);
+  }
+
+  /**
+   * `listOtherLiveOwners` without the pruning: the same answer, and the
+   * project is left byte for byte as it was. For a caller that has promised
+   * to write nothing yet (`render_movie` ahead of its launch gate).
+   *
+   * @throws {BridgeRegistryUnreadableError} as `listOtherLiveOwners` does.
+   */
+  peekOtherLiveOwners(projectPath: string): BridgeOwnerInfo[] {
+    return this.readLiveOwners(projectPath, false)
       .filter((e) => !this.isSelfOwnerFile(e.fileName))
       .map((e) => e.info);
   }
@@ -605,18 +781,84 @@ export class BridgeManager {
     return fileName === this.ownerFileName();
   }
 
-  private isOwnerLive(info: BridgeOwnerInfo): boolean {
+  private isOwnerLive(info: BridgeOwnerInfo, isSelf: boolean): boolean {
     // A foreign host can't be probed at all, so it is conservatively treated
     // as live rather than pruned.
     if (info.hostname !== this.hostnameFn()) return true;
-    return this.isProcessAliveFn(info.pid);
+    if (!this.isProcessAliveFn(info.pid)) return false;
+    // This instance's own file was written by the code that is running now.
+    if (isSelf) return true;
+    return this.pidStillBelongsToOwner(info);
+  }
+
+  /**
+   * False when the process holding the owner's pid is known to be a different
+   * process from the one that wrote the owner file: the owner died and the
+   * operating system handed its pid out again. Without this a hard-killed
+   * server whose pid was reused counts as live for good, the stranded bridge
+   * is never repaired, and the edit guard tells the caller to wait for a
+   * session that does not exist.
+   *
+   * Decided by equality of two readings of the same kernel value: the start
+   * identity the owner recorded for itself at inject, and the start identity
+   * of whatever holds the pid now. Neither moves with the wall clock, so a
+   * clock step between the two readings cannot make a live owner look dead.
+   *
+   * True whenever either side is missing: an owner file with no recorded
+   * identity (an older build, or a reader that failed at inject), or a pid
+   * whose identity cannot be read now. Unknown keeps the pid-only answer.
+   */
+  private pidStillBelongsToOwner(info: BridgeOwnerInfo): boolean {
+    const recorded = info.processStart;
+    if (recorded === undefined) return true;
+    // Another BridgeManager in this process, or an earlier process that had
+    // this pid. This process's own identity is read at most once.
+    if (info.pid === this.pid) {
+      const own = this.readOwnStartIdentity();
+      return own === null || own === recorded;
+    }
+    const cacheKey = `${info.pid}:${recorded}`;
+    const now = this.nowFn();
+    if (this.cacheProcessStartIdentity) {
+      const cached = this.ownerVerdicts.get(cacheKey);
+      if (cached !== undefined && now < cached.until) return cached.belongs;
+      this.ownerVerdicts.delete(cacheKey);
+      if (!this.helperProgramsAllowed) return true;
+    }
+    const current = this.processStartIdentityFn(info.pid);
+    const belongs = current === null || current === recorded;
+    if (this.cacheProcessStartIdentity) {
+      this.ownerVerdicts.set(cacheKey, { belongs, until: now + OWNER_IDENTITY_CACHE_TTL_MS });
+    }
+    return belongs;
+  }
+
+  /**
+   * This process's own start identity, or null when it cannot be read. Read
+   * once and kept: it cannot change while the process runs. Null, without a
+   * read, when reading would run a helper program and none may be run.
+   */
+  private readOwnStartIdentity(): string | null {
+    if (this.ownStartIdentity !== undefined) return this.ownStartIdentity;
+    const shared = this.usesDefaultIdentityReader ? ownStartIdentityByPid.get(this.pid) : undefined;
+    if (shared !== undefined) {
+      this.ownStartIdentity = shared;
+      return shared;
+    }
+    if (this.cacheProcessStartIdentity && !this.helperProgramsAllowed) return null;
+    const identity = this.processStartIdentityFn(this.pid);
+    this.ownStartIdentity = identity;
+    if (this.usesDefaultIdentityReader) ownStartIdentityByPid.set(this.pid, identity);
+    return identity;
   }
 
   /**
    * Read every owner file in the registry, pruning (best-effort unlink) any
    * that is unparseable or dead. Returns only the live entries. This is the
    * single point that mutates the on-disk registry by pruning, so every
-   * public method that needs "who is live" goes through it.
+   * public method that needs "who is live" goes through it. With `prune`
+   * false nothing is unlinked: the answer is the same and the disk is not
+   * touched.
    *
    * Only an absent registry is an empty one. A directory that exists and
    * cannot be listed, or an owner file that exists and cannot be opened, is a
@@ -629,7 +871,7 @@ export class BridgeManager {
    * @throws {BridgeRegistryUnreadableError} when the registry exists and
    *   could not be read. Nothing is pruned for the unreadable part.
    */
-  private readLiveOwners(projectPath: string): OwnerFileEntry[] {
+  private readLiveOwners(projectPath: string, prune: boolean = true): OwnerFileEntry[] {
     const dir = bridgeOwnersDir(projectPath);
     let fileNames: string[];
     try {
@@ -658,12 +900,8 @@ export class BridgeManager {
         info = null;
       }
 
-      if (info === null) {
-        this.unlinkQuietly(filePath);
-        continue;
-      }
-      if (!this.isOwnerLive(info)) {
-        this.unlinkQuietly(filePath);
+      if (info === null || !this.isOwnerLive(info, this.isSelfOwnerFile(fileName))) {
+        if (prune) this.unlinkQuietly(filePath);
         continue;
       }
       live.push({ fileName, info });
@@ -685,15 +923,56 @@ export class BridgeManager {
   }
 
   /**
+   * Remove the shared bridge artifacts for a project no live session owns,
+   * without taking them from a session that claims the project meanwhile.
+   *
+   * The caller read the registry and found no live owner, but a sibling
+   * server's `inject` can land between that read and the removal: it writes
+   * its owner file, finds the script and the entry still present, and writes
+   * neither. Removing them now would leave that session with a claim and no
+   * bridge. No lock is taken. The two sides are ordered instead: an inject
+   * writes its owner file before it looks at the script and the entry, and
+   * this reads the registry again after it has removed them. Whichever way
+   * the two interleave, one of them sees the other: either the inject finds
+   * the artifacts already gone and writes them, or this finds the new owner
+   * and puts them back.
+   *
+   * Synchronous and non-throwing, as `cleanup` requires.
+   */
+  private removeUnclaimedArtifacts(projectPath: string): string[] {
+    const problems = this.removeBridgeArtifacts(projectPath);
+    let claimedBy: OwnerFileEntry[];
+    try {
+      claimedBy = this.readLiveOwners(projectPath);
+    } catch (err) {
+      logDebug(`Non-fatal: could not re-read the owner registry after removal: ${err}`);
+      return problems;
+    }
+    if (claimedBy.length === 0) return problems;
+    // A session registered while the artifacts were being removed. They are
+    // its artifacts now, so what was removed is restored and nothing about
+    // the removal is reported as a problem.
+    try {
+      const template = readFileSync(this.bridgeScriptPath, 'utf8');
+      const attachOwner = claimedBy.find((e) => e.info.mode === 'attached')?.info;
+      this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
+      this.ensureBridgeEntry(join(projectPath, 'project.godot'), () => {});
+      logDebug('Restored the shared bridge artifacts for a session that registered during removal');
+    } catch (err) {
+      logDebug(`Non-fatal: could not restore the shared bridge artifacts: ${err}`);
+    }
+    return [];
+  }
+
+  /**
    * Remove the shared bridge artifacts: the autoload entry, the namespaced
    * script and its `.uid`, the legacy project-root script and its `.uid`, the
    * `owners/` directory once empty, and the `bridge/` directory once empty.
    * Each step is independently try/caught and best-effort.
    *
-   * Callers (`cleanup`, `repairOrphaned`) are responsible for confirming no
-   * live owner remains before calling this — it does not check the registry
-   * itself, so it must never be called while another session might still be
-   * relying on these artifacts.
+   * Called only through `removeUnclaimedArtifacts`, whose callers (`cleanup`,
+   * `repairOrphaned`) confirm no live owner remains first. This does not
+   * check the registry itself.
    *
    * Never touches `screenshots/`, `scripts/`, `validate/`, the
    * `.mcp/godot-runtime/` directory itself, or `.mcp/.gdignore` — handed-out
@@ -701,9 +980,10 @@ export class BridgeManager {
    * Legacy `.mcp/screenshots/` and `.mcp/scripts/` from older versions are left
    * in place, neither migrated nor deleted.
    *
-   * When the `McpBridge` entry points somewhere this server does not own, the
-   * entry and the project-root script are both left alone: that combination is
-   * a user's own autoload sharing a reserved name, not our artifact.
+   * An `McpBridge` assignment that points somewhere this server does not own
+   * is left alone, and so is the project-root script while one exists: that
+   * combination is a user's own autoload sharing a reserved name, not our
+   * artifact. Server-owned assignments in the same file are still removed.
    *
    * Accepted gap: with no `McpBridge` entry at all there is nothing to test
    * ownership against, so a project-root file named exactly `mcp_bridge.gd`
@@ -721,13 +1001,16 @@ export class BridgeManager {
     const projectFile = join(projectPath, 'project.godot');
     let userOwnsEntry = false;
     try {
-      const registeredPath = this.readBridgeAutoload(projectFile);
-      userOwnsEntry = registeredPath !== undefined && !isServerOwnedBridgePath(registeredPath);
-      if (userOwnsEntry) {
-        logDebug(
-          `Left user-registered ${BRIDGE_AUTOLOAD_NAME} autoload at ${registeredPath} untouched`,
-        );
-      } else if (registeredPath !== undefined) {
+      // Every assignment, not only the one the engine keeps: a server-owned
+      // line a user's own line overrides is still this server's to remove,
+      // and a user's line a server-owned one overrides must stay.
+      const assignedPaths = this.readBridgeAssignments(projectFile);
+      const userPath = assignedPaths.find((path) => !isServerOwnedBridgePath(path));
+      userOwnsEntry = userPath !== undefined;
+      if (userPath !== undefined) {
+        logDebug(`Left user-registered ${BRIDGE_AUTOLOAD_NAME} autoload at ${userPath} untouched`);
+      }
+      if (assignedPaths.some(isServerOwnedBridgePath)) {
         const entryProblem = this.removeBridgeEntry(projectFile);
         if (entryProblem !== null) problems.push(entryProblem);
       }
@@ -746,8 +1029,9 @@ export class BridgeManager {
     }
     this.unlinkQuietly(`${bridgeScriptAbsPath(projectPath)}.uid`);
 
-    // Pre-namespace layout. Skipped when a user-owned entry is registered,
-    // because a root mcp_bridge.gd under that entry is presumably theirs.
+    // Pre-namespace layout. Skipped when the user registers an McpBridge of
+    // their own under any assignment, because a root mcp_bridge.gd next to
+    // that entry is presumably theirs.
     if (!userOwnsEntry) {
       const legacyScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
       const legacyFailure = this.unlinkQuietly(legacyScript);
@@ -787,22 +1071,24 @@ export class BridgeManager {
   }
 
   /**
-   * Remove the server-owned `McpBridge` entry from project.godot and read the
-   * file back to confirm it is gone. The removal call returning is not the
-   * entry being removed, so the answer comes from the second read. Returns
-   * null when the entry is confirmed gone, otherwise the problem as a
-   * sentence. Never throws.
+   * Remove every server-owned `McpBridge` assignment from project.godot and
+   * read the file back to confirm none is left. An assignment whose path this
+   * server does not own is a user's line and is never removed, whether it
+   * overrides a server-owned one or is overridden by it; in the second case it
+   * is the entry the engine loads once ours is gone. The removal call
+   * returning is not the entry being removed, so the answer comes from the
+   * second read. Returns null when no server-owned assignment remains,
+   * otherwise the problem as a sentence. Never throws.
    */
   private removeBridgeEntry(projectFile: string): string | null {
     try {
-      this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME);
+      this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME, isServerOwnedBridgePath);
     } catch (err) {
       logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
       return `the ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be removed from project.godot (${describeFailure(err)}): ${BRIDGE_ENTRY_REMEDY}`;
     }
     try {
-      const remaining = this.readBridgeAutoload(projectFile);
-      if (remaining !== undefined && isServerOwnedBridgePath(remaining)) {
+      if (this.readBridgeAssignments(projectFile).some(isServerOwnedBridgePath)) {
         return `the ${BRIDGE_AUTOLOAD_NAME} autoload entry is still registered in project.godot after the removal: ${BRIDGE_ENTRY_REMEDY}`;
       }
     } catch (err) {
@@ -822,6 +1108,18 @@ export class BridgeManager {
     if (!existsSync(projectFilePath)) return undefined;
     const entry = parseAutoloads(projectFilePath).find((a) => a.name === BRIDGE_AUTOLOAD_NAME);
     return entry ? normalizeAutoloadPath(entry.path) : undefined;
+  }
+
+  /**
+   * Registered path of every `McpBridge` assignment, overridden ones included,
+   * in file order and normalized to `res://` form. Empty when project.godot is
+   * missing. Throws as `readBridgeAutoload` does.
+   */
+  private readBridgeAssignments(projectFilePath: string): string[] {
+    if (!existsSync(projectFilePath)) return [];
+    return parseAutoloadAssignments(projectFilePath, BRIDGE_AUTOLOAD_NAME).map((entry) =>
+      normalizeAutoloadPath(entry.path),
+    );
   }
 
   /**

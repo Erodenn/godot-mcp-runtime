@@ -1,5 +1,14 @@
-import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  unlinkSync,
+  readdirSync,
+} from 'fs';
+import { hostname } from 'os';
 import { join } from 'path';
 import {
   BridgeAttachConflictError,
@@ -25,6 +34,14 @@ const BRIDGE_SOURCE_CONTENT =
 
 const TEST_PORT = 9900;
 const ALT_PORT = 23456;
+const READ_ONLY_MODE = 0o444;
+const READ_WRITE_MODE = 0o644;
+/**
+ * Reader for a manager standing in for a process that does not exist: there
+ * is no such pid to ask the operating system about.
+ */
+const NO_START_IDENTITY = (): null => null;
+/** A start time read this much after an owner's claim is still inside the allowed slack. */
 
 function bakedContent(port: number, token?: string): string {
   let content = BRIDGE_SOURCE_CONTENT.replace(/const PORT := \d+/, `const PORT := ${port}`);
@@ -614,6 +631,88 @@ describe('BridgeManager guards a user-registered McpBridge autoload', () => {
   });
 });
 
+// A name assigned twice has one live entry, the last. Removal is decided line
+// by line all the same: only a line whose path this server owns may go.
+describe('BridgeManager with a user McpBridge line and a server-owned one in the same file', () => {
+  const USER_LINE = 'McpBridge="*res://game/my_own_bridge.gd"';
+  const SERVER_LINE = `McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`;
+  const OTHER_LINE = 'Other="*res://other.gd"';
+
+  function setupTwoLines(first: string, second: string) {
+    return setupProject({
+      projectGodot: `config_version=5\n\n[autoload]\n${first}\n${OTHER_LINE}\n${second}\n`,
+    });
+  }
+
+  const userLineOnly = `config_version=5\n\n[autoload]\n${USER_LINE}\n${OTHER_LINE}\n`;
+  const userLineOnlyAfterOther = `config_version=5\n\n[autoload]\n${OTHER_LINE}\n${USER_LINE}\n`;
+
+  describe('server-owned line last (the entry the engine loads is ours)', () => {
+    it('cleanup removes only the server-owned line, leaving the user line as the live entry', () => {
+      const { projectPath, manager } = setupTwoLines(USER_LINE, SERVER_LINE);
+
+      expect(manager.cleanup(projectPath)).toEqual([]);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(userLineOnly);
+    });
+
+    it('repairOrphaned removes only the server-owned line', () => {
+      const { projectPath, manager } = setupTwoLines(USER_LINE, SERVER_LINE);
+
+      manager.repairOrphaned(projectPath);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(userLineOnly);
+    });
+
+    it('inject treats the entry as its own, and the cleanup after it still keeps the user line', () => {
+      const { projectPath, manager } = setupTwoLines(USER_LINE, SERVER_LINE);
+
+      manager.inject(projectPath, TEST_PORT);
+      expect(manager.isBridgeAutoloadRegistered(projectPath)).toBe(true);
+      expect(manager.cleanup(projectPath)).toEqual([]);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(userLineOnly);
+    });
+  });
+
+  describe('user line last (the entry the engine loads belongs to the user)', () => {
+    it('inject refuses with a collision and changes nothing in project.godot', () => {
+      const { projectPath, manager } = setupTwoLines(SERVER_LINE, USER_LINE);
+      const before = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+
+      expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(BridgeAutoloadCollisionError);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(before);
+    });
+
+    it('cleanup removes the overridden server-owned line and keeps the user line', () => {
+      const { projectPath, manager } = setupTwoLines(SERVER_LINE, USER_LINE);
+
+      expect(manager.cleanup(projectPath)).toEqual([]);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(userLineOnlyAfterOther);
+    });
+
+    it('repairOrphaned removes the overridden server-owned line and keeps the user line', () => {
+      const { projectPath, manager } = setupTwoLines(SERVER_LINE, USER_LINE);
+
+      manager.repairOrphaned(projectPath);
+
+      expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(userLineOnlyAfterOther);
+    });
+
+    it('cleanup keeps a project-root mcp_bridge.gd, which is presumably user code', () => {
+      const { projectPath, manager } = setupTwoLines(SERVER_LINE, USER_LINE);
+      const rootScript = join(projectPath, LEGACY_BRIDGE_SCRIPT_FILENAME);
+      writeFileSync(rootScript, '# user code that happens to share the name\n', 'utf8');
+
+      manager.cleanup(projectPath);
+
+      expect(existsSync(rootScript)).toBe(true);
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // repairOrphaned: stranded artifacts from a hard-killed earlier process
 // ---------------------------------------------------------------------------
@@ -771,6 +870,7 @@ describe('BridgeManager with concurrent sessions on one project', () => {
     const managerA = new BridgeManager(bridgeSourcePath, {
       pid: () => deadPid,
       isProcessAlive: () => true,
+      processStartIdentity: NO_START_IDENTITY,
     });
     managerA.inject(projectPath, TEST_PORT);
     expect(ownerFileNames(projectPath).length).toBe(1);
@@ -812,6 +912,7 @@ describe('BridgeManager with concurrent sessions on one project', () => {
     const managerDead = new BridgeManager(bridgeSourcePath, {
       pid: () => deadPid,
       isProcessAlive: () => true,
+      processStartIdentity: NO_START_IDENTITY,
     });
     managerDead.inject(projectPath, TEST_PORT);
 
@@ -828,6 +929,40 @@ describe('BridgeManager with concurrent sessions on one project', () => {
     const others = managerSelf.listOtherLiveOwners(projectPath);
     expect(others.length).toBe(1);
     expect(others[0]!.port).toBe(ALT_PORT + 1);
+  });
+
+  it('peekOtherLiveOwners gives the same answer and leaves a dead owner file in place', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const deadPid = 555555;
+    const isProcessAlive = (pid: number) => pid !== deadPid;
+    const managerSelf = new BridgeManager(bridgeSourcePath, { isProcessAlive });
+    new BridgeManager(bridgeSourcePath, { isProcessAlive }).inject(projectPath, ALT_PORT);
+    // Registered last, by a manager that takes every pid for alive, so no
+    // earlier registry read has pruned it.
+    new BridgeManager(bridgeSourcePath, {
+      pid: () => deadPid,
+      isProcessAlive: () => true,
+      processStartIdentity: NO_START_IDENTITY,
+    }).inject(projectPath, TEST_PORT);
+    const filesBefore = ownerFileNames(projectPath);
+    expect(filesBefore).toHaveLength(2);
+
+    const peeked = managerSelf.peekOtherLiveOwners(projectPath);
+
+    expect(peeked.map((owner) => owner.port)).toEqual([ALT_PORT]);
+    expect(ownerFileNames(projectPath)).toEqual(filesBefore);
+    // The pruning read answers the same and removes the dead owner's file.
+    expect(managerSelf.listOtherLiveOwners(projectPath)).toEqual(peeked);
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+  });
+
+  it('peekOtherLiveOwners throws on an unreadable registry, as the pruning read does', () => {
+    const { projectPath, manager } = setupProject();
+    mkdirSync(bridgeDir(projectPath), { recursive: true });
+    // A file where the owners directory should be: it exists and cannot be listed.
+    writeFileSync(bridgeOwnersDir(projectPath), 'not a directory', 'utf8');
+
+    expect(() => manager.peekOtherLiveOwners(projectPath)).toThrow(BridgeRegistryUnreadableError);
   });
 
   describe('attach mode: single-attach-owner rule', () => {
@@ -1159,5 +1294,565 @@ describe('BridgeManager owner registry read failures', () => {
 
     expect(ownerFileNames(projectPath)).toEqual([UNREADABLE_OWNER_FILE]);
     expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// precheckInject: everything an inject can refuse on, with nothing written. A
+// start runs it before it stops the session it is about to replace.
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager.precheckInject', () => {
+  const projectGodotOf = (projectPath: string): string =>
+    readFileSync(join(projectPath, 'project.godot'), 'utf8');
+
+  it('passes on a healthy project and writes nothing', () => {
+    const { projectPath, manager } = setupProject();
+    const before = projectGodotOf(projectPath);
+
+    expect(manager.precheckInject(projectPath, false)).toBe(BRIDGE_SOURCE_CONTENT);
+    expect(manager.precheckInject(projectPath, true)).toBe(BRIDGE_SOURCE_CONTENT);
+
+    expect(existsSync(join(projectPath, '.mcp'))).toBe(false);
+    expect(existsSync(join(projectPath, '.gitignore'))).toBe(false);
+    expect(projectGodotOf(projectPath)).toBe(before);
+  });
+
+  it('refuses an attach while another session holds the attach slot, and a spawned start is not refused by it', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const attached = new BridgeManager(bridgeSourcePath);
+    attached.inject(projectPath, TEST_PORT, 'token-of-the-attached-session');
+    const scriptBefore = readFileSync(bridgeScriptAbsPath(projectPath), 'utf8');
+
+    const other = new BridgeManager(bridgeSourcePath);
+    expect(() => other.precheckInject(projectPath, true)).toThrow(BridgeAttachConflictError);
+    expect(() => other.precheckInject(projectPath, false)).not.toThrow();
+
+    // Nothing of the refused session reached the project.
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+    expect(readFileSync(bridgeScriptAbsPath(projectPath), 'utf8')).toBe(scriptBefore);
+  });
+
+  it("does not count this instance's own attached session as a conflict", () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT, 'first-token');
+    expect(() => manager.precheckInject(projectPath, true)).not.toThrow();
+  });
+
+  it("refuses on a user's own McpBridge autoload", () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: 'config_version=5\n\n[autoload]\n\nMcpBridge="*res://game/own_bridge.gd"\n',
+    });
+    expect(() => manager.precheckInject(projectPath, false)).toThrow(BridgeAutoloadCollisionError);
+    expect(existsSync(join(projectPath, '.mcp'))).toBe(false);
+  });
+
+  it('refuses a spawned start too when the owner registry cannot be read', () => {
+    const { projectPath, manager } = setupProject();
+    mkdirSync(bridgeDir(projectPath), { recursive: true });
+    writeFileSync(bridgeOwnersDir(projectPath), 'not a directory\n', 'utf8');
+
+    expect(() => manager.precheckInject(projectPath, false)).toThrow(BridgeRegistryUnreadableError);
+    expect(() => manager.precheckInject(projectPath, true)).toThrow(BridgeRegistryUnreadableError);
+  });
+
+  it('refuses when the shipped template is missing a marker', () => {
+    const { projectPath, manager, bridgeSourcePath } = setupProject();
+    writeFileSync(bridgeSourcePath, 'extends Node\n', 'utf8');
+    expect(() => manager.precheckInject(projectPath, false)).toThrow(/missing the 'const PORT/);
+  });
+
+  it('does not refuse a read-only project.godot: the write is a rename, which the directory decides', () => {
+    const { projectPath, manager } = setupProject();
+    const projectFile = join(projectPath, 'project.godot');
+    chmodSync(projectFile, READ_ONLY_MODE);
+    try {
+      expect(() => manager.precheckInject(projectPath, false)).not.toThrow();
+      expect(() => manager.precheckInject(projectPath, true)).not.toThrow();
+    } finally {
+      chmodSync(projectFile, READ_WRITE_MODE);
+    }
+  });
+
+  // On Windows the read-only attribute blocks the rename over the file, and
+  // the inject fails there; the caller then withdraws what it wrote.
+  it.skipIf(process.platform === 'win32')(
+    'injects into a read-only project.godot in a writable directory',
+    () => {
+      const { projectPath, manager } = setupProject();
+      const projectFile = join(projectPath, 'project.godot');
+      chmodSync(projectFile, READ_ONLY_MODE);
+      try {
+        manager.inject(projectPath, TEST_PORT);
+        expect(readFileSync(projectFile, 'utf8')).toContain('McpBridge=');
+      } finally {
+        chmodSync(projectFile, READ_WRITE_MODE);
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// An owner is its pid AND its start identity. A pid alone says only that some
+// process has that number now. The identity is compared for equality, never as
+// a time: no clock step may make a live owner look dead.
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager owner identity', () => {
+  /** A pid some other process is taken to hold; the liveness probe is faked. */
+  const OTHER_SERVER_PID = 424242;
+  const WATCHER_PID = 515151;
+  const HALF_MINUTE_MS = 30_000;
+  /** What the operating system reports for the owner process, and for the one that got its pid later. */
+  const OWNER_IDENTITY = 'test:owner-process';
+  const NEWCOMER_IDENTITY = 'test:process-that-reused-the-pid';
+
+  /** Register an owner under OTHER_SERVER_PID, as a server that has since been hard-killed left it. */
+  function registerOtherOwner(projectPath: string, bridgeSourcePath: string): void {
+    const other = new BridgeManager(bridgeSourcePath, {
+      pid: () => OTHER_SERVER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity: () => OWNER_IDENTITY,
+    });
+    other.inject(projectPath, TEST_PORT);
+  }
+
+  function observer(bridgeSourcePath: string, options: BridgeManagerOptions): BridgeManager {
+    return new BridgeManager(bridgeSourcePath, {
+      pid: () => WATCHER_PID,
+      isProcessAlive: () => true,
+      ...options,
+    });
+  }
+
+  function readOwnerFile(projectPath: string): Record<string, unknown> {
+    const [fileName] = ownerFileNames(projectPath);
+    return JSON.parse(
+      readFileSync(join(bridgeOwnersDir(projectPath), fileName!), 'utf8'),
+    ) as Record<string, unknown>;
+  }
+
+  function rewriteOwnerFile(
+    projectPath: string,
+    change: (info: Record<string, unknown>) => void,
+  ): void {
+    const [fileName] = ownerFileNames(projectPath);
+    const info = readOwnerFile(projectPath);
+    change(info);
+    writeFileSync(join(bridgeOwnersDir(projectPath), fileName!), JSON.stringify(info), 'utf8');
+  }
+
+  it("records the owner process's own start identity in the owner file at inject", () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    expect(readOwnerFile(projectPath).processStart).toBe(OWNER_IDENTITY);
+  });
+
+  it('leaves the field out when the identity cannot be read at inject', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    new BridgeManager(bridgeSourcePath, {
+      pid: () => OTHER_SERVER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity: () => null,
+    }).inject(projectPath, TEST_PORT);
+    expect(readOwnerFile(projectPath)).not.toHaveProperty('processStart');
+  });
+
+  it('counts an owner as dead when the process holding its pid has another start identity', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    // The pid answers the liveness probe, but it was handed to a new process.
+    const watcher = observer(bridgeSourcePath, { processStartIdentity: () => NEWCOMER_IDENTITY });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(ownerFileNames(projectPath)).toEqual([]);
+  });
+
+  it('repairs the bridge such an owner stranded, where the pid alone would have kept it forever', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const watcher = observer(bridgeSourcePath, { processStartIdentity: () => NEWCOMER_IDENTITY });
+
+    watcher.repairOrphaned(projectPath);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+  });
+
+  it('counts an owner as live when the process holding its pid has the identity it recorded', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const watcher = observer(bridgeSourcePath, { processStartIdentity: () => OWNER_IDENTITY });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+  });
+
+  it.each([
+    ['far in the past', '1999-01-01T00:00:00.000Z'],
+    ['far in the future', '2099-01-01T00:00:00.000Z'],
+    ['not a time at all', 'not-a-timestamp'],
+  ])(
+    'never judges a live owner by the wall clock: a startedAt %s leaves it live',
+    (_label, startedAt) => {
+      const { projectPath, bridgeSourcePath } = setupProject();
+      registerOtherOwner(projectPath, bridgeSourcePath);
+      // What a clock stepped between the owner's start and its inject does to
+      // the file: `startedAt` no longer agrees with any time the process
+      // started at. The identity is all that is compared.
+      rewriteOwnerFile(projectPath, (info) => {
+        info.startedAt = startedAt;
+      });
+      const watcher = observer(bridgeSourcePath, { processStartIdentity: () => OWNER_IDENTITY });
+
+      expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+      expect(ownerFileNames(projectPath)).toHaveLength(1);
+    },
+  );
+
+  it('keeps the pid-only answer when the identity cannot be read now', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const watcher = observer(bridgeSourcePath, { processStartIdentity: () => null });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+  });
+
+  it('keeps the pid-only answer for an owner file an older build wrote, without asking', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    rewriteOwnerFile(projectPath, (info) => {
+      delete info.processStart;
+    });
+    const processStartIdentity = vi.fn(() => NEWCOMER_IDENTITY);
+    const watcher = observer(bridgeSourcePath, { processStartIdentity });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    expect(processStartIdentity).not.toHaveBeenCalled();
+  });
+
+  it('does not ask for the identity of a pid that is not running at all', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const processStartIdentity = vi.fn(() => null);
+    const watcher = new BridgeManager(bridgeSourcePath, {
+      pid: () => WATCHER_PID,
+      isProcessAlive: () => false,
+      processStartIdentity,
+    });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(processStartIdentity).not.toHaveBeenCalled();
+  });
+
+  it("keeps this instance's own owner file whatever the reader says later, and reads its identity once", () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const processStartIdentity = vi.fn(() => OWNER_IDENTITY);
+    const self = new BridgeManager(bridgeSourcePath, {
+      pid: () => OTHER_SERVER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity,
+    });
+    self.inject(projectPath, TEST_PORT);
+    processStartIdentity.mockReturnValue(NEWCOMER_IDENTITY);
+
+    self.listOtherLiveOwners(projectPath);
+    self.repairOrphaned(projectPath);
+    self.inject(projectPath, TEST_PORT);
+
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(readOwnerFile(projectPath).processStart).toBe(OWNER_IDENTITY);
+  });
+
+  it('reuses an answer for a while where asking runs a program, then asks again', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    let now = Date.now();
+    const processStartIdentity = vi.fn(() => OWNER_IDENTITY);
+    const watcher = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: true,
+      now: () => now,
+    });
+
+    watcher.listOtherLiveOwners(projectPath);
+    watcher.listOtherLiveOwners(projectPath);
+    watcher.listOtherLiveOwners(projectPath);
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+
+    // The owner can die and its pid be reused between two reads, so the
+    // answer is not kept for good.
+    now += HALF_MINUTE_MS + 1;
+    processStartIdentity.mockReturnValue(NEWCOMER_IDENTITY);
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(processStartIdentity).toHaveBeenCalledTimes(2);
+    expect(ownerFileNames(projectPath)).toEqual([]);
+  });
+
+  it('reuses an unknown answer too: a helper that cannot answer is not run on every read', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    let now = Date.now();
+    const processStartIdentity = vi.fn((): string | null => null);
+    const watcher = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: true,
+      now: () => now,
+    });
+
+    for (let read = 0; read < 5; read += 1) {
+      expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    }
+    watcher.repairOrphaned(projectPath);
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+
+    now += HALF_MINUTE_MS + 1;
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    expect(processStartIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks afresh, inside the window, about a new owner that got the same pid', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const processStartIdentity = vi.fn(() => OWNER_IDENTITY);
+    const watcher = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: true,
+    });
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+
+    // The first server died and a new one, with the same pid, registered.
+    // The answer in hand is about the first one's identity, not this one's.
+    rewriteOwnerFile(projectPath, (info) => {
+      info.processStart = NEWCOMER_IDENTITY;
+    });
+    processStartIdentity.mockReturnValue(NEWCOMER_IDENTITY);
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    expect(processStartIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks on every read where the identity is read from a file', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const processStartIdentity = vi.fn(() => OWNER_IDENTITY);
+    const watcher = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: false,
+    });
+
+    watcher.listOtherLiveOwners(projectPath);
+    watcher.listOtherLiveOwners(projectPath);
+
+    expect(processStartIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs no helper from the exit-time cleanup, and leaves the artifacts to an owner it cannot judge', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const processStartIdentity = vi.fn(() => NEWCOMER_IDENTITY);
+    const leaving = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: true,
+    });
+
+    expect(leaving.cleanupAtExit(projectPath)).toEqual([]);
+
+    expect(processStartIdentity).not.toHaveBeenCalled();
+    // Judged by its pid alone, the other owner is live, so nothing is removed.
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+
+    // An ordinary cleanup afterwards asks, and removes what the dead owner left.
+    leaving.cleanup(projectPath);
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+  });
+
+  it('uses an answer already in hand from the exit-time cleanup', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerOtherOwner(projectPath, bridgeSourcePath);
+    const processStartIdentity = vi.fn(() => OWNER_IDENTITY);
+    const leaving = observer(bridgeSourcePath, {
+      processStartIdentity,
+      cacheProcessStartIdentity: true,
+    });
+    leaving.peekOtherLiveOwners(projectPath);
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+
+    leaving.cleanupAtExit(projectPath);
+
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+  });
+
+  it("drops an owner file an earlier process left under this instance's pid, reading its own identity once", () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    // A server that had the pid this watcher has now, and was hard-killed.
+    new BridgeManager(bridgeSourcePath, {
+      pid: () => WATCHER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity: () => OWNER_IDENTITY,
+    }).inject(projectPath, TEST_PORT);
+    const processStartIdentity = vi.fn(() => NEWCOMER_IDENTITY);
+    const watcher = observer(bridgeSourcePath, { processStartIdentity });
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(watcher.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(processStartIdentity).toHaveBeenCalledTimes(1);
+    expect(processStartIdentity).toHaveBeenCalledWith(WATCHER_PID);
+    expect(ownerFileNames(projectPath)).toEqual([]);
+  });
+
+  it('keeps another instance in this same process', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const options: BridgeManagerOptions = { processStartIdentity: () => OWNER_IDENTITY };
+    const sibling = new BridgeManager(bridgeSourcePath, options);
+    sibling.inject(projectPath, TEST_PORT);
+    const watcher = new BridgeManager(bridgeSourcePath, options);
+
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+  });
+
+  it('keeps an owner file under this pid that carries no identity', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
+    writeFileSync(
+      join(bridgeOwnersDir(projectPath), `${process.pid}-0123456789abcdef.json`),
+      JSON.stringify({
+        pid: process.pid,
+        instanceId: '0123456789abcdef',
+        hostname: hostname(),
+        mode: 'spawned',
+        startedAt: '2001-01-01T00:00:00.000Z',
+        port: TEST_PORT,
+      }),
+      'utf8',
+    );
+    const processStartIdentity = vi.fn(() => NEWCOMER_IDENTITY);
+    const watcher = new BridgeManager(bridgeSourcePath, { processStartIdentity });
+
+    // Unknown is live: with nothing recorded to compare, the pid decides.
+    expect(watcher.listOtherLiveOwners(projectPath)).toHaveLength(1);
+    expect(processStartIdentity).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A removal racing a sibling's inject. The sibling writes its owner file,
+// finds the script and the entry still there, and writes neither; the removal
+// that had already read an empty registry then takes both from under it.
+// ---------------------------------------------------------------------------
+
+describe('BridgeManager removal racing a sibling inject', () => {
+  const SIBLING_INSTANCE_ID = 'fedcba9876543210';
+  const projectGodotOf = (projectPath: string): string =>
+    readFileSync(join(projectPath, 'project.godot'), 'utf8');
+
+  /**
+   * What a sibling's inject leaves when it lands after the remover's registry
+   * read and before its removal: an owner file, and nothing else written,
+   * because the shared script and the entry were still in place.
+   */
+  function registerSiblingOwner(projectPath: string): void {
+    mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
+    writeFileSync(
+      join(bridgeOwnersDir(projectPath), `${process.pid}-${SIBLING_INSTANCE_ID}.json`),
+      JSON.stringify({
+        pid: process.pid,
+        instanceId: SIBLING_INSTANCE_ID,
+        hostname: hostname(),
+        mode: 'spawned',
+        startedAt: new Date().toISOString(),
+        port: ALT_PORT,
+      }),
+      'utf8',
+    );
+  }
+
+  /** A manager whose removal step is preceded by the sibling registering. */
+  function managerRacedBySibling(bridgeSourcePath: string, projectPath: string): BridgeManager {
+    return new BridgeManager(bridgeSourcePath, {
+      removeAutoloadEntry: (projectFile, name) => {
+        registerSiblingOwner(projectPath);
+        return removeAutoloadEntry(projectFile, name);
+      },
+    });
+  }
+
+  it('cleanup puts the script and the entry back for a session that registered during the removal', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const leaving = managerRacedBySibling(bridgeSourcePath, projectPath);
+    leaving.inject(projectPath, TEST_PORT);
+
+    const problems = leaving.cleanup(projectPath);
+
+    // The sibling still has what it believed it had.
+    expect(readFileSync(bridgeScriptAbsPath(projectPath), 'utf8')).toBe(BRIDGE_SOURCE_CONTENT);
+    expect(projectGodotOf(projectPath)).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
+    expect(projectGodotOf(projectPath).match(/McpBridge=/g)).toHaveLength(1);
+    expect(ownerFileNames(projectPath)).toEqual([`${process.pid}-${SIBLING_INSTANCE_ID}.json`]);
+    // Nothing is left undone that the leaving session owed the project.
+    expect(problems).toEqual([]);
+  });
+
+  it('repairOrphaned does the same for a session that registered while it was removing stranded artifacts', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    // Stranded: a script and an entry with no owner on record.
+    const stranded = new BridgeManager(bridgeSourcePath);
+    stranded.inject(projectPath, TEST_PORT);
+    for (const name of ownerFileNames(projectPath)) {
+      unlinkSync(join(bridgeOwnersDir(projectPath), name));
+    }
+
+    managerRacedBySibling(bridgeSourcePath, projectPath).repairOrphaned(projectPath);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(projectGodotOf(projectPath)).toContain(`McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`);
+  });
+
+  it('restores the baked port and token when the session that registered is an attach session', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const attachToken = 'token-of-the-racing-attach';
+    const leaving = new BridgeManager(bridgeSourcePath, {
+      removeAutoloadEntry: (projectFile, name) => {
+        mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
+        writeFileSync(
+          join(bridgeOwnersDir(projectPath), `${process.pid}-${SIBLING_INSTANCE_ID}.json`),
+          JSON.stringify({
+            pid: process.pid,
+            instanceId: SIBLING_INSTANCE_ID,
+            hostname: hostname(),
+            mode: 'attached',
+            startedAt: new Date().toISOString(),
+            port: ALT_PORT,
+            token: attachToken,
+          }),
+          'utf8',
+        );
+        return removeAutoloadEntry(projectFile, name);
+      },
+    });
+    leaving.inject(projectPath, TEST_PORT);
+
+    leaving.cleanup(projectPath);
+
+    expect(readFileSync(bridgeScriptAbsPath(projectPath), 'utf8')).toBe(
+      bakedContent(ALT_PORT, attachToken),
+    );
+  });
+
+  it('still removes everything when nobody registered meanwhile', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+
+    expect(manager.cleanup(projectPath)).toEqual([]);
+
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(existsSync(bridgeDir(projectPath))).toBe(false);
+    expect(projectGodotOf(projectPath)).not.toContain('McpBridge=');
   });
 });
