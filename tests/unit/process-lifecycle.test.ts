@@ -92,6 +92,56 @@ describe('registerProcessLifecycle', () => {
     expect(proc.listenerCount('exit')).toBe(1);
   });
 
+  /** Register on a fresh fake process as the named platform would. */
+  function registerOn(platform: NodeJS.Platform): {
+    proc: FakeProcess;
+    exits: number[];
+    cleanups: () => number;
+  } {
+    const platformProc = makeFakeProcess();
+    const exits: number[] = [];
+    let cleanups = 0;
+    registerProcessLifecycle({
+      runner,
+      cleanup: async () => {
+        cleanups += 1;
+      },
+      proc: platformProc,
+      exit: (code) => exits.push(code),
+      platform,
+    });
+    return { proc: platformProc, exits, cleanups: () => cleanups };
+  }
+
+  // Outside Windows the games and headless runs lead their own process
+  // groups, so the terminal's hangup does not reach them, and SIGHUP's default
+  // action would end Node without running the exit handler.
+  it.each(['linux', 'darwin'] as const)(
+    'gives SIGHUP the graceful shutdown on %s: cleanup first, then the exit',
+    async (platform) => {
+      const registered = registerOn(platform);
+
+      registered.proc.emit('SIGHUP');
+      expect(registered.cleanups()).toBe(1);
+      expect(registered.exits).toEqual([]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(registered.exits).toEqual([0]);
+    },
+  );
+
+  // Windows ends the process a few seconds after the console closes, which
+  // the graceful path can outlast: the synchronous exit handler does the work.
+  it('exits at once on SIGHUP on Windows, without the asynchronous cleanup', () => {
+    const registered = registerOn('win32');
+
+    registered.proc.emit('SIGHUP');
+
+    expect(registered.exits).toEqual([0]);
+    expect(registered.cleanups()).toBe(0);
+  });
+
   it("runs cleanup once on stdin 'end' and not again on a following 'close'", async () => {
     proc.stdinEmit('end');
     proc.stdinEmit('close');

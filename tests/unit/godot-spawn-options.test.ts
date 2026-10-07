@@ -18,22 +18,40 @@ const ALL_KINDS: readonly GodotSpawnKind[] = [
   'editor',
 ];
 const WINDOWED_KINDS: readonly GodotSpawnKind[] = ['run', 'editor'];
+/** Kinds the server kills later, so they lead a process group a group signal can reach. */
+const KILLED_KINDS: readonly GodotSpawnKind[] = ['headless', 'run', 'run-background', 'movie'];
+const LEADS_OWN_GROUP = process.platform !== 'win32';
 
 describe('godotSpawnOptions', () => {
   it('headless spawns hide their console window', () => {
-    expect(godotSpawnOptions('headless')).toEqual({ stdio: 'pipe', windowsHide: true });
+    expect(godotSpawnOptions('headless')).toEqual({
+      stdio: 'pipe',
+      detached: LEADS_OWN_GROUP,
+      windowsHide: true,
+    });
   });
 
   it('the background run spawn hides its window', () => {
-    expect(godotSpawnOptions('run-background')).toEqual({ stdio: 'pipe', windowsHide: true });
+    expect(godotSpawnOptions('run-background')).toEqual({
+      stdio: 'pipe',
+      detached: LEADS_OWN_GROUP,
+      windowsHide: true,
+    });
   });
 
   it('the movie spawn hides its window and leads its own process group outside Windows', () => {
     expect(godotSpawnOptions('movie')).toEqual({
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
+      detached: LEADS_OWN_GROUP,
       windowsHide: true,
     });
+  });
+
+  it('every kind the server kills leads its own process group outside Windows, and the editor never does', () => {
+    for (const kind of KILLED_KINDS) {
+      expect(godotSpawnOptions(kind).detached, kind).toBe(LEADS_OWN_GROUP);
+    }
+    expect(godotSpawnOptions('editor')).not.toHaveProperty('detached');
   });
 
   it('the run and editor spawns never ask for a hidden window', () => {
@@ -42,8 +60,9 @@ describe('godotSpawnOptions', () => {
       // Absent, not false: a caller spreading these options must not be able
       // to read the key as a decision that was made for a windowed process.
       expect(options, kind).not.toHaveProperty('windowsHide');
-      expect(options, kind).toEqual({ stdio: 'pipe' });
     }
+    expect(godotSpawnOptions('run')).toEqual({ stdio: 'pipe', detached: LEADS_OWN_GROUP });
+    expect(godotSpawnOptions('editor')).toEqual({ stdio: 'pipe' });
   });
 
   it('every kind keeps piped stdio', () => {

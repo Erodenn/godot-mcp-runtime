@@ -42,21 +42,41 @@ export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'movie' | '
  * symptom by a shorter route. Pipes that are opened have to be read, so each
  * caller either consumes them or drains them.
  *
+ * Every kind this server later kills leads its own process group outside
+ * Windows (`detached`). The executable may be a wrapper script whose child is
+ * the real engine, and a signal sent to the group reaches both, where a signal
+ * sent to the one pid leaves the engine running (see `killProcessTree`). That
+ * holds for `headless` as much as for the games: its timeout is the only
+ * bound on a headless run, and a timeout that kills a wrapper and leaves the
+ * engine running has bounded nothing.
+ *
+ * A group leader is not signalled along with the server by the terminal
+ * (Ctrl+C, or SIGHUP when the terminal closes), so the caller of each such
+ * kind keeps the child in a set its exit hook kills, and the server handles
+ * SIGINT, SIGTERM and SIGHUP so that hook runs (`process-lifecycle.ts`). A
+ * server ended by SIGKILL runs no hook and nothing reaps these children. A
+ * spawned game notices through its parent watch and quits. A headless run
+ * does not: it runs on to its own end with no timeout left to cut it short,
+ * as a wrapper's engine child already did before headless runs led a group.
+ * Windows kills by tree with `taskkill /T` and needs no group. The editor is
+ * never killed by the server and stays in the server's group.
+ *
  * None of this can be asserted by a test: no test can observe a terminal being
  * painted over. The tests cover the options returned here and nothing else.
  */
 export function godotSpawnOptions(kind: GodotSpawnKind): SpawnOptions {
+  const leadsOwnGroup = process.platform !== 'win32';
   if (kind === 'headless' || kind === 'run-background') {
-    return { stdio: 'pipe', windowsHide: true };
+    return { stdio: 'pipe', detached: leadsOwnGroup, windowsHide: true };
   }
-  // Stdin is ignored and the child leads its own process group outside
-  // Windows, so a timeout can signal the whole group (see killProcessTree).
+  // Stdin is ignored: nothing is ever written to a movie run.
   if (kind === 'movie') {
     return {
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
+      detached: leadsOwnGroup,
       windowsHide: true,
     };
   }
+  if (kind === 'run') return { stdio: 'pipe', detached: leadsOwnGroup };
   return { stdio: 'pipe' };
 }
