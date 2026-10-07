@@ -1,6 +1,7 @@
 /**
- * The scene a launch runs when the caller names none: `run/main_scene` under
- * `[application]` in project.godot, read with the project.godot grammar.
+ * The scene a launch runs when the caller names none: the setting
+ * `application/run/main_scene` in project.godot, read with the project.godot
+ * grammar under whichever section split the file spells it with.
  */
 
 import { closeSync, openSync, readdirSync, readFileSync, readSync } from 'fs';
@@ -28,11 +29,11 @@ function isFileNotFound(err: unknown): boolean {
 }
 
 /**
- * Read `run/main_scene` from `[application]` in project.godot. Returns the
- * value when it is a non-empty string (`res://...` as Godot writes it; a bare
- * value in a hand-edited file is tolerated), else null. With the key written
- * more than once the last one is read, the one the engine keeps. Does NOT
- * verify the file exists.
+ * Read the setting `application/run/main_scene` from project.godot. Returns
+ * the value when it is a non-empty string (`res://...` as Godot writes it; a
+ * bare value in a hand-edited file is tolerated), else null. With the setting
+ * assigned more than once, under any spelling, the last one is read, the one
+ * the engine keeps. Does NOT verify the file exists.
  */
 export function readMainSceneFromProject(projectDir: string): string | null {
   let content: string;
@@ -74,7 +75,8 @@ function readFirstLine(absPath: string): string | null {
  * reads the text the engine writes, not `.godot/uid_cache.bin`, so it needs no
  * import to have run. Dot-directories (`.godot`, `.mcp`) and symbolic links
  * are not entered. After `maxFiles` opens it stops and says the search is
- * incomplete; an unreadable directory makes it incomplete too.
+ * incomplete; a directory, scene header or sidecar that could not be read
+ * makes it incomplete too, since any of them may carry the uid.
  */
 export function findFilesByUid(
   projectDir: string,
@@ -115,7 +117,9 @@ export function findFilesByUid(
       opened++;
       if (isScene) {
         const line = readFirstLine(abs);
-        if (line !== null && scanTscn(line).headers[0]?.attrs.get(UID_ATTRIBUTE) === uid) {
+        if (line === null) {
+          complete = false;
+        } else if (scanTscn(line).headers[0]?.attrs.get(UID_ATTRIBUTE) === uid) {
           paths.push(abs);
         }
       } else {
@@ -123,6 +127,7 @@ export function findFilesByUid(
         try {
           text = readFileSync(abs, 'utf8');
         } catch {
+          complete = false;
           continue;
         }
         if (text.trim() === uid) paths.push(abs.slice(0, -UID_SIDECAR_EXTENSION.length));
@@ -134,56 +139,75 @@ export function findFilesByUid(
   return { paths, complete };
 }
 
+/** Why a uid search can end before every file was read; worded to follow "the search was cut short". */
+export const UID_SEARCH_CUT_SHORT_CAUSE = `a limit of ${UID_SCAN_MAX_FILES} files, or a folder or file that could not be read`;
+
 /**
  * What a launch with no explicit `scene` argument runs. `none`: the project
  * configures no main scene. `unresolved`: it configures one that cannot be
  * turned into a file (a `uid://` nothing in the project carries, or a value
- * that is not a path inside the project). `scenes`: the files to scan, with
- * notes for the caller to surface; more than one file when several carry the
- * same uid, since the engine may load any of them.
+ * that is not a path inside the project); `searchIncomplete` is true when a
+ * uid search ended before every file was read, so the scene may exist and was
+ * not found. `scenes`: the files to scan, with notes for the caller to
+ * surface; more than one file when several carry the same uid, since the
+ * engine may load any of them. `complete` is false when the uid search that
+ * found them was cut short, so another carrier may exist that is not listed.
  */
 export type LaunchScene =
-  | { kind: 'scenes'; absPaths: string[]; notes: string[] }
+  | { kind: 'scenes'; absPaths: string[]; notes: string[]; complete: boolean }
   | { kind: 'none' }
-  | { kind: 'unresolved'; value: string; reason: string };
+  | { kind: 'unresolved'; value: string; reason: string; searchIncomplete: boolean };
 
 /**
  * The scene a launch with no explicit `scene` argument runs: `run/main_scene`
  * from project.godot. A path is resolved under the project root (`res://x`, or
  * `x` when a hand-edited value omits the prefix); a `uid://` is looked up with
- * `findFilesByUid`, which is what the editor writes. A launch that names a
- * scene resolves it with `resolveProjectPath` itself and never comes through
- * here.
+ * `findFilesByUid`, which is what the editor writes, opening at most
+ * `maxFiles` files. A launch that names a scene resolves it with
+ * `resolveProjectPath` itself and never comes through here.
  *
  * Does NOT verify a path exists; the caller's `existsSync` check produces the
  * warning if the path is stale.
  */
-export function resolveLaunchScene(projectDir: string): LaunchScene {
+export function resolveLaunchScene(
+  projectDir: string,
+  maxFiles: number = UID_SCAN_MAX_FILES,
+): LaunchScene {
   const main = readMainSceneFromProject(projectDir);
   if (main === null) return { kind: 'none' };
 
   if (isUidReference(main)) {
-    const { paths, complete } = findFilesByUid(projectDir, main);
+    const { paths, complete } = findFilesByUid(projectDir, main, maxFiles);
     if (paths.length === 0) {
       const reason = complete
         ? `no scene or .uid file in the project carries ${main}`
-        : `the search was cut short (a limit of ${UID_SCAN_MAX_FILES} files, or an unreadable folder) before a file carrying ${main} was found`;
-      return { kind: 'unresolved', value: main, reason };
+        : `the search was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}) before a file carrying ${main} was found`;
+      return { kind: 'unresolved', value: main, reason, searchIncomplete: !complete };
     }
-    const notes =
-      paths.length > 1
-        ? [`${paths.length} files carry ${main}; all of them were scanned: ${paths.join(', ')}`]
-        : [];
-    return { kind: 'scenes', absPaths: paths, notes };
+    const notes: string[] = [];
+    if (paths.length > 1) {
+      notes.push(
+        complete
+          ? `${paths.length} files carry ${main}; all of them were scanned: ${paths.join(', ')}`
+          : `${paths.length} files carry ${main} and were scanned: ${paths.join(', ')}`,
+      );
+    }
+    if (!complete) {
+      notes.push(
+        `The search for ${main} was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}): another file may carry it, and was not scanned`,
+      );
+    }
+    return { kind: 'scenes', absPaths: paths, notes, complete };
   }
 
-  const resolved = resolveProjectPath(projectDir, main);
+  const resolved = resolveProjectPath(projectDir, main, 'read');
   if (resolved === null) {
     return {
       kind: 'unresolved',
       value: main,
-      reason: 'the value is not a path inside the project',
+      reason: 'the value could not be resolved to a file inside the project',
+      searchIncomplete: false,
     };
   }
-  return { kind: 'scenes', absPaths: [resolved.absPath], notes: [] };
+  return { kind: 'scenes', absPaths: [resolved.absPath], notes: [], complete: true };
 }

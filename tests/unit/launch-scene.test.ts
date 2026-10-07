@@ -105,6 +105,7 @@ describe('resolveLaunchScene', () => {
       kind: 'scenes',
       absPaths: [join(dir, 'main.tscn')],
       notes: [],
+      complete: true,
     });
   });
 
@@ -212,6 +213,7 @@ describe('resolveLaunchScene with a uid:// main scene', () => {
       kind: 'scenes',
       absPaths: [join(dir, 'menu.tscn')],
       notes: [],
+      complete: true,
     });
   });
 
@@ -232,5 +234,80 @@ describe('resolveLaunchScene with a uid:// main scene', () => {
       absPaths: [join(dir, 'one.tscn'), join(dir, 'two.tscn')],
     });
     expect(result.kind === 'scenes' && result.notes).toHaveLength(1);
+  });
+});
+
+describe('a uid search that was cut short', () => {
+  const mainSceneUid = (uid: string): string =>
+    `config_version=5\n\n[application]\nrun/main_scene="${uid}"\n`;
+  const FILE_CAP = 2;
+
+  it('says so when a carrier was found before the cap, instead of claiming all were scanned', () => {
+    const dir = tmp.makeProject('launch-uid-capped-', mainSceneUid(UID_A));
+    writeFileSync(join(dir, 'a.tscn'), sceneWithUid(UID_A));
+    writeFileSync(join(dir, 'b.tscn'), sceneWithUid(UID_B));
+    writeFileSync(join(dir, 'c.tscn'), sceneWithUid(UID_A));
+
+    const result = resolveLaunchScene(dir, FILE_CAP);
+    expect(result).toMatchObject({
+      kind: 'scenes',
+      absPaths: [join(dir, 'a.tscn')],
+      complete: false,
+    });
+    const notes = result.kind === 'scenes' ? result.notes.join('\n') : '';
+    expect(notes).toMatch(/was cut short/);
+    expect(notes).toMatch(/another file may carry it, and was not scanned/);
+    expect(notes).not.toMatch(/all of them were scanned/);
+  });
+
+  it('is unresolved, and marked as an incomplete search, when no carrier was found before the cap', () => {
+    const dir = tmp.makeProject('launch-uid-capped-none-', mainSceneUid(UID_A));
+    for (const name of ['a', 'b', 'c']) {
+      writeFileSync(join(dir, `${name}.tscn`), sceneWithUid(UID_B));
+    }
+    expect(resolveLaunchScene(dir, FILE_CAP)).toMatchObject({
+      kind: 'unresolved',
+      value: UID_A,
+      searchIncomplete: true,
+    });
+  });
+
+  it('a search that read every file is complete', () => {
+    const dir = tmp.makeProject('launch-uid-complete-', mainSceneUid(UID_A));
+    expect(resolveLaunchScene(dir)).toMatchObject({ kind: 'unresolved', searchIncomplete: false });
+  });
+});
+
+describe('the main scene is the setting application/run/main_scene, however it is spelled', () => {
+  it('reads it from an [application/run] section', () => {
+    const dir = tmp.makeProject(
+      'launch-scene-split-',
+      'config_version=5\n\n[application/run]\nmain_scene="res://split.tscn"\n',
+    );
+    expect(readMainSceneFromProject(dir)).toBe('res://split.tscn');
+  });
+
+  it('reads it from a top-level line', () => {
+    const dir = tmp.makeProject(
+      'launch-scene-top-',
+      'application/run/main_scene="res://top.tscn"\n\n[rendering]\nx=1\n',
+    );
+    expect(readMainSceneFromProject(dir)).toBe('res://top.tscn');
+  });
+
+  it('keeps the last assignment across spellings', () => {
+    const dir = tmp.makeProject(
+      'launch-scene-mixed-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://first.tscn"\n\n[application/run]\nmain_scene="res://last.tscn"\n',
+    );
+    expect(readMainSceneFromProject(dir)).toBe('res://last.tscn');
+  });
+
+  it('reads a value that starts on the line after the equals sign', () => {
+    const dir = tmp.makeProject(
+      'launch-scene-nextline-',
+      'config_version=5\n\n[application]\nrun/main_scene=\n"res://next.tscn"\n',
+    );
+    expect(readMainSceneFromProject(dir)).toBe('res://next.tscn');
   });
 });

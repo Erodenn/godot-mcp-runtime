@@ -73,7 +73,23 @@ describe('runLaunchGate session confirmation', () => {
       makeContext({ elicit: async () => ({ action: 'decline' }) }),
     );
     expectErrorMatching(result, /User declined render_movie/);
-    expect(unwrap(result).content[1]?.text ?? '').toMatch(/Retry render_movie/);
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).toMatch(
+      /do not call render_movie on this project again unless the user asks/,
+    );
+    expect(solutions).not.toMatch(/Retry|GODOT_MCP_DISABLE_ELICITATION/);
+  });
+
+  it('points a cancelled prompt, and only that, at the elicitation opt-out', async () => {
+    const dir = tmp.makeProject('launch-gate-cancel-');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ elicit: async () => ({ action: 'cancel' }) }),
+    );
+    expectErrorMatching(result, /cancelled without an explicit choice/);
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).toMatch(/GODOT_MCP_DISABLE_ELICITATION=true/);
+    expect(solutions).not.toMatch(/Retry/);
   });
 
   it('elicits once per project across repeated calls on one context', async () => {
@@ -184,7 +200,7 @@ describe('runLaunchGate pre-flight scan', () => {
     const result = await runLaunchGate(
       {
         projectPath: dir,
-        scene: resolveProjectPath(dir, 'other.tscn')!,
+        scene: resolveProjectPath(dir, 'other.tscn', 'read')!,
         confirm: false,
         launchedByServer: false,
         toolName: 'run_project',
@@ -220,7 +236,7 @@ describe('runLaunchGate pre-flight scan', () => {
     const result = await runLaunchGate(
       {
         projectPath: dir,
-        scene: resolveProjectPath(dir, join(dir, 'other.tscn'))!,
+        scene: resolveProjectPath(dir, join(dir, 'other.tscn'), 'read')!,
         confirm: false,
         launchedByServer: false,
         toolName: 'run_project',
@@ -385,5 +401,61 @@ describe('runLaunchGate strict mode and the launch scene', () => {
     const dir = makeProjectWithAutoload('gate-strict-tier1-first-', TIER1_AUTOLOAD);
     const result = await runLaunchGate(request(dir, true), makeContext({ strict: true }));
     expectErrorMatching(result, /Tier 1 primitives/);
+  });
+});
+
+describe('runLaunchGate strict-mode refusals', () => {
+  const solutionsOf = (result: Awaited<ReturnType<typeof runLaunchGate>>): string =>
+    unwrap(result).content[1]?.text ?? '';
+  const strictRequest = (dir: string) => ({
+    projectPath: dir,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each<[string, () => string, Elicitor | undefined]>([
+    [
+      'a Tier 1 finding',
+      () => makeProjectWithAutoload('gate-strict-tier1-', TIER1_AUTOLOAD, MAIN_SCENE_SETTING),
+      undefined,
+    ],
+    ['no launch scene', () => tmp.makeProject('gate-strict-noscene-'), undefined],
+    [
+      'an autoload it could not resolve',
+      () =>
+        tmp.makeProject(
+          'gate-strict-unresolved-',
+          'config_version=5\n\n[autoload]\nOut="res://../x.gd"\n',
+        ),
+      undefined,
+    ],
+    [
+      'a client without elicitation',
+      () => {
+        const dir = tmp.makeProject(
+          'gate-strict-noelicit-',
+          `config_version=5\n\n[application]\n${MAIN_SCENE_SETTING}`,
+        );
+        writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+        return dir;
+      },
+      async () => {
+        throw new Error('elicitation not supported');
+      },
+    ],
+  ])('on %s, never advises turning strict mode off', async (_label, makeDir, elicit) => {
+    const dir = makeDir();
+    if (_label === 'a Tier 1 finding') {
+      writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    }
+    const result = await runLaunchGate(
+      strictRequest(dir),
+      makeContext(elicit ? { strict: true, elicit } : { strict: true }),
+    );
+    expect(result.ok).toBe(false);
+    const solutions = solutionsOf(result);
+    expect(solutions).toMatch(/operator setting: report this refusal to the user/);
+    expect(solutions).not.toMatch(/Unset GODOT_MCP_STRICT/i);
   });
 });

@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { writeFileSync } from 'fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   runLaunchGate,
@@ -479,13 +479,73 @@ describe('launch scan: autoloads', () => {
     );
   });
 
-  it('an autoload path that escapes the project is still skipped for a scene', async () => {
+  it('an autoload path that leaves the project is reported as not scanned', async () => {
     const dir = tmp.makeProject(
       'scan-escape-',
       'config_version=5\n\n[autoload]\nOut="res://../elsewhere.tscn"\n',
     );
     const warnings = await gateWarnings(dir);
-    expect(warnings.join('\n')).toMatch(/Skipped autoload Out/);
+    expect(warnings).toContain(
+      'Autoload Out (res://../elsewhere.tscn) was not scanned: the path could not be resolved to a file inside the project',
+    );
+  });
+
+  it('strict mode refuses on an autoload path it could not resolve', async () => {
+    const dir = tmp.makeProject(
+      'scan-escape-strict-',
+      'config_version=5\n\n[autoload]\nOut="res://../elsewhere.gd"\n',
+    );
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+    expectErrorMatching(result, /could not read or resolve scripts or scenes/);
+    expectErrorMatching(
+      result,
+      /Autoload Out .* could not be resolved to a file inside the project/,
+    );
+  });
+
+  it('scans an autoload whose file name holds two dots', async () => {
+    const dir = tmp.makeProject(
+      'scan-dotted-name-',
+      'config_version=5\n\n[autoload]\nBoot="*res://boot..old.gd"\n',
+    );
+    writeFileSync(join(dir, 'boot..old.gd'), TIER1_BODY, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/boot\.\.old\.gd:3 OS\.execute/);
+    expect(warnings.join('\n')).not.toMatch(/was not scanned/);
+  });
+
+  it('scans an autoload registered by a top-level autoload/Name line', async () => {
+    const dir = tmp.makeProject(
+      'scan-top-level-autoload-',
+      'config_version=5\nautoload/Boot="*res://boot.gd"\n\n[application]\nconfig/name="x"\n',
+    );
+    writeFileSync(join(dir, 'boot.gd'), TIER1_BODY, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+  });
+
+  it('scans the autoload the engine keeps when a name is assigned twice', async () => {
+    const dir = tmp.makeProject(
+      'scan-duplicate-autoload-',
+      'config_version=5\n\n[autoload]\nBoot="*res://clean.gd"\nBoot="*res://boot.gd"\n',
+    );
+    writeFileSync(join(dir, 'clean.gd'), 'extends Node\n', 'utf8');
+    writeFileSync(join(dir, 'boot.gd'), TIER1_BODY, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+  });
+
+  it('scans the main scene set under an [application/run] section', async () => {
+    const dir = tmp.makeProject(
+      'scan-split-section-',
+      'config_version=5\n\n[application/run]\nmain_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(dir, 'main.tscn'), INLINE_TIER1_SCENE, 'utf8');
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/main\.tscn\[GDScript GDScript_evil\]:4 OS\.execute/);
   });
 });
 
@@ -527,6 +587,19 @@ describe('launch scan: headers a blank follows the bracket of, and headers it ca
     expect(warnings.some((w) => /^Not scanned: main\.tscn: .*\[node/.test(w))).toBe(true);
   });
 
+  it.each([
+    ['an ext_resource header', '[gd_scene format=3]\n\n[ ext_resource path="x\n'],
+    ['a node header', '[gd_scene format=3]\n\n[node name="Main" type="Node"\nscript = null\n'],
+  ])('makes strict mode refuse on a malformed statement: %s', async (_name, sceneText) => {
+    const dir = projectWithMainScene('scan-malformed-strict-', sceneText);
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+    expectErrorMatching(result, /could not read or resolve scripts or scenes/);
+    expectErrorMatching(result, /Not scanned: main\.tscn: /);
+  });
+
   it('does not read a scene instance that leaves the project', async () => {
     const dir = projectWithMainScene(
       'scan-escape-',
@@ -541,7 +614,157 @@ describe('launch scan: headers a blank follows the bracket of, and headers it ca
     tmp.track(outside);
     const warnings = await gateWarnings(dir);
     const text = warnings.join('\n');
-    expect(text).toMatch(/reference res:\/\/\.\.\/outside\.tscn escapes the project root/);
+    expect(text).toMatch(
+      /reference res:\/\/\.\.\/outside\.tscn could not be resolved to a file inside the project and was not followed/,
+    );
     expect(text).not.toMatch(/OS\.execute/);
+  });
+});
+
+describe('launch scan: a scene script that leaves the project', () => {
+  const ESCAPING_SCRIPT_SCENE =
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://../outside.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n';
+
+  it('is reported as not scanned, with the reason', async () => {
+    const dir = projectWithMainScene('scan-script-escape-', ESCAPING_SCRIPT_SCENE);
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(
+      /Scene script ".*outside\.gd" was not scanned: the path could not be resolved to a file inside the project/,
+    );
+  });
+
+  it('makes strict mode refuse: the engine would still load it', async () => {
+    const dir = projectWithMainScene('scan-script-escape-strict-', ESCAPING_SCRIPT_SCENE);
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+    expectErrorMatching(result, /could not read or resolve scripts or scenes/);
+  });
+});
+
+describe('launch scan: a project.godot with lines Godot did not write', () => {
+  const BENIGN = '[application]\nrun/main_scene="res://main.tscn"\n';
+  const NON_CANONICAL: ReadonlyArray<readonly [name: string, extra: string]> = [
+    [
+      'a second main scene on the line of a header',
+      '[application] run/main_scene="res://evil.tscn"\n',
+    ],
+    ['two statements on one line', 'config/name="x" run/main_scene="res://evil.tscn"\n'],
+    ['a blank inside a key', 'run/main_ scene="res://evil.tscn"\n'],
+    ['a quoted key', '"run/main_scene"="res://evil.tscn"\n'],
+    ['a junk line before a header', 'x\n[application]\nrun/main_scene="res://evil.tscn"\n'],
+    ['an autoload on the line of its header', '[autoload] Evil="*res://evil.gd"\n'],
+    ['a # line under [autoload]', '[autoload]\n#Evil="*res://evil.gd"\n'],
+    [
+      'a second autoload on the line of an entry',
+      '[autoload]\nA="*res://a.gd" Evil="*res://evil.gd"\n',
+    ],
+  ];
+
+  function projectWith(extra: string): string {
+    const dir = tmp.makeProject('scan-non-canonical-', `config_version=5\n\n${BENIGN}${extra}`);
+    writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    writeFileSync(join(dir, 'evil.tscn'), INLINE_TIER1_SCENE, 'utf8');
+    writeFileSync(join(dir, 'evil.gd'), TIER1_BODY, 'utf8');
+    writeFileSync(join(dir, 'a.gd'), 'extends Node\n', 'utf8');
+    return dir;
+  }
+
+  it.each(NON_CANONICAL)('%s is reported with its line number', async (_name, extra) => {
+    const warnings = await gateWarnings(projectWith(extra));
+    expect(warnings.join('\n')).toMatch(
+      /project\.godot has \d+ line\(s\) that are not in the form Godot writes.*line \d+ \(.*could not be read reliably/,
+    );
+  });
+
+  it.each(NON_CANONICAL)('%s makes strict mode refuse the launch', async (_name, extra) => {
+    const result = await runLaunchGate(
+      {
+        projectPath: projectWith(extra),
+        confirm: false,
+        launchedByServer: true,
+        toolName: 'run_project',
+      },
+      makeContext({ strict: true }),
+    );
+    // Refused either for the unreadable file or for what the tolerant reading found.
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+  });
+
+  it('a canonical file adds no such warning and strict mode launches', async () => {
+    const dir = projectWith(
+      'config/features=PackedStringArray("4.6")\n\n[autoload]\nA="*res://a.gd"\n',
+    );
+    expect(await gateWarnings(dir, true)).toEqual([]);
+  });
+
+  it('strict mode refuses on an autoload line that does not read as an entry', async () => {
+    const dir = projectWith('\n[autoload]\nmy-auto="res://evil.gd"\n');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+    expectErrorMatching(result, /Autoload line could not be parsed and was not scanned: my-auto/);
+  });
+});
+
+describe('launch scan: a folder linked to a place outside the project', () => {
+  /** A project whose `addons/shared` is a link to a folder holding `boot.gd` and `main.tscn`. */
+  function projectWithLinkedAddon(settings: string, bootSource: string): string {
+    const dir = tmp.makeProject('scan-linked-', `config_version=5\n\n${settings}`);
+    const shared = tmp.make('scan-linked-shared-');
+    writeFileSync(join(shared, 'boot.gd'), bootSource, 'utf8');
+    writeFileSync(
+      join(shared, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://addons/shared/boot.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      'utf8',
+    );
+    mkdirSync(join(dir, 'addons'));
+    symlinkSync(shared, join(dir, 'addons', 'shared'), 'junction');
+    return dir;
+  }
+  const LINKED_AUTOLOAD = '[autoload]\nBoot="*res://addons/shared/boot.gd"\n';
+  const LINKED_MAIN_SCENE = '[application]\nrun/main_scene="res://addons/shared/main.tscn"\n';
+
+  it('scans the real autoload script behind the link', async () => {
+    const warnings = await gateWarnings(projectWithLinkedAddon(LINKED_AUTOLOAD, TIER1_BODY));
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+    expect(warnings.join('\n')).not.toMatch(/was not scanned/);
+  });
+
+  it('scans a main scene behind the link, and the script it attaches', async () => {
+    const warnings = await gateWarnings(projectWithLinkedAddon(LINKED_MAIN_SCENE, TIER1_BODY));
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+    expect(warnings.join('\n')).not.toMatch(/could not be resolved/);
+  });
+
+  it('follows a scene instanced from behind the link and scans its script', async () => {
+    const dir = projectWithLinkedAddon(
+      '[application]\nrun/main_scene="res://main.tscn"\n',
+      TIER1_BODY,
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://addons/shared/main.tscn" id="1"]\n\n[node name="Main" type="Node"]\n\n[node name="Part" parent="." instance=ExtResource("1")]\n',
+      'utf8',
+    );
+    const warnings = await gateWarnings(dir);
+    expect(warnings.join('\n')).toMatch(/boot\.gd:3 OS\.execute/);
+    expect(warnings.join('\n')).not.toMatch(/could not be resolved/);
+  });
+
+  it('strict mode launches when the linked scene and scripts are clean', async () => {
+    const settings = `${LINKED_MAIN_SCENE}\n${LINKED_AUTOLOAD}`;
+    const result = await runLaunchGate(
+      {
+        projectPath: projectWithLinkedAddon(settings, 'extends Node\n'),
+        confirm: false,
+        launchedByServer: true,
+        toolName: 'run_project',
+      },
+      makeContext({ strict: true }),
+    );
+    expect(result.ok && result.value.warnings).toEqual([]);
   });
 });

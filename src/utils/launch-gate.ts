@@ -34,7 +34,12 @@ import {
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
 import { collectSceneScripts } from './scene-parsing.js';
-import { findFilesByUid, isUidReference, resolveLaunchScene } from './launch-scene.js';
+import {
+  findFilesByUid,
+  isUidReference,
+  resolveLaunchScene,
+  UID_SEARCH_CUT_SHORT_CAUSE,
+} from './launch-scene.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */
@@ -47,6 +52,21 @@ export const MAX_SCAN_WARNINGS_SHOWN = 10;
 export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
+/** Why a reference the engine would still try to load was not scanned. */
+const UNRESOLVED_PATH_CAUSE = 'the path could not be resolved to a file inside the project';
+/** What a `project.godot` with lines Godot did not write means for the scan. */
+const NON_CANONICAL_PROJECT_FILE_CAUSE =
+  'The autoloads and main scene could not be read reliably, so what the engine loads may not be what was scanned. Rewrite those lines as one key=value statement per line';
+/**
+ * The one thing to do about a strict-mode refusal that the project itself
+ * cannot fix. Strict mode is how an operator bounds a run nobody is watching,
+ * so a refusal is never answered by advising the agent to turn it off.
+ */
+const STRICT_MODE_IS_OPERATOR_SETTING =
+  'Strict mode (GODOT_MCP_STRICT) is an operator setting: report this refusal to the user rather than changing it';
+/** Offered only for a prompt the client dismissed by itself, never for a user's decline. */
+const ELICITATION_OPT_OUT_SOLUTION =
+  'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
 
 /**
  * Refuse a `scene` argument the engine would not run as a scene, or null when
@@ -180,8 +200,11 @@ export async function runLaunchGate(
   const confirmationWarnings: string[] = [];
   const scanFindings: ScanFinding[] = [];
   // The part of the scan that failed on something it reads: a GDScript file or
-  // text scene that exists and could not be read, or a scan step that threw.
-  // Each entry is also in scanWarnings. Strict mode refuses on these. Items the
+  // text scene that exists and could not be read, a path or uid the engine
+  // would still try to load and the scan could not resolve to a file, a
+  // project.godot with lines that are not in the form Godot writes, an
+  // autoload line that does not read as an entry, or a scan step that threw. Each entry is also in scanWarnings. Strict mode
+  // refuses on these. Items the
   // scan does not read by kind (a C# script, a binary scene, a resource file)
   // are never added here: refusing on those would block whole classes of
   // project, and whether strict mode should is left open (docs/security.md).
@@ -194,6 +217,10 @@ export async function runLaunchGate(
   const failLaunchScene = (message: string, noSceneConfigured = false): void => {
     scanWarnings.push(message);
     launchSceneFailures.push({ message, noSceneConfigured });
+  };
+  const failScanRead = (message: string): void => {
+    scanWarnings.push(message);
+    scanReadFailures.push(message);
   };
   const absProjectPath = resolve(request.projectPath);
 
@@ -211,7 +238,7 @@ export async function runLaunchGate(
     const collected = collectSceneScripts(scenePath, absProjectPath);
     for (const filePath of collected.scripts) {
       if (!isUnderDir(absProjectPath, filePath)) {
-        scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
+        failScanRead(`Scene script "${filePath}" was not scanned: ${UNRESOLVED_PATH_CAUSE}`);
         continue;
       }
       scanScriptPath(filePath);
@@ -226,7 +253,13 @@ export async function runLaunchGate(
       scanWarnings.push(notice);
       // A text scene is one the scan reads. A file of another extension that
       // could not be read is a binary scene at best, which it does not.
-      if (item.readFailed && item.scenePath.toLowerCase().endsWith(SCENE_EXTENSION)) {
+      const sceneReadFailed =
+        item.readFailed === true && item.scenePath.toLowerCase().endsWith(SCENE_EXTENSION);
+      // An unresolved reference is one the engine would still try to load, so
+      // it is a file the scan set out to read and did not.
+      // A malformed statement was read in part: the engine may load from it
+      // something the scan did not see.
+      if (sceneReadFailed || item.unresolved === true || item.malformed === true) {
         scanReadFailures.push(notice);
       }
     }
@@ -271,9 +304,15 @@ export async function runLaunchGate(
   try {
     const projectGodot = projectGodotPath(absProjectPath);
     if (existsSync(projectGodot)) {
-      const { entries: autoloads, unparsed } = parseAutoloadSection(projectGodot);
+      const { entries: autoloads, unparsed, nonCanonical } = parseAutoloadSection(projectGodot);
+      // A line Godot did not write may make the engine load an autoload or a
+      // main scene other than the one read here, and a line that registers an
+      // autoload without reading as an entry names a file nothing scanned.
+      // Both are settings the scan set out to read and could not.
+      if (nonCanonical !== null)
+        failScanRead(`${nonCanonical}. ${NON_CANONICAL_PROJECT_FILE_CAUSE}`);
       for (const line of unparsed) {
-        scanWarnings.push(`Autoload line could not be parsed and was not scanned: ${line}`);
+        failScanRead(`Autoload line could not be parsed and was not scanned: ${line}`);
       }
       for (const entry of autoloads) {
         // Skip this server's own injected bridge. It is left registered
@@ -290,23 +329,38 @@ export async function runLaunchGate(
         if (isUidReference(entry.path)) {
           const found = findFilesByUid(absProjectPath, entry.path);
           if (found.paths.length === 0) {
-            const cause = found.complete
-              ? 'no scene or .uid file in the project carries it'
-              : 'the uid search was cut short before a file carrying it was found';
-            scanWarnings.push(`Autoload ${entry.name} (${entry.path}) was not scanned: ${cause}`);
+            // A search that read every file and found no carrier names a file
+            // of a kind the scan does not read, or nothing. One that was cut
+            // short may have missed a script it reads.
+            if (found.complete) {
+              scanWarnings.push(
+                `Autoload ${entry.name} (${entry.path}) was not scanned: no scene or .uid file in the project carries it`,
+              );
+            } else {
+              failScanRead(
+                `Autoload ${entry.name} (${entry.path}) was not scanned: the uid search was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}) before a file carrying it was found`,
+              );
+            }
             continue;
           }
           if (found.paths.length > 1) {
             scanWarnings.push(
-              `Autoload ${entry.name} (${entry.path}): ${found.paths.length} files carry this uid and all were scanned`,
+              found.complete
+                ? `Autoload ${entry.name} (${entry.path}): ${found.paths.length} files carry this uid and all were scanned`
+                : `Autoload ${entry.name} (${entry.path}): ${found.paths.length} files carry this uid and were scanned`,
+            );
+          }
+          if (!found.complete) {
+            scanWarnings.push(
+              `Autoload ${entry.name} (${entry.path}): the uid search was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}), so another file may carry this uid and was not scanned`,
             );
           }
           targets = found.paths;
         } else {
-          const autoloadFile = resolveProjectPath(absProjectPath, entry.path);
+          const autoloadFile = resolveProjectPath(absProjectPath, entry.path, 'read');
           if (!autoloadFile) {
-            scanWarnings.push(
-              `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
+            failScanRead(
+              `Autoload ${entry.name} (${entry.path}) was not scanned: ${UNRESOLVED_PATH_CAUSE}`,
             );
             continue;
           }
@@ -347,10 +401,7 @@ export async function runLaunchGate(
           `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
           ...summary.map((s) => `- ${s}`),
         ].join('\n'),
-        [
-          'Remove or refactor the flagged primitives',
-          'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
-        ],
+        ['Remove or refactor the flagged primitives', STRICT_MODE_IS_OPERATOR_SETTING],
       ),
     );
   }
@@ -369,10 +420,7 @@ export async function runLaunchGate(
           'Strict mode: refusing to launch project because the scene to launch could not be found or resolved, so its scripts were not checked.',
           ...refusedLaunchScene.map((failure) => `- ${failure.message}`),
         ].join('\n'),
-        [
-          'Set `run/main_scene` in project.godot or pass `scene`',
-          'Unset GODOT_MCP_STRICT to launch with this reported in `warnings` instead',
-        ],
+        ['Set `run/main_scene` in project.godot or pass `scene`', STRICT_MODE_IS_OPERATOR_SETTING],
       ),
     );
   }
@@ -389,12 +437,12 @@ export async function runLaunchGate(
     return err(
       createErrorResponse(
         [
-          `Strict mode: refusing to launch project because the pre-flight scan could not read scripts or scenes it scans, so they were not checked${more}.`,
+          `Strict mode: refusing to launch project because the pre-flight scan could not read or resolve scripts or scenes it scans, so they were not checked${more}.`,
           ...shown.map((s) => `- ${s}`),
         ].join('\n'),
         [
-          'Fix what stops the file from being read (permissions, a directory where the file should be), then retry',
-          'Unset GODOT_MCP_STRICT to launch with these reported in `warnings` instead',
+          'Fix what stops the file from being read or found (permissions, a directory where the file should be, a path that leaves the project), then retry',
+          STRICT_MODE_IS_OPERATOR_SETTING,
         ],
       ),
     );
@@ -436,10 +484,7 @@ export async function runLaunchGate(
           return err(
             createErrorResponse(
               `${elicitMsg}; strict mode refuses to launch without explicit user confirmation.`,
-              [
-                'Unset GODOT_MCP_STRICT to launch without confirmation',
-                'Use an MCP client that supports elicitation',
-              ],
+              ['Use an MCP client that supports elicitation', STRICT_MODE_IS_OPERATOR_SETTING],
             ),
           );
         }
@@ -451,18 +496,20 @@ export async function runLaunchGate(
       if (!isElicitAccepted(elicitResult)) {
         // A `cancel` action means the client dismissed the prompt without an
         // explicit choice. Some clients (e.g. Claude Desktop) auto-cancel
-        // elicitation without ever displaying it, so distinguish it from an
-        // explicit `decline` and point the user at the opt-out.
+        // elicitation without ever displaying it, so it is told apart from an
+        // explicit `decline`, and only it points at the opt-out: a decline is
+        // the user's answer, and nothing about it is to be worked around.
         const cancelled = elicitResult.action === 'cancel';
         return err(
           createErrorResponse(
             cancelled
-              ? `${request.toolName} confirmation was cancelled without an explicit choice. Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them.`
+              ? `${request.toolName} confirmation was cancelled without an explicit choice. Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them. The project was not launched.`
               : `User declined ${request.toolName}. The project was not launched.`,
-            [
-              `Retry ${request.toolName} once you intend to launch the project`,
-              'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them',
-            ],
+            cancelled
+              ? [ELICITATION_OPT_OUT_SOLUTION]
+              : [
+                  `The user declined this launch: do not call ${request.toolName} on this project again unless the user asks for it`,
+                ],
           ),
         );
       }
