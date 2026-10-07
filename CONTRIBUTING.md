@@ -82,13 +82,13 @@ ESLint enforces this via `no-console` with `["error", "warn"]` allowed.
 
 ### Mutation operations auto-save
 
-Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_properties`, `delete_nodes`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too - `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
+Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_properties`, `delete_nodes`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too - after the loop, `batch_scene_operations` saves each scene an operation succeeded on and no `save` item has written since. A scene nothing changed is not rewritten.
 
 Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `parseProjectArgs` / `parseSceneArgs` / `parseNodePath` from `src/utils/arg-parsing.ts`, each returning `Result<T, ToolResponse>`. `parseProjectArgs` rejects `..` and verifies `project.godot` exists. `parseSceneArgs` additionally resolves `scenePath` through `resolveProjectPath` (rejecting absolute paths that escape the project root) and returns the resolved path alongside the project-relative one, and always requires `scenePath` to be present (pass `{ requireExists: false }` to opt out of the on-disk existence check, e.g. for `create_scene`). For scene-tree node paths (e.g. `root/Player`), use `parseNodePath` / `parseRequiredNodePath` / `parseOptionalNodePath` - they allow the relative-path style that `resolveProjectPath` rejects. Any other project sub-path a tool accepts goes through `resolveProjectPath` (`src/utils/path-validation.ts`), which returns `relPath` for GDScript, `absPath` for fs calls and `resPath` for `project.godot` and the Godot command line. Don't construct paths ad hoc with `path.join` - route through these parsers so the rules stay centralized.
+All handlers validate paths through `parseProjectArgs` / `parseSceneArgs` / `parseNodePath` from `src/utils/arg-parsing.ts`, each returning `Result<T, ToolResponse>`. `parseProjectArgs` rejects a `..` segment in the project directory and verifies `project.godot` exists. `parseSceneArgs` additionally resolves `scenePath` through `resolveProjectPath` and returns the resolved path alongside the project-relative one, and always requires `scenePath` to be present (pass `{ requireExists: false }` to opt out of the on-disk existence check, e.g. for `create_scene`). For scene-tree node paths (e.g. `root/Player`), use `parseNodePath` / `parseRequiredNodePath` / `parseOptionalNodePath` - they allow the relative-path style that `resolveProjectPath` rejects. Any other project sub-path a tool accepts goes through `resolveProjectPath` (`src/utils/path-validation.ts`), which takes a required `'read'` or `'write'` intent (a call site that cannot say which is a write) and returns `relPath` for GDScript, `absPath` for fs calls and `resPath` for `project.godot` and the Godot command line. Inside a project, containment is decided by resolving the path, not by its shape: a `..` that stays inside is accepted, and a path that resolves outside, has a name ending in a dot or a space or a Windows device name (`NUL`, `con.txt`), or carries a colon past the drive prefix is refused. A `'write'` path whose real location leaves the project through a symlink or junction is refused too, while a `'read'` path follows the link, so a project can link in shared assets. Every path field of a `batch_scene_operations` item goes through it. Refusals use the shared wording `projectSubPathError` and `PROJECT_SUB_PATH_SOLUTIONS`. Don't construct paths ad hoc with `path.join` - route through these parsers so the rules stay centralized.
 
 ### Error responses use `Result<HandlerResult, ToolResponse>`
 
@@ -104,8 +104,8 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 
 The gate emits a three-tier decision:
 
-- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
-- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
+- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`/`create_instance`), native libraries (`GDExtensionManager.load_extension`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `GDScript.new`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). A reflective call with a literal method name is judged as the call it makes, after its escapes are decoded and any dispatch it names is followed, so `OS.call("execute", ...)` and `OS.call("call", "\u0065xecute")` are blocked like `OS.execute(...)`. Server rejects without forwarding.
+- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`), a guarded singleton used as a value (`var o = OS`), `source_code`, `instance_from_id`, `JavaScriptBridge.eval`, and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
 - **Tier 3: warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
 
 `GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch - MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
@@ -152,9 +152,9 @@ Docker CI runs automatically on push and PR to `main`.
 
 ## Known limitations
 
-### Headless mode initializes all autoloads
+### Headless mode loads all autoloads
 
-When Godot runs headlessly, it initializes every registered autoload. A broken autoload (syntax error, missing resource, display-dependent code) crashes the headless process before the operation runs. The runner detects this and surfaces a descriptive error pointing at `list_autoloads` / `remove_autoload`. Use the dedicated autoload tools - they edit `project.godot` directly and need no Godot process.
+When Godot runs headlessly, it loads every registered autoload. The operation is dispatched before any autoload's `_ready`, so an autoload that only errors or quits in `_ready` does not affect it. One that stops the engine before dispatch (a `quit()` in `_init`, for example) fails every headless operation. The runner detects this and surfaces a descriptive error pointing at `list_autoloads` / `remove_autoload`. Use the dedicated autoload tools - they edit `project.godot` directly and need no Godot process.
 
 ### `breakpoint` is a no-op
 
