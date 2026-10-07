@@ -50,6 +50,44 @@ const MAX_HOLD_MS := 10000
 const MAX_TEXT_LENGTH := 1000
 const MAX_WATCH_ENTRIES := 16
 const MAX_UI_DELTA_ENTRIES := 20
+# KEEP IN SYNC: MAX_INPUT_BATCH_BUDGET_MS in src/tools/runtime-tools.ts is the
+# twin of this constant. Ceiling on the wall-clock waiting one batch asks for:
+# every wait's ms plus every hold_ms. The per-action caps bound each wait, not
+# how many there are, and a wait in milliseconds has no cap of its own, so
+# without this a batch can park this peer for as long as its sender likes.
+const MAX_BATCH_WAIT_MS := 600000
+# Longest text reported for one Control in an input result (the focused text
+# Control's value, and a changed Control's new text). A TextEdit can hold a
+# whole document, and these go into every action's entry.
+const MAX_UI_TEXT_CHARS := 2000
+# Most actions one batch may hold. The server's time budget admits fewer (every
+# action is charged a settle frame), so this only meets a bridge driven by
+# hand. It is what bounds the part of an input reply that the byte budget
+# below does not: the reduced entries.
+const MAX_BATCH_ACTIONS := 10000
+# Bytes the full entries of one input reply may add up to, a quarter of the
+# frame limit. One entry is bounded (MAX_UI_DELTA_ENTRIES, MAX_UI_TEXT_CHARS,
+# the sample bounds), but a batch holds thousands of them. Past this budget an
+# entry is reduced to REDUCED_ENTRY_KEYS and marked `details_dropped`, so the
+# reply always fits a frame: the actions of a batch have run by the time its
+# reply is built, and a reply that cannot be sent would leave the caller not
+# knowing that.
+const MAX_INPUT_REPLY_BYTES := 4 * 1024 * 1024
+# What a reduced entry keeps: whether the action ran and when. All fixed-size
+# except `error`, which is cut to MAX_REDUCED_ERROR_CHARS and which at most
+# one entry of a batch carries, because a failed action ends the batch.
+const REDUCED_ENTRY_KEYS := ["index", "type", "ok", "frame", "elapsed_ms", "error"]
+const MAX_REDUCED_ERROR_CHARS := 512
+
+# KEEP IN SYNC: PARENT_WATCH_PORT_ENV in src/utils/bridge-protocol.ts is the
+# twin of this constant. The server sets it for a game it spawned, never for an
+# attached one, to the port of a listener that lives as long as the server
+# process does.
+const PARENT_WATCH_PORT_ENV := "MCP_PARENT_WATCH_PORT"
+# How often the connection to that listener is checked. A server that was
+# killed outright is noticed within two checks: the first write after its
+# death is answered with a reset, and the second one fails.
+const PARENT_WATCH_INTERVAL_MS := 2000
 
 # Profiler track caps. KEEP IN SYNC: MAX_TRACK_ENTRIES and MIN_TRACK_INTERVAL_MS
 # with TRACK_MAX_ENTRIES and TRACK_MIN_INTERVAL_MS in src/tools/profiler-tools.ts. A
@@ -66,14 +104,19 @@ const DEFAULT_TRACK_INTERVAL_MS := 250
 const DEFAULT_TRACK_DURATION_MS := 60000
 
 # Serialization bounds. _serialize_bounded walks containers recursively, and a
-# Dictionary or Array can hold itself, so with no depth bound one such value
-# recurses until the engine's stack runs out, inside the game. Every caller is
-# bounded in depth; a cut is written into the value as a marker string, never
-# dropped silently.
+# Dictionary or Array can hold itself, or hold one other container many times
+# over. Depth alone does not bound that walk: an array holding itself four
+# times costs 4^depth steps on the game's main thread. So every caller is
+# bounded three ways (depth, total container elements, string length), and a
+# container met again while it is still being walked is cut where it recurs. A
+# cut is written into the value as a marker string, never dropped silently.
 #
-# A run_script result gets the depth bound only: it is one value the caller
-# asked for, and its size is theirs to choose.
+# A run_script result is one value the caller asked for, so its bounds are
+# generous: they exist to stop a walk that would never finish or a reply that
+# could never be sent, not to trim an ordinary result.
 const MAX_RESULT_DEPTH := 32
+const MAX_RESULT_ELEMENTS := 50000
+const MAX_RESULT_STRING_CHARS := 1048576
 # A watch or track sample is taken again and again (a track up to
 # MAX_TRACK_SAMPLES times per entry, from _process), so it is bounded in size
 # as well: how deep it goes, how many container elements it holds in total, and
@@ -82,13 +125,18 @@ const MAX_RESULT_DEPTH := 32
 const MAX_SAMPLE_DEPTH := 4
 const MAX_SAMPLE_ELEMENTS := 32
 const MAX_SAMPLE_STRING_CHARS := 128
-# "No limit" for the two size bounds above, as _serialize_bounded reads them.
-const SERIALIZE_UNLIMITED := -1
 const TRUNCATED_DEPTH_MARKER := "<truncated: nested deeper than %d levels>"
+const TRUNCATED_CYCLE_MARKER := "<truncated: this container contains itself>"
 const TRUNCATED_ELEMENTS_MARKER := "<truncated: %d more elements>"
 const TRUNCATED_ENTRIES_KEY := "<truncated>"
 const TRUNCATED_ENTRIES_MARKER := "%d more entries"
 const TRUNCATED_STRING_MARKER := "<truncated: %d more characters>"
+# What a command is answered with when its real reply is too large to frame.
+# The command has run by then, so the error carries OVERSIZE_RESPONSE_FIELD to
+# tell it apart from a refusal, which means nothing was done.
+# KEEP IN SYNC: OVERSIZE_RESPONSE_FIELD in src/utils/bridge-protocol.ts.
+const OVERSIZE_RESPONSE_FIELD := "response_too_large"
+const OVERSIZE_RESPONSE_ERROR := "The response is %d bytes, over the %d byte frame limit, and was not sent. Ask for less in one call: return a smaller value from run_script, pass a filter to get_ui_elements, or send fewer actions per batch."
 
 # Where background mode parks the window: far enough off every monitor layout
 # that no part of it is on screen.
@@ -147,8 +195,9 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 # WHAT CANCELLATION GUARANTEES, and what it does not. The generation is bumped
 # by two events, both of them the client itself acting: a new connection being
 # accepted, and a new input batch starting. The Node client holds one socket and
-# MCP serializes tool calls, so either event proves the batch owning an older
-# generation has nobody left to report to. Both are observed inside this
+# sends one command at a time (its session queue holds the next one back), so
+# either event proves the batch owning an older generation has nobody left to
+# report to. Both are observed inside this
 # process, with no dependence on when the OS reports the old peer gone --
 # StreamPeerTCP.poll() surfaces a destroyed peer promptly on some platforms and
 # not at all on others until a write is attempted, so the peer status checked
@@ -178,8 +227,19 @@ var _track_samples: Array = []
 # arguments because the element count is shared by the whole value, not by one
 # container. The walk never awaits, so two serializations cannot interleave.
 var _serialize_depth_limit: int = MAX_RESULT_DEPTH
-var _serialize_elements_left: int = SERIALIZE_UNLIMITED
-var _serialize_string_limit: int = SERIALIZE_UNLIMITED
+var _serialize_elements_left: int = MAX_RESULT_ELEMENTS
+var _serialize_string_limit: int = MAX_RESULT_STRING_CHARS
+# The containers the walk is inside right now, outermost first. A container
+# found on it again holds itself, directly or through others.
+var _serialize_path: Array = []
+
+# Parent watch: one connection to the server that spawned this game, kept only
+# to notice that server going away. Null when no watch port was given (an
+# attached session, a standalone run) or once the watch has been given up.
+var _parent_watch: StreamPeerTCP = null
+var _parent_watch_established: bool = false
+var _parent_watch_next_ms: int = 0
+var _parent_watch_beat: PackedByteArray = PackedByteArray()
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -199,6 +259,12 @@ func _ready() -> void:
 	else:
 		print("McpBridge: Listening on TCP port %d" % port)
 
+	var watch_port_text := OS.get_environment(PARENT_WATCH_PORT_ENV)
+	if watch_port_text != "" and watch_port_text.is_valid_int():
+		var watch_port := int(watch_port_text)
+		if watch_port >= 1 and watch_port <= 65535:
+			_start_parent_watch(watch_port)
+
 	if OS.get_environment("MCP_BACKGROUND") == "1":
 		# Setting BORDERLESS after the window exists removes the frame but keeps
 		# the outer rectangle, so the client area grows to the old outer size.
@@ -217,6 +283,8 @@ func _ready() -> void:
 		print("McpBridge: Background mode active - window off-screen, mouse input passes through")
 
 func _process(_delta: float) -> void:
+	if _parent_watch != null:
+		_poll_parent_watch()
 	if not _track_watch.is_empty():
 		_poll_track()
 	if tcp_server == null or not tcp_server.is_listening():
@@ -246,6 +314,54 @@ func _process(_delta: float) -> void:
 		_poll_peer(peer)
 		if peer.stream == null or peer.stream.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			_peers.remove_at(i)
+
+# --- Parent watch ---
+
+# Nothing tells a child process that its parent died. A server that is killed
+# outright (TerminateProcess, SIGKILL, a client that force-kills it) runs no
+# exit hook, so the game it spawned would keep running with nobody able to
+# reach it; in background mode it is hidden and cannot be focused either. The
+# operating system does close every socket of a dead process, however it died,
+# so this keeps one connection open to the server and quits the game when that
+# connection is lost.
+func _start_parent_watch(port: int) -> void:
+	var stream := StreamPeerTCP.new()
+	if stream.connect_to_host("127.0.0.1", port) != OK:
+		push_warning("McpBridge: could not open the parent watch connection; this game will not quit by itself if the MCP server is killed")
+		return
+	_parent_watch = stream
+	_parent_watch_beat.resize(1)
+	_parent_watch_beat[0] = 0
+	_parent_watch_next_ms = Time.get_ticks_msec() + PARENT_WATCH_INTERVAL_MS
+
+# Two signals, because neither is dependable alone on every platform: the
+# stream's status after poll(), which reports a closed peer promptly on some
+# systems and not at all on others while the connection is idle, and a write,
+# which fails once the peer's reset has come back. The write is one byte the
+# server reads and discards.
+#
+# Only a connection that was established and then lost quits the game. One
+# that never connected is given up on with a warning: that is a watch that
+# could not be set up, not a server that went away.
+func _poll_parent_watch() -> void:
+	var now := Time.get_ticks_msec()
+	if now < _parent_watch_next_ms:
+		return
+	_parent_watch_next_ms = now + PARENT_WATCH_INTERVAL_MS
+	_parent_watch.poll()
+	var status := _parent_watch.get_status()
+	if status == StreamPeerTCP.STATUS_CONNECTING:
+		return
+	if status == StreamPeerTCP.STATUS_CONNECTED:
+		_parent_watch_established = true
+		if _parent_watch.put_data(_parent_watch_beat) == OK:
+			return
+	_parent_watch = null
+	if not _parent_watch_established:
+		push_warning("McpBridge: the parent watch connection was never established; this game will not quit by itself if the MCP server is killed")
+		return
+	print("McpBridge: the MCP server that started this game is gone; quitting")
+	get_tree().quit()
 
 func _poll_peer(peer: PeerState) -> void:
 	peer.stream.poll()
@@ -476,6 +592,7 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	# release. Keys are reported verbatim in still_held.
 	var held := {}
 	var stopped := false
+	var reply_bytes := 0
 
 	for i in actions.size():
 		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, held)
@@ -487,6 +604,12 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 		if _input_batch_abandoned(peer, generation):
 			stopped = true
 			break
+		# Once the full entries have used the reply's byte budget, this entry
+		# and every later one is reported reduced.
+		if reply_bytes <= MAX_INPUT_REPLY_BYTES:
+			reply_bytes += JSON.stringify(entry).to_utf8_buffer().size()
+		if reply_bytes > MAX_INPUT_REPLY_BYTES:
+			entry = _reduce_entry(entry)
 		results.append(entry)
 		# The single sentinel site. It runs for every reported entry on every
 		# path, success or failure, and always after that action's settle frame,
@@ -516,6 +639,16 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	# what keeps the "every path reaches _send_response" invariant true without a
 	# finally block GDScript does not have.
 	_send_response(peer, response)
+
+# An entry cut down to REDUCED_ENTRY_KEYS, with the marker that says so.
+func _reduce_entry(entry: Dictionary) -> Dictionary:
+	var reduced := {"details_dropped": true}
+	for key in REDUCED_ENTRY_KEYS:
+		if entry.has(key):
+			reduced[key] = entry[key]
+	if reduced.has("error"):
+		reduced["error"] = _cut_text(str(reduced["error"]), MAX_REDUCED_ERROR_CHARS)
+	return reduced
 
 # True when the batch that started at `generation` has nobody left to report to.
 # Two independent signals, in order of trustworthiness:
@@ -551,6 +684,10 @@ func _validate_input_batch(actions: Array, watch: Variant) -> String:
 		if _split_watch_spec(spec).is_empty():
 			return "watch[%d]: expected NodePath:property (got '%s')" % [i, str(spec)]
 
+	if actions.size() > MAX_BATCH_ACTIONS:
+		return "the batch holds %d actions, over the %d one call may hold; split it across calls" % [actions.size(), MAX_BATCH_ACTIONS]
+
+	var total_wait_ms := 0.0
 	for i in actions.size():
 		var action = actions[i]
 		if typeof(action) != TYPE_DICTIONARY:
@@ -562,6 +699,14 @@ func _validate_input_batch(actions: Array, watch: Variant) -> String:
 		var field_error := _validate_action_fields(i, type, dict)
 		if field_error != "":
 			return field_error
+		# Both were type-checked just above: ms is a number on a wait, hold_ms a
+		# number on the types that take one.
+		if type == "wait" and dict.has("ms"):
+			total_wait_ms += float(dict.get("ms"))
+		elif dict.has("hold_ms"):
+			total_wait_ms += float(dict.get("hold_ms"))
+	if total_wait_ms > float(MAX_BATCH_WAIT_MS):
+		return "the batch waits %.0f ms in total, over the %d ms ceiling for one call; split it across calls" % [total_wait_ms, MAX_BATCH_WAIT_MS]
 	return ""
 
 func _validate_action_fields(index: int, type: String, action: Dictionary) -> String:
@@ -797,9 +942,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	if type == "text":
 		var focus_node := _focus_owner()
 		if focus_node is LineEdit:
-			entry["value"] = (focus_node as LineEdit).text
+			entry["value"] = _cut_text((focus_node as LineEdit).text, MAX_UI_TEXT_CHARS)
 		elif focus_node is TextEdit:
-			entry["value"] = (focus_node as TextEdit).text
+			entry["value"] = _cut_text((focus_node as TextEdit).text, MAX_UI_TEXT_CHARS)
 
 	var changes := _diff_ui(before, _snapshot_ui(), pre_focus, pre_scene)
 	if not changes.is_empty():
@@ -1001,7 +1146,7 @@ func _diff_ui(before: Dictionary, after: Dictionary, pre_focus: String, pre_scen
 		var now: Dictionary = after[path]
 		var delta := {"path": path}
 		if was.get("text", "") != now.get("text", ""):
-			delta["text"] = now.get("text", "")
+			delta["text"] = _cut_text(str(now.get("text", "")), MAX_UI_TEXT_CHARS)
 		if was.get("disabled", false) != now.get("disabled", false):
 			delta["disabled"] = now.get("disabled", false)
 		if delta.size() > 1:
@@ -1311,36 +1456,48 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	_send_response(peer, {"success": true, "result": serialized})
 
 # A value the caller asked for once (a run_script result, a mouse position):
-# bounded in depth, so a container that holds itself cannot recurse without
-# end, and in nothing else.
+# bounded in depth, total container elements and string length, generously.
+# See MAX_RESULT_DEPTH.
 func _serialize_value(value: Variant) -> Variant:
 	_serialize_depth_limit = MAX_RESULT_DEPTH
-	_serialize_elements_left = SERIALIZE_UNLIMITED
-	_serialize_string_limit = SERIALIZE_UNLIMITED
+	_serialize_elements_left = MAX_RESULT_ELEMENTS
+	_serialize_string_limit = MAX_RESULT_STRING_CHARS
+	_serialize_path.clear()
 	return _serialize_bounded(value, 0)
 
-# A watch or track sample: bounded in depth, total container elements and
-# string length. See MAX_SAMPLE_DEPTH.
+# A watch or track sample: the same three bounds, tightly. See MAX_SAMPLE_DEPTH.
 func _serialize_sample(value: Variant) -> Variant:
 	_serialize_depth_limit = MAX_SAMPLE_DEPTH
 	_serialize_elements_left = MAX_SAMPLE_ELEMENTS
 	_serialize_string_limit = MAX_SAMPLE_STRING_CHARS
+	_serialize_path.clear()
 	return _serialize_bounded(value, 0)
 
-# Cuts text to the string limit in force, with the number of characters cut.
-func _bound_text(text: String) -> String:
-	if _serialize_string_limit == SERIALIZE_UNLIMITED or text.length() <= _serialize_string_limit:
+# Cuts text to `limit` characters, with the number of characters cut.
+func _cut_text(text: String, limit: int) -> String:
+	if text.length() <= limit:
 		return text
-	return text.substr(0, _serialize_string_limit) + TRUNCATED_STRING_MARKER % (text.length() - _serialize_string_limit)
+	return text.substr(0, limit) + TRUNCATED_STRING_MARKER % (text.length() - limit)
+
+# Cuts text to the string limit of the serialization in progress.
+func _bound_text(text: String) -> String:
+	return _cut_text(text, _serialize_string_limit)
 
 # True when one more container element may be serialized, and counts it.
 func _take_serialize_element() -> bool:
-	if _serialize_elements_left == SERIALIZE_UNLIMITED:
-		return true
 	if _serialize_elements_left <= 0:
 		return false
 	_serialize_elements_left -= 1
 	return true
+
+# True when `container` is one the walk is already inside. Compared by
+# identity: == on two containers compares their contents, which for a container
+# that holds itself is the very recursion this exists to stop.
+func _on_serialize_path(container: Variant) -> bool:
+	for ancestor in _serialize_path:
+		if is_same(ancestor, container):
+			return true
+	return false
 
 # `depth` is how many containers enclose `value`. Call through _serialize_value
 # or _serialize_sample, which set the bounds this reads.
@@ -1373,6 +1530,9 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			if depth >= _serialize_depth_limit:
 				return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
 			var d: Dictionary = value
+			if _on_serialize_path(d):
+				return TRUNCATED_CYCLE_MARKER
+			_serialize_path.append(d)
 			var result := {}
 			var taken := 0
 			for key in d:
@@ -1381,17 +1541,22 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 					break
 				result[_bound_text(str(key))] = _serialize_bounded(d[key], depth + 1)
 				taken += 1
+			_serialize_path.pop_back()
 			return result
 		TYPE_ARRAY:
 			if depth >= _serialize_depth_limit:
 				return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
 			var a: Array = value
+			if _on_serialize_path(a):
+				return TRUNCATED_CYCLE_MARKER
+			_serialize_path.append(a)
 			var result := []
 			for i in a.size():
 				if not _take_serialize_element():
 					result.append(TRUNCATED_ELEMENTS_MARKER % (a.size() - i))
 					break
 				result.append(_serialize_bounded(a[i], depth + 1))
+			_serialize_path.pop_back()
 			return result
 		TYPE_OBJECT:
 			# A freed Object is not null, and `is` raises on one. A profiler track
@@ -1420,7 +1585,8 @@ func _handle_shutdown(peer: PeerState) -> void:
 	# Let the response flush before we tear the listener down. A new command
 	# arriving in this 2-frame window would dispatch against a peer that's
 	# about to close; the response write fails gracefully and the Node side
-	# sees BridgeDisconnectedError. MCP serializes calls so this is theoretical.
+	# sees BridgeDisconnectedError. The Node side sends one command at a time and
+	# sends nothing after a shutdown, so this is theoretical.
 	await get_tree().process_frame
 	await get_tree().process_frame
 	_close_all_peers()
@@ -1435,9 +1601,11 @@ func _send_response(peer: PeerState, data: Dictionary) -> void:
 	var resp := JSON.stringify(data)
 	var body := resp.to_utf8_buffer()
 	if body.size() > MAX_FRAME_BYTES:
-		push_error("McpBridge: Response exceeds %d bytes; dropping" % MAX_FRAME_BYTES)
-		peer.handling = false
-		return
+		# The caller is waiting on a reply. Sending none would leave it to wait
+		# out its whole timeout and conclude the game had stopped, so it gets a
+		# small error naming the size instead.
+		push_error("McpBridge: Response of %d bytes exceeds %d; sending an error in its place" % [body.size(), MAX_FRAME_BYTES])
+		body = JSON.stringify({"error": OVERSIZE_RESPONSE_ERROR % [body.size(), MAX_FRAME_BYTES], OVERSIZE_RESPONSE_FIELD: true}).to_utf8_buffer()
 	if peer.stream != null and peer.stream.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 		var header := PackedByteArray()
 		header.resize(FRAME_HEADER_BYTES)

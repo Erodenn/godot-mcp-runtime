@@ -37,6 +37,116 @@ export const FRAME_HEADER_BYTES = 4;
 export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 30000;
 
 /**
+ * Key the bridge sets to `true` on the error it sends in place of a reply too
+ * large to frame. The command had already run by then, which is what tells
+ * this error apart from a refusal: a handler that reads any `error` as "the
+ * command did nothing" would tell the caller to repeat work that landed.
+ *
+ * KEEP IN SYNC: `OVERSIZE_RESPONSE_FIELD` in src/scripts/mcp_bridge.gd.
+ */
+export const OVERSIZE_RESPONSE_FIELD = 'response_too_large';
+
+/**
+ * Largest delay `setTimeout` honors. A larger value overflows its 32-bit
+ * signed field and the timer fires after 1 ms instead, so a caller-supplied
+ * timeout of a few months would expire at once while the work it bounds is
+ * still running.
+ */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+const MIN_TIMER_DELAY_MS = 1;
+
+/**
+ * A duration that is safe to hand to `setTimeout`. The one place a
+ * caller-supplied timeout is bounded: every bridge command and every headless
+ * child goes through it. A value that is not a number becomes the maximum,
+ * which is the longest wait a timer can express.
+ */
+export function clampTimerDelay(ms: number): number {
+  if (typeof ms !== 'number' || Number.isNaN(ms)) return MAX_TIMER_DELAY_MS;
+  return Math.min(MAX_TIMER_DELAY_MS, Math.max(MIN_TIMER_DELAY_MS, Math.floor(ms)));
+}
+
+/**
+ * Environment variable that gives a spawned game the port of this server's
+ * parent-watch listener. Set next to `MCP_SESSION_TOKEN` and `MCP_BRIDGE_PORT`
+ * for spawned sessions only: an attached Godot is the user's process and is
+ * never given one.
+ *
+ * KEEP IN SYNC: `PARENT_WATCH_PORT_ENV` in src/scripts/mcp_bridge.gd.
+ */
+export const PARENT_WATCH_PORT_ENV = 'MCP_PARENT_WATCH_PORT';
+
+/**
+ * The listener a spawned game's bridge keeps one connection open to, so the
+ * game can tell when this server process is gone.
+ *
+ * Nothing watches a parent process for a child. A server that is killed
+ * outright (TerminateProcess, SIGKILL, a client that force-kills it) runs no
+ * exit hook, and the game it spawned keeps running; in background mode that
+ * game is hidden and cannot be focused. The operating system does close every
+ * socket of a dead process, though, however it died, so a connection to the
+ * server is the one signal that needs no cooperation from it. The bridge
+ * writes a byte down that connection on a timer and quits the game when the
+ * write fails or the connection reports closed.
+ *
+ * The listener only accepts and discards. It is unref'd, so it never keeps
+ * the server alive, and it is never closed: it ends with the process, which
+ * is the event it exists to signal.
+ */
+export class ParentWatchListener {
+  private server: net.Server | null = null;
+  private listening: Promise<number> | null = null;
+  /** Open connections, kept only so `close` can end them. */
+  private readonly connections = new Set<net.Socket>();
+
+  /** Port of the listener, binding it on first use. */
+  port(): Promise<number> {
+    if (this.listening !== null) return this.listening;
+    const pending = new Promise<number>((resolve, reject) => {
+      const server = net.createServer((socket) => {
+        // Heartbeat bytes are read and dropped, so the game's writes never
+        // fill the socket buffer. An error here is the game going away.
+        socket.on('error', () => {});
+        socket.on('close', () => this.connections.delete(socket));
+        this.connections.add(socket);
+        socket.resume();
+        socket.unref();
+      });
+      server.once('error', (error) => {
+        this.listening = null;
+        reject(error);
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+          this.listening = null;
+          server.close();
+          reject(new Error('Failed to determine the parent-watch port'));
+          return;
+        }
+        server.unref();
+        this.server = server;
+        resolve(address.port);
+      });
+    });
+    this.listening = pending;
+    return pending;
+  }
+
+  /**
+   * Stop listening and drop every connection, which is what a game sees when
+   * the server process dies. For tests; the server process never calls it.
+   */
+  close(): void {
+    for (const socket of this.connections) socket.destroy();
+    this.connections.clear();
+    this.server?.close();
+    this.server = null;
+    this.listening = null;
+  }
+}
+
+/**
  * Marker the bridge prints on stderr after each simulated input action settles,
  * as `<sentinel> <action index>`. stderr is a single ordered fd, so every
  * runtime-error line an input handler wrote during an action lands before that
@@ -149,6 +259,56 @@ export function findFreePort(): Promise<number> {
     // we proceed to srv.close() in the listening callback — a later error
     // is not possible from this server, so the listener stays safely dormant.
     srv.on('error', reject);
+  });
+}
+
+/**
+ * Send one frame to a bridge on a connection of its own and resolve with the
+ * first frame it answers. The connection is closed either way. Rejects when
+ * nothing listens, the peer closes first, the reply cannot be framed, or
+ * `timeoutMs` passes.
+ *
+ * For teardown. The runner's command socket carries one command at a time and
+ * may be in the middle of one when a session has to be stopped; a `shutdown`
+ * sent this way neither waits for that command nor disturbs it. The bridge
+ * serves each connection by itself.
+ */
+export function requestOnce(port: number, payload: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    let received: Buffer = Buffer.alloc(0);
+    let settled = false;
+    const settle = (finish: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      // An 'error' with no listener is thrown; a late one on a socket nobody
+      // waits on any more must not take the server down.
+      socket.on('error', () => {});
+      socket.destroy();
+      finish();
+    };
+    const timer = setTimeout(() => {
+      settle(() => reject(new Error(`No reply from the bridge within ${timeoutMs}ms`)));
+    }, clampTimerDelay(timeoutMs));
+    socket.once('connect', () => {
+      socket.setNoDelay(true);
+      socket.write(encodeFrame(payload));
+    });
+    socket.on('data', (chunk: Buffer) => {
+      received = Buffer.concat([received, chunk]);
+      try {
+        const first = parseFrames(received).frames[0];
+        if (first !== undefined) settle(() => resolve(first.toString('utf8')));
+      } catch (error) {
+        settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+      }
+    });
+    socket.on('error', (error: Error) => settle(() => reject(error)));
+    socket.on('close', () =>
+      settle(() => reject(new Error('The bridge closed the connection before replying'))),
+    );
   });
 }
 

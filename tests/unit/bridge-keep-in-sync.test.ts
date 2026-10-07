@@ -18,14 +18,25 @@ import {
   DEFAULT_BRIDGE_PORT,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
+  PARENT_WATCH_PORT_ENV,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
 import { TRACK_MAX_ENTRIES, TRACK_MIN_INTERVAL_MS } from '../../src/tools/profiler-tools.js';
-import { normalizeForCompare, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import {
+  extractTokenFramedPayload,
+  normalizeForCompare,
+  OPERATION_RESULT_SENTINEL,
+  OPERATION_RESULT_TOKEN_END,
+  OPERATION_RESULT_TOKEN_ENV,
+} from '../../src/utils/output-parsing.js';
+import {
+  MAX_INPUT_BATCH_BUDGET_MS,
   SCREENSHOT_DEFAULT_TIMEOUT_MS,
   SCREENSHOT_FRAME_RENDER_BUDGET_MS,
 } from '../../src/tools/runtime-tools.js';
+
+/** The most bytes UTF-8 spends on one character. */
+const UTF8_MAX_BYTES_PER_CHAR = 4;
 
 const bridgeSource = readFileSync(
   new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
@@ -37,6 +48,15 @@ function gdConst(name: string): string {
   const match = bridgeSource.match(new RegExp(`^const ${name}\\s*:=\\s*(.+?)\\s*(?:#.*)?$`, 'm'));
   expect(match, `mcp_bridge.gd must declare const ${name}`).not.toBeNull();
   return match![1]!;
+}
+
+/** Body of one top-level `func`, up to the next top-level declaration. */
+function gdFunctionBody(name: string): string {
+  const start = bridgeSource.indexOf(`\nfunc ${name}(`);
+  expect(start, `mcp_bridge.gd must define func ${name}`).toBeGreaterThanOrEqual(0);
+  const rest = bridgeSource.slice(start + 1);
+  const next = rest.slice(1).search(/\n(?:func |# |const |var )/);
+  return next === -1 ? rest : rest.slice(0, next + 1);
 }
 
 describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
@@ -77,6 +97,71 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(bridgeSource).not.toContain('await RenderingServer.frame_post_draw');
     expect(bridgeSource).toContain('< FRAME_RENDER_BUDGET_MS');
   });
+
+  it('bounds the waits of one input batch at the same figure as the TypeScript budget ceiling', () => {
+    expect(gdConst('MAX_BATCH_WAIT_MS')).toBe(String(MAX_INPUT_BATCH_BUDGET_MS));
+    const validation = gdFunctionBody('_validate_input_batch');
+    expect(validation).toContain('if total_wait_ms > float(MAX_BATCH_WAIT_MS):');
+  });
+
+  it('reads the parent-watch port from the variable the server sets', () => {
+    expect(gdConst('PARENT_WATCH_PORT_ENV')).toBe(`"${PARENT_WATCH_PORT_ENV}"`);
+    expect(gdFunctionBody('_ready')).toContain('OS.get_environment(PARENT_WATCH_PORT_ENV)');
+  });
+});
+
+/**
+ * The parent watch quits a spawned game whose server is gone. What a text
+ * read can pin is the shape that keeps it from quitting a game it should not:
+ * it is started only from the environment variable (an attached Godot is
+ * given none), and it quits only on a connection that was established first.
+ */
+describe('mcp_bridge.gd parent watch', () => {
+  it('is started from the environment variable and nowhere else', () => {
+    const starts = bridgeSource.match(/_start_parent_watch\(/g) ?? [];
+    // The definition and the one call in _ready.
+    expect(starts).toHaveLength(2);
+    expect(bridgeSource).not.toMatch(/const PARENT_WATCH_PORT\s*:=/);
+  });
+
+  it('quits only after the connection had been established, and warns otherwise', () => {
+    const poll = gdFunctionBody('_poll_parent_watch');
+    const giveUp = poll.indexOf('if not _parent_watch_established:');
+    const quit = poll.indexOf('get_tree().quit()');
+    expect(giveUp).toBeGreaterThanOrEqual(0);
+    expect(quit).toBeGreaterThan(giveUp);
+    expect(poll.slice(giveUp, quit)).toContain('return');
+    expect(poll).toContain('_parent_watch.put_data(_parent_watch_beat) == OK');
+  });
+
+  it('checks on a named interval', () => {
+    expect(Number(gdConst('PARENT_WATCH_INTERVAL_MS'))).toBeGreaterThan(0);
+    expect(gdFunctionBody('_poll_parent_watch')).toContain('PARENT_WATCH_INTERVAL_MS');
+  });
+});
+
+/**
+ * A reply the bridge cannot frame must still be answered: the caller is
+ * waiting, and silence reads as a dead game.
+ */
+describe('mcp_bridge.gd answers every command', () => {
+  it('sends an error in place of a response over the frame limit, instead of sending nothing', () => {
+    const send = gdFunctionBody('_send_response');
+    expect(send).toContain('OVERSIZE_RESPONSE_ERROR %');
+    // One exit only: the oversize branch falls through to the write.
+    expect(send.match(/^\t+return$/gm)).toBeNull();
+    expect(gdConst('OVERSIZE_RESPONSE_ERROR')).toContain('%d');
+  });
+
+  it('bounds the two text fields of an input result that no serializer sees', () => {
+    expect(Number(gdConst('MAX_UI_TEXT_CHARS'))).toBeGreaterThan(0);
+    expect(gdFunctionBody('_run_action').match(/_cut_text\(.+, MAX_UI_TEXT_CHARS\)/g)).toHaveLength(
+      2,
+    );
+    expect(gdFunctionBody('_diff_ui')).toMatch(
+      /delta\["text"\] = _cut_text\(.+, MAX_UI_TEXT_CHARS\)/,
+    );
+  });
 });
 
 /**
@@ -86,15 +171,6 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
  * Godot-backed integration run.
  */
 describe('mcp_bridge.gd bounds the values it serializes', () => {
-  /** Body of one top-level `func`, up to the next top-level declaration. */
-  function gdFunctionBody(name: string): string {
-    const start = bridgeSource.indexOf(`\nfunc ${name}(`);
-    expect(start, `mcp_bridge.gd must define func ${name}`).toBeGreaterThanOrEqual(0);
-    const rest = bridgeSource.slice(start + 1);
-    const next = rest.slice(1).search(/\n(?:func |# |const |var )/);
-    return next === -1 ? rest : rest.slice(0, next + 1);
-  }
-
   it('declares a depth bound for every serialization and size bounds for samples', () => {
     expect(Number(gdConst('MAX_RESULT_DEPTH'))).toBeGreaterThan(0);
     expect(Number(gdConst('MAX_SAMPLE_DEPTH'))).toBeGreaterThan(0);
@@ -120,7 +196,23 @@ describe('mcp_bridge.gd bounds the values it serializes', () => {
     expect(walker.match(/TRUNCATED_DEPTH_MARKER %/g)).toHaveLength(2);
     expect(walker).toContain('TRUNCATED_ELEMENTS_MARKER %');
     expect(walker).toContain('TRUNCATED_ENTRIES_MARKER %');
-    expect(gdFunctionBody('_bound_text')).toContain('TRUNCATED_STRING_MARKER %');
+    expect(gdFunctionBody('_cut_text')).toContain('TRUNCATED_STRING_MARKER %');
+    expect(gdFunctionBody('_bound_text')).toContain('_cut_text(text, _serialize_string_limit)');
+  });
+
+  it('cuts a container that is already being walked, in both container branches, by identity', () => {
+    const walker = gdFunctionBody('_serialize_bounded');
+    expect(
+      walker.match(/if _on_serialize_path\(\w+\):\n\t+return TRUNCATED_CYCLE_MARKER/g),
+    ).toHaveLength(2);
+    // Entered and left in pairs, so a sibling is never mistaken for an ancestor.
+    expect(walker.match(/_serialize_path\.append\(/g)).toHaveLength(2);
+    expect(walker.match(/_serialize_path\.pop_back\(\)/g)).toHaveLength(2);
+    // == on a container that holds itself is the recursion being avoided.
+    expect(gdFunctionBody('_on_serialize_path')).toContain('is_same(ancestor, container)');
+    // Each entry point starts from an empty path.
+    expect(gdFunctionBody('_serialize_value')).toContain('_serialize_path.clear()');
+    expect(gdFunctionBody('_serialize_sample')).toContain('_serialize_path.clear()');
   });
 
   it('samples watch and track values through the size-bounded entry point', () => {
@@ -133,11 +225,25 @@ describe('mcp_bridge.gd bounds the values it serializes', () => {
     expect(sampleEntry).toContain('_serialize_string_limit = MAX_SAMPLE_STRING_CHARS');
   });
 
-  it('gives a run_script result the depth bound and no size bound', () => {
+  it('gives a run_script result all three bounds, far wider than a sample gets', () => {
     const resultEntry = gdFunctionBody('_serialize_value');
     expect(resultEntry).toContain('_serialize_depth_limit = MAX_RESULT_DEPTH');
-    expect(resultEntry).toContain('_serialize_elements_left = SERIALIZE_UNLIMITED');
-    expect(resultEntry).toContain('_serialize_string_limit = SERIALIZE_UNLIMITED');
+    expect(resultEntry).toContain('_serialize_elements_left = MAX_RESULT_ELEMENTS');
+    expect(resultEntry).toContain('_serialize_string_limit = MAX_RESULT_STRING_CHARS');
+    expect(Number(gdConst('MAX_RESULT_ELEMENTS'))).toBeGreaterThan(
+      Number(gdConst('MAX_SAMPLE_ELEMENTS')),
+    );
+    expect(Number(gdConst('MAX_RESULT_STRING_CHARS'))).toBeGreaterThan(
+      Number(gdConst('MAX_SAMPLE_STRING_CHARS')),
+    );
+  });
+
+  it('has no unbounded serialization left', () => {
+    expect(bridgeSource).not.toContain('SERIALIZE_UNLIMITED');
+    // A result string at its cap, encoded at four bytes a character, still fits a frame.
+    const worstCaseStringBytes =
+      Number(gdConst('MAX_RESULT_STRING_CHARS')) * UTF8_MAX_BYTES_PER_CHAR;
+    expect(worstCaseStringBytes).toBeLessThan(MAX_FRAME_BYTES);
   });
 });
 
@@ -161,6 +267,37 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
       'godot_operations.gd must declare const OPERATION_RESULT_SENTINEL',
     ).not.toBeNull();
     expect(match![1]).toBe(`"${OPERATION_RESULT_SENTINEL}"`);
+  });
+
+  it.each([
+    ['OPERATION_RESULT_TOKEN_ENV', OPERATION_RESULT_TOKEN_ENV],
+    ['OPERATION_RESULT_TOKEN_END', OPERATION_RESULT_TOKEN_END],
+  ])('declares the same %s', (name, expected) => {
+    const match = operationsSource.match(
+      new RegExp(`^const ${name}\\s*:=\\s*(.+?)\\s*(?:#.*)?$`, 'm'),
+    );
+    expect(match, `godot_operations.gd must declare const ${name}`).not.toBeNull();
+    expect(match![1]).toBe(`"${expected}"`);
+  });
+
+  it('frames the result as the reader expects it: sentinel, token, token end, JSON', () => {
+    const emitterLine = operationsSource
+      .split('\n')
+      .find((line) => line.includes('print(OPERATION_RESULT_SENTINEL'));
+    expect(emitterLine?.trim()).toBe(
+      'print(OPERATION_RESULT_SENTINEL + token_part + JSON.stringify(payload))',
+    );
+    expect(operationsSource).toContain(
+      'var token_part := "" if result_token.is_empty() else result_token + OPERATION_RESULT_TOKEN_END',
+    );
+    expect(operationsSource).toContain(
+      'result_token = OS.get_environment(OPERATION_RESULT_TOKEN_ENV)',
+    );
+
+    // The same concatenation, done here, is what the reader accepts.
+    const token = 'ab12';
+    const line = `${OPERATION_RESULT_SENTINEL}${token}${OPERATION_RESULT_TOKEN_END}{"ok":true}`;
+    expect(extractTokenFramedPayload(line, token)).toBe('{"ok":true}');
   });
 
   it('keeps the sentinel distinct from the stderr action-boundary sentinel', () => {
