@@ -35,12 +35,11 @@ export async function engineMajorMinor(): Promise<MajorMinor> {
 }
 
 /**
- * Heuristic: bridge failures we treat as "no display server" (skip-worthy)
- * rather than real failures. Anything else means runProject or the bridge is
- * genuinely broken and the test must fail loudly.
- *
- * This is the only condition an itGodot runtime test may skip on beyond the
- * `hasGodot` gate above. Do not add others.
+ * Heuristic: engine output that names a missing display server. Used only by
+ * the render_movie test, which already skips on `checkDisplayAvailable()` and
+ * reads this to word its failure. `runProjectOrSkip` does not use it: it
+ * decides its one skip from `checkDisplayAvailable()` before launching, since
+ * a substring of a failure also matches real window-creation defects.
  */
 export function isHeadlessEnvironmentError(err: string | undefined): boolean {
   if (!err) return false;
