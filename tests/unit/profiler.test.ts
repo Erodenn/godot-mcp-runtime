@@ -16,12 +16,19 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as net from 'net';
 import Ajv from 'ajv';
 import { decodeVariant, encodeVariant, type Variant } from '../../src/utils/godot-variant.js';
-import { profilerToolDefinitions } from '../../src/tools/profiler-tools.js';
+import {
+  PROFILE_PROJECT_WORST_CASE_MS,
+  profilerToolDefinitions,
+} from '../../src/tools/profiler-tools.js';
 import {
   DebuggerProfiler,
+  PROFILE_MAX_SECONDS,
+  PROFILE_WINDOW_MAX_SECONDS,
+  PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
   timelineBucketMs,
   type TrackCollector,
+  type TrackSample,
 } from '../../src/utils/profiler.js';
 
 const THREAD = 1;
@@ -428,17 +435,25 @@ describe('DebuggerProfiler capture quality signals', () => {
     expect(result.limitReached).toBe(false);
   });
 
-  it('refuses to summarize a capture that folded no frames', async () => {
+  it('refuses to summarize a capture that was stopped before it folded a frame', async () => {
     const { profiler: p, peer: fake } = await connectedProfiler();
     const running = p.start(5, 512);
     await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 1, 'profiler enable');
     // Only the boundary frame arrives, so nothing survives the discard. An
     // all-zero payload here would read as "nothing in this game is slow".
     fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [[0, 1, 0.001, 0.002]])]);
+    await drain(fake);
+    // A stop lands while the start is still waiting for its first usable frame.
+    const stopped = p.stop(10, 'selfMs');
+    stopped.catch(() => undefined);
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 2, 'profiler disable');
     fake.send(['servers:profile_total', THREAD, frame(2, 0.016, [])]);
-    await running;
 
-    await expect(p.stop(10, 'selfMs')).rejects.toMatchObject({ code: 'profile_no_frames' });
+    // The engine closed the capture: an answer, not a reason to sit out the wait.
+    expect(await running).toMatchObject({ active: false, firstFrame: null });
+    await expect(stopped).rejects.toMatchObject({ code: 'profile_no_frames' });
+    // Closed out, so the receiver takes the next capture at once.
+    expect(() => p.assertCanStart(5, 512)).not.toThrow();
   });
 
   it('rejects a frame whose counts are not whole numbers', async () => {
@@ -1079,7 +1094,40 @@ describe('DebuggerProfiler visual capture', () => {
     const result = await visualCapture([visualFrame(41, cpuOnly)]);
 
     expect(result.visual).toMatchObject({ frames: 1, gpuTimed: false });
-    expect(result.visual!.gpuMs.max).toBe(0);
+    // Not measured is null everywhere a GPU time is reported, never 0.
+    const visual = result.visual!;
+    expect(visual.gpuMs).toBeNull();
+    expect(visual.cpuMs!.max).toBeCloseTo(1.6, 6);
+    expect(visual.areas.length).toBeGreaterThan(0);
+    for (const area of visual.areas) expect(area.gpuMs).toBeNull();
+    expect(visual.worstFrame!.gpuMs).toBeNull();
+    expect(visual.worstFrame!.cpuMs).toBeCloseTo(1.6, 6);
+    expect(visual.worstFrame!.areas.length).toBeGreaterThan(0);
+    for (const area of visual.worstFrame!.areas) expect(area.gpuMs).toBeNull();
+  });
+
+  it('reports GPU times as numbers once any frame carried a GPU timestamp', async () => {
+    const cpuOnly: Marker[] = RENDER_FRAME.map(([name, cpu]) => [name, cpu, 0]);
+    const result = await visualCapture([visualFrame(41, cpuOnly), visualFrame(42, RENDER_FRAME)]);
+
+    const visual = result.visual!;
+    expect(visual).toMatchObject({ frames: 2, gpuTimed: true });
+    expect(visual.gpuMs!.max).toBeCloseTo(3.6, 6);
+    for (const area of visual.areas) expect(area.gpuMs).not.toBeNull();
+  });
+
+  it('has no render timings at all when no render frame was folded', async () => {
+    // Only the settle frames arrive: the capture measured no rendering.
+    const result = await visualCapture([]);
+
+    expect(result.visual).toMatchObject({ frames: 0, framesReceived: 5, gpuTimed: false });
+    expect(result.visual!.cpuMs).toBeNull();
+    expect(result.visual!.gpuMs).toBeNull();
+    expect(result.visual!.areas).toEqual([]);
+    expect(result.visual!.worstFrame).toBeNull();
+    const definition = profilerToolDefinitions.find((tool) => tool.name === 'profile_project');
+    const validate = new Ajv({ strict: false }).compile(definition!.outputSchema as object);
+    expect(validate({ projectPath: '/p', ...result }), JSON.stringify(validate.errors)).toBe(true);
   });
 
   it('keeps a group the engine re-opens as a sibling of its first pass, not its child', async () => {
@@ -1781,5 +1829,511 @@ describe('DebuggerProfiler incomplete captures keep what they measured', () => {
     expect(result.visual).not.toBeNull();
     expect(result.timeline).not.toBeNull();
     expect(result.monitors).not.toBeNull();
+  });
+});
+
+describe('DebuggerProfiler reports unmeasured GPU time on the timeline as null', () => {
+  it('a renderer that timed no GPU work leaves render.gpuMs null and the payload schema-valid', async () => {
+    const cpuOnly: Marker[] = RENDER_FRAME.map(([name, cpu]) => [name, cpu, 0]);
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512, { visual: true, timelineMs: 5000 });
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [])]);
+    sendSettleFrames(fake);
+    fake.send(['visual:profile_frame', THREAD, visualFrame(41, cpuOnly)]);
+    const result = await stopCapture(p, fake);
+
+    const bucket = result.timeline!.buckets[0]!;
+    expect(bucket.render).toEqual({ cpuMs: expect.closeTo(1.6, 6), gpuMs: null });
+    const definition = profilerToolDefinitions.find((tool) => tool.name === 'stop_profiler');
+    const validate = new Ajv({ strict: false }).compile(definition!.outputSchema as object);
+    expect(validate({ projectPath: '/p', ...result }), JSON.stringify(validate.errors)).toBe(true);
+  });
+});
+
+describe('DebuggerProfiler leaves game values unrounded', () => {
+  const TRACK = '/root/Main/Player:speed';
+  // Both are below the four decimals the server's own timings are rounded to.
+  const TINY_TRACKED = 0.00003;
+  const TINY_MONITOR = 0.00004;
+  const NOISY_FRAME_SECONDS = 0.0160000123;
+
+  it('passes tracked values and custom monitors through exactly, and still rounds its timings', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    fake.send(['performance:profile_names', THREAD, ['game/drift']]);
+    const running = p.start(5, 512, { timelineMs: 5000, track: [TRACK] });
+    await feedStart(fake, running, [
+      frame(1, 0.016, []),
+      frame(2, NOISY_FRAME_SECONDS, [[0, 1, 0.001, 0.002]]),
+    ]);
+    fake.send(['performance:profile_frame', THREAD, monitorSample({}, 59, [TINY_MONITOR])]);
+    const collect = async (): Promise<{ samples: TrackSample[]; error: null }> => ({
+      samples: [{ frame: 2, values: { [TRACK]: TINY_TRACKED, nested: { x: TINY_TRACKED } } }],
+      error: null,
+    });
+    const result = await stopCapture(p, fake, 10, collect);
+
+    expect(result.timeline!.buckets[0]!.track).toEqual({
+      [TRACK]: TINY_TRACKED,
+      nested: { x: TINY_TRACKED },
+    });
+    expect(result.monitors!.custom).toEqual([
+      { name: 'game/drift', avg: TINY_MONITOR, min: TINY_MONITOR, max: TINY_MONITOR },
+    ]);
+    // The server's own arithmetic is still trimmed to four decimals of a millisecond.
+    expect(result.frame.frameMs.avg).toBe(16);
+    expect(result.timeline!.buckets[0]!.frameMs).toEqual({ avg: 16, max: 16 });
+  });
+});
+
+describe('DebuggerProfiler ties each sentinel to the disable it answers', () => {
+  const TOTALS_TIMEOUT_ADVANCE_MS = 10_001;
+  const FIRST_FRAME_TIMEOUT_ADVANCE_MS = 5_001;
+
+  const serverCommands = (fake: FakeGodot): number => fake.commandsNamed('profiler:servers').length;
+
+  /** Capture A: two usable frames, then a stop the engine never answers. */
+  async function captureClosedByTimeout(p: DebuggerProfiler, fake: FakeGodot): Promise<void> {
+    const first = p.start(5, 512);
+    await feedStart(fake, first, [
+      frame(1, 0.016, []),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0.016, [[0, 1, 0.001, 0.002]]),
+    ]);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const timedOut = p.stop(10, 'selfMs');
+      await vi.advanceTimersByTimeAsync(TOTALS_TIMEOUT_ADVANCE_MS);
+      expect(await timedOut).toMatchObject({ complete: false, frames: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("drops a frozen capture's late frame and its sentinel instead of closing the next capture with them", async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    // Capture A times out while the game is frozen: its disable is unanswered.
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    // Capture B opens. The game thaws and sends what it still owed A, in the
+    // order the engine handles messages: one more A frame, then A's sentinel,
+    // and only then anything B's enable produced.
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    fake.send(['servers:profile_frame', THREAD, frame(4, 0.5, [[0, 50, 0.4, 0.4]])]);
+    fake.send(['servers:profile_total', THREAD, frame(4, 0.016, [])]);
+    await drain(fake);
+    // Neither closed B nor counted as its boundary frame.
+    expect(p.hasResult).toBe(false);
+    expect(p.hasFrames).toBe(false);
+
+    await feedStart(fake, second, [
+      frame(10, 0.016, []),
+      frame(11, 0.016, [[0, 3, 0.003, 0.006]]),
+      frame(12, 0.016, [[0, 4, 0.004, 0.008]]),
+    ]);
+    expect(await second).toMatchObject({ active: true, firstFrame: 11 });
+
+    const result = await stopCapture(p, fake);
+    expect(result).toMatchObject({
+      complete: true,
+      frames: 2,
+      framesReceived: 3,
+      firstFrame: 11,
+      lastFrame: 12,
+    });
+    // A's late frame carried 50 calls; none of them is in B.
+    expect(result.rows[0]).toMatchObject({ function: '_burn', calls: 7 });
+    // B's own disable was sent and answered: the engine is not left profiling.
+    expect(fake.commandsNamed('profiler:servers').map((c) => (c[2] as Variant[])[0])).toEqual([
+      true,
+      false,
+      true,
+      false,
+    ]);
+  });
+
+  it("drops a frozen capture's late render frames too", async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+
+    const second = p.start(5, 512, { visual: true });
+    await waitUntil(() => fake.commandsNamed('profiler:visual').length >= 1, 'visual enable');
+    // Still owed to the earlier capture: they must not use up B's settle frames.
+    fake.send(['visual:profile_frame', THREAD, visualFrame(20, STALE_FRAME)]);
+    fake.send(['servers:profile_total', THREAD, frame(4, 0.016, [])]);
+    sendSettleFrames(fake);
+    fake.send(['visual:profile_frame', THREAD, visualFrame(41, RENDER_FRAME)]);
+    await feedStart(fake, second, [frame(10, 0.016, []), frame(11, 0.016, [])]);
+
+    const result = await stopCapture(p, fake);
+    expect(result.visual).toMatchObject({ framesReceived: 6, frames: 1 });
+    expect(result.visual!.cpuMs!.max).toBeCloseTo(1.6, 6);
+  });
+
+  it('start, stop, start in quick succession: each capture keeps its own frames', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const first = p.start(5, 512);
+    await feedStart(fake, first, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => serverCommands(fake) >= 2, 'first disable');
+    // Sent before the engine handled the disable: still the first capture's.
+    fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 2, 0.002, 0.004]])]);
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    expect(await stopped).toMatchObject({ complete: true, frames: 2, lastFrame: 3 });
+
+    const second = p.start(5, 512);
+    await feedStart(fake, second, [frame(7, 0.016, []), frame(8, 0.016, [[1, 5, 0.001, 0.001]])]);
+    const result = await stopCapture(p, fake);
+
+    expect(result).toMatchObject({ complete: true, frames: 1, firstFrame: 8, lastFrame: 8 });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({ function: '_other', calls: 5 });
+  });
+
+  it('ignores a sentinel that answers no disable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    fake.send(['servers:profile_total', THREAD, frame(2, 0.016, [])]);
+    await drain(fake);
+
+    expect(p.hasResult).toBe(false);
+    expect((await stopCapture(p, fake)).complete).toBe(true);
+  });
+
+  it('a start that times out waiting for its first frame closes itself out and leaves the receiver usable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const failed = p.start(5, 512);
+      failed.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(FIRST_FRAME_TIMEOUT_ADVANCE_MS);
+      await expect(failed).rejects.toMatchObject({ code: 'profile_timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+    // Enabled, then switched off again by the failed start itself.
+    await waitUntil(() => serverCommands(fake) >= 2, 'the failed start disabling the profiler');
+
+    // Not `stopping`: the next start is accepted, and reading the failed
+    // capture answers at once, saying it never started, instead of waiting out
+    // a totals timeout for a sentinel a frozen game will not send.
+    expect(() => p.assertCanStart(5, 512)).not.toThrow();
+    const reading = p.stop(10, 'selfMs');
+    await expect(reading).rejects.toMatchObject({ code: 'profile_no_frames' });
+    await expect(reading).rejects.toThrow(/never started.*received 0/);
+
+    // The game thaws mid-way through the next capture: the failed start's
+    // sentinel arrives late and closes nothing.
+    const next = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= 3, 'next enable');
+    fake.send(['servers:profile_total', THREAD, frame(1, 0.016, [])]);
+    await feedStart(fake, next, [frame(10, 0.016, []), frame(11, 0.016, [[0, 2, 0.002, 0.004]])]);
+    expect(await next).toMatchObject({ active: true });
+    expect(await stopCapture(p, fake)).toMatchObject({ complete: true, frames: 1 });
+  });
+
+  it('a one-shot window whose first frame never arrives leaves the receiver usable as well', async () => {
+    const { profiler: p } = await connectedProfiler();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const failed = p.captureWindow(1, 10, 'selfMs');
+      failed.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(FIRST_FRAME_TIMEOUT_ADVANCE_MS);
+      await expect(failed).rejects.toMatchObject({ code: 'profile_timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(() => p.assertCanStart(5, 512)).not.toThrow();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SAMPLES_PROVING_THE_SENTINEL_LOST = 3;
+  /** The engine's interval between two monitor samples. */
+  const MONITOR_SAMPLE_INTERVAL_MS = 1_000;
+  /** Longer than the wait a disable gets before it can be given up on. */
+  const PAST_THE_SENTINEL_WAIT_MS = 5_000;
+
+  /**
+   * Deliver `count` monitor samples one engine interval apart on the test
+   * clock, each one received before the next is sent. The clock must be faked.
+   */
+  async function sendSpacedMonitorSamples(fake: FakeGodot, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      vi.setSystemTime(Date.now() + MONITOR_SAMPLE_INTERVAL_MS);
+      fake.send(['performance:profile_frame', THREAD, monitorSample({})]);
+      await drain(fake);
+    }
+  }
+
+  it('gives up on a sentinel once the engine has provably iterated past the disable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    // The engine keeps sending its once-a-second monitor sample and never the
+    // sentinel: it dropped it. Waiting for it would discard B's frames for good.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + PAST_THE_SENTINEL_WAIT_MS);
+    await sendSpacedMonitorSamples(fake, SAMPLES_PROVING_THE_SENTINEL_LOST);
+    vi.useRealTimers();
+    await feedStart(fake, second, [frame(10, 0.016, []), frame(11, 0.016, [[0, 3, 0.003, 0.006]])]);
+    expect(await second).toMatchObject({ active: true, firstFrame: 11 });
+    expect(await stopCapture(p, fake)).toMatchObject({ complete: true, frames: 1 });
+  });
+
+  it('still waits for the sentinel while fewer monitor samples than that have arrived', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    // One sample was in flight and one came from the iteration that then read
+    // the disable: both can precede the sentinel on a healthy engine.
+    fake.send(['performance:profile_frame', THREAD, monitorSample({})]);
+    fake.send(['performance:profile_frame', THREAD, monitorSample({})]);
+    fake.send(['servers:profile_frame', THREAD, frame(4, 0.5, [[0, 50, 0.4, 0.4]])]);
+    fake.send(['servers:profile_frame', THREAD, frame(5, 0.5, [[0, 50, 0.4, 0.4]])]);
+    fake.send(['servers:profile_total', THREAD, frame(5, 0.016, [])]);
+    await drain(fake);
+    expect(p.hasFrames).toBe(false);
+
+    await feedStart(fake, second, [frame(10, 0.016, []), frame(11, 0.016, [[0, 3, 0.003, 0.006]])]);
+    const result = await stopCapture(p, fake);
+    expect(result).toMatchObject({ complete: true, frames: 1, firstFrame: 11 });
+    expect(result.rows[0]).toMatchObject({ calls: 3 });
+  });
+
+  it('closes a stopping capture as incomplete when its sentinel is lost, without the full totals wait', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => serverCommands(fake) >= 2, 'disable');
+    await sendSpacedMonitorSamples(fake, SAMPLES_PROVING_THE_SENTINEL_LOST);
+    vi.setSystemTime(Date.now() + PAST_THE_SENTINEL_WAIT_MS);
+    await sendSpacedMonitorSamples(fake, 1);
+    const result = await stopped;
+    expect(result.complete).toBe(false);
+    expect(result.frames).toBe(1);
+    expect(result.warnings?.[0]).toMatch(/capture is incomplete/);
+  });
+
+  // Samples are counted when they are received, which is not when they were
+  // sent: after a pause of this process they arrive together, and some were
+  // sent before the disable was.
+  it('does not give up on samples delivered in one burst, and the sentinel still closes its own capture', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + PAST_THE_SENTINEL_WAIT_MS);
+    for (let i = 0; i < SAMPLES_PROVING_THE_SENTINEL_LOST + 1; i++) {
+      fake.send(['performance:profile_frame', THREAD, monitorSample({})]);
+    }
+    // The late frames and sentinel of the first capture, behind the burst.
+    fake.send(['servers:profile_frame', THREAD, frame(4, 0.5, [[0, 50, 0.4, 0.4]])]);
+    fake.send(['servers:profile_total', THREAD, frame(4, 0.016, [])]);
+    await drain(fake);
+    vi.useRealTimers();
+    expect(p.hasFrames).toBe(false);
+
+    await feedStart(fake, second, [frame(10, 0.016, []), frame(11, 0.016, [[0, 3, 0.003, 0.006]])]);
+    const result = await stopCapture(p, fake);
+    expect(result).toMatchObject({ complete: true, frames: 1, firstFrame: 11 });
+    expect(result.rows[0]).toMatchObject({ calls: 3 });
+  });
+
+  it('does not give up on well-spaced samples before the minimum wait has passed', async () => {
+    const SHORT_SAMPLE_GAP_MS = 600;
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    for (let i = 0; i < SAMPLES_PROVING_THE_SENTINEL_LOST; i++) {
+      vi.setSystemTime(Date.now() + SHORT_SAMPLE_GAP_MS);
+      fake.send(['performance:profile_frame', THREAD, monitorSample({})]);
+      await drain(fake);
+    }
+    fake.send(['servers:profile_frame', THREAD, frame(4, 0.5, [[0, 50, 0.4, 0.4]])]);
+    fake.send(['servers:profile_total', THREAD, frame(4, 0.016, [])]);
+    await drain(fake);
+    vi.useRealTimers();
+    expect(p.hasFrames).toBe(false);
+
+    await feedStart(fake, second, [frame(10, 0.016, []), frame(11, 0.016, [[0, 3, 0.003, 0.006]])]);
+    expect(await stopCapture(p, fake)).toMatchObject({ complete: true, frames: 1, firstFrame: 11 });
+  });
+
+  it('the game exiting mid-capture keeps the capture readable, with an earlier disable still unanswered', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    const afterA = serverCommands(fake);
+
+    const second = p.start(5, 512);
+    await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
+    fake.send(['servers:profile_total', THREAD, frame(3, 0.016, [])]);
+    await feedStart(fake, second, [
+      frame(10, 0.016, []),
+      frame(11, 0.016, [[0, 3, 0.003, 0.006]]),
+      frame(12, 0.016, [[0, 4, 0.004, 0.008]]),
+    ]);
+    fake.close();
+    await waitUntil(() => p.hasResult, 'the disconnect closing out the capture');
+
+    const result = await p.stop(10, 'selfMs');
+    expect(result).toMatchObject({ complete: false, frames: 2, firstFrame: 11 });
+    expect(result.warnings?.[0]).toMatch(/connection dropped/);
+  });
+
+  it('the game exiting while a stale disable is outstanding leaves the finished capture readable', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await captureClosedByTimeout(p, fake);
+    fake.close();
+    await waitUntil(() => !p.connected, 'peer disconnect');
+
+    expect(await p.stop(10, 'selfMs')).toMatchObject({ complete: false, frames: 2 });
+  });
+});
+
+describe('DebuggerProfiler window limits', () => {
+  const CLIENT_REQUEST_TIMEOUT_MS = 60_000;
+
+  it('keeps the worst case of a blocking capture under a client request timeout', () => {
+    expect(PROFILE_WINDOW_WORST_CASE_MS).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+    expect(PROFILE_PROJECT_WORST_CASE_MS).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+    expect(PROFILE_PROJECT_WORST_CASE_MS).toBeGreaterThan(PROFILE_WINDOW_WORST_CASE_MS);
+  });
+
+  it('refuses a blocking window longer than its limit, and still lets start run to the longer one', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    await expect(
+      p.captureWindow(PROFILE_WINDOW_MAX_SECONDS + 1, 10, 'selfMs'),
+    ).rejects.toMatchObject({
+      code: 'bad_args',
+      message: `seconds must be in (0, ${PROFILE_WINDOW_MAX_SECONDS}]`,
+    });
+    expect(fake.commandsNamed('profiler:servers')).toHaveLength(0);
+    expect(() => p.assertCanStart(PROFILE_MAX_SECONDS, 512)).not.toThrow();
+    expect(() =>
+      p.assertCanStart(PROFILE_MAX_SECONDS, 512, {}, PROFILE_WINDOW_MAX_SECONDS),
+    ).toThrow(expect.objectContaining({ code: 'bad_args' }));
+  });
+
+  it('names both limits in the tool descriptions', () => {
+    const byName = (name: string): string =>
+      JSON.stringify(profilerToolDefinitions.find((tool) => tool.name === name));
+    expect(byName('profile_project')).toContain(`max ${PROFILE_WINDOW_MAX_SECONDS}`);
+    expect(byName('profile_project')).toContain('start_profiler');
+    expect(byName('start_profiler')).toContain(`max ${PROFILE_MAX_SECONDS}`);
+  });
+});
+
+describe('DebuggerProfiler debugger messages it cannot read', () => {
+  const CONNECT_TIMEOUT_ADVANCE_MS = 5_001;
+  const u32 = (value: number): Buffer => {
+    const buf = Buffer.alloc(4);
+    buf.writeUInt32LE(value, 0);
+    return buf;
+  };
+  const TYPE_ARRAY = 28;
+  /** A Variant type the codec refuses (objects and vectors are never decoded). */
+  const UNSUPPORTED_TYPE = 24;
+
+  /** `[name, <undecodable>]`: a message whose body the codec cannot represent. */
+  function undecodableMessage(name: string): Buffer {
+    return Buffer.concat([u32(TYPE_ARRAY), u32(2), encodeVariant(name), u32(UNSUPPORTED_TYPE)]);
+  }
+
+  it('says the stream is unreadable when every message has an unexpected layout', async () => {
+    profiler = await DebuggerProfiler.create();
+    peer = await FakeGodot.connect(profiler.port);
+    const p = profiler;
+    expect(p.streamProblem).toBeNull();
+    // A two-element message, with no thread id: neither is recognised.
+    peer.send(['set_pid', [4242]]);
+    peer.send(['debug_enter', [false, 'boom', true]]);
+    await waitUntil(() => p.streamProblem !== null, 'the stream diagnosis');
+
+    expect(p.connected).toBe(false);
+    expect(p.streamProblem).toMatch(/2 debugger message\(s\) and none could be read/);
+    expect(p.streamProblem).toMatch(/array\(2\) \[string, array\(1\)\]/);
+    expect(p.streamProblem).toMatch(/pause the game/);
+    // The pause was not answered: nothing here knows the thread to answer on.
+    expect(peer.commandsNamed('continue')).toHaveLength(0);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const failed = p.start(5, 512);
+      failed.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_ADVANCE_MS);
+      await expect(failed).rejects.toThrow(
+        /never opened the debugger connection.*none could be read/,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('has nothing to say once any message has been read', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    fake.send(['debug_enter', [false, 'boom', true]]);
+    fake.send('not even an array');
+    await drain(fake);
+
+    expect(p.streamProblem).toBeNull();
+  });
+
+  it('never decodes the body of a message it does not consume', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    // `output` and `error` carry values the codec refuses; they are skipped by
+    // name, so they are not packets the capture is missing.
+    fake.sendRaw(undecodableMessage('output'));
+    fake.sendRaw(undecodableMessage('error'));
+    const result = await stopCapture(p, fake);
+
+    expect(result.undecodablePackets).toBe(0);
+    expect(result.frames).toBe(1);
+  });
+
+  it('counts a message it does consume and could not decode', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    fake.sendRaw(undecodableMessage('servers:profile_frame'));
+    const result = await stopCapture(p, fake);
+
+    expect(result.undecodablePackets).toBe(1);
+  });
+
+  it('takes the sentinel by name, whatever its body holds', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
+    const stopped = p.stop(10, 'selfMs');
+    await waitUntil(() => fake.commandsNamed('profiler:servers').length >= 2, 'profiler disable');
+    fake.sendRaw(undecodableMessage('servers:profile_total'));
+
+    const result = await stopped;
+    expect(result.complete).toBe(true);
+    expect(result.undecodablePackets).toBe(0);
   });
 });

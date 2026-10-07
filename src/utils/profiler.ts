@@ -18,7 +18,13 @@
  */
 
 import * as net from 'net';
-import { decodeVariant, encodeVariant, MAX_PACKET_BYTES, type Variant } from './godot-variant.js';
+import {
+  decodeVariant,
+  encodeVariant,
+  MAX_PACKET_BYTES,
+  peekMessageName,
+  type Variant,
+} from './godot-variant.js';
 import { logDebug } from './logger.js';
 
 export type ProfilerErrorCode =
@@ -154,6 +160,83 @@ const MS_ROUNDING = 10 ** MS_DECIMALS;
 const WAIT_CONNECT_MS = 5000;
 const WAIT_FIRST_FRAME_MS = 5000;
 const WAIT_TOTAL_MS = 10000;
+/**
+ * The longest window a blocking capture (`captureWindow`, behind
+ * `profile_project`) accepts. A call that blocks answers only at its end, and
+ * a client that attached no progress token gives up on a request after 60 s
+ * by default (the MCP SDK's per-request timeout), so a result that arrives
+ * later is never read. The window is held to what keeps the call's worst case
+ * (`PROFILE_WINDOW_WORST_CASE_MS`) under that. A capture that returns at once
+ * (`start`) is bounded by `PROFILE_MAX_SECONDS` instead.
+ */
+export const PROFILE_WINDOW_MAX_SECONDS = 30;
+/**
+ * The longest a blocking capture can take inside this receiver: the wait for
+ * the debugger connection, the wait for the first frame, the window, and the
+ * wait for the engine's closing packet.
+ */
+export const PROFILE_WINDOW_WORST_CASE_MS =
+  WAIT_CONNECT_MS +
+  WAIT_FIRST_FRAME_MS +
+  PROFILE_WINDOW_MAX_SECONDS * MS_PER_SECOND +
+  WAIT_TOTAL_MS;
+
+/** The packet that answers a `profiler:servers` disable. Its body is never read. */
+const SENTINEL_MESSAGE = 'servers:profile_total';
+/**
+ * The messages this receiver reads. Any other debugger message (`output`,
+ * `error`, the scene and stack messages) is recognised by name and its body
+ * is never decoded.
+ */
+const CONSUMED_MESSAGES: ReadonlySet<string> = new Set([
+  'set_pid',
+  'debug_enter',
+  'visual:hardware_info',
+  'visual:profile_frame',
+  'performance:profile_names',
+  'performance:profile_frame',
+  'servers:function_signature',
+  'servers:profile_frame',
+]);
+/** Every debugger message this server understands is `[name, thread id, data]`. */
+const MESSAGE_ARITY = 3;
+/**
+ * Monitor samples after which an unanswered disable is given up on. The
+ * engine ticks its profilers and then reads debugger messages, once per
+ * iteration, and sends a monitor sample once a second from that tick. After a
+ * disable is written, at most two samples can still precede its sentinel: one
+ * already in flight, and one from the iteration that then reads the disable
+ * (the tick runs first). A third sample means the engine has iterated past
+ * the disable, so the sentinel was sent and lost (the engine drops messages
+ * when its outgoing queue is full) and waiting for it would discard every
+ * later capture's frames.
+ */
+const SENTINEL_LOST_AFTER_MONITOR_SAMPLES = 3;
+/**
+ * Least time between two monitor samples that both count toward
+ * `SENTINEL_LOST_AFTER_MONITOR_SAMPLES`, and between the disable and the first
+ * one that counts: half the engine's one-second sample interval. The count is
+ * evidence only as far as it reflects when samples were sent, and this side
+ * sees when they are received. Samples that queued up while the event loop
+ * was busy (a full-frame PNG compare, a synchronous process kill) are
+ * delivered together, some of them sent before the disable was, so a burst
+ * counts once.
+ */
+const SENTINEL_LOST_SAMPLE_MIN_SPACING_MS = 500;
+/**
+ * Least time since a disable was written before it is given up on, whatever
+ * the sample count says. Longer than any pause this process is expected to
+ * take in one stretch, and shorter than the wait a `stop` gives the sentinel,
+ * so a lost sentinel still ends a stop early.
+ */
+const SENTINEL_LOST_MIN_WAIT_MS = 4_000;
+/**
+ * Keys whose values come from the game and are reported exactly as sampled:
+ * a timeline interval's tracked values and the custom monitors. Rounding is
+ * for this server's own timing arithmetic; a tracked 0.00003 is the game's
+ * number, not float noise.
+ */
+const GAME_VALUE_KEYS: ReadonlySet<string> = new Set(['track', 'custom']);
 
 export interface ProfilePeak {
   frame: number;
@@ -262,8 +345,12 @@ export interface TimelineBucket {
   physicsMs: number | null;
   scriptMs: number | null;
   slowFrames: number;
-  /** Render timeline per profiled frame; null without `visual`. */
-  render: { cpuMs: number; gpuMs: number } | null;
+  /**
+   * Render timeline per profiled frame; null without `visual` or when no
+   * render frame landed in the bucket. `gpuMs` is null when the renderer
+   * timed no GPU work in the whole capture.
+   */
+  render: { cpuMs: number; gpuMs: number | null } | null;
   drawCalls: number | null;
   top: TimelineItem[];
   /** The last tracked sample taken inside the bucket's frames. */
@@ -288,14 +375,16 @@ export interface VisualArea {
   /** Frames the stage appeared in. Averages divide by every folded frame. */
   frames: number;
   cpuMs: ProfileStat;
-  gpuMs: ProfileStat;
+  /** Null when the renderer timed no GPU work (`gpuTimed` false). */
+  gpuMs: ProfileStat | null;
 }
 
 export interface VisualWorstFrame {
   frame: number;
   cpuMs: number;
-  gpuMs: number;
-  areas: Array<{ path: string; cpuMs: number; gpuMs: number }>;
+  /** Null, here and in `areas`, when the renderer timed no GPU work. */
+  gpuMs: number | null;
+  areas: Array<{ path: string; cpuMs: number; gpuMs: number | null }>;
 }
 
 export interface VisualResult {
@@ -316,9 +405,13 @@ export interface VisualResult {
    * the whole capture.
    */
   stoppedAt: number | null;
-  /** The whole render timeline of a frame, first marker to last. */
-  cpuMs: ProfileStat;
-  gpuMs: ProfileStat;
+  /**
+   * The whole render timeline of a frame, first marker to last. `cpuMs` is
+   * null when no render frame was folded (`frames` is 0); `gpuMs` is null
+   * then too, and whenever `gpuTimed` is false.
+   */
+  cpuMs: ProfileStat | null;
+  gpuMs: ProfileStat | null;
   areasReceived: number;
   areas: VisualArea[];
   worstFrame: VisualWorstFrame | null;
@@ -460,8 +553,11 @@ interface Capture {
   servers: Map<string, Map<string, number>>;
   worst: ({ frame: number } & FrameTimings & { rows: FrameRow[] }) | null;
   result: FrameRow[] | null;
-  /** How the capture was closed out; null while it is still open. */
-  closedBy: 'sentinel' | 'timeout' | 'disconnect' | null;
+  /**
+   * How the capture was closed out; null while it is still open. `no_start`
+   * is a capture whose first frame never arrived: it holds nothing.
+   */
+  closedBy: 'sentinel' | 'timeout' | 'disconnect' | 'no_start' | null;
   monitors: MonitorCapture;
   /** Null unless the capture enabled the engine's visual profiler. */
   visual: VisualCapture | null;
@@ -587,7 +683,15 @@ interface VisualCapture {
   gpuSum: number;
   gpuMax: number;
   areas: Map<string, AreaTotals>;
-  worst: VisualWorstFrame | null;
+  /** GPU times as the engine sent them; `summarizeVisual` decides whether they were measured. */
+  worst: WorstRenderFrame | null;
+}
+
+interface WorstRenderFrame {
+  frame: number;
+  cpuMs: number;
+  gpuMs: number;
+  areas: Array<{ path: string; cpuMs: number; gpuMs: number }>;
 }
 
 /** One `visual:profile_frame`: timestamps, each counted from the frame's first marker. */
@@ -638,13 +742,20 @@ function asCount(value: Variant | undefined, limit: number): number {
   return count;
 }
 
-/** Trim float noise from the summary — these are milliseconds, not physics. */
+/**
+ * Trim float noise from the summary's own timing arithmetic: these are
+ * milliseconds, not physics. A subtree under one of `GAME_VALUE_KEYS` is
+ * handed back untouched.
+ */
 function roundNumbers<T>(value: T): T {
   if (typeof value === 'number') return (Math.round(value * MS_ROUNDING) / MS_ROUNDING) as T;
   if (Array.isArray(value)) return value.map(roundNumbers) as T;
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, inner]) => [key, roundNumbers(inner)]),
+      Object.entries(value).map(([key, inner]) => [
+        key,
+        GAME_VALUE_KEYS.has(key) ? inner : roundNumbers(inner),
+      ]),
     ) as T;
   }
   return value;
@@ -963,7 +1074,12 @@ function summarizeVisual(
   hardware: VisualResult['hardware'],
   top: number,
 ): VisualResult {
-  const frames = Math.max(visual.frames, 1);
+  // No folded frame means no area and no worst frame either, so the only
+  // divisions below that could meet a zero are the two whole-frame stats.
+  const frames = visual.frames;
+  // A renderer that times no GPU work sends 0 for every GPU timestamp. That
+  // is "not measured", so every GPU figure is null rather than a free GPU.
+  const gpu = <T>(measured: T): T | null => (visual.gpuTimed ? measured : null);
   const areas: VisualArea[] = [];
   for (const totals of visual.areas.values()) {
     if (totals.cpuMax <= 0 && totals.gpuMax <= 0) continue;
@@ -973,23 +1089,32 @@ function summarizeVisual(
       group: totals.group,
       frames: totals.frames,
       cpuMs: { avg: totals.cpuSum / frames, max: totals.cpuMax },
-      gpuMs: { avg: totals.gpuSum / frames, max: totals.gpuMax },
+      gpuMs: gpu({ avg: totals.gpuSum / frames, max: totals.gpuMax }),
     });
   }
-  const cost = (area: VisualArea): number => Math.max(area.cpuMs.avg, area.gpuMs.avg);
+  const cost = (area: VisualArea): number => Math.max(area.cpuMs.avg, area.gpuMs?.avg ?? 0);
   areas.sort((a, b) => cost(b) - cost(a) || a.path.localeCompare(b.path));
+  const worst = visual.worst;
   return {
     hardware,
     framesReceived: visual.framesReceived,
-    frames: visual.frames,
+    frames,
     gpuTimed: visual.gpuTimed,
     truncatedFrames: visual.truncatedFrames,
     stoppedAt: visual.stoppedAt,
-    cpuMs: { avg: visual.cpuSum / frames, max: visual.cpuMax },
-    gpuMs: { avg: visual.gpuSum / frames, max: visual.gpuMax },
+    cpuMs: frames > 0 ? { avg: visual.cpuSum / frames, max: visual.cpuMax } : null,
+    gpuMs: frames > 0 ? gpu({ avg: visual.gpuSum / frames, max: visual.gpuMax }) : null,
     areasReceived: areas.length,
     areas: areas.slice(0, top),
-    worstFrame: visual.worst,
+    worstFrame:
+      worst === null
+        ? null
+        : {
+            frame: worst.frame,
+            cpuMs: worst.cpuMs,
+            gpuMs: gpu(worst.gpuMs),
+            areas: worst.areas.map((area) => ({ ...area, gpuMs: gpu(area.gpuMs) })),
+          },
   };
 }
 
@@ -1144,7 +1269,11 @@ function foldTimelineRender(bucket: Bucket, render: FoldedRender): void {
   }
 }
 
-function summarizeTimeline(timeline: TimelineCapture, spanMs: number): TimelineResult {
+function summarizeTimeline(
+  timeline: TimelineCapture,
+  spanMs: number,
+  gpuTimed: boolean,
+): TimelineResult {
   const samples = [...(timeline.samples ?? [])].sort((a, b) => a.frame - b.frame);
   const last = timeline.buckets.length - 1;
   const buckets = timeline.buckets.map((bucket, index): TimelineBucket => {
@@ -1179,7 +1308,7 @@ function summarizeTimeline(timeline: TimelineCapture, spanMs: number): TimelineR
         bucket.renderFrames > 0
           ? {
               cpuMs: bucket.renderCpuSum / bucket.renderFrames,
-              gpuMs: bucket.renderGpuSum / bucket.renderFrames,
+              gpuMs: gpuTimed ? bucket.renderGpuSum / bucket.renderFrames : null,
             }
           : null,
       drawCalls: bucket.drawCalls,
@@ -1310,6 +1439,33 @@ function summarizeMonitors(monitors: MonitorCapture): MonitorsResult | null {
   };
 }
 
+/** A disable written to the engine whose sentinel has not arrived. */
+interface PendingDisable {
+  capture: Capture;
+  /** Monitor samples counted since the disable was written; see `SENTINEL_LOST_SAMPLE_MIN_SPACING_MS`. */
+  monitorSamples: number;
+  /** When the disable was written, in `Date.now()` milliseconds. */
+  writtenAt: number;
+  /** When the last counted sample arrived; `writtenAt` until one has. */
+  lastCountedAt: number;
+}
+
+/** Elements of a malformed message named in its logged shape. */
+const SHAPE_PREVIEW_ITEMS = 4;
+
+/** The layout of a message the receiver could not use, for the log and the diagnosis. */
+function describeShape(message: Variant): string {
+  const kind = (value: Variant | undefined): string => {
+    if (value === null || value === undefined) return 'null';
+    if (Array.isArray(value)) return `array(${value.length})`;
+    if (typeof value === 'object') return 'packed array';
+    return typeof value;
+  };
+  if (!Array.isArray(message)) return kind(message);
+  const items = message.slice(0, SHAPE_PREVIEW_ITEMS).map(kind).join(', ');
+  return `array(${message.length}) [${items}${message.length > SHAPE_PREVIEW_ITEMS ? ', ...' : ''}]`;
+}
+
 export class DebuggerProfiler {
   private socket: net.Socket | null = null;
   /** Pending bytes, joined only once a whole frame has arrived (see `receive`). */
@@ -1334,6 +1490,21 @@ export class DebuggerProfiler {
   /** Pipeline compilations at the newest monitor sample, captured or not. */
   private lastCompilations: number | null = null;
   private capture: Capture | null = null;
+  /**
+   * Disables written and not yet answered, oldest first. The engine handles
+   * debugger messages in the order it got them and answers every
+   * `profiler:servers` disable with one sentinel, so the oldest entry names
+   * the capture every frame-stream packet arriving now belongs to, and the
+   * capture the next sentinel closes. An entry outlives its capture when the
+   * capture was closed out by a timeout while the game was frozen: its late
+   * frames and its sentinel are then dropped here instead of being read as
+   * the next capture's.
+   */
+  private pendingDisables: PendingDisable[] = [];
+  /** Messages of the `[name, thread id, data]` layout, and those of any other. */
+  private wellFormedMessages = 0;
+  private malformedMessages = 0;
+  private firstMalformedShape: string | null = null;
   private autoStopTimer: NodeJS.Timeout | null = null;
   private waiters: Waiter[] = [];
 
@@ -1382,6 +1553,28 @@ export class DebuggerProfiler {
   }
 
   /**
+   * What is wrong with the debugger stream when packets arrived and not one
+   * could be read as a message: this engine's debugger protocol is not the
+   * one this receiver speaks. Nothing can be profiled then, and a
+   * `debug_enter` is never answered, so the first script error leaves the
+   * game paused. Null while nothing has arrived or anything has been read.
+   */
+  get streamProblem(): string | null {
+    const unread = this.malformedMessages + this.undecodable;
+    if (unread === 0 || this.wellFormedMessages > 0) return null;
+    const seen =
+      this.firstMalformedShape !== null
+        ? `first layout seen: ${this.firstMalformedShape}`
+        : `decode error: ${this.lastDecodeError ?? 'none'}`;
+    return (
+      `Godot sent ${unread} debugger message(s) and none could be read as [name, thread id, data] (${seen}). ` +
+      `This Godot version's debugger protocol is not one this server supports: nothing can be profiled, ` +
+      `and a script error or breakpoint will pause the game for good because the pause cannot be answered. ` +
+      `Run the project without profiling: true.`
+    );
+  }
+
+  /**
    * Enable the engine profiler and return once frames are arriving. The
    * capture stops itself after `seconds` so a forgotten `start_profiler`
    * cannot profile the rest of the session. `options.visual` also turns on
@@ -1402,11 +1595,16 @@ export class DebuggerProfiler {
    * any track that is running - a refused call must not take a running
    * capture's track down with it.
    */
-  assertCanStart(seconds: number, captureLimit: number, options: CaptureOptions = {}): void {
+  assertCanStart(
+    seconds: number,
+    captureLimit: number,
+    options: CaptureOptions = {},
+    maxSeconds: number = PROFILE_MAX_SECONDS,
+  ): void {
     const timelineMs = options.timelineMs ?? null;
     const targetFps = options.targetFps ?? DEFAULT_TARGET_FPS;
-    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > PROFILE_MAX_SECONDS) {
-      throw new ProfilerError('bad_args', `seconds must be in (0, ${PROFILE_MAX_SECONDS}]`);
+    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > maxSeconds) {
+      throw new ProfilerError('bad_args', `seconds must be in (0, ${maxSeconds}]`);
     }
     if (
       timelineMs !== null &&
@@ -1445,8 +1643,9 @@ export class DebuggerProfiler {
     seconds: number,
     captureLimit: number,
     options: CaptureOptions,
+    maxSeconds: number = PROFILE_MAX_SECONDS,
   ): Promise<{ started: ProfileStartResult; capture: Capture }> {
-    this.assertCanStart(seconds, captureLimit, options);
+    this.assertCanStart(seconds, captureLimit, options, maxSeconds);
     const visual = options.visual === true;
     const timelineMs = options.timelineMs ?? null;
 
@@ -1506,7 +1705,14 @@ export class DebuggerProfiler {
         'Godot sent no profiler frames',
       );
     } catch (err) {
-      if (this.capture === capture) this.autoStop();
+      // No frame was folded, so there is nothing the engine's answer could
+      // add: switch the profiler off and close the capture out here. Left to
+      // the sentinel, a game that is frozen would hold the receiver in
+      // `stopping`, refusing every later start as busy, until it thawed.
+      if (capture.result === null) {
+        if (this.capture === capture) this.autoStop();
+        this.finalize(capture, 'no_start');
+      }
       throw err;
     }
     return {
@@ -1614,7 +1820,7 @@ export class DebuggerProfiler {
     options: CaptureOptions = {},
     collect?: TrackCollector,
   ): Promise<ProfileResult> {
-    const { capture } = await this.open(seconds, captureLimit, options);
+    const { capture } = await this.open(seconds, captureLimit, options, PROFILE_WINDOW_MAX_SECONDS);
     // One wait, inside `finish`, covering the window and the close. A wait of
     // its own here would reject past `finish`'s handling when the engine never
     // sends its totals: the frames already folded would be withheld, and the
@@ -1633,6 +1839,7 @@ export class DebuggerProfiler {
     this.rejectWaiters(new ProfilerError('profile_disconnected', 'Profiler closed'));
     this.socket?.destroy();
     this.socket = null;
+    this.pendingDisables = [];
     this.server.close();
   }
 
@@ -1692,11 +1899,25 @@ export class DebuggerProfiler {
       const rest = joined.subarray(4 + size);
       this.rxChunks = rest.length > 0 ? [rest] : [];
       this.rxLength = rest.length;
+      // The name says whether the body is worth decoding. `output` and
+      // `error` arrive for the whole session, capture or not, and the sentinel
+      // carries up to a capture limit of rows nobody reads.
+      const name = peekMessageName(payload);
+      if (name !== null) {
+        this.lastMessage = name;
+        if (name === SENTINEL_MESSAGE) {
+          this.wellFormedMessages += 1;
+          this.handleSentinel();
+          this.notify();
+          continue;
+        }
+        if (!CONSUMED_MESSAGES.has(name)) continue;
+      }
       let message: Variant;
       try {
         message = decodeVariant(payload);
       } catch (err) {
-        // Unrelated debugger packets carry objects and vectors we don't decode.
+        // A message this receiver reads, in an encoding the codec does not.
         this.lastDecodeError = err instanceof Error ? err.message : String(err);
         this.undecodable += 1;
         if (this.capture !== null) this.capture.undecodablePackets += 1;
@@ -1715,11 +1936,92 @@ export class DebuggerProfiler {
     }
   }
 
+  /**
+   * Close the capture the oldest outstanding disable belongs to. One that a
+   * timeout already closed out is left as it is: this was its late answer.
+   *
+   * The engine's own accumulated rows are capped by `captureLimit` exactly as
+   * the frame packets are, and carry nothing the frames did not already
+   * deliver, while top-N membership rotates between frames, so summing them
+   * covers strictly more functions. Verified against Godot: at a limit of 16
+   * the frames saw 37 distinct functions and this packet only 16, and its
+   * call counts match our sums exactly. So this is a completion sentinel, not
+   * the source of the totals, and its layout is never parsed: an unusual one
+   * must not turn a complete capture into a failed one.
+   */
+  private handleSentinel(): void {
+    const answered = this.pendingDisables.shift();
+    if (answered === undefined) {
+      logDebug('[Profiler] A profile_total arrived with no disable outstanding; ignored');
+      return;
+    }
+    if (answered.capture.result === null) this.finalize(answered.capture, 'sentinel');
+  }
+
+  /**
+   * The open capture a frame-stream packet arriving now belongs to, or null
+   * when it belongs to one already closed out (see `pendingDisables`) or to
+   * none.
+   */
+  private packetOwner(): Capture | null {
+    const pending = this.pendingDisables[0];
+    const open =
+      this.state === 'starting' || this.state === 'capturing' || this.state === 'stopping';
+    const owner = pending !== undefined ? pending.capture : open ? this.capture : null;
+    return owner !== null && owner.result === null ? owner : null;
+  }
+
+  /**
+   * Count a monitor sample against every outstanding disable, and give up on
+   * the ones the engine has provably iterated past: enough samples spaced the
+   * way the engine sends them (`SENTINEL_LOST_AFTER_MONITOR_SAMPLES`,
+   * `SENTINEL_LOST_SAMPLE_MIN_SPACING_MS`) and enough time since the disable
+   * was written (`SENTINEL_LOST_MIN_WAIT_MS`). Neither alone is proof: samples
+   * are counted when received, not when sent.
+   */
+  private countMonitorSampleAgainstDisables(): void {
+    const now = Date.now();
+    for (const pending of this.pendingDisables) {
+      if (now - pending.lastCountedAt < SENTINEL_LOST_SAMPLE_MIN_SPACING_MS) continue;
+      pending.monitorSamples += 1;
+      pending.lastCountedAt = now;
+    }
+    let oldest = this.pendingDisables[0];
+    while (
+      oldest !== undefined &&
+      oldest.monitorSamples >= SENTINEL_LOST_AFTER_MONITOR_SAMPLES &&
+      now - oldest.writtenAt >= SENTINEL_LOST_MIN_WAIT_MS
+    ) {
+      this.pendingDisables.shift();
+      logDebug(
+        `[Profiler] No profile_total answered a disable within ${SENTINEL_LOST_AFTER_MONITOR_SAMPLES} monitor samples and ${SENTINEL_LOST_MIN_WAIT_MS} ms; treating it as lost`,
+      );
+      if (oldest.capture.result === null) this.finalize(oldest.capture, 'timeout');
+      oldest = this.pendingDisables[0];
+    }
+  }
+
+  private noteMalformed(message: Variant): void {
+    this.malformedMessages += 1;
+    if (this.firstMalformedShape !== null) return;
+    this.firstMalformedShape = describeShape(message);
+    logDebug(
+      `[Profiler] Debugger message is not [name, thread id, data] and was dropped: ${this.firstMalformedShape}`,
+    );
+  }
+
   private handle(message: Variant): void {
-    if (!Array.isArray(message) || message.length !== 3) return;
+    if (!Array.isArray(message) || message.length !== MESSAGE_ARITY) {
+      this.noteMalformed(message);
+      return;
+    }
     const [name, data] = [message[0], message[2]];
     const threadId = message[1] ?? null;
-    if (typeof name !== 'string' || !Array.isArray(data)) return;
+    if (typeof name !== 'string' || !Array.isArray(data)) {
+      this.noteMalformed(message);
+      return;
+    }
+    this.wellFormedMessages += 1;
     this.lastMessage = name;
 
     if (name === 'set_pid') {
@@ -1759,10 +2061,11 @@ export class DebuggerProfiler {
           bucket.drawCalls = drawCalls;
         }
       }
+      this.countMonitorSampleAgainstDisables();
       return;
     }
-    if (!capturing || this.capture === null) return;
-    const capture = this.capture;
+    const capture = this.packetOwner();
+    if (capture === null) return;
 
     if (name === 'servers:function_signature') {
       if (typeof data[0] === 'string' && typeof data[1] === 'number') {
@@ -1785,27 +2088,6 @@ export class DebuggerProfiler {
       }
       const bucket = this.timelineBucket(capture, false);
       if (bucket !== null) foldTimelineRender(bucket, render);
-      return;
-    }
-    if (name === 'servers:profile_total') {
-      // The engine's own accumulated rows are capped by `captureLimit` exactly
-      // as the frame packets are, and carry nothing the frames did not already
-      // deliver — while top-N membership rotates between frames, so summing
-      // them covers strictly more functions. Verified against Godot: at a limit
-      // of 16 the frames saw 37 distinct functions and this packet only 16, and
-      // its call counts match our sums exactly. So this is a completion
-      // sentinel, not the source of the totals, and its layout is never parsed:
-      // an unusual one must not turn a complete capture into a failed one.
-      //
-      // A sentinel answers a disable, and the engine handles messages in the
-      // order it got them. So the sentinel of an earlier capture, closed out by
-      // timeout and answered late, always precedes every packet of this
-      // capture's own enable. Until one of those frame packets has arrived (the
-      // discarded boundary frame counts), a sentinel can only be that stale
-      // one, and finalizing on it would report a capture that has not run as
-      // complete. This rests on packet order, not on anything in the packet.
-      if (capture.framesReceived === 0) return;
-      this.finalize(capture, 'sentinel');
       return;
     }
     if (name !== 'servers:profile_frame') return;
@@ -1892,10 +2174,14 @@ export class DebuggerProfiler {
       // Dividing by a synthetic 1 here would return a well-formed payload of
       // zeroes and an empty `rows`, which reads exactly like "nothing in this
       // game is slow" rather than "nothing was measured".
+      const why =
+        capture.closedBy === 'no_start'
+          ? `The capture never started: Godot sent no usable profiler frame within ${WAIT_FIRST_FRAME_MS / MS_PER_SECOND} s of being asked`
+          : 'The capture folded no usable frames';
       throw new ProfilerError(
         'profile_no_frames',
-        `The capture folded no usable frames (received ${capture.framesReceived}; the first is ` +
-          `always discarded), so there is nothing to rank`,
+        `${why} (received ${capture.framesReceived}; the first is always discarded), so there is ` +
+          `nothing to rank`,
       );
     }
     const frames = capture.frames;
@@ -1919,7 +2205,7 @@ export class DebuggerProfiler {
     const warnings: string[] = [];
     if (capture.closedBy === 'timeout') {
       warnings.push(
-        `The capture is incomplete: Godot did not send its closing totals within ${WAIT_TOTAL_MS / 1000} s, so this covers only the frames received and seconds is measured to the last of them.`,
+        'The capture is incomplete: Godot did not send its closing totals, so this covers only the frames received and seconds is measured to the last of them.',
       );
     } else if (capture.closedBy === 'disconnect') {
       warnings.push(
@@ -1974,7 +2260,10 @@ export class DebuggerProfiler {
       worstFrame: capture.worst,
       monitors: summarizeMonitors(capture.monitors),
       visual: capture.visual === null ? null : summarizeVisual(capture.visual, this.hardware, top),
-      timeline: capture.timeline === null ? null : summarizeTimeline(capture.timeline, spanMs),
+      timeline:
+        capture.timeline === null
+          ? null
+          : summarizeTimeline(capture.timeline, spanMs, capture.visual?.gpuTimed === true),
     });
   }
 
@@ -2014,7 +2303,17 @@ export class DebuggerProfiler {
     if (this.state !== 'starting' && this.state !== 'capturing') return;
     this.state = 'stopping';
     this.clearAutoStop();
-    if (this.capture) {
+    // With no connection nothing is written, so no sentinel is owed.
+    if (this.capture && this.socket !== null) {
+      // Recorded before the write: a write that fails drops the connection,
+      // and that clears every outstanding disable, this one included.
+      const writtenAt = Date.now();
+      this.pendingDisables.push({
+        capture: this.capture,
+        monitorSamples: 0,
+        writtenAt,
+        lastCountedAt: writtenAt,
+      });
       this.send(false, this.capture.limit);
       const visual = this.capture.visual;
       if (visual !== null && visual.stoppedAt === null) {
@@ -2055,6 +2354,8 @@ export class DebuggerProfiler {
         capture.elapsedMs = Math.max(0, capture.lastFrameAt - capture.startedAt);
       }
     }
+    // The receiver's state follows the current capture only.
+    if (capture !== this.capture) return;
     this.state = 'finished';
     this.clearAutoStop();
   }
@@ -2071,6 +2372,8 @@ export class DebuggerProfiler {
     this.socket = null;
     this.rxChunks = [];
     this.rxLength = 0;
+    // No sentinel can arrive on a connection that is gone.
+    this.pendingDisables = [];
     // A capture nobody is waiting on (`start_profiler`) would otherwise stay
     // open forever: its totals can no longer arrive, `finalize` has no other
     // caller, and the frames folded so far would be unreadable.
@@ -2112,7 +2415,8 @@ export class DebuggerProfiler {
             new ProfilerError(
               'profile_timeout',
               `${what} (last debugger message: ${this.lastMessage ?? 'none'}; ` +
-                `signatures: ${this.signatures.size}; decode: ${this.lastDecodeError ?? 'none'})`,
+                `signatures: ${this.signatures.size}; decode: ${this.lastDecodeError ?? 'none'})` +
+                (this.streamProblem === null ? '' : `. ${this.streamProblem}`),
             ),
           );
         }, timeoutMs),

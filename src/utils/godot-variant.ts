@@ -5,7 +5,9 @@
  * profiler stream carries is a nil/bool/int/float/string/array or a packed
  * numeric array. A typed array (`TypedArray<StringName>` carries the custom
  * monitor names) decodes to a plain array: its element type is read and
- * dropped. Objects, dictionaries and vectors are deliberately *not*
+ * dropped. A packed numeric array decodes to a JavaScript typed array, so a
+ * packet-sized one costs its own bytes and not a boxed number per element.
+ * Objects, dictionaries and vectors are deliberately *not*
  * decoded: an unrelated debugger packet must fail loudly instead of driving
  * allocation from an attacker-shaped length field. Callers treat a decode
  * failure as "not a message I care about" and move on.
@@ -14,8 +16,15 @@
  * in this repo; this one is Godot's and only the engine defines it.
  */
 
+/**
+ * A decoded packed numeric array. `PackedInt64Array` lands in a Float64Array:
+ * its elements go through the same `Number` conversion a scalar 64-bit int
+ * does, exact up to 2^53.
+ */
+export type PackedArray = Uint8Array | Int32Array | Float32Array | Float64Array;
+
 /** Every value this codec can represent. */
-export type Variant = null | boolean | number | string | Variant[];
+export type Variant = null | boolean | number | string | Variant[] | PackedArray;
 
 /** Matches the engine's own debugger packet ceiling. */
 export const MAX_PACKET_BYTES = 16 * 1024 * 1024;
@@ -41,6 +50,9 @@ const TYPED_ARRAY_SHIFT = 16;
 const TYPED_ARRAY_MASK = 0b11 << TYPED_ARRAY_SHIFT;
 const TYPED_BUILTIN = 1;
 const MAX_NESTING = 64;
+const WORD_BYTES = 4;
+// The top bit of an array's count word is the engine's "shared" marker.
+const ARRAY_COUNT_MASK = 0x7fffffff;
 
 const padding = (length: number): number => (4 - (length % 4)) % 4;
 
@@ -139,11 +151,11 @@ export function decodeVariant(raw: Buffer): Variant {
       case TYPE_PACKED_FLOAT64_ARRAY: {
         const reader = PACKED_READERS[kind];
         if (reader === undefined) throw new Error(`Unsupported debugger Variant ${header}`);
-        const [size, read] = reader;
+        const [size, read, allocate] = reader;
         const count = u32();
         if (count > (raw.length - offset) / size) throw new Error('Invalid packed array length');
-        const values: Variant[] = [];
-        for (let i = 0; i < count; i++) values.push(take(size, read));
+        const values = allocate(count);
+        for (let i = 0; i < count; i++) values[i] = take(size, read);
         if (kind === TYPE_PACKED_BYTE_ARRAY) offset += padding(count);
         return values;
       }
@@ -158,8 +170,7 @@ export function decodeVariant(raw: Buffer): Variant {
           if (typed >> TYPED_ARRAY_SHIFT === TYPED_BUILTIN) u32();
           else readString();
         }
-        // The top bit of the count is the engine's "shared" marker.
-        const count = u32() & 0x7fffffff;
+        const count = u32() & ARRAY_COUNT_MASK;
         if (count > (raw.length - offset) / 4) throw new Error('Invalid array length');
         const values: Variant[] = [];
         for (let i = 0; i < count; i++) {
@@ -177,10 +188,41 @@ export function decodeVariant(raw: Buffer): Variant {
   return value;
 }
 
-const PACKED_READERS: Record<number, [number, (buf: Buffer, at: number) => number]> = {
-  [TYPE_PACKED_BYTE_ARRAY]: [1, (buf, at) => buf.readUInt8(at)],
-  [TYPE_PACKED_INT32_ARRAY]: [4, (buf, at) => buf.readInt32LE(at)],
-  [TYPE_PACKED_INT64_ARRAY]: [8, (buf, at) => Number(buf.readBigInt64LE(at))],
-  [TYPE_PACKED_FLOAT32_ARRAY]: [4, (buf, at) => buf.readFloatLE(at)],
-  [TYPE_PACKED_FLOAT64_ARRAY]: [8, (buf, at) => buf.readDoubleLE(at)],
+/** Element width in bytes, how one element is read, and the typed array that holds them. */
+type PackedReader = [
+  size: number,
+  read: (buf: Buffer, at: number) => number,
+  allocate: (count: number) => PackedArray,
+];
+
+const PACKED_READERS: Record<number, PackedReader> = {
+  [TYPE_PACKED_BYTE_ARRAY]: [1, (buf, at) => buf.readUInt8(at), (n) => new Uint8Array(n)],
+  [TYPE_PACKED_INT32_ARRAY]: [4, (buf, at) => buf.readInt32LE(at), (n) => new Int32Array(n)],
+  [TYPE_PACKED_INT64_ARRAY]: [
+    8,
+    (buf, at) => Number(buf.readBigInt64LE(at)),
+    (n) => new Float64Array(n),
+  ],
+  [TYPE_PACKED_FLOAT32_ARRAY]: [4, (buf, at) => buf.readFloatLE(at), (n) => new Float32Array(n)],
+  [TYPE_PACKED_FLOAT64_ARRAY]: [8, (buf, at) => buf.readDoubleLE(at), (n) => new Float64Array(n)],
 };
+
+/**
+ * The name of a debugger message, read without decoding the rest of it. Every
+ * debugger message is an untyped array whose first element is its name, so the
+ * receiver can tell from two header words and one string whether the payload
+ * is one it consumes. Null when the packet does not start that way; the caller
+ * then decodes it in full and reports what it found.
+ */
+export function peekMessageName(raw: Buffer): string | null {
+  // Array header, element count, string header, string length.
+  const nameAt = 4 * WORD_BYTES;
+  if (raw.length < nameAt) return null;
+  if (raw.readUInt32LE(0) !== TYPE_ARRAY) return null;
+  if ((raw.readUInt32LE(WORD_BYTES) & ARRAY_COUNT_MASK) === 0) return null;
+  const kind = raw.readUInt32LE(2 * WORD_BYTES);
+  if (kind !== TYPE_STRING && kind !== TYPE_STRING_NAME) return null;
+  const size = raw.readUInt32LE(3 * WORD_BYTES);
+  if (size > raw.length - nameAt) return null;
+  return raw.toString('utf8', nameAt, nameAt + size);
+}

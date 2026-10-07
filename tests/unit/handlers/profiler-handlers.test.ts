@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  PROFILE_PROJECT_WORST_CASE_MS,
   profilerToolDefinitions,
   handleProfileProject,
   handleStartProfiler,
@@ -16,6 +17,9 @@ import {
 } from '../../../src/tools/profiler-tools.js';
 import {
   MONITOR_NAMES,
+  PROFILE_MAX_SECONDS,
+  PROFILE_WINDOW_MAX_SECONDS,
+  PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
   timelineBucketMs,
   type CaptureOptions,
@@ -23,6 +27,7 @@ import {
   type TrackCollector,
 } from '../../../src/utils/profiler.js';
 import type { GodotProcess, GodotRunner } from '../../../src/utils/godot-runner.js';
+import { SessionQueue } from '../../../src/utils/session-queue.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
@@ -38,6 +43,11 @@ interface ProfilerFake {
   /** Bridge commands the handler sent, in order. */
   bridge: Array<{ command: string; params: Record<string, unknown> }>;
 }
+
+/** How long the fake's session queue lets a call wait: short, so a busy queue fails a test fast. */
+const QUEUE_WAIT_MS = 30;
+/** A wait inside a capture, standing in for the window: long enough to cross a timer, far under the suite's patience. */
+const WINDOW_TIMER_MS = 5;
 
 // Every field DebuggerProfiler.summarize returns: the schema requires them all.
 const FRAME_STAT = { avg: 16, max: 20 };
@@ -106,6 +116,8 @@ function createProfilerFake(
     trackPending?: boolean;
     /** Raw bridge replies by command; an Error rejects the send. */
     replies?: Record<string, string | Error>;
+    /** Run before the capture window answers, where the real profiler waits on its timers. */
+    duringWindow?: () => Promise<void>;
   } = {},
 ): ProfilerFake {
   const calls: ProfilerCall[] = [];
@@ -150,6 +162,7 @@ function createProfilerFake(
     async captureWindow(...args: unknown[]) {
       const [seconds, , , , capture] = args as [number, number, string, number, CaptureOptions];
       const timelineMs = capture?.timelineMs ?? null;
+      await options.duringWindow?.();
       const result = record('captureWindow', args, {
         ...captureResult,
         sort: args[2],
@@ -167,6 +180,7 @@ function createProfilerFake(
       return result;
     },
   };
+  const queue = new SessionQueue(QUEUE_WAIT_MS);
   const runner = {
     activeProfiler: options.profiler === false ? null : (profiler as unknown as DebuggerProfiler),
     activeProcess: { hasExited: options.exited === true } as GodotProcess,
@@ -175,13 +189,21 @@ function createProfilerFake(
     hasActiveRuntimeSession() {
       return options.session !== false && options.exited !== true;
     },
-    async sendCommand(command: string, params: Record<string, unknown> = {}) {
-      bridge.push({ command, params });
-      const reply =
-        options.replies?.[command] ??
-        (command === 'track_stop' ? '{"samples":[]}' : '{"status":"tracking"}');
-      if (reply instanceof Error) throw reply;
-      return reply;
+    // The real queue, as the runner uses it: a handler holds it through
+    // runExclusive, and a bridge command takes its own turn unless it is sent
+    // from inside the operation that holds it.
+    runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
+      return queue.run(label, operation);
+    },
+    sendCommand(command: string, params: Record<string, unknown> = {}) {
+      return queue.run(`bridge command '${command}'`, async () => {
+        bridge.push({ command, params });
+        const reply =
+          options.replies?.[command] ??
+          (command === 'track_stop' ? '{"samples":[]}' : '{"status":"tracking"}');
+        if (reply instanceof Error) throw reply;
+        return reply;
+      });
     },
   };
   Object.assign(
@@ -224,6 +246,49 @@ describe('profiler handlers: session requirements', () => {
   ])('%s rejects a Godot process that already exited', async (_name, handler) => {
     const fake = createProfilerFake({ exited: true });
     expectErrorMatching(await handler(fake.asRunner, {}), /has exited/);
+  });
+});
+
+describe('profiler handlers: the session queue', () => {
+  const TRACK = ['/root/Main/Player:position'];
+
+  it("profile_project's own track commands do not wait behind it, across the window's timer", async () => {
+    const fake = createProfilerFake({
+      trackPending: true,
+      duringWindow: () => new Promise((resolve) => setTimeout(resolve, WINDOW_TIMER_MS)),
+    });
+
+    const result = await handleProfileProject(fake.asRunner, { track: TRACK });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridge.map((b) => b.command)).toEqual(['track_start', 'track_stop']);
+    expect(fake.calls.find((c) => c.method === 'attachTrack')?.args).toEqual([[], null]);
+  });
+
+  it.each([
+    ['profile_project', handleProfileProject],
+    ['start_profiler', handleStartProfiler],
+    ['stop_profiler', handleStopProfiler],
+  ])('%s gives up behind a running operation and names it', async (name, handler) => {
+    const fake = createProfilerFake();
+    let release: () => void = () => {};
+    const held = fake.asRunner.runExclusive(
+      'profile_project',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+
+    const result = await handler(fake.asRunner, {});
+
+    expectErrorMatching(
+      result,
+      new RegExp(`${name} waited \\d+ ms for profile_project to finish and gave up`),
+    );
+    expect(unwrap(result).content[1]?.text ?? '').toMatch(
+      /Wait for profile_project to return, then retry/,
+    );
+    expect(fake.calls).toEqual([]);
+    release();
+    await held;
   });
 });
 
@@ -372,7 +437,7 @@ describe('handleProfileProject', () => {
 
   it.each([
     ['a capture already running', new ProfilerError('profile_busy', 'A capture is already active')],
-    ['a window the profiler rejects', new ProfilerError('bad_args', 'seconds must be in (0, 60]')],
+    ['a window the profiler rejects', new ProfilerError('bad_args', 'seconds must be in (0, 30]')],
   ])(
     'refuses %s before asking the bridge for a track, leaving the running track alone',
     async (_label, refusal) => {
@@ -386,13 +451,70 @@ describe('handleProfileProject', () => {
     },
   );
 
+  it('holds profile_project to the blocking-window limit and start_profiler to the longer one', async () => {
+    const limits: unknown[] = [];
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      assertCanStart: (...args: unknown[]) => void;
+    };
+    profiler.assertCanStart = (...args: unknown[]) => {
+      limits.push(args[3]);
+    };
+    await handleProfileProject(fake.asRunner, {});
+    await handleStartProfiler(fake.asRunner, {});
+
+    expect(limits).toEqual([PROFILE_WINDOW_MAX_SECONDS, PROFILE_MAX_SECONDS]);
+  });
+
+  it('points a window that is too long at start_profiler', async () => {
+    const tooLong = PROFILE_WINDOW_MAX_SECONDS + 1;
+    const refusal = new ProfilerError(
+      'bad_args',
+      `seconds must be in (0, ${PROFILE_WINDOW_MAX_SECONDS}]`,
+    );
+    const window = createProfilerFake({ refuses: refusal });
+    const text = errorAndSolutions(
+      await handleProfileProject(window.asRunner, { seconds: tooLong }),
+    );
+    expect(text).toMatch(/seconds must be in \(0, 30\]/);
+    expect(text).toMatch(/use start_profiler \(up to 60 s\) and stop_profiler/);
+
+    // The same refusal for another argument does not send the caller elsewhere.
+    const other = createProfilerFake({ refuses: refusal });
+    expect(
+      errorAndSolutions(await handleProfileProject(other.asRunner, { seconds: 5 })),
+    ).not.toMatch(/use start_profiler/);
+  });
+
+  it('sends its track commands with a timeout short enough to keep the call under a minute', async () => {
+    const CLIENT_REQUEST_TIMEOUT_MS = 60_000;
+    const fake = createProfilerFake({ trackPending: true });
+    const timeouts: unknown[] = [];
+    const runner = fake.asRunner as unknown as {
+      sendCommand: (command: string, params: unknown, timeoutMs?: number) => Promise<string>;
+    };
+    const send = runner.sendCommand.bind(runner);
+    runner.sendCommand = (command, params, timeoutMs) => {
+      timeouts.push(timeoutMs);
+      return send(command, params, timeoutMs);
+    };
+    await handleProfileProject(fake.asRunner, { track: ['/root/Main:position'] });
+
+    expect(fake.bridge.map((b) => b.command)).toEqual(['track_start', 'track_stop']);
+    expect(timeouts).toHaveLength(2);
+    const [start, stop] = timeouts as [number, number];
+    expect(start).toBe(stop);
+    expect(PROFILE_WINDOW_WORST_CASE_MS + start + stop).toBe(PROFILE_PROJECT_WORST_CASE_MS);
+    expect(PROFILE_PROJECT_WORST_CASE_MS).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+  });
+
   it('says so when a long window widens the requested timeline interval', async () => {
     const fake = createProfilerFake();
-    const result = await handleProfileProject(fake.asRunner, { seconds: 60, timelineMs: 250 });
+    const result = await handleProfileProject(fake.asRunner, { seconds: 30, timelineMs: 250 });
 
     const content = unwrap(result).structuredContent as { warnings?: string[] };
     expect(content.warnings).toEqual([
-      expect.stringMatching(/1000 ms intervals, not the requested 250 ms/),
+      expect.stringMatching(/500 ms intervals, not the requested 250 ms/),
     ]);
   });
 
@@ -590,6 +712,36 @@ describe('handleStopProfiler', () => {
     expect(content.warnings).toEqual([
       expect.stringMatching(/no usable render frames \(3 received/),
     ]);
+  });
+
+  it.each([
+    ['says GPU time was not measured when the renderer timed none', false, 1],
+    ['adds nothing when the GPU was timed', true, 0],
+  ])('%s', async (_label, gpuTimed, expected) => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async () => ({
+      ...captureResult,
+      visual: {
+        hardware: { cpu: 'cpu', gpu: 'gpu' },
+        framesReceived: 15,
+        frames: 10,
+        gpuTimed,
+        truncatedFrames: 0,
+        stoppedAt: null,
+      },
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    const content = unwrap(result).structuredContent as { warnings?: string[] };
+    expect(content.warnings ?? []).toHaveLength(expected);
+    if (expected > 0) {
+      expect(Object.keys(content)[0]).toBe('warnings');
+      expect(content.warnings![0]).toMatch(/GPU times are null/);
+      expect(content.warnings![0]).toMatch(/not measured, which does not mean it is zero/);
+    }
   });
 
   const trackedTimeline = (overrides: Record<string, unknown>) => ({

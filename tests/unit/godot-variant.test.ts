@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { decodeVariant, encodeVariant, type Variant } from '../../src/utils/godot-variant.js';
+import {
+  decodeVariant,
+  encodeVariant,
+  peekMessageName,
+  type PackedArray,
+  type Variant,
+} from '../../src/utils/godot-variant.js';
 
 function roundTrip(value: Variant): Variant {
   return decodeVariant(encodeVariant(value));
@@ -69,12 +75,12 @@ describe('decodeVariant rejects malformed packets', () => {
     expect(() => decodeVariant(raw)).toThrow(/Unsupported debugger Variant/);
   });
 
-  it('decodes a packed float array as plain numbers', () => {
+  it('decodes a packed float array into a typed array', () => {
     const raw = Buffer.alloc(8 + 8);
     raw.writeUInt32LE(33, 0);
     raw.writeUInt32LE(1, 4);
     raw.writeDoubleLE(1.5, 8);
-    expect(decodeVariant(raw)).toEqual([1.5]);
+    expect(decodeVariant(raw)).toEqual(new Float64Array([1.5]));
   });
 });
 
@@ -115,13 +121,25 @@ describe('decodeVariant handles the encodings our encoder never emits', () => {
   });
 
   it.each([
-    ['byte', 29, 1, (b: Buffer, at: number) => b.writeUInt8(7, at), 7],
-    ['int32', 30, 4, (b: Buffer, at: number) => b.writeInt32LE(-9, at), -9],
-    ['int64', 31, 8, (b: Buffer, at: number) => b.writeBigInt64LE(-9n, at), -9],
-    ['float32', 32, 4, (b: Buffer, at: number) => b.writeFloatLE(0.25, at), 0.25],
-    ['float64', 33, 8, (b: Buffer, at: number) => b.writeDoubleLE(0.1, at), 0.1],
-  ] as Array<[string, number, number, (b: Buffer, at: number) => void, number]>)(
-    'decodes a packed %s array',
+    ['byte', 29, 1, (b: Buffer, at: number) => b.writeUInt8(7, at), new Uint8Array([7])],
+    ['int32', 30, 4, (b: Buffer, at: number) => b.writeInt32LE(-9, at), new Int32Array([-9])],
+    ['int64', 31, 8, (b: Buffer, at: number) => b.writeBigInt64LE(-9n, at), new Float64Array([-9])],
+    [
+      'float32',
+      32,
+      4,
+      (b: Buffer, at: number) => b.writeFloatLE(0.25, at),
+      new Float32Array([0.25]),
+    ],
+    [
+      'float64',
+      33,
+      8,
+      (b: Buffer, at: number) => b.writeDoubleLE(0.1, at),
+      new Float64Array([0.1]),
+    ],
+  ] as Array<[string, number, number, (b: Buffer, at: number) => void, PackedArray]>)(
+    'decodes a packed %s array into a typed array',
     (_label, kind, width, write, expected) => {
       // The byte array is the only one that pads to a 4-byte boundary.
       const pad = kind === 29 ? (4 - (1 % 4)) % 4 : 0;
@@ -129,9 +147,33 @@ describe('decodeVariant handles the encodings our encoder never emits', () => {
       raw.writeUInt32LE(kind, 0);
       raw.writeUInt32LE(1, 4);
       write(raw, 8);
-      expect(decodeVariant(raw)).toEqual([expected]);
+      const decoded = decodeVariant(raw);
+      expect(decoded).toEqual(expected);
+      expect(Array.isArray(decoded)).toBe(false);
     },
   );
+
+  it('decodes a packet-sized byte array without a boxed element per byte', () => {
+    const PACKED_BYTE_ARRAY = 29;
+    const BYTES = 1024 * 1024;
+    const raw = Buffer.alloc(8 + BYTES, 0xab);
+    raw.writeUInt32LE(PACKED_BYTE_ARRAY, 0);
+    raw.writeUInt32LE(BYTES, 4);
+    const decoded = decodeVariant(raw);
+    expect(decoded).toBeInstanceOf(Uint8Array);
+    expect((decoded as Uint8Array).length).toBe(BYTES);
+    expect((decoded as Uint8Array)[BYTES - 1]).toBe(0xab);
+  });
+
+  it('copies a packed array out of the packet, so the packet buffer is not kept alive', () => {
+    const raw = Buffer.alloc(8 + 4);
+    raw.writeUInt32LE(30, 0);
+    raw.writeUInt32LE(1, 4);
+    raw.writeInt32LE(5, 8);
+    const decoded = decodeVariant(raw) as Int32Array;
+    raw.writeInt32LE(6, 8);
+    expect(decoded[0]).toBe(5);
+  });
 
   it('rejects an array nested past the depth limit', () => {
     // 65 opening ARRAY headers, each declaring one element.
@@ -203,5 +245,56 @@ describe('decodeVariant reads typed arrays as plain arrays', () => {
   it('rejects type-kind bits on a packed string array', () => {
     const raw = Buffer.concat([u32(TYPE_PACKED_STRING_ARRAY | (1 << 16)), u32(0)]);
     expect(() => decodeVariant(raw)).toThrow(/Unsupported debugger Variant/);
+  });
+});
+
+describe('peekMessageName', () => {
+  const TYPE_ARRAY = 28;
+  const TYPE_STRING_NAME = 21;
+  const u32 = (value: number): Buffer => {
+    const buf = Buffer.alloc(4);
+    buf.writeUInt32LE(value, 0);
+    return buf;
+  };
+
+  it('reads the name of a debugger message without decoding its body', () => {
+    const raw = encodeVariant(['servers:profile_frame', 1, [1, 2, 3]]);
+    expect(peekMessageName(raw)).toBe('servers:profile_frame');
+  });
+
+  it('reads the name when the body is one the codec cannot decode', () => {
+    const UNSUPPORTED_TYPE = 24;
+    const name = encodeVariant('output');
+    const raw = Buffer.concat([u32(TYPE_ARRAY), u32(2), name, u32(UNSUPPORTED_TYPE), u32(0)]);
+    expect(() => decodeVariant(raw)).toThrow(/Unsupported debugger Variant/);
+    expect(peekMessageName(raw)).toBe('output');
+  });
+
+  it('reads a name sent as a StringName, and one in an array marked shared', () => {
+    const SHARED_FLAG = 0x80000000;
+    const text = Buffer.from('set_pid\0', 'utf8').subarray(0, 8);
+    text[7] = 0;
+    const raw = Buffer.concat([
+      u32(TYPE_ARRAY),
+      u32((1 | SHARED_FLAG) >>> 0),
+      u32(TYPE_STRING_NAME),
+      u32(7),
+      text,
+    ]);
+    expect(peekMessageName(raw)).toBe('set_pid');
+  });
+
+  it.each([
+    ['a packet that is not an array', encodeVariant('set_pid')],
+    ['an empty array', encodeVariant([])],
+    ['an array whose first element is not a string', encodeVariant([1, 'set_pid'])],
+    ['a typed array', Buffer.concat([u32(TYPE_ARRAY | (1 << 16)), u32(4), u32(1)])],
+    ['a packet cut off inside the header', encodeVariant(['set_pid']).subarray(0, 10)],
+    [
+      'a name whose length runs past the packet',
+      Buffer.concat([u32(TYPE_ARRAY), u32(1), u32(4), u32(1000), Buffer.from('abcd')]),
+    ],
+  ])('returns null for %s', (_label, raw) => {
+    expect(peekMessageName(raw)).toBeNull();
   });
 });
