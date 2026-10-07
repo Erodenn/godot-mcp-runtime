@@ -186,7 +186,8 @@ describe('killProcessTree', () => {
 
   it('falls back to proc.kill when taskkill reports failure on win32', () => {
     const deps = killDeps('win32');
-    deps.spawnSyncMock.mockReturnValue({ status: 128 });
+    // Any failure other than 128 ("no such process", which needs no fallback).
+    deps.spawnSyncMock.mockReturnValue({ status: 1 });
     const proc = createFakeChild();
     killProcessTree(proc as unknown as ChildProcess, deps);
     expect(proc.kill).toHaveBeenCalledTimes(1);

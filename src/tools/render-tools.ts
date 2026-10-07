@@ -9,6 +9,8 @@ import {
   checkDisplayAvailable,
   isUnderDir,
   projectGodotPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
   resolveProjectPath,
   type ResolvedProjectPath,
 } from '../utils/path-validation.js';
@@ -44,10 +46,15 @@ import {
   type RunMovieProcess,
 } from '../utils/movie-process.js';
 import {
+  BLANK_CHANNEL_TOLERANCE,
   computeFrameDifference,
   MOTION_CHANNEL_THRESHOLD,
+  MOTION_MIN_CHANGED_PIXELS,
+  MOTION_REFERENCE_FRAME_HEIGHT,
+  MOTION_REFERENCE_FRAME_WIDTH,
   measurePngFile,
   showsMotion,
+  type ChangedBounds,
   type FrameDifference,
   type RgbaFrame,
 } from '../utils/pixel-stats.js';
@@ -103,7 +110,7 @@ export const renderToolDefinitions = [
   {
     name: 'render_movie',
     description:
-      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, no session, no input (to interact: run_project + simulate_input + take_screenshot). mode check (default): stats, likelyBlank, motion, inline frames; files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths; warnings leads if anything was unmeasured. Needs a display. Errors on timeout, failed run, or a live session on the project.',
+      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, no session, no input (to interact: run_project + simulate_input + take_screenshot). mode check (default): stats, likelyBlank, motion, inline frames; files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths, bytesWritten; warnings leads if anything was unmeasured. Needs a display. Errors on timeout, failed run, or a live session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -171,16 +178,16 @@ export const renderToolDefinitions = [
         },
         likelyBlank: {
           type: ['boolean', 'null'],
-          description: 'Judged on the last frame; null when it was not measured.',
+          description: `Judged on every pixel of the last frame: true when it is one flat colour (no channel varies by more than ${BLANK_CHANNEL_TOLERANCE} of 255 across it). Null when it was not measured.`,
         },
         motion: {
           type: ['number', 'null'],
           description:
-            'Largest mean RGB difference between consecutive sampled frames, 0 to 1. A small mover can read near 0 here; anyMotion is decided by changed sample count, not by this mean.',
+            'Largest mean RGB difference between consecutive measured frames, over every pixel, 0 to 1. A small mover reads near 0 here; anyMotion is decided by the changed pixel count, not by this mean.',
         },
         anyMotion: {
           type: ['boolean', 'null'],
-          description: `True when some pair had at least one sampled point whose R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255. Null when no measured pair moved and a pair was not measured, or fewer than two frames were sampled.`,
+          description: `True when some pair of consecutive measured frames had at least its motionThreshold of pixels whose R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255; every pixel is compared. Null when no measured pair moved and a pair was not measured, or fewer than two frames were measured. motionPairs has the counts behind it.`,
         },
         motionPairs: {
           type: 'array',
@@ -191,19 +198,43 @@ export const renderToolDefinitions = [
               to: { type: 'number' },
               difference: {
                 type: ['number', 'null'],
-                description: 'Mean absolute RGB difference over the sampling grid, 0 to 1.',
+                description: 'Mean absolute RGB difference over every pixel, 0 to 1.',
               },
-              changedSamples: {
+              changedPixels: {
                 type: ['number', 'null'],
-                description: `Sampled points where R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255. Null exactly where difference is null.`,
+                description: `Pixels where R, G or B changed by more than ${MOTION_CHANNEL_THRESHOLD} of 255. Null exactly where difference is null.`,
               },
               changedFraction: {
                 type: ['number', 'null'],
                 description:
-                  'changedSamples divided by the sampled points, 0 to 1. Null exactly where difference is null.',
+                  'changedPixels divided by the pixels in the frame, 0 to 1. Null exactly where difference is null.',
+              },
+              motionThreshold: {
+                type: ['number', 'null'],
+                description: `The changedPixels count this pair needed to show motion: ${MOTION_MIN_CHANGED_PIXELS} up to a ${MOTION_REFERENCE_FRAME_WIDTH}x${MOTION_REFERENCE_FRAME_HEIGHT} frame, more in proportion to the pixels of a larger one. Null exactly where difference is null.`,
+              },
+              changedBounds: {
+                type: ['object', 'null'],
+                description:
+                  'Smallest rectangle holding every changed pixel, in frame pixels from the top left. Null when no pixel changed or the pair was not measured.',
+                properties: {
+                  x: { type: 'number' },
+                  y: { type: 'number' },
+                  width: { type: 'number' },
+                  height: { type: 'number' },
+                },
+                required: ['x', 'y', 'width', 'height'],
               },
             },
-            required: ['from', 'to', 'difference', 'changedSamples', 'changedFraction'],
+            required: [
+              'from',
+              'to',
+              'difference',
+              'changedPixels',
+              'changedFraction',
+              'motionThreshold',
+              'changedBounds',
+            ],
           },
         },
         samples: {
@@ -253,6 +284,11 @@ export const renderToolDefinitions = [
         format: { type: 'string', enum: ['avi', 'ogv'] },
         path: { type: 'string' },
         byteSize: { type: 'number' },
+        bytesWritten: {
+          type: ['number', 'null'],
+          description:
+            'Total size in bytes of every file this run wrote under .mcp/godot-runtime/movies/. In check mode the files are deleted again (framesKept false); in frames and video mode they stay on disk until removed by hand. Null when the run directory could not be read.',
+        },
       },
       required: ['mode', 'projectPath', 'fps', 'framesRequested', 'statsAvailable'],
     },
@@ -367,13 +403,12 @@ function parseRenderOptions(
   if (!scene.ok) return scene;
   let resolvedScene: ResolvedProjectPath | undefined;
   if (scene.value !== undefined) {
-    const resolved = resolveProjectPath(projectRoot, scene.value);
+    const resolved = resolveProjectPath(projectRoot, scene.value, 'read');
     if (!resolved) {
       return err(
-        createErrorResponse(
-          `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
-          ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
-        ),
+        createErrorResponse(projectSubPathError('scene path', scene.value), [
+          ...PROJECT_SUB_PATH_SOLUTIONS,
+        ]),
       );
     }
     const notAScene = rejectNonSceneLaunchArg(resolved.relPath);
@@ -483,7 +518,7 @@ function refuseStrandedBridge(registeredPath: string): ToolResponse {
   return createErrorResponse(
     `project.godot registers the McpBridge autoload (${registeredPath}) but no live MCP session owns it. render_movie does not run with the bridge loaded and does not edit project.godot.`,
     [
-      'Call remove_autoload with name "McpBridge" on this project, then retry render_movie',
+      'Call remove_autoload with autoloadName "McpBridge" on this project, then retry render_movie',
       'If an older server version is running this project, stop it first',
     ],
   );
@@ -506,12 +541,17 @@ function findServerOwnedBridgeEntry(projectRoot: string): string | null {
  * The refusals that keep a movie run from loading the McpBridge autoload: a
  * live session on the project (this server's or another's), an owner registry
  * that cannot be read, or a server-owned entry no live session owns. Null
- * when the project is clear. Reads only; nothing is written.
+ * when the project is clear. It reads only: the owner registry is asked
+ * without its upkeep (`BridgeManager.peekOtherLiveOwners`), so the owner file
+ * of a session whose process is gone is left for the next pruning read. Both
+ * calls, before the launch gate and after it, use this read: a movie run never
+ * registers as an owner, so it has no use for a pruned registry, and a refusal
+ * leaves the project exactly as it was.
  */
 function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse | null {
   let live: LiveSessionOnProject | null;
   try {
-    live = findLiveSessionOnProject(runner, root);
+    live = findLiveSessionOnProject(runner, root, 'read-only');
   } catch (error: unknown) {
     // An unreadable owner registry is "unknown", never "nobody is running".
     if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
@@ -555,6 +595,24 @@ function discoverFrames(runDir: string): FrameFile[] {
   return found.sort((a, b) => a.index - b.index);
 }
 
+/**
+ * Total size of the files in a run directory, which is flat: frames, the
+ * audio track, or one movie file. Null when it cannot be read.
+ */
+function runDirBytes(runDir: string): number | null {
+  try {
+    let total = 0;
+    for (const name of readdirSync(runDir)) total += statSync(join(runDir, name)).size;
+    return total;
+  } catch (error) {
+    logDebug(`render_movie could not size ${runDir}: ${getErrorMessage(error)}`);
+    return null;
+  }
+}
+
+const BYTES_UNMEASURED_WARNING =
+  'bytesWritten is null: the run directory could not be read to size the files this run wrote.';
+
 /** Remove a run directory. Returns the failure message, or null when it is gone. */
 function removeRunDir(runDir: string): string | null {
   try {
@@ -590,10 +648,14 @@ interface MotionPair {
   from: number;
   to: number;
   difference: number | null;
-  /** Sampled points that changed beyond the per-channel threshold; null where difference is. */
-  changedSamples: number | null;
-  /** changedSamples over the sampled points, 0 to 1; null where difference is. */
+  /** Pixels that changed beyond the per-channel threshold; null where difference is. */
+  changedPixels: number | null;
+  /** changedPixels over the pixels in the frame, 0 to 1; null where difference is. */
   changedFraction: number | null;
+  /** The changedPixels count the pair needed to show motion; null where difference is. */
+  motionThreshold: number | null;
+  /** Null when no pixel changed, and where difference is. */
+  changedBounds: ChangedBounds | null;
   reason: string | null;
 }
 
@@ -655,8 +717,10 @@ function measureFrames(runDir: string, frameFiles: FrameFile[], inlineWanted: nu
         from: previous.index,
         to: file.index,
         difference: difference?.mean ?? null,
-        changedSamples: difference?.changedSamples ?? null,
-        changedFraction: difference ? difference.changedSamples / difference.sampledPoints : null,
+        changedPixels: difference?.changedPixels ?? null,
+        changedFraction: difference ? difference.changedPixels / difference.totalPixels : null,
+        motionThreshold: difference?.motionThreshold ?? null,
+        changedBounds: difference?.changedBounds ?? null,
         reason,
       });
     }
@@ -698,7 +762,10 @@ function summarizeMotion(pairs: MotionPair[]): {
   const motion = differences.length > 0 ? Math.max(...differences) : null;
   if (
     pairs.some(
-      (p) => p.changedSamples !== null && showsMotion({ changedSamples: p.changedSamples }),
+      (p) =>
+        p.changedPixels !== null &&
+        p.motionThreshold !== null &&
+        showsMotion({ changedPixels: p.changedPixels, motionThreshold: p.motionThreshold }),
     )
   ) {
     return { motion, anyMotion: true };
@@ -862,7 +929,12 @@ async function findRunFailure(
 }
 
 function buildVideoResponse(rc: RunContext, result: MovieProcessResult): HandlerResult {
-  const warnings = [...runtimeErrorWarnings(rc.runner, result.stderr), ...rc.gateWarnings];
+  const bytesWritten = runDirBytes(rc.runDir);
+  const warnings = [
+    ...(bytesWritten === null ? [BYTES_UNMEASURED_WARNING] : []),
+    ...runtimeErrorWarnings(rc.runner, result.stderr),
+    ...rc.gateWarnings,
+  ];
   return createStructuredResponse({
     ...(warnings.length > 0 ? { warnings } : {}),
     mode: rc.options.mode,
@@ -875,6 +947,7 @@ function buildVideoResponse(rc: RunContext, result: MovieProcessResult): Handler
     format: rc.options.format,
     path: rc.outputPath,
     byteSize: statSync(rc.outputPath).size,
+    bytesWritten,
   });
 }
 
@@ -895,7 +968,10 @@ function buildPngResponse(
   const framePaths = frameFiles.map((f) => join(rc.runDir, f.name));
   const firstFrame = frameFiles[0]!;
 
+  // Sized before a check run removes the directory.
+  const bytesWritten = runDirBytes(rc.runDir);
   const warnings = measurementWarnings(measurement, frameCount, rc.options.frames);
+  if (bytesWritten === null) warnings.push(BYTES_UNMEASURED_WARNING);
   warnings.push(...runtimeErrorWarnings(rc.runner, result.stderr));
   warnings.push(...rc.gateWarnings);
 
@@ -930,10 +1006,13 @@ function buildPngResponse(
       from: p.from,
       to: p.to,
       difference: p.difference,
-      changedSamples: p.changedSamples,
+      changedPixels: p.changedPixels,
       changedFraction: p.changedFraction,
+      motionThreshold: p.motionThreshold,
+      changedBounds: p.changedBounds,
     })),
     samples,
+    bytesWritten,
   };
   if (isCheck) {
     payload.inlineFrames = measurement.inlineEntries;

@@ -18,6 +18,7 @@ import { BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager
 import { normalizeProjectKey } from '../../../src/utils/mcp-context.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import type { MovieProcessResult, RunMovieProcess } from '../../../src/utils/movie-process.js';
+import { MOTION_MIN_CHANGED_PIXELS } from '../../../src/utils/pixel-stats.js';
 import { decodePng } from '../../../src/utils/png-decoder.js';
 import { createFakeRunner, type FakeRunnerOptions } from '../../helpers/fake-runner.js';
 import { makeContext } from '../../helpers/runtime-fakes.js';
@@ -80,8 +81,10 @@ interface Payload {
     from: number;
     to: number;
     difference: number | null;
-    changedSamples: number | null;
+    changedPixels: number | null;
     changedFraction: number | null;
+    motionThreshold: number | null;
+    changedBounds: { x: number; y: number; width: number; height: number } | null;
   }>;
   samples?: Array<{ index: number; path?: string; stats: SampleStats | null }>;
   inlineFrames?: Array<{ index: number; width: number; height: number }>;
@@ -93,6 +96,7 @@ interface Payload {
   format?: string;
   path?: string;
   byteSize?: number;
+  bytesWritten?: number | null;
 }
 
 // --- Frame builders ---
@@ -414,7 +418,10 @@ describe('render_movie arguments', () => {
   it('rejects a scene that escapes the project', async () => {
     const { dir, runner, stub, handler } = setup();
     const result = await handler(runner, { projectPath: dir, scene: '../outside.tscn' }, NO_GATE);
-    expectErrorMatching(result, /Invalid scene path/);
+    expectErrorMatching(result, /Invalid scene path: ".*" resolves outside the project/);
+    // Absolute in-project and res:// spellings are accepted, so the message
+    // must not tell the caller the path has to be relative.
+    expect(JSON.stringify(result)).not.toMatch(/must be project-relative/);
     expect(stub.calls.length).toBe(0);
   });
 
@@ -589,6 +596,24 @@ describe('render_movie refusals before any spawn', () => {
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
   });
 
+  // Nothing is written before the launch gate, the owner registry included:
+  // an ordinary registry read unlinks the owner files of dead sessions.
+  it('asks the owner registry read-only, before the launch gate and after it', async () => {
+    const { dir, runner, handler } = setup();
+    const reads: unknown[] = [];
+    const spied = runner as GodotRunner & {
+      otherLiveSessionsOnProject: (projectPath: string, registryRead?: string) => [];
+    };
+    spied.otherLiveSessionsOnProject = (_projectPath, registryRead) => {
+      reads.push(registryRead);
+      return [];
+    };
+
+    payloadOf(await handler(runner, { projectPath: dir }, NO_GATE));
+
+    expect(reads).toEqual(['read-only', 'read-only']);
+  });
+
   it('refuses a stranded server-owned McpBridge autoload', async () => {
     const { dir, runner, stub, handler } = setup({
       projectGodot:
@@ -597,6 +622,8 @@ describe('render_movie refusals before any spawn', () => {
     const before = readFileSync(join(dir, 'project.godot'));
     const result = await handler(runner, { projectPath: dir }, NO_GATE);
     expectErrorMatching(result, /registers the McpBridge autoload/);
+    // remove_autoload's parameter is autoloadName; "name" is not one it takes.
+    expect(JSON.stringify(result)).toMatch(/remove_autoload with autoloadName \\"McpBridge\\"/);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
     expect(readFileSync(join(dir, 'project.godot')).equals(before)).toBe(true);
@@ -809,9 +836,13 @@ describe('render_movie check mode', () => {
     expect(payload.anyMotion).toBe(true);
     expect(payload.motion).toBeGreaterThan(0);
     for (const pair of payload.motionPairs!) {
-      expect(pair.changedSamples).toBeGreaterThan(0);
+      expect(pair.changedPixels).toBeGreaterThan(0);
       expect(pair.changedFraction).toBeGreaterThan(0);
       expect(pair.changedFraction).toBeLessThanOrEqual(1);
+      // A frame this small is held to the floor.
+      expect(pair.motionThreshold).toBe(MOTION_MIN_CHANGED_PIXELS);
+      // The block only ever moves along its own row band.
+      expect(pair.changedBounds).toMatchObject({ y: BLOCK_Y, height: BLOCK_SIZE });
     }
     expect(payload.frameCount).toBe(TEST_FRAMES);
     expect(payload.framesKept).toBe(false);
@@ -862,9 +893,57 @@ describe('render_movie check mode', () => {
     expect(payload.anyMotion).toBe(false);
     expect(payload.motion).toBe(0);
     for (const pair of payload.motionPairs!) {
-      expect(pair.changedSamples).toBe(0);
+      expect(pair.changedPixels).toBe(0);
       expect(pair.changedFraction).toBe(0);
+      expect(pair.changedBounds).toBeNull();
     }
+  });
+
+  it('counts a single flickering pixel without calling it motion', async () => {
+    const FLICKER_X = 50;
+    const FLICKER_Y = 5;
+    const flickerFrame = (): Buffer => {
+      const data = frameRgba(0);
+      data.set(RED, (FLICKER_Y * FRAME_SIZE + FLICKER_X) * RED.length);
+      return encodePng(FRAME_SIZE, FRAME_SIZE, data);
+    };
+    const { dir, runner, handler } = setup({
+      stub: { makeFrame: (i) => (i % 2 === 0 ? stillFrame() : flickerFrame()) },
+    });
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const payload = payloadOf(result);
+
+    expect(MOTION_MIN_CHANGED_PIXELS).toBeGreaterThan(1);
+    expect(payload.anyMotion).toBe(false);
+    expect(payload.motionPairs!.length).toBeGreaterThan(0);
+    for (const pair of payload.motionPairs!) {
+      expect(pair.changedPixels).toBe(1);
+      expect(pair.changedBounds).toEqual({ x: FLICKER_X, y: FLICKER_Y, width: 1, height: 1 });
+    }
+    expect(outputValidator(unwrap(result).structuredContent)).toBe(true);
+  });
+
+  it('reports the bytes the run wrote even though a check run deletes them', async () => {
+    let written = 0;
+    const { dir, runner } = setup();
+    const stub = createStub();
+    const sizing = createRenderMovieHandler({
+      runProcess: async (godotPath, args, timeoutMs) => {
+        const outcome = await stub.runProcess(godotPath, args, timeoutMs);
+        const runDir = dirname(args[args.indexOf('--write-movie') + 1]!);
+        for (const name of readdirSync(runDir)) written += statSync(join(runDir, name)).size;
+        return outcome;
+      },
+      displayAvailable: () => true,
+    });
+    const payload = payloadOf(
+      await sizing(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+    );
+
+    expect(payload.framesKept).toBe(false);
+    expect(written).toBeGreaterThan(0);
+    expect(payload.bytesWritten).toBe(written);
+    expect(movieRunDirs(dir)).toEqual([]);
   });
 
   it('deletes its frames and the wav', async () => {
@@ -907,8 +986,10 @@ describe('render_movie check mode', () => {
     expect(touching.length).toBeGreaterThan(0);
     for (const pair of touching) {
       expect(pair.difference).toBeNull();
-      expect(pair.changedSamples).toBeNull();
+      expect(pair.changedPixels).toBeNull();
       expect(pair.changedFraction).toBeNull();
+      expect(pair.motionThreshold).toBeNull();
+      expect(pair.changedBounds).toBeNull();
     }
     expect(payload.anyMotion).toBe(true);
     expect(payload.measuredFrames).toBe(payload.samples!.length - 1);
@@ -997,6 +1078,12 @@ describe('render_movie frames mode', () => {
     for (const path of payload.framePaths!) expect(existsSync(path)).toBe(true);
     for (const sample of payload.samples!) expect(existsSync(sample.path!)).toBe(true);
     expect(existsSync(payload.audioPath!)).toBe(true);
+    // Every file the run left behind, the audio track included.
+    const kept = readdirSync(payload.directory!);
+    expect(kept).toHaveLength(TEST_FRAMES + 1);
+    expect(payload.bytesWritten).toBe(
+      kept.reduce((sum, name) => sum + statSync(join(payload.directory!, name)).size, 0),
+    );
   });
 
   it('omits framePaths above the listing cap', async () => {
@@ -1043,6 +1130,7 @@ describe('render_movie video mode', () => {
     expect(payload.format).toBe('avi');
     expect(payload.path!.endsWith('movie.avi')).toBe(true);
     expect(payload.byteSize).toBe(statSync(payload.path!).size);
+    expect(payload.bytesWritten).toBe(payload.byteSize);
     expect(payload.byteSize).toBeGreaterThan(0);
   });
 
