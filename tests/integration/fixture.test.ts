@@ -72,6 +72,14 @@ describe('tests/fixtures/godot-authored-project: fixture health', () => {
     'inventory.tscn',
     'broken_script.gd',
     'broken_script.tscn',
+    'tinted_unit.tscn',
+    'tinted_host.tscn',
+    'typed_values.gd',
+    'typed_values.tscn',
+    'spawner.gd',
+    'spawner.tscn',
+    'unbind_host.gd',
+    'unbind_host.tscn',
     'notes.txt',
   ];
 

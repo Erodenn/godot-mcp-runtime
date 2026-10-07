@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3 uid="uid://c1tinthost01"]
+
+[ext_resource type="PackedScene" uid="uid://c1tintunit01" path="res://tinted_unit.tscn" id="1_tint"]
+
+[node name="TintedHost" type="Node2D"]
+
+[node name="Unit" parent="." instance=ExtResource("1_tint")]
+position = Vector2(10, 10)
+
+[node name="Badge" type="Node2D" parent="Unit"]
+
+[node name="Group" type="Node2D" parent="."]
+
+[node name="Inner" parent="Group" instance=ExtResource("1_tint")]

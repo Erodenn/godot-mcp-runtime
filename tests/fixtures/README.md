@@ -26,6 +26,10 @@ Contents and what each file is for:
 - `host.tscn`: instances `base_unit.tscn` as `Unit` with a position override, for edits inside an instanced child
 - `inventory.tscn`, `inventory.gd`: typed exports (`Dictionary[String, int]`, `Dictionary[int, float]`, `Vector2i`, `PackedByteArray`, `PackedInt32Array`); needs Godot 4.4+ because of the typed dictionaries
 - `broken_script.tscn`, `broken_script.gd`: a script that cannot compile (undeclared identifier) with a stored `speed = 9.0`, the deterministic case for a save that drops content
+- `tinted_unit.tscn`, `tinted_host.tscn`: a scene whose root carries a non-default `position` and `modulate` plus a `Core` child, and a host that instances it twice: as `Unit` with a position override and a `Badge` child the host adds under it, and as `Group/Inner` with no override. Both carry scene uids. Used by the `duplicate_node` tests on instanced nodes
+- `typed_values.tscn`, `typed_values.gd`: stored `Array[int]`, `PackedInt32Array` and `int` exports plus an `Array[Vector2i]` left at its default, for the integer range and empty container write tests. The script has no `.uid` sidecar because the scene references it by path alone
+- `spawner.tscn`, `spawner.gd`: a scene that holds `base_unit.tscn` as a property value, once in a `PackedScene` export and once in an `Array[PackedScene]` export, both written as `ExtResource`. For the batch test that saves `base_unit.tscn` while this scene's tree is loaded: the reference has to stay an `ExtResource`
+- `unbind_host.tscn`, `unbind_host.gd`: a `Toggle` `CheckButton` whose `toggled` signal is connected to a root method that takes no argument, with `unbinds=1`. For the `duplicate_node` test that the copy's connection keeps its unbound argument count
 - `notes.txt`: a plain text file under `res://`, not an importable resource
 
 ## `godot-profiling-project/`
