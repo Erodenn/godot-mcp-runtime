@@ -260,7 +260,7 @@ describe('handleValidate batch mode - per-target checks', () => {
           errors: [
             {
               message:
-                'Invalid scenePath: must be a relative path inside the project root, no ".."',
+                'Invalid scenePath: "../escape.tscn" resolves outside the project or is not a valid file name',
             },
           ],
         },

@@ -122,60 +122,72 @@ describe('parseSceneArgs', () => {
   const tmp = useTmpDirs();
 
   it('returns err when projectPath is missing', () => {
-    expectErrorMatching(parseSceneArgs({}), /projectPath is required/);
+    expectErrorMatching(parseSceneArgs({}, 'write'), /projectPath is required/);
   });
 
   it('returns err when projectPath contains ..', () => {
-    expectErrorMatching(parseSceneArgs({ projectPath: '/some/../path' }), /Invalid project path/);
+    expectErrorMatching(
+      parseSceneArgs({ projectPath: '/some/../path' }, 'write'),
+      /Invalid project path/,
+    );
   });
 
   it('returns err when directory exists but has no project.godot', () => {
     const dir = tmp.make('godot-test-');
-    expectErrorMatching(parseSceneArgs({ projectPath: dir }), /Not a valid Godot project/);
+    expectErrorMatching(parseSceneArgs({ projectPath: dir }, 'write'), /Not a valid Godot project/);
   });
 
   it('returns err when scenePath contains ..', () => {
     expectErrorMatching(
-      parseSceneArgs({
-        projectPath: fixtureProjectPath,
-        scenePath: '../outside.tscn',
-      }),
+      parseSceneArgs(
+        {
+          projectPath: fixtureProjectPath,
+          scenePath: '../outside.tscn',
+        },
+        'write',
+      ),
       /Invalid scene path/,
     );
   });
 
   it('returns err when scenePath is an absolute path that escapes the project', () => {
     expectErrorMatching(
-      parseSceneArgs({
-        projectPath: fixtureProjectPath,
-        scenePath: '/etc/passwd',
-      }),
+      parseSceneArgs(
+        {
+          projectPath: fixtureProjectPath,
+          scenePath: '/etc/passwd',
+        },
+        'write',
+      ),
       /Invalid scene path/,
     );
   });
 
   it('returns err when sceneRequired (default) and scene file does not exist', () => {
     expectErrorMatching(
-      parseSceneArgs({
-        projectPath: fixtureProjectPath,
-        scenePath: 'nonexistent.tscn',
-      }),
+      parseSceneArgs(
+        {
+          projectPath: fixtureProjectPath,
+          scenePath: 'nonexistent.tscn',
+        },
+        'write',
+      ),
       /Scene file does not exist/,
     );
   });
 
   it('returns err when scenePath is absent even when requireExists:false (presence is always required)', () => {
     expectErrorMatching(
-      parseSceneArgs({ projectPath: fixtureProjectPath }, { requireExists: false }),
+      parseSceneArgs({ projectPath: fixtureProjectPath }, 'write', { requireExists: false }),
       /scenePath is required/,
     );
   });
 
   it('returns ok shape for a valid project and scene', () => {
-    const result = parseSceneArgs({
-      projectPath: fixtureProjectPath,
-      scenePath: fixtureScenePath,
-    });
+    const result = parseSceneArgs(
+      { projectPath: fixtureProjectPath, scenePath: fixtureScenePath },
+      'write',
+    );
     assert(result.ok);
     expect(result.value.projectPath).toBe(fixtureProjectPath);
     expect(result.value.scenePath).toBe(fixtureScenePath);
@@ -185,6 +197,7 @@ describe('parseSceneArgs', () => {
     // Only requireExists:true (the default) stat-checks the scene file
     const result = parseSceneArgs(
       { projectPath: fixtureProjectPath, scenePath: 'ghost.tscn' },
+      'write',
       { requireExists: false },
     );
     assert(result.ok);

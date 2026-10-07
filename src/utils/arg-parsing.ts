@@ -17,10 +17,14 @@ import { ok, err, type Result } from './result.js';
 import type { NodePath, ProjectPath, ScenePath } from './branded.js';
 import {
   validatePath,
+  isSceneFileNodeType,
   resolveProjectPath,
+  type PathAccess,
   type ResolvedProjectPath,
   validateNodePath as validateNodePathShape,
   projectGodotPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
 } from './path-validation.js';
 
 // --- Generic field helpers ---
@@ -236,7 +240,7 @@ export function parseProjectArgs(
   if (!validatePath(raw)) {
     return err(
       createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
+        'Provide the path of the project directory, without a ".." segment',
       ]),
     );
   }
@@ -258,9 +262,13 @@ export function parseProjectArgs(
  * - Existence: when `requireExists` is true (default), the scene file must
  *   already exist on disk. Pass `{ requireExists: false }` for operations
  *   like `create_scene` that write a scene to a path that need not exist yet.
+ *
+ * `access` says what the tool does with the scene: `'write'` for every tool
+ * that saves it, `'read'` for one that only reads it. See `PathAccess`.
  */
 export function parseSceneArgs(
   args: OperationParams,
+  access: PathAccess,
   opts?: { requireExists?: boolean },
 ): Result<
   { projectPath: ProjectPath; scenePath: ScenePath; scene: ResolvedProjectPath },
@@ -275,23 +283,21 @@ export function parseSceneArgs(
   if (!raw) {
     return err(
       createErrorResponse('scenePath is required', [
-        'Provide the scene file path relative to the project',
+        'Provide the path of the scene file inside the project',
       ]),
     );
   }
   if (typeof raw !== 'string') {
     return err(
       createErrorResponse('scenePath must be a string', [
-        'Provide the scene file path relative to the project',
+        'Provide the path of the scene file inside the project',
       ]),
     );
   }
-  const scene = resolveProjectPath(project.value.projectPath, raw);
+  const scene = resolveProjectPath(project.value.projectPath, raw, access);
   if (!scene) {
     return err(
-      createErrorResponse('Invalid scene path', [
-        'Provide a valid relative path without ".." that stays inside the project directory',
-      ]),
+      createErrorResponse(projectSubPathError('scene path', raw), [...PROJECT_SUB_PATH_SOLUTIONS]),
     );
   }
   if (requireExists) {
@@ -381,7 +387,7 @@ function itemField(item: ItemRecord, camelKey: string, snakeKey: string): unknow
   return item[camelKey] !== undefined ? item[camelKey] : item[snakeKey];
 }
 
-function itemError(message: string, solution: string): Result<void, ToolResponse> {
+function itemError(message: string, solution: string): Result<never, ToolResponse> {
   return err(createErrorResponse(message, [solution]));
 }
 
@@ -463,6 +469,55 @@ const BATCH_ITEM_STRING_FIELDS: ReadonlyArray<readonly [camel: string, snake: st
   ['newPath', 'new_path'],
 ];
 
+/**
+ * The fields of a batch operation item that hold a path inside the project,
+ * with what the operation does to the file: each scene an operation works on
+ * is saved, and a `save` item's `newPath` is the copy it writes; a texture and
+ * a scene named as a `nodeType` are only read. `applies` narrows a field that
+ * is a path for some values only.
+ */
+const BATCH_ITEM_PATH_FIELDS: ReadonlyArray<{
+  camel: string;
+  snake: string;
+  access: PathAccess;
+  applies?: (value: string) => boolean;
+}> = [
+  { camel: 'scenePath', snake: 'scene_path', access: 'write' },
+  { camel: 'newPath', snake: 'new_path', access: 'write' },
+  { camel: 'texturePath', snake: 'texture_path', access: 'read' },
+  { camel: 'nodeType', snake: 'node_type', access: 'read', applies: isSceneFileNodeType },
+];
+
+/**
+ * Resolve every path field of one batch item by the rules a single call
+ * applies. Returns the item with each path replaced by its project-relative
+ * form, under the key the caller spelled it with, or the refusal naming the
+ * item and the field.
+ */
+function resolveBatchItemPaths(
+  item: ItemRecord,
+  where: string,
+  projectPath: string,
+): Result<ItemRecord, ToolResponse> {
+  const resolved: ItemRecord = { ...item };
+  for (const field of BATCH_ITEM_PATH_FIELDS) {
+    const key = item[field.camel] !== undefined ? field.camel : field.snake;
+    const value = item[key];
+    if (typeof value !== 'string' || value === '') continue;
+    if (field.applies !== undefined && !field.applies(value)) continue;
+    const path = resolveProjectPath(projectPath, value, field.access);
+    if (path === null) {
+      return err(
+        createErrorResponse(projectSubPathError(`${where}.${field.camel}`, value), [
+          ...PROJECT_SUB_PATH_SOLUTIONS,
+        ]),
+      );
+    }
+    resolved[key] = path.relPath;
+  }
+  return ok(resolved);
+}
+
 /** The sub-operations a batch item may name. KEEP IN SYNC with the match in batch_scene_operations. */
 const BATCH_OPERATION_NAMES = ['add_node', 'load_sprite', 'set_node_properties', 'save'] as const;
 
@@ -490,12 +545,20 @@ function batchOperationHint(item: Record<string, unknown>): string {
  * on a call that is malformed. A missing one names the operation the item's
  * other keys suggest. The script keeps its own hint branch for callers that
  * reach `executeOperation` without this check.
+ *
+ * Every path an item carries (`BATCH_ITEM_PATH_FIELDS`) goes through
+ * `resolveProjectPath` with the intent a single call gives it, so a batch
+ * accepts and refuses exactly the paths the single tools do. The value
+ * returned is the operations to forward: the same items with each path in its
+ * resolved project-relative form.
  */
 export function checkBatchOperationItems(
   items: unknown[],
+  projectPath: string,
   field = 'operations',
-): Result<void, ToolResponse> {
+): Result<ItemRecord[], ToolResponse> {
   const operationList = BATCH_OPERATION_NAMES.join(', ');
+  const resolvedItems: ItemRecord[] = [];
   for (let i = 0; i < items.length; i++) {
     const where = `${field}[${i}]`;
     const item = asItemRecord(items[i]);
@@ -524,7 +587,7 @@ export function checkBatchOperationItems(
     if (scenePath !== undefined && typeof scenePath !== 'string') {
       return itemError(
         `${where}.scenePath must be a string when provided`,
-        'Provide the scene file path relative to the project',
+        'Provide the path of the scene file inside the project',
       );
     }
     for (const [camelKey, snakeKey] of BATCH_ITEM_STRING_FIELDS) {
@@ -556,6 +619,9 @@ export function checkBatchOperationItems(
       const updates = checkUpdateItems(item.updates, `${where}.updates`);
       if (!updates.ok) return updates;
     }
+    const resolved = resolveBatchItemPaths(item, where, projectPath);
+    if (!resolved.ok) return resolved;
+    resolvedItems.push(resolved.value);
   }
-  return ok(undefined);
+  return ok(resolvedItems);
 }

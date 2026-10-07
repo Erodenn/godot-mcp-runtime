@@ -893,22 +893,49 @@ describe('validate accepts every project path spelling', () => {
     expect(scene.calls[0]?.params).toEqual({ scenePath: fixtureScenePath });
   });
 
-  it('batch targets keep the caller spelling, except absolute paths go relative', async () => {
+  it('batch targets are forwarded relative, whatever the caller spelling', async () => {
     const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
     await handleValidate(fake.asRunner, {
       projectPath: fixtureProjectPath,
       targets: [
         { scriptPath: 'res://placeholder.gd' },
+        { scriptPath: '.\\placeholder.gd' },
         { scriptPath: absolute('placeholder.gd') },
         { scenePath: absolute(fixtureScenePath) },
       ],
     });
     expect(fake.calls[0]?.params).toEqual({
       targets: [
-        { script_path: 'res://placeholder.gd' },
+        { script_path: 'placeholder.gd' },
+        { script_path: 'placeholder.gd' },
         { script_path: 'placeholder.gd' },
         { scene_path: fixtureScenePath },
       ],
     });
+  });
+
+  it('a batch result reports the caller spelling, and the relative path for an absolute one', async () => {
+    const answer = (target: string) => ({ target, valid: true, errors: [], checkErrors: [] });
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [answer('placeholder.gd'), answer('placeholder.gd'), answer(fixtureScenePath)],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        { scriptPath: 'res://placeholder.gd' },
+        { scriptPath: absolute('placeholder.gd') },
+        { scenePath: `./${fixtureScenePath}` },
+      ],
+    });
+    const payload = JSON.parse(unwrap(result).content[0]!.text) as {
+      results: Array<{ target: string }>;
+    };
+    expect(payload.results.map((r) => r.target)).toEqual([
+      'res://placeholder.gd',
+      'placeholder.gd',
+      `./${fixtureScenePath}`,
+    ]);
   });
 });

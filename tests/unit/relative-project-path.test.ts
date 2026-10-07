@@ -33,6 +33,7 @@ vi.mock('../../src/utils/path-validation.js', async () => {
 });
 vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {
+    precheckInject = () => '';
     inject = injectMock;
     cleanup = cleanupMock;
     getLastInjectedPort = () => MOCK_BRIDGE_PORT;
@@ -44,8 +45,8 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 function fakeSpawnedProcess() {
   return {
     pid: 4242,
-    stdout: { on: vi.fn() },
-    stderr: { on: vi.fn() },
+    stdout: { on: vi.fn(), once: vi.fn() },
+    stderr: { on: vi.fn(), once: vi.fn() },
     on: vi.fn(),
     kill: vi.fn(),
   };

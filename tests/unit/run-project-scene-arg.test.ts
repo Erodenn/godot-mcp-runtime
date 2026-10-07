@@ -33,6 +33,7 @@ vi.mock('../../src/utils/path-validation.js', async () => {
 });
 vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {
+    precheckInject = () => '';
     inject = injectMock;
     cleanup = cleanupMock;
     getLastInjectedPort = () => MOCK_BRIDGE_PORT;
@@ -45,8 +46,8 @@ import { resolveProjectPath } from '../../src/utils/path-validation.js';
 function fakeSpawnedProcess() {
   return {
     pid: 4242,
-    stdout: { on: vi.fn() },
-    stderr: { on: vi.fn() },
+    stdout: { on: vi.fn(), once: vi.fn() },
+    stderr: { on: vi.fn(), once: vi.fn() },
     on: vi.fn(),
     kill: vi.fn(),
   };
@@ -68,7 +69,11 @@ describe('runProject scene argument', () => {
 
   it('appends the scene res:// path to the Godot argv after --path', async () => {
     const runner = new GodotRunner({ godotPath: process.execPath });
-    await runner.runProject(projectDir, resolveProjectPath(projectDir, 'scenes/level.tscn')!, true);
+    await runner.runProject(
+      projectDir,
+      resolveProjectPath(projectDir, 'scenes/level.tscn', 'read')!,
+      true,
+    );
     const spawnArgs = spawnMock.mock.calls[0] as unknown[];
     expect(spawnArgs[1]).toEqual(['--path', resolve(projectDir), 'res://scenes/level.tscn']);
   });
@@ -85,7 +90,7 @@ describe('runProject scene argument', () => {
     const runner = new GodotRunner({ godotPath: process.execPath });
     await runner.runProject(
       projectDir,
-      resolveProjectPath(projectDir, 'scenes/level.tscn')!,
+      resolveProjectPath(projectDir, 'scenes/level.tscn', 'read')!,
       true,
       undefined,
       true,
