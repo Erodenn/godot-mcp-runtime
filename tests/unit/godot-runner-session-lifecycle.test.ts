@@ -58,6 +58,8 @@ interface BridgeRecorder {
 function stubBridge(runner: Runner): BridgeRecorder {
   const rec: BridgeRecorder = { cleanupCalls: [], injectCalls: [], cleanupProblems: [] };
   (runner as unknown as { bridge: unknown }).bridge = {
+    // A healthy project: nothing for the precheck to refuse.
+    precheckInject: () => '',
     inject: (projectPath: string) => {
       rec.injectCalls.push(projectPath);
     },
@@ -349,7 +351,13 @@ describe('spawned-process exit auto-clear', () => {
     // regression reverting the classification's key from `activeProcess` back
     // to `activeSessionMode === 'spawned'` would leave a direct-call test
     // green while the real behavior broke.
-    scripted = await startScriptedBridge(() => ({ kind: 'reply', payload: OK }));
+    // The stderr line is written when the bridge has the frame and before it
+    // answers: after the command took its marker, which is the "post-exit"
+    // ordering under test.
+    scripted = await startScriptedBridge(() => {
+      proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: post-exit line\n'));
+      return { kind: 'reply', payload: OK };
+    });
     await start();
 
     proc.emit('exit', 1);
@@ -363,13 +371,7 @@ describe('spawned-process exit auto-clear', () => {
     currentRecord(runner).bridgePort = scripted.port;
     currentRecord(runner).token = 'test-token';
 
-    // Marker capture inside sendCommandWithErrors happens synchronously before
-    // it awaits the round-trip, so emitting the stderr line right after the
-    // call (and before awaiting it) lands after the marker - exactly the
-    // "post-exit" ordering under test.
-    const pending = runner.sendCommandWithErrors('get_ui_elements', {});
-    proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: post-exit line\n'));
-    const { runtimeErrors } = await pending;
+    const { runtimeErrors } = await runner.sendCommandWithErrors('get_ui_elements', {});
 
     expect(runtimeErrors.some((l) => l.includes('SCRIPT ERROR: post-exit line'))).toBe(true);
   });
@@ -379,7 +381,7 @@ describe('spawned-process exit auto-clear', () => {
 // Attached-mode disconnect
 // ---------------------------------------------------------------------------
 
-type FrameAction = { kind: 'reply'; payload: string } | { kind: 'drop' };
+type FrameAction = { kind: 'reply'; payload: string } | { kind: 'drop' } | { kind: 'hold' };
 
 interface ScriptedBridge {
   port: number;
@@ -390,7 +392,8 @@ interface ScriptedBridge {
 /**
  * Loopback TCP server that answers each framed command according to `script`.
  * `drop` destroys the peer without replying, which is what a Godot process
- * that went away looks like to `sendCommand`.
+ * that went away looks like to `sendCommand`. `hold` keeps the connection
+ * open and says nothing: a game that is alive and not answering.
  */
 async function startScriptedBridge(
   script: (command: string, seenCount: number) => FrameAction,
@@ -409,7 +412,7 @@ async function startScriptedBridge(
         const action = script(parsed.command, seen.length);
         seen.push(parsed.command);
         if (action.kind === 'reply') socket.write(encodeFrame(action.payload));
-        else socket.destroy();
+        else if (action.kind === 'drop') socket.destroy();
       }
     });
     socket.on('error', () => {
@@ -504,6 +507,30 @@ describe('attached-mode bridge disconnect', () => {
   );
 
   it(
+    'a probe that times out does not end the session: the game is alive and not answering',
+    async () => {
+      // The command's connection is dropped, then the probe ping is accepted
+      // and never answered. That is a timeout, not a disconnect, and only a
+      // disconnect says the bridge is gone.
+      scripted = await startScriptedBridge((command) =>
+        command === 'ping' ? { kind: 'hold' } : { kind: 'drop' },
+      );
+      attach(scripted.port);
+
+      await expect(runner.sendCommandWithErrors('run_script', {})).rejects.toBeInstanceOf(
+        BridgeDisconnectedError,
+      );
+
+      expect(scripted.seen).toEqual(['run_script', 'ping']);
+      expect(runner.activeSessionMode).toBe('attached');
+      expect(runner.activeProjectPath).toBe(projectPath);
+      expect(runner.hasActiveRuntimeSession()).toBe(true);
+      expect(bridge.cleanupCalls).toEqual([]);
+    },
+    DISCONNECT_CASE_TIMEOUT_MS,
+  );
+
+  it(
     'retryable command that succeeds on its retry never probes',
     async () => {
       scripted = await startScriptedBridge((command, seenCount) =>
@@ -540,17 +567,20 @@ describe('attached-mode bridge disconnect', () => {
     DISCONNECT_CASE_TIMEOUT_MS,
   );
 
+  // A status ping already is the question the probe asks. Teardown needs no
+  // exemption: a stop sends `shutdown` over a connection of its own, which the
+  // attached-stop cases below observe as the only frame the bridge receives.
   it(
-    'shutdown is exempt: a disconnect during teardown never probes or clears',
+    'ping is exempt: a status ping that meets a disconnect is not probed again and clears nothing',
     async () => {
       scripted = await startScriptedBridge(() => ({ kind: 'drop' }));
       attach(scripted.port);
 
-      await expect(runner.sendCommandWithErrors('shutdown', {})).rejects.toBeInstanceOf(
+      await expect(runner.sendCommandWithErrors('ping', {})).rejects.toBeInstanceOf(
         BridgeDisconnectedError,
       );
 
-      expect(scripted.seen).toEqual(['shutdown']);
+      expect(scripted.seen).toEqual(['ping']);
       expect(runner.activeSessionMode).toBe('attached');
       expect(bridge.cleanupCalls).toEqual([]);
     },
@@ -788,6 +818,10 @@ describe('spawn options reach child_process.spawn', () => {
     proc.emit('close', 0);
 
     expect(await pending).toBe('4.7.2.stable.official');
-    expect(spawnOptions()).toEqual({ stdio: 'pipe', windowsHide: true });
+    expect(spawnOptions()).toEqual({
+      stdio: 'pipe',
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
   });
 });

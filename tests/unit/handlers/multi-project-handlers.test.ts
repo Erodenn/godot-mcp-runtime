@@ -413,7 +413,7 @@ describe('no silent fallback', () => {
 
     const result = await handleStopProject(runner);
 
-    expectErrorMatching(result, /No active Godot process to stop/);
+    expectErrorMatching(result, /Nothing to stop: no runtime session is current/);
     expect(fullText(result)).toContain(a);
     expect(fullText(result)).toContain('switch_project');
     expect(runner.hasLiveSessionOnProject(a)).toBe(true);
@@ -434,7 +434,7 @@ describe('no silent fallback', () => {
     expect(payload.message as string).toContain(a);
 
     const second = await handleStopProject(runner);
-    expectErrorMatching(second, /No active Godot process to stop/);
+    expectErrorMatching(second, /Nothing to stop: no runtime session is current/);
     expect(fullText(second)).toContain(a);
   });
 

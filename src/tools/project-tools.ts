@@ -17,6 +17,7 @@ import {
   optionalStringArray,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
+import { SessionQueueTimeoutError } from '../utils/session-queue.js';
 import { logDebug } from '../utils/logger.js';
 import { scanTscn } from '../utils/scene-parsing.js';
 import { findSetting, readProjectSettings, scanProjectFile } from '../utils/project-godot.js';
@@ -131,7 +132,11 @@ export const projectToolDefinitions = [
             sessionMode: { type: 'string', enum: ['spawned', 'attached'] },
             processExited: { type: 'boolean' },
             exitCode: { type: ['number', 'null'] },
-            bridgeResponsive: { type: 'boolean' },
+            bridgeResponsive: {
+              type: ['boolean', 'null'],
+              description:
+                'Whether the current live session answered a ping. null when the ping was not sent because another runtime operation was still running; diagnostics says which.',
+            },
             diagnostics: { type: 'array', items: { type: 'string' } },
             liveSessions: {
               type: 'array',
@@ -277,7 +282,7 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_settings',
     description:
-      'Parse project.godot into JSON without launching Godot. Use to inspect display, input and rendering settings. Pass section for one INI section (e.g. "display"). Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section. Strings are unescaped, an empty value is null, complex values stay raw text. Keys before any section, config_version included, are under __global__. warnings leads when the section is absent, a value is unterminated or empty, or a line was skipped.',
+      'Parse project.godot into JSON without launching Godot. Use to inspect display, input and rendering settings. Pass section for one INI section. Returns: settings as { [section]: { [key]: value } }, or { [key]: value } plus section. Strings are unescaped, an empty value is null, complex values stay raw text. Keys before any section are under __global__. warnings leads when the section is absent, a value is unterminated or empty, a line is not as Godot writes it, or a setting is assigned twice.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -294,7 +299,12 @@ export const projectToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        warnings: { type: 'array', items: { type: 'string' } },
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present only when there is something to say. One entry names, by line number, every line that is not in the form Godot writes (two statements on a line, a statement after a header, a # line, a value that is not one whole value): the engine may read such a line differently from what settings shows.',
+        },
         section: { type: 'string', description: 'Present when a section filter was applied.' },
         settings: {
           type: 'object',
@@ -618,7 +628,7 @@ export async function handleListProjects(args: OperationParams): Promise<Handler
   if (!validatePath(directory.value)) {
     return err(
       createErrorResponse('Invalid directory path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
+        'Provide the path of the directory to search, without a ".." segment',
       ]),
     );
   }
@@ -703,10 +713,37 @@ function describeProjectSession(runner: GodotRunner, projectPath: string): Recor
  * runs when that session is live, so the no-session path costs nothing extra
  * and a failed/timed-out ping never turns the call into an error - it only
  * downgrades bridgeResponsive and adds a diagnostic.
+ *
+ * With a live session, the status read and the ping run with the session queue
+ * held, so the session reported is the one pinged. When the queue does not
+ * come free in time the report is still given, read without the queue, with
+ * bridgeResponsive null and a diagnostic naming what the ping waited behind.
  */
 async function buildRuntimeReport(
   runner: GodotRunner,
   askedProjectPath: string | null,
+): Promise<Record<string, unknown>> {
+  if (runner.getRuntimeSessionStatus().state !== 'live') {
+    return describeRuntime(runner, askedProjectPath, null);
+  }
+  try {
+    return await runner.runExclusive('check_project', () =>
+      describeRuntime(runner, askedProjectPath, null),
+    );
+  } catch (error: unknown) {
+    if (!(error instanceof SessionQueueTimeoutError)) throw error;
+    return describeRuntime(runner, askedProjectPath, `Bridge not pinged: ${error.message}`);
+  }
+}
+
+/**
+ * The runtime block. `pingSkipped` is null to ping a live current session, or
+ * the reason no ping is sent, which is reported with bridgeResponsive null.
+ */
+async function describeRuntime(
+  runner: GodotRunner,
+  askedProjectPath: string | null,
+  pingSkipped: string | null,
 ): Promise<Record<string, unknown>> {
   const status = runner.getRuntimeSessionStatus();
   const current = status.current;
@@ -716,24 +753,29 @@ async function buildRuntimeReport(
     runtime = { activeSession: false };
   } else if (status.state === 'live') {
     runtime = { activeSession: true, sessionMode: current.mode };
-    try {
-      // ping is exempt from the attached-mode disconnect probe (see
-      // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
-      // ping here reports bridgeResponsive:false without ending the session.
-      const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
-      let parsed: { status?: string } | undefined;
+    if (pingSkipped !== null) {
+      runtime.bridgeResponsive = null;
+      diagnostics.push(pingSkipped);
+    } else {
       try {
-        parsed = JSON.parse(response) as { status?: string };
-      } catch {
-        diagnostics.push('Bridge returned a non-JSON ping response');
+        // ping is exempt from the attached-mode disconnect probe (see
+        // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
+        // ping here reports bridgeResponsive:false without ending the session.
+        const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
+        let parsed: { status?: string } | undefined;
+        try {
+          parsed = JSON.parse(response) as { status?: string };
+        } catch {
+          diagnostics.push('Bridge returned a non-JSON ping response');
+        }
+        runtime.bridgeResponsive = parsed?.status === 'pong';
+        if (parsed && parsed.status !== 'pong') {
+          diagnostics.push('Bridge responded to ping with an unexpected payload');
+        }
+      } catch (error: unknown) {
+        runtime.bridgeResponsive = false;
+        diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
       }
-      runtime.bridgeResponsive = parsed?.status === 'pong';
-      if (parsed && parsed.status !== 'pong') {
-        diagnostics.push('Bridge responded to ping with an unexpected payload');
-      }
-    } catch (error: unknown) {
-      runtime.bridgeResponsive = false;
-      diagnostics.push(`Bridge not responsive: ${getErrorMessage(error)}`);
     }
   } else if (current.mode === 'spawned') {
     runtime = { activeSession: false, sessionMode: 'spawned', processExited: true };
@@ -955,7 +997,7 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
 
 export async function handleGetSceneDependencies(args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   try {

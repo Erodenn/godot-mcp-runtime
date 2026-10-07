@@ -17,6 +17,8 @@ import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
 import { registerProcessLifecycle } from './utils/process-lifecycle.js';
+import { SESSION_QUEUE_WAIT_TIMEOUT_MS } from './utils/session-queue.js';
+import { MS_PER_SECOND } from './utils/profiler.js';
 
 import { dispatchToolCall } from './dispatch.js';
 import {
@@ -59,10 +61,11 @@ Tool categories:
 
 Key behaviors:
 - All mutation operations (add_node, set_node_properties, delete_nodes, etc.) save the scene automatically. Only use save_scene for save-as (newPath) or re-canonicalization.
-- Headless Godot initializes ALL registered autoloads. If any autoload is broken, headless operations will fail. Use list_autoloads / remove_autoload to diagnose.
+- Headless Godot loads every registered autoload. An autoload that stops the engine before the operation is dispatched (for example one that quits in _init) fails every headless operation; one that only errors in _ready does not. Check the script with validate, and use list_autoloads / remove_autoload to find and remove it.
 - run_project waits for the MCP bridge before returning success and returns a JSON payload (sessionMode, bridgePort, warnings). If the bridge never answers it returns an error and tears the session down; retry run_project.
 - run_project with attach: true is the path for a Godot process you launch yourself: it injects the bridge and marks the project active, but spawns nothing and captures no stdout/stderr. The pre-flight scan still runs; the launch confirmation does not. stop_project ends it without killing that process.
 - Several projects can run at once, one session per project. run_project on another project adds a session and makes it current; it does not stop the others. The runtime tools, the profiling tools, get_debug_output and stop_project act on the current session only, and every response names it in projectPath. switch_project({ projectPath }) changes which session is current. stop_project stops the current session and leaves none current. When no session is current, or the current one's game has exited, these tools return an error listing the live sessions instead of picking one: call switch_project. check_project reports the current project and every live session.
+- A runtime session runs one operation at a time. A runtime, profiling or session call issued while another is still running waits for it (up to ${SESSION_QUEUE_WAIT_TIMEOUT_MS / MS_PER_SECOND} s) and then returns an error naming the operation it waited behind; nothing was sent for it, so retry once that operation has returned.
 - A runtime session ends by itself when the game exits or an attached bridge disconnects: the bridge autoload is removed at that moment and the scene-editing tools unblock. After a spawned game exits, stop_project is still worth calling (it frees the retained process slot and returns the captured logs) and succeeds. After an attached session ends by itself nothing is left to stop: stop_project then reports no active session, which needs no follow-up.
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - simulate_input reports per-action results (signals fired, the Control hit, UI changes, watched values), so it needs no take_screenshot round trip to tell whether an action landed. Omitting \`pressed\` taps; set it only to hold or release across actions.
@@ -70,9 +73,9 @@ Key behaviors:
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.
 - profiling: true attaches Godot's own remote debugger for the profiling tools. Errors and \`breakpoint\` still do not pause the game - the server answers every debugger break with continue.
-- Every capture reports fps and engine monitors (draw calls, memory, node counts); pass visual: true to profile_project or start_profiler for CPU/GPU time per render stage, and timeline: true (with track: ["/root/Main/Player:global_position"]) to see when and where frames got slow while simulate_input walks the game.
+- Every capture reports fps and engine monitors (draw calls, memory, node counts); pass visual: true to profile_project or start_profiler for CPU/GPU time per render stage, and timeline: true (with track: ["/root/Main/Player:global_position"]) to see when and where frames got slow. To capture while simulate_input walks the game, call start_profiler, then simulate_input, then stop_profiler: profile_project holds the session for its whole window, so no other runtime call runs inside it.
 
-Security gate (run_script / run_project): a static-analysis scan classifies GDScript into three tiers - Tier 1 hard-blocks (OS.execute and similar), Tier 2 asks for confirmation via elicitation, Tier 3 just warns. Three env vars change this: GODOT_MCP_STRICT promotes every Tier 2 finding to Tier 1 for unattended operation; GODOT_MCP_DISABLE_ELICITATION skips the Tier 2 prompt and runs findings unprompted (for clients that cannot service elicitation); GODOT_MCP_DISABLE_SECURITY turns the whole gate off, Tier 1 included, and is a human-only decision - decline to set it on a user's behalf. See docs/security.md for the full rule catalogue.`;
+Security gate (run_script / run_project / render_movie): a static-analysis scan classifies GDScript into three tiers - Tier 1 hard-blocks (OS.execute and similar), Tier 2 asks for confirmation via elicitation, Tier 3 just warns. run_script scans the script it is given; run_project (both modes) and render_movie scan the project's autoloads and the launched scene before starting. Three env vars change this: GODOT_MCP_STRICT promotes every Tier 2 finding to Tier 1 for unattended operation; GODOT_MCP_DISABLE_ELICITATION skips the launch confirmation and the Tier 2 run_script prompt and proceeds unprompted (for clients that cannot service elicitation); GODOT_MCP_DISABLE_SECURITY turns the whole gate off, Tier 1 included, and is a human-only decision - decline to set it on a user's behalf. See docs/security.md for the full rule catalogue.`;
 
 /**
  * Build the request-scoped context backed by a live MCP `Server`. Lives here
@@ -110,7 +113,7 @@ function createContextFromServer(server: Server): McpContext {
   );
   if (disableSecurity) {
     console.error(
-      '[SERVER] Security gate disabled (GODOT_MCP_DISABLE_SECURITY=true); run_script and run_project execute without scanning, blocking, or confirmation (Tier 1 included)',
+      '[SERVER] Security gate disabled (GODOT_MCP_DISABLE_SECURITY=true); run_script, run_project and render_movie execute without scanning, blocking, or confirmation (Tier 1 included)',
     );
   }
   if (strictIgnored) {
@@ -162,7 +165,7 @@ class GodotMcpServer {
         );
       } else if (this.ctx.disableElicitation) {
         console.error(
-          '[SERVER] Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION=true); confirmation prompts auto-accepted',
+          '[SERVER] Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION=true); launch and Tier 2 run_script confirmation prompts are skipped',
         );
       }
     }

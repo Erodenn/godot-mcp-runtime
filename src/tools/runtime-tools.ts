@@ -1,18 +1,26 @@
 import { join, sep, resolve } from 'path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'fs';
 import {
+  BRIDGE_PING_TIMEOUT_MS,
   BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS,
   BRIDGE_WAIT_ATTACHED_TIMEOUT_MS,
+  StartBudgetExhaustedError,
+  type AttachedProbeOutcome,
   type GodotRunner,
   type ReplacedAttachedSession,
   type RuntimeSessionMode,
 } from '../utils/godot-runner.js';
-import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
+import {
+  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
+  OVERSIZE_RESPONSE_FIELD,
+} from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import {
   resolveProjectPath,
   isUnderDir,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
   type ResolvedProjectPath,
 } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
@@ -56,13 +64,31 @@ import {
   noLiveCurrentSessionError,
   otherLiveSessionsClause,
   requireRuntimeSession,
+  runSessionExclusive,
   runtimeCommandFailure,
   runtimeToolWording,
+  type NoSessionWording,
 } from '../utils/session-report.js';
+import { sessionKey } from '../utils/godot-runner.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
 export const DEFAULT_PREVIEW_MAX_HEIGHT = 540;
+/**
+ * Largest preview box a caller may ask for. A preview is the cheap inline
+ * image; past full HD the caller wants `full`, which returns the screenshot
+ * itself. A larger request is clamped to this, not refused.
+ */
+export const PREVIEW_MAX_WIDTH_LIMIT = 1920;
+export const PREVIEW_MAX_HEIGHT_LIMIT = 1080;
+const BYTES_PER_MEBIBYTE = 1024 * 1024;
+/**
+ * Largest image file returned inline, for `full` and `preview` alike. Base64
+ * adds a third, and a response of several megabytes is refused by some
+ * clients and costs the others their context. Past this the path, size and
+ * stats are still returned, with a leading warning in place of the image.
+ */
+export const SCREENSHOT_INLINE_MAX_BYTES = 3 * BYTES_PER_MEBIBYTE;
 const STATS_NOT_MEASURED_WARNING_PREFIX = 'Pixel stats were not measured: ';
 const STATS_NOT_MEASURED_WARNING_SUFFIX =
   '. The screenshot was saved; stats is null, which does not mean the frame is blank.';
@@ -80,6 +106,20 @@ const MAX_WATCH_ENTRIES = 16;
 // server-side timeout load-bearing, so every term is a named multiplier and the
 // caps above are what keep the total bounded.
 const INPUT_TIMEOUT_BUFFER_MS = 10000;
+/**
+ * Ceiling on one batch's computed time budget (`computeInputTimeoutMs`): its
+ * waits and holds, its frames at the pessimistic frame time, and the buffer.
+ * A batch over it is refused before anything is injected. The per-action caps
+ * bound each wait, but not how many there are, and a wait in milliseconds had
+ * no cap at all; with no ceiling the server-side timeout of the call is
+ * whatever the caller asked for. Ten minutes is far past any batch that
+ * drives a game step by step; longer waits belong in separate calls.
+ *
+ * KEEP IN SYNC: `MAX_BATCH_WAIT_MS` in src/scripts/mcp_bridge.gd bounds the
+ * wall-clock waits of a batch at the same figure on the bridge side.
+ */
+export const MAX_INPUT_BATCH_BUDGET_MS = 600000;
+const MS_PER_SECOND = 1000;
 /**
  * Wall-clock charged per engine frame a batch waits on. It is a floor on the
  * frame rate, not an estimate of it: a batch that outruns this budget times out
@@ -164,7 +204,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true wait for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. The new session becomes current; sessions on other projects keep running. Returns: projectPath, sessionMode, bridgePort, message; warnings leads when the pre-flight scan flagged a script. Errors if the bridge never answers.',
+      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true wait for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. The new session becomes current; sessions on other projects keep running. Returns: projectPath, sessionMode, bridgePort, message; warnings leads on a scan finding or a start caveat. Errors if the bridge never answers.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -175,7 +215,7 @@ export const runtimeToolDefinitions = [
         },
         attach: {
           type: 'boolean',
-          description: `If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to ${BRIDGE_WAIT_ATTACHED_TIMEOUT_MS / 1000}s for it to start listening, ${BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS / 1000}s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project. Cannot be combined with scene, background or profiling; get_debug_output and the profiler are unavailable.`,
+          description: `If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to ${BRIDGE_WAIT_ATTACHED_TIMEOUT_MS / 1000}s for it to start listening, ${BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS / 1000}s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project; attaching again keeps this server's attached session unless its bridge is gone, and says so in warnings. Cannot be combined with scene, background or profiling. Nothing is captured: get_debug_output returns null logs with a warning, and the profiler is unavailable.`,
         },
         scene: {
           type: 'string',
@@ -295,7 +335,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'stop_project',
     description:
-      'End the current runtime session and remove the bridge. A spawned Godot is stopped; an attached one is detached, not killed. Other sessions keep running; none becomes current. Call it even after a spawned game exited by itself: it frees the slot and reports alreadyExited. Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, finalOutput, finalErrors; warnings leads if cleanup was unconfirmed. Errors if no session, as after an attached one ended by itself.',
+      'End the current session now and remove the bridge, cutting off a runtime call in progress. A spawned Godot is stopped; an attached one is detached, not killed. Other sessions keep running; none becomes current. Also frees a spawned game that exited by itself (alreadyExited). Returns: projectPath, message, sessionMode, externalProcessPreserved, alreadyExited, exitCode, killUnconfirmed, finalOutput, finalErrors; warnings leads if the kill or cleanup was unconfirmed. Errors if nothing is running.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -312,6 +352,12 @@ export const runtimeToolDefinitions = [
         externalProcessPreserved: { type: 'boolean' },
         alreadyExited: { type: 'boolean' },
         exitCode: { type: ['number', 'null'] },
+        killUnconfirmed: {
+          type: 'boolean',
+          description:
+            'Present and true when the kill was sent and the process did not report its exit in time: it may still be running. warnings names the pid.',
+        },
+        pid: { type: 'number', description: 'Pid the unconfirmed kill was sent to.' },
         finalOutput: {
           type: ['array', 'null'],
           items: { type: 'string' },
@@ -338,7 +384,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'take_screenshot',
     description:
-      'Save a PNG of the running viewport under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline, max 960x540), full (inline full PNG, for small text), path_only (no image). Returns: projectPath, path, size, and stats {chromatic, dominant, distinct, likelyBlank} measured from the full PNG, so a blank frame is detectable without vision; stats is null with a leading warning if not measured. Errors if no session, no frame renders, or the bridge times out.',
+      'Save a PNG of the running viewport under .mcp/godot-runtime/screenshots/ (kept after stop_project). responseMode: preview (default; inline, fits default 960x540, max 1920x1080), full (inline PNG, for small text), path_only (no image). Returns: projectPath, path, size, stats {chromatic, dominant, distinct, likelyBlank} from the full PNG, so a blank frame shows without vision. warnings leads if stats is null or the image is too big to inline. Errors: no session, no frame rendered, bridge timeout.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -350,18 +396,15 @@ export const runtimeToolDefinitions = [
         responseMode: {
           type: 'string',
           enum: ['full', 'preview', 'path_only'],
-          description:
-            'Response payload mode. "preview" returns a bounded inline preview plus paths (default). "full" returns the full inline PNG. "path_only" returns paths only.',
+          description: `Response payload mode. "preview" returns a bounded inline preview plus paths (default). "full" returns the full inline PNG. "path_only" returns paths only. An image file over ${SCREENSHOT_INLINE_MAX_BYTES / BYTES_PER_MEBIBYTE} MiB, or a full PNG that could not be decoded, is not inlined: the path is returned with a leading warning.`,
         },
         previewMaxWidth: {
           type: 'number',
-          description:
-            'Maximum preview width in pixels when responseMode is "preview" (default: 960)',
+          description: `Width in pixels of the box the preview is fitted into when responseMode is "preview". Default: ${DEFAULT_PREVIEW_MAX_WIDTH}. Maximum: ${PREVIEW_MAX_WIDTH_LIMIT}; a larger value is clamped to it, not refused. Use responseMode "full" for the screenshot at its own size.`,
         },
         previewMaxHeight: {
           type: 'number',
-          description:
-            'Maximum preview height in pixels when responseMode is "preview" (default: 540)',
+          description: `Height in pixels of the box the preview is fitted into when responseMode is "preview". Default: ${DEFAULT_PREVIEW_MAX_HEIGHT}. Maximum: ${PREVIEW_MAX_HEIGHT_LIMIT}; a larger value is clamped to it, not refused.`,
         },
       },
       required: [],
@@ -416,8 +459,7 @@ export const runtimeToolDefinitions = [
       properties: {
         actions: {
           type: 'array',
-          description:
-            'Array of input actions to execute sequentially. Each object must have a "type" field.',
+          description: `Array of input actions to execute sequentially. Each object must have a "type" field. A batch whose time budget (its waits and holds, plus every frame it spends counted at 10fps) exceeds ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s is rejected before anything is injected: split it across calls.`,
           items: {
             type: 'object',
             properties: {
@@ -503,8 +545,7 @@ export const runtimeToolDefinitions = [
               },
               ms: {
                 type: 'number',
-                description:
-                  '[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required. Uncapped, but a batch whose total wait approaches 60s may be cut off by your client before the server answers: split it across calls.',
+                description: `[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required. Counts toward the batch's ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s time budget, and a batch whose total wait approaches 60s may be cut off by your client before the server answers: split it across calls.`,
               },
               frames: {
                 type: 'number',
@@ -587,6 +628,11 @@ export const runtimeToolDefinitions = [
                 },
               },
               watch: { type: 'object', additionalProperties: true },
+              details_dropped: {
+                type: 'boolean',
+                description:
+                  'Present when the results of the batch outgrew what one reply can carry: this entry keeps only index, type, ok, frame, elapsed_ms and error. The action still ran. Read the state it left with get_ui_elements or take_screenshot.',
+              },
             },
             required: ['index', 'type'],
           },
@@ -708,13 +754,34 @@ function formatMoreFindingsSuffix(total: number): string {
  * `return parsed` on the err branch (the inner `error` is already a structured
  * MCP error response). `context` should describe which bridge command produced
  * the frame.
+ *
+ * `oversize` is what to tell the caller when the bridge sent its oversize
+ * error in place of the reply. It is required, so every handler that reads a
+ * bridge reply says what that means for its own command: the command ran, and
+ * a handler that took the flat `error` for a refusal would tell the caller to
+ * repeat work that already landed.
  */
 function parseBridgeJson<T = unknown>(
   responseStr: string,
   context: string,
+  oversize: { ran: string; solutions: string[] },
 ): Result<T, ToolResponse> {
   try {
-    return ok(JSON.parse(responseStr) as T);
+    const parsed: unknown = JSON.parse(responseStr);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>)[OVERSIZE_RESPONSE_FIELD] === true
+    ) {
+      const detail = (parsed as { error?: unknown }).error;
+      return err(
+        createErrorResponse(
+          `${oversize.ran} Its result was too large to deliver${typeof detail === 'string' ? `: ${detail}` : '.'}`,
+          oversize.solutions,
+        ),
+      );
+    }
+    return ok(parsed as T);
   } catch (error) {
     return err(
       createErrorResponse(`Invalid response from bridge (${context}): ${getErrorMessage(error)}`, [
@@ -778,18 +845,25 @@ const ELICITATION_OPT_OUT_SOLUTION =
  * without a prompt because elicitation was disabled (GODOT_MCP_DISABLE_ELICITATION),
  * distinct from a user-confirmed `elicit_accepted`. Keeping them distinct from
  * `warn` preserves the confirmation event in the audit trail.
+ *
+ * `not_sent` is a script the policy admitted that never reached the bridge:
+ * the session ended or changed, or the call gave up waiting for its turn,
+ * between the policy decision and the send. `admitted_as` then holds what the
+ * decision would have been (`ok`, `warn`, `elicit_accepted`,
+ * `elicit_bypassed`), so a confirmation a person gave is still on record.
  */
+type AdmittedAuditDecision = 'elicit_accepted' | 'elicit_bypassed' | 'warn' | 'ok';
 type AuditDecision =
   | 'hard_block'
   | 'elicit_denied'
   | 'elicit_cancelled'
-  | 'elicit_accepted'
-  | 'elicit_bypassed'
-  | 'warn'
-  | 'ok';
+  | 'not_sent'
+  | AdmittedAuditDecision;
 
 interface AuditSidecar {
   decision: AuditDecision;
+  /** Present only with `decision: 'not_sent'`. */
+  admitted_as?: AdmittedAuditDecision;
   tier: 1 | 2 | 3 | null;
   strict_mode: boolean;
   promoted_by_strict: boolean;
@@ -815,6 +889,7 @@ function writeAuditSidecar(
   decision: AuditDecision,
   policy: PolicyDecision,
   strictMode: boolean,
+  admittedAs?: AdmittedAuditDecision,
 ): void {
   try {
     const projectRoot = resolve(projectPath);
@@ -832,6 +907,7 @@ function writeAuditSidecar(
 
     const sidecar: AuditSidecar = {
       decision,
+      ...(admittedAs !== undefined ? { admitted_as: admittedAs } : {}),
       tier: policy.effectiveTier,
       strict_mode: strictMode,
       promoted_by_strict: policy.promotedByStrict,
@@ -1083,13 +1159,12 @@ async function startSpawnedSession(
 
   let resolvedScene: ResolvedProjectPath | undefined;
   if (scene.value !== undefined) {
-    const resolved = resolveProjectPath(projectPath, scene.value);
+    const resolved = resolveProjectPath(projectPath, scene.value, 'read');
     if (!resolved) {
       return err(
-        createErrorResponse(
-          `Invalid scene path: must be project-relative without ".." (got: ${scene.value})`,
-          ['Pass scene as a path relative to the project root, e.g. "scenes/main.tscn"'],
-        ),
+        createErrorResponse(projectSubPathError('scene path', scene.value), [
+          ...PROJECT_SUB_PATH_SOLUTIONS,
+        ]),
       );
     }
     const notAScene = rejectNonSceneLaunchArg(resolved.relPath);
@@ -1137,37 +1212,72 @@ async function startSpawnedSession(
     }
   }
 
+  // The start, the wait for its bridge and the teardown of a start that did
+  // not come up are one operation: no other runtime call runs in between, and
+  // every step acts on the record this start created (`started`), never on
+  // whichever session is current by then. The launch gate above stays
+  // outside: a confirmation prompt can be held open for minutes.
+  return runSessionExclusive(runner, 'run_project', () =>
+    launchSpawnedSession(runner, projectPath, warnings, {
+      scene: resolvedScene,
+      background: isBackground,
+      bridgePort: bridgePort.value,
+      profiling: isProfiling,
+    }),
+  );
+}
+
+async function launchSpawnedSession(
+  runner: GodotRunner,
+  projectPath: string,
+  warnings: readonly string[],
+  opts: {
+    scene: ResolvedProjectPath | undefined;
+    background: boolean;
+    bridgePort: number | undefined;
+    profiling: boolean;
+  },
+): Promise<HandlerResult> {
+  const isBackground = opts.background;
+  const isProfiling = opts.profiling;
   try {
-    await runner.runProject(
+    const started = await runner.runProject(
       projectPath,
-      resolvedScene,
+      opts.scene,
       isBackground,
-      bridgePort.value,
+      opts.bridgePort,
       isProfiling,
     );
 
-    // Read by project, not through the current pointer, and before the wait:
-    // every outcome below has to say what happened to an attached session
-    // this start replaced, the failures included.
-    const replaced = describeReplacedAttached(
-      runner.getSessionInfo(projectPath)?.replacedAttached ?? null,
-    );
+    // Read off the started record, and before the wait: every outcome below
+    // has to say what happened to the session this start replaced, the
+    // failures included.
+    const atStart = runner.describeSessionRef(started);
+    const replaced = describeReplacedAttached(atStart.replacedAttached ?? null);
+    const startWarnings = atStart.startWarnings ?? [];
+    const startWarningsLine = startWarnings.length > 0 ? `\n${startWarnings.join(' ')}` : '';
 
-    const bridgeResult = await runner.waitForBridge();
+    const bridgeResult = await runner.waitForBridge(undefined, undefined, started);
+    // The record as the wait left it: a game that exited meanwhile has
+    // cleared its own mode and port.
+    const session = runner.describeSessionRef(started);
 
+    if (bridgeResult.stopped === true) {
+      return err(startCutOffByStop(projectPath, 'run_project'));
+    }
     if (!bridgeResult.ready) {
-      if (runner.activeProcess && runner.activeProcess.hasExited) {
+      if (session.processExited) {
         // A process that exited by itself has already cleared its own session
         // (mode, port, token, bridge artifacts) and kept its logs, and
         // runProject replaces such a record on a retry. Stopping it here would
         // only throw those logs away. A session that still has a mode is the
         // other case: the process never started (a spawn 'error'), nothing
         // cleared it, and the stop is what removes the injected bridge.
-        const logsRetained = runner.activeSessionMode === null;
-        if (!logsRetained) await runner.stopProject();
+        const logsRetained = session.mode === null;
+        if (!logsRetained) await runner.stopSessionRef(started);
         return err(
           createErrorResponse(
-            `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}${replaced.errorLine}`,
+            `Godot process exited before the MCP bridge could initialize.\n${bridgeResult.error || ''}${replaced.errorLine}${startWarningsLine}`,
             [
               logsRetained
                 ? 'Call get_debug_output for the full captured output of the exited process: it is kept until the next run_project or stop_project'
@@ -1180,50 +1290,58 @@ async function startSpawnedSession(
         );
       }
 
-      const recentErrors = runner.getRecentErrors(RECENT_STDERR_LINES_IN_ERROR);
+      // Read the log tail and the port before the teardown: the stop
+      // releases both.
+      const recentErrors = runner.recentErrorsFor(started, RECENT_STDERR_LINES_IN_ERROR);
       const errorTail = recentErrors.length > 0 ? `\nLast stderr:\n${recentErrors.join('\n')}` : '';
       const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
+      const assignedPort = session.bridgePort;
+      // Tear down before returning so the project has no session and the next
+      // run_project starts clean. The stop reports what it observed.
+      const stopped = await runner.stopSessionRef(started);
       const lines = [
-        `Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
+        `Godot process started, but the MCP bridge did not respond within ${Math.round((bridgeResult.waitedMs ?? BRIDGE_WAIT_SPAWNED_TIMEOUT_MS) / MS_PER_SECOND)} seconds.`,
         // Surface the precise poll failure (token/path mismatch, abort reason)
         // instead of burying it behind the generic timeout narrative.
         ...(bridgeResult.error ? [`- Actual reason: ${bridgeResult.error}`] : []),
         bridgeRegistered
           ? '- The bridge listener never came up - likely an early _ready error or a stuck process holding the port'
           : '- project.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project)',
-        '- Session has been torn down; retry run_project to start a new one',
+        stopped?.killUnconfirmed === true
+          ? `- ${killUnconfirmedWarning(stopped.pid)}`
+          : '- Session has been torn down; retry run_project to start a new one',
         errorTail,
       ];
       if (isBackground) {
         lines.push(`- ${BACKGROUND_MODE_NOTE}`);
       }
-      // Read the port before the teardown: stopProject clears it.
-      const assignedPort = runner.activeBridgePort;
-      // Tear down before returning so hasActiveRuntimeSession() reports false
-      // and the next run_project lazy-reconnects cleanly.
-      await runner.stopProject();
       const solutions = [
         'Check for broken autoloads with list_autoloads',
         `Check that the assigned bridge port (${assignedPort}) is not occupied by another Godot process`,
         'Retry run_project',
       ];
-      return err(createErrorResponse(lines.join('\n') + replaced.errorLine, solutions));
+      return err(
+        createErrorResponse(lines.join('\n') + replaced.errorLine + startWarningsLine, solutions),
+      );
     }
 
     // Read after readiness, not assumed from it: a game that exits in between
     // clears its port, and a session with no port is no session. Reporting
     // that as a start with `bridgePort: null` would be a success for nothing.
-    const readyPort = runner.activeBridgePort;
+    const readyPort = session.bridgePort;
     if (readyPort === null) {
-      // Read the log tail before the teardown: stopProject releases it.
-      const lastErrors = runner.getRecentErrors(RECENT_STDERR_LINES_IN_ERROR);
+      // Read the log tail before the teardown: the stop releases it.
+      const lastErrors = runner.recentErrorsFor(started, RECENT_STDERR_LINES_IN_ERROR);
       const errorTail = lastErrors.length > 0 ? `\nLast stderr:\n${lastErrors.join('\n')}` : '';
-      await runner.stopProject();
+      await runner.stopSessionRef(started);
       return err(
-        createErrorResponse(`${SESSION_ENDED_AT_READY_MESSAGE}${errorTail}${replaced.errorLine}`, [
-          'Retry run_project',
-          'If the game keeps exiting right after it starts, check its startup scripts and autoloads (list_autoloads)',
-        ]),
+        createErrorResponse(
+          `${SESSION_ENDED_AT_READY_MESSAGE}${errorTail}${replaced.errorLine}${startWarningsLine}`,
+          [
+            'Retry run_project',
+            'If the game keeps exiting right after it starts, check its startup scripts and autoloads (list_autoloads)',
+          ],
+        ),
       );
     }
 
@@ -1235,11 +1353,19 @@ async function startSpawnedSession(
       message += ' Profiling enabled: use profile_project or start_profiler.';
     }
     message += replaced.messageNote;
+    // Null this early is not a clean bill: the engine may have sent nothing
+    // yet. The profiler tools report the same problem once it shows.
+    const streamProblem = isProfiling ? runner.profilerStreamProblemFor(started) : null;
     return buildRunProjectResponse({
       projectPath,
       sessionMode: 'spawned',
       bridgePort: readyPort,
-      warnings: [...replaced.warnings, ...warnings],
+      warnings: [
+        ...(streamProblem !== null ? [streamProblem] : []),
+        ...startWarnings,
+        ...replaced.warnings,
+        ...warnings,
+      ],
       message,
     });
   } catch (error: unknown) {
@@ -1252,6 +1378,7 @@ async function startSpawnedSession(
         ]),
       );
     }
+    if (error instanceof StartBudgetExhaustedError) return err(startBudgetExhausted(error));
     if (error instanceof BridgeRegistryUnreadableError) {
       // Nothing was launched: which sessions own the shared bridge is unknown,
       // so the bridge was not injected.
@@ -1273,11 +1400,62 @@ async function startSpawnedSession(
     }
     return err(
       createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+        'Nothing was launched. If the message names project.godot or the .mcp folder, check that the project directory is writable',
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
       ]),
     );
   }
+}
+
+/** The error for a start whose session a stop ended while its bridge was awaited. */
+function startCutOffByStop(projectPath: string, retryWhat: string): ToolResponse {
+  return createErrorResponse(
+    `The session on ${projectPath} was stopped while it was starting (stop_project, or the server shutting down), so this start was abandoned.`,
+    [
+      'Nothing is left running for this start and its bridge was removed from the project: no stop_project is needed',
+      `Call ${retryWhat} again to start a new session`,
+    ],
+  );
+}
+
+/** The error for a start that got its turn with too little time left to wait for the bridge. */
+function startBudgetExhausted(error: StartBudgetExhaustedError): ToolResponse {
+  return createErrorResponse(error.message, [
+    error.behind !== null
+      ? `Retry once ${error.behind} has returned`
+      : 'Retry: nothing was stopped or launched',
+    'A runtime session runs one operation at a time: issue runtime calls one after another, not in parallel',
+  ]);
+}
+
+/**
+ * How run_project reports an attached session it kept, by what the session's
+ * bridge did with the probe ping. Only a bridge seen to be gone is replaced.
+ */
+function keptAttachedSessionWording(probe: AttachedProbeOutcome): {
+  warning: string;
+  message: string;
+} {
+  const kept = 'the existing session was kept and made current; nothing was injected again.';
+  if (probe === 'silent') {
+    return {
+      warning: `This server was already attached to this project. Its bridge did not answer a ping within ${BRIDGE_PING_TIMEOUT_MS} ms, which a busy game (loading, a long frame) also does, so ${kept} If the next runtime call fails as well, the game is stuck or gone.`,
+      message:
+        'Already attached to the project; the MCP bridge did not answer the probe in time and was left as it is.',
+    };
+  }
+  if (probe === 'unexpected-reply') {
+    return {
+      warning: `This server was already attached to this project. Something answered on its bridge port, but not with a pong for this session, so ${kept} If runtime calls keep failing, another process holds the port: stop_project, then attach again.`,
+      message:
+        'Already attached to the project; its bridge port answered the probe with something other than a pong.',
+    };
+  }
+  return {
+    warning: `This server was already attached to this project and its bridge answered, so ${kept}`,
+    message: 'Already attached to the project and the MCP bridge is answering.',
+  };
 }
 
 /**
@@ -1312,18 +1490,61 @@ async function startAttachedSession(
   if (!gate.ok) return gate;
   const { warnings } = gate.value;
 
+  // One operation, like the spawned start: the attach, the wait and the
+  // teardown of an attach that did not come up, all on the record `attached`
+  // names.
+  return runSessionExclusive(runner, 'run_project', () =>
+    attachSession(runner, projectPath, warnings, bridgePort.value),
+  );
+}
+
+async function attachSession(
+  runner: GodotRunner,
+  projectPath: string,
+  warnings: readonly string[],
+  requestedPort: number | undefined,
+): Promise<HandlerResult> {
   try {
-    await runner.attachProject(projectPath, bridgePort.value);
+    const attached = await runner.attachProject(projectPath, requestedPort);
+    const started = attached.session;
 
-    const bridgeResult = await runner.waitForBridgeAttached();
+    if (attached.alreadyAttached) {
+      // This server already holds a live attached session here and its
+      // bridge was not seen to be gone. Nothing was injected: a new token and
+      // port would never reach the Godot that is already running.
+      const existing = runner.describeSessionRef(started);
+      if (existing.bridgePort !== null) {
+        const portNote =
+          requestedPort !== undefined && requestedPort !== existing.bridgePort
+            ? ` The requested bridgePort ${requestedPort} was not applied: the running Godot listens on ${existing.bridgePort}.`
+            : '';
+        const kept = keptAttachedSessionWording(attached.existingBridge ?? 'answered');
+        return buildRunProjectResponse({
+          projectPath,
+          sessionMode: 'attached',
+          bridgePort: existing.bridgePort,
+          warnings: [
+            `${kept.warning}${portNote} To attach afresh, call stop_project first, then run_project with attach: true, and restart Godot while that call waits.`,
+            ...warnings,
+          ],
+          message: `${kept.message} stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.`,
+        });
+      }
+    }
 
+    const bridgeResult = await runner.waitForBridgeAttached(undefined, undefined, started);
+    const session = runner.describeSessionRef(started);
+
+    if (bridgeResult.stopped === true) {
+      return err(startCutOffByStop(projectPath, 'run_project with attach: true'));
+    }
     if (!bridgeResult.ready) {
       const bridgeRegistered = runner.isBridgeAutoloadRegistered(projectPath);
-      // Read the port before the teardown: stopProject clears it.
-      const assignedPort = runner.activeBridgePort;
+      // Read the port before the teardown: the stop clears it.
+      const assignedPort = session.bridgePort;
       // Tear down the attached-mode session state so a retry of run_project
       // works without an intervening stop_project.
-      await runner.stopProject();
+      await runner.stopSessionRef(started);
       // What is true after this failure: the teardown above removed the bridge
       // script and the autoload entry, and every attach bakes a new token (and
       // a new port unless bridgePort is given). A Godot that started during
@@ -1347,9 +1568,9 @@ async function startAttachedSession(
 
     // Same read as the spawned path: an attached session whose bridge went
     // away as it became ready has been cleared and has no port.
-    const readyPort = runner.activeBridgePort;
+    const readyPort = session.bridgePort;
     if (readyPort === null) {
-      await runner.stopProject();
+      await runner.stopSessionRef(started);
       return err(
         createErrorResponse(SESSION_ENDED_AT_READY_MESSAGE, [
           'Retry run_project with attach: true and launch Godot while that call is waiting: the bridge was removed, so a Godot already running cannot be attached to',
@@ -1367,6 +1588,7 @@ async function startAttachedSession(
         'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
     });
   } catch (error: unknown) {
+    if (error instanceof StartBudgetExhaustedError) return err(startBudgetExhausted(error));
     if (error instanceof BridgeAttachConflictError) {
       return err(
         createErrorResponse(`Failed to attach project: ${error.message}`, [
@@ -1382,10 +1604,16 @@ async function startAttachedSession(
             'Rename the existing McpBridge autoload in project.godot, then retry run_project with attach: true',
             'Use list_autoloads to see what the project currently registers',
           ]
-        : [
-            'Check if project.godot is accessible',
-            'Ensure MCP can write the bridge autoload into the project',
-          ];
+        : error instanceof BridgeRegistryUnreadableError
+          ? [
+              'Retry run_project with attach: true: a registry file that another session was writing at that moment is readable again a moment later',
+              'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
+            ]
+          : [
+              'Nothing was attached and any session this server had on the project is as it was, unless the message says otherwise',
+              'Check if project.godot is accessible',
+              'Ensure MCP can write the bridge autoload into the project',
+            ];
     return err(
       createErrorResponse(`Failed to attach project: ${getErrorMessage(error)}`, solutions),
     );
@@ -1404,6 +1632,13 @@ export async function handleSwitchProject(
   if (!parsed.ok) return parsed;
   const target = resolve(parsed.value.projectPath);
 
+  // The pointer move and the probe that follows it are one operation: moving
+  // the pointer closes the bridge socket, which must not happen under a
+  // command another call has in flight.
+  return runSessionExclusive(runner, 'switch_project', () => switchToSession(runner, target));
+}
+
+async function switchToSession(runner: GodotRunner, target: string): Promise<HandlerResult> {
   const previousProjectPath = runner.getCurrentSessionInfo()?.projectPath ?? null;
   const session = runner.switchSession(target);
   if (session === null) {
@@ -1566,21 +1801,31 @@ export function handleGetDebugOutput(
   return createStructuredResponse(response);
 }
 
-export async function handleStopProject(runner: GodotRunner): Promise<HandlerResult> {
+export function handleStopProject(runner: GodotRunner): Promise<HandlerResult> {
+  // Not queued: a stop cuts off whatever runtime call is running on the
+  // session (an input batch, a script, a start waiting for its bridge), which
+  // then fails saying the session was stopped. Waiting for it instead would
+  // leave a wedged game unstoppable for as long as that call's own timeout.
+  return stopCurrentSession(runner);
+}
+
+async function stopCurrentSession(runner: GodotRunner): Promise<HandlerResult> {
   const result = await runner.stopProject();
 
   if (!result) {
     const others = otherLiveSessionsClause(runner.getRuntimeSessionStatus());
     return err(
-      createErrorResponse(`No active Godot process to stop.${others}`, [
-        'Use run_project to start a Godot project first',
-        'The process may have already terminated',
-        ...(others === ''
-          ? []
+      createErrorResponse(
+        `Nothing to stop: no runtime session is current.${others}`,
+        others === ''
+          ? [
+              'No follow-up is needed: nothing is running and no bridge is left in a project. An attached session that ended by itself, or a session already stopped, looks like this',
+            ]
           : [
               'Call switch_project with one of the listed project paths, then stop_project, to stop that session',
-            ]),
-      ]),
+              'If the session you meant to stop is not listed, it has already ended and needs no stop',
+            ],
+      ),
     );
   }
 
@@ -1608,7 +1853,12 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
   const alreadyExited = result.alreadyExited === true;
   // Each teardown step that was attempted and not confirmed leads the payload.
   // The stop itself still happened, so this stays a success.
-  const warnings = result.cleanupProblems.map((problem) => CLEANUP_INCOMPLETE_PREFIX + problem);
+  // An unconfirmed kill leads everything: the game may still be running.
+  const killUnconfirmed = result.killUnconfirmed === true;
+  const warnings = [
+    ...(killUnconfirmed ? [killUnconfirmedWarning(result.pid)] : []),
+    ...result.cleanupProblems.map((problem) => CLEANUP_INCOMPLETE_PREFIX + problem),
+  ];
   if (result.mode === 'attached' && result.shutdownAcknowledged === false) {
     warnings.push(SHUTDOWN_UNACKNOWLEDGED_WARNING);
   }
@@ -1630,6 +1880,11 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     base = cleanupComplete
       ? 'The Godot process had already exited; MCP bridge state was cleaned up at that time and the process slot is now free'
       : 'The Godot process had already exited; MCP bridge cleanup at that time was incomplete (see warnings) and the process slot is now free';
+  } else if (killUnconfirmed) {
+    // The stop is reported as what was observed: a kill that was sent.
+    base = cleanupComplete
+      ? 'The Godot process was sent a kill but did not report its exit (see warnings); the session was released and MCP bridge state cleaned up'
+      : 'The Godot process was sent a kill but did not report its exit, and MCP bridge cleanup was incomplete (see warnings); the session was released';
   } else {
     base = cleanupComplete
       ? 'Godot project stopped'
@@ -1644,6 +1899,8 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     externalProcessPreserved: result.externalProcessPreserved === true,
     alreadyExited,
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+    ...(killUnconfirmed ? { killUnconfirmed: true } : {}),
+    ...(killUnconfirmed && result.pid !== undefined ? { pid: result.pid } : {}),
     finalOutput:
       result.output === null ? null : condenseProcessTail(result.output, STOP_OUTPUT_MAX_LINES),
     finalErrors:
@@ -1652,6 +1909,10 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
 }
 
 const CLEANUP_INCOMPLETE_PREFIX = 'Bridge cleanup incomplete: ';
+
+function killUnconfirmedWarning(pid: number | undefined): string {
+  return `The Godot process (pid ${pid ?? 'unknown'}) was sent a kill and did not report its exit in time, so it may still be running and may still hold its bridge port. Check for it by that pid and end it by hand if it is still there.`;
+}
 const CAPTURE_ONLY_NO_LOGS_WARNING =
   'finalOutput and finalErrors are null, not empty: the logs of the exited process were returned by the earlier stop_project call and are no longer held.';
 const SHUTDOWN_UNACKNOWLEDGED_WARNING =
@@ -1672,20 +1933,61 @@ function parseScreenshotResponseMode(value: unknown): ScreenshotResponseMode | n
     : null;
 }
 
-function parsePreviewDimension(value: unknown, fallback: number): number | null {
+/**
+ * A preview bound in whole pixels: the default when omitted, null when it is
+ * not a positive number, and never above `limit` (a larger request is
+ * clamped, as the property description says).
+ */
+function parsePreviewDimension(value: unknown, fallback: number, limit: number): number | null {
   if (value === undefined) return fallback;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
-  return Math.max(1, Math.floor(value));
+  return Math.min(limit, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * The inline image block for a saved PNG, or the warning that takes its
+ * place when the file is too large to inline or cannot be read. `what` names
+ * the image in that warning ("The screenshot", "The preview").
+ */
+function inlineImageOrWarning(
+  filePath: string,
+  what: string,
+): { block: { type: string; [key: string]: unknown } } | { warning: string } {
+  try {
+    const bytes = statSync(filePath).size;
+    if (bytes > SCREENSHOT_INLINE_MAX_BYTES) {
+      return {
+        warning: `${what} was not returned inline: the file is ${bytes} bytes, over the ${SCREENSHOT_INLINE_MAX_BYTES} byte inline limit. It is saved at the returned path.`,
+      };
+    }
+    return {
+      block: {
+        type: 'image',
+        data: readFileSync(filePath).toString('base64'),
+        mimeType: 'image/png',
+      },
+    };
+  } catch (error) {
+    return {
+      warning: `${what} was not returned inline: the file could not be read (${getErrorMessage(error)}).`,
+    };
+  }
 }
 
 function normalizeScreenshotPath(path: string): string {
   return sep === '\\' ? path.replace(/\//g, '\\') : path;
 }
 
-export async function handleTakeScreenshot(
+export function handleTakeScreenshot(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
+  // Gate and command are one step: the session the gate admitted is the one
+  // the command goes to, with no other runtime call in between.
+  return runSessionExclusive(runner, 'take_screenshot', () => takeScreenshot(runner, args));
+}
+
+async function takeScreenshot(runner: GodotRunner, args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const wording = runtimeToolWording('take a screenshot');
@@ -1705,8 +2007,16 @@ export async function handleTakeScreenshot(
     );
   }
 
-  const previewMaxWidth = parsePreviewDimension(args.previewMaxWidth, DEFAULT_PREVIEW_MAX_WIDTH);
-  const previewMaxHeight = parsePreviewDimension(args.previewMaxHeight, DEFAULT_PREVIEW_MAX_HEIGHT);
+  const previewMaxWidth = parsePreviewDimension(
+    args.previewMaxWidth,
+    DEFAULT_PREVIEW_MAX_WIDTH,
+    PREVIEW_MAX_WIDTH_LIMIT,
+  );
+  const previewMaxHeight = parsePreviewDimension(
+    args.previewMaxHeight,
+    DEFAULT_PREVIEW_MAX_HEIGHT,
+    PREVIEW_MAX_HEIGHT_LIMIT,
+  );
   if (previewMaxWidth === null || previewMaxHeight === null) {
     return err(
       createErrorResponse('Invalid preview dimensions for take_screenshot', [
@@ -1728,7 +2038,13 @@ export async function handleTakeScreenshot(
       timeout,
     );
 
-    const parsedResult = parseBridgeJson<ScreenshotBridgeResponse>(responseStr, 'screenshot');
+    const parsedResult = parseBridgeJson<ScreenshotBridgeResponse>(responseStr, 'screenshot', {
+      ran: 'The screenshot was taken.',
+      solutions: [
+        'Look for the saved PNG under .mcp/godot-runtime/screenshots/ in the project',
+        'Retry take_screenshot with responseMode "path_only"',
+      ],
+    });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
 
@@ -1801,14 +2117,23 @@ export async function handleTakeScreenshot(
     };
 
     const content: Array<{ type: string; [key: string]: unknown }> = [];
+    const inlineWarnings: string[] = [];
 
     if (responseMode === 'full') {
-      const imageBuffer = readFileSync(screenshotPath);
-      content.push({
-        type: 'image',
-        data: imageBuffer.toString('base64'),
-        mimeType: 'image/png',
-      });
+      const inline = inlineImageOrWarning(screenshotPath, 'The screenshot');
+      if (!('block' in inline)) {
+        inlineWarnings.push(
+          `${inline.warning} Use responseMode "preview" for a smaller inline image.`,
+        );
+      } else if (!measured.ok) {
+        // The file did not decode as a PNG, so it is not handed to the client
+        // as an image. The stats warning says why.
+        inlineWarnings.push(
+          'The screenshot was not returned inline: the saved file could not be decoded as a PNG. It is saved at the returned path.',
+        );
+      } else {
+        content.push(inline.block);
+      }
     } else if (responseMode === 'preview') {
       if (!parsed.preview_path) {
         return err(
@@ -1838,12 +2163,9 @@ export async function handleTakeScreenshot(
           ]),
         );
       }
-      const previewBuffer = readFileSync(previewPath);
-      content.push({
-        type: 'image',
-        data: previewBuffer.toString('base64'),
-        mimeType: 'image/png',
-      });
+      const inline = inlineImageOrWarning(previewPath, 'The preview');
+      if ('block' in inline) content.push(inline.block);
+      else inlineWarnings.push(inline.warning);
       metadata.previewPath = parsed.preview_path;
       metadata.previewSize = { width: parsed.preview_width, height: parsed.preview_height };
     }
@@ -1852,7 +2174,7 @@ export async function handleTakeScreenshot(
     const statsWarnings = measured.ok
       ? []
       : [STATS_NOT_MEASURED_WARNING_PREFIX + measured.error + STATS_NOT_MEASURED_WARNING_SUFFIX];
-    const warnings = [...statsWarnings, ...capRuntimeErrorLines(runtimeErrors)];
+    const warnings = [...statsWarnings, ...inlineWarnings, ...capRuntimeErrorLines(runtimeErrors)];
 
     return createStructuredResponse(
       {
@@ -1969,6 +2291,12 @@ function findInputCapViolation(actions: unknown[], watch: string[]): string | nu
       return `action ${i} (${String(type)}): text exceeds ${MAX_TEXT_LENGTH} characters`;
     }
   }
+  // The whole batch, after the per-action caps: its count and its waits in
+  // milliseconds are bounded only here.
+  const budgetMs = computeInputTimeoutMs(actions);
+  if (!(budgetMs <= MAX_INPUT_BATCH_BUDGET_MS)) {
+    return `the batch's time budget is ${budgetMs} ms, over the ${MAX_INPUT_BATCH_BUDGET_MS} ms ceiling for one call (its waits and holds, plus ${INPUT_PESSIMISTIC_FRAME_MS} ms for every frame it spends); split it across calls`;
+  }
   return null;
 }
 
@@ -1998,10 +2326,16 @@ function attachActionErrors(
 const PARTIAL_ERROR_ATTRIBUTION_WARNING =
   "Runtime errors raised during this batch may be attributed to the wrong action or be missing: Godot's stderr had not delivered every action boundary in time. Read get_debug_output for the full log.";
 
-export async function handleSimulateInput(
+export function handleSimulateInput(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
+  // One step from the gate to the last stderr line: the error capture window
+  // opened for this batch must not receive another call's boundaries.
+  return runSessionExclusive(runner, 'simulate_input', () => simulateInput(runner, args));
+}
+
+async function simulateInput(runner: GodotRunner, args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const wording = runtimeToolWording('simulate input');
@@ -2022,7 +2356,7 @@ export async function handleSimulateInput(
     return err(
       createErrorResponse(`Input simulation error: ${capViolation}`, [
         'Fix the named action and resend the batch - nothing was injected',
-        'Check the per-property descriptions for the caps on frames, hold_ms, text and watch',
+        'Check the per-property descriptions for the caps on frames, hold_ms, text, watch and the batch time budget',
       ]),
     );
   }
@@ -2045,11 +2379,19 @@ export async function handleSimulateInput(
       error?: string;
       results?: unknown[];
       still_held?: string[];
-    }>(responseStr, 'simulate_input');
+    }>(responseStr, 'simulate_input', {
+      ran: 'The batch ran: its actions were injected and are not undone.',
+      solutions: [
+        'Do not resend the batch: its inputs already landed. Read the state they left with get_ui_elements or take_screenshot',
+        'For a result that fits, send fewer actions per call or fewer watch entries',
+      ],
+    });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
 
-    // A flat `error` is a pre-validation refusal: nothing was injected.
+    // A flat `error` is a pre-validation refusal: nothing was injected. The
+    // one flat error sent after the actions ran, the oversize reply, never
+    // gets here: parseBridgeJson has already reported it as such.
     if (parsed.error) {
       return err(
         createErrorResponse(`Input simulation error: ${parsed.error}`, [
@@ -2121,10 +2463,14 @@ export async function handleSimulateInput(
   }
 }
 
-export async function handleGetUiElements(
+export function handleGetUiElements(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
+  return runSessionExclusive(runner, 'get_ui_elements', () => queryUiElements(runner, args));
+}
+
+async function queryUiElements(runner: GodotRunner, args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
   const wording = runtimeToolWording('query UI elements');
@@ -2150,6 +2496,13 @@ export async function handleGetUiElements(
     const parsedResult = parseBridgeJson<{ elements?: unknown[]; error?: string }>(
       responseStr,
       'get_ui_elements',
+      {
+        ran: 'The UI was read and nothing was changed.',
+        solutions: [
+          'Pass filter with a Control class name (Button, Label, LineEdit) to narrow the list',
+          'Leave visibleOnly at true',
+        ],
+      },
     );
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
@@ -2240,6 +2593,9 @@ export async function handleRunScript(
   // decision, no elicitation, no warnings, no audit sidecar. Tier 1 hard
   // blocks are included in the no-op — see McpContext.disableSecurity.
   let warningsFromPolicy: string[] = [];
+  // Set when the policy admits the script. The record of an admitted script
+  // is written at the send, not here: see `auditAdmitted` below.
+  let admitted: { policy: PolicyDecision; decision: AdmittedAuditDecision } | null = null;
   if (!ctx.disableSecurity) {
     const policy = evaluateScript(script, ctx.strictMode);
     const projectPath = sessionProjectPath;
@@ -2330,20 +2686,99 @@ export async function handleRunScript(
       warningsFromPolicy = matchesToWarnings(policy.matches);
     }
 
-    // Audit successful / warn paths. Tier 2 accept lands here and is recorded
-    // distinctly from a plain Tier 3 warn so the audit trail preserves the
-    // user-confirmation event. A Tier 2 finding that ran unprompted because
-    // elicitation was disabled is recorded as `elicit_bypassed`.
-    if (projectPath) {
-      let auditDecision: AuditDecision;
-      if (policy.decision === 'ok') auditDecision = 'ok';
-      else if (policy.decision === 'elicit_required')
-        auditDecision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
-      else auditDecision = 'warn';
-      writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
-    }
+    // The successful / warn paths. A Tier 2 accept is recorded distinctly from
+    // a plain Tier 3 warn so the audit trail preserves the user-confirmation
+    // event. A Tier 2 finding that ran unprompted because elicitation was
+    // disabled is recorded as `elicit_bypassed`.
+    let decision: AdmittedAuditDecision;
+    if (policy.decision === 'ok') decision = 'ok';
+    else if (policy.decision === 'elicit_required')
+      decision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
+    else decision = 'warn';
+    admitted = { policy, decision };
   }
 
+  // One record per admitted call, saying what happened to the script: the
+  // admitted decision when it is about to be sent, `not_sent` when the call
+  // ended before that. Written once; nothing when the gate is disabled.
+  let audited = false;
+  const auditAdmitted = (sent: boolean): void => {
+    if (admitted === null || audited || !sessionProjectPath) return;
+    audited = true;
+    if (sent) {
+      writeAuditSidecar(
+        sessionProjectPath,
+        script,
+        admitted.decision,
+        admitted.policy,
+        ctx.strictMode,
+      );
+    } else {
+      writeAuditSidecar(
+        sessionProjectPath,
+        script,
+        'not_sent',
+        admitted.policy,
+        ctx.strictMode,
+        admitted.decision,
+      );
+    }
+  };
+
+  const result = await runSessionExclusive(runner, 'run_script', async () => {
+    // The gate at the top admitted this call, but a confirmation prompt can
+    // be held open for minutes and the queue wait comes on top of it. The
+    // session is checked again now that the turn has come: the script was
+    // judged and confirmed for that session and runs on no other. The audit
+    // record is written only once this check has passed.
+    const current = requireRuntimeSession(runner, wording);
+    if (!current.ok) return current;
+    if (
+      sessionKey(current.value.projectPath) !== sessionKey(sessionProjectPath) ||
+      current.value.mode !== sessionMode
+    ) {
+      return err(
+        createErrorResponse(
+          `The current session changed while this call was waiting (it was ${sessionProjectPath}, it is now ${current.value.projectPath}). The script was not executed.`,
+          [
+            'Call run_script again to run it on the session that is current now',
+            'Or call switch_project first if it should run on the other session',
+          ],
+        ),
+      );
+    }
+    auditAdmitted(true);
+    return executeAdmittedScript(runner, {
+      script,
+      timeout,
+      sessionProjectPath,
+      sessionMode,
+      tip,
+      warningsFromPolicy,
+      wording,
+    });
+  });
+  // Reached without a record only when the script was never sent: the turn
+  // did not come, or the session was gone or another one by the time it did.
+  auditAdmitted(false);
+  return result;
+}
+
+/** The send and the reading of its reply, for a script the gate and the policy have admitted. */
+async function executeAdmittedScript(
+  runner: GodotRunner,
+  admitted: {
+    script: string;
+    timeout: number;
+    sessionProjectPath: string;
+    sessionMode: RuntimeSessionMode | null;
+    tip: string;
+    warningsFromPolicy: string[];
+    wording: NoSessionWording;
+  },
+): Promise<HandlerResult> {
+  const { script, timeout, sessionProjectPath, sessionMode, tip, warningsFromPolicy, wording } =
+    admitted;
   try {
     const {
       response: responseStr,
@@ -2355,7 +2790,13 @@ export async function handleRunScript(
       success?: boolean;
       result?: unknown;
       error?: string;
-    }>(responseStr, 'run_script');
+    }>(responseStr, 'run_script', {
+      ran: 'The script ran to completion and whatever it changed stays changed.',
+      solutions: [
+        'Do not rerun the script only to read its value if it changes state',
+        'Return less from execute(): a count, a slice, or only the fields you need',
+      ],
+    });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
 

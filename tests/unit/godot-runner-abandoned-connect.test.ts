@@ -104,6 +104,8 @@ describe('a bridge connect abandoned by its command', () => {
     );
     runner.switchSession(PROJECT_B);
     const pending = runner.sendCommand('get_ui_elements', {}, LIVE_COMMAND_TIMEOUT_MS);
+    // A command takes its turn in the session queue, so it dials a tick later.
+    await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(2));
     expect(connectMock).toHaveBeenNthCalledWith(1, PORT_A, LOOPBACK_HOST);
     expect(connectMock).toHaveBeenNthCalledWith(2, PORT_B, LOOPBACK_HOST);
     return { pending };

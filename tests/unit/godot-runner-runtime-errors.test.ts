@@ -13,10 +13,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import type { GodotProcess } from '../../src/utils/godot-runner.js';
 import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
+import { MAX_PENDING_LINE_CHARS, truncatedLineMarker } from '../../src/utils/child-output.js';
 import { installSession } from '../helpers/session-install.js';
 
 /** Actions in a batch whose only stderr output is their boundary lines. */
 const BOUNDARY_ONLY_ACTIONS = 3;
+/** A newline-free stream, delivered in chunks that together pass the pending cap several times. */
+const NEWLINE_FREE_CHUNK_CHARS = 4096;
+const NEWLINE_FREE_CHUNKS = (MAX_PENDING_LINE_CHARS / NEWLINE_FREE_CHUNK_CHARS) * 3;
 
 function makeFakeProcess(opts: { errors?: string[]; totalErrorsWritten?: number }): GodotProcess {
   const errors = opts.errors ?? [];
@@ -149,7 +153,7 @@ describe('GodotRunner.ingestStderrChunk', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(
       proc,
-      ['SCRIPT ERROR: boom', `${ACTION_BOUNDARY_SENTINEL} 0`, 'after'].join('\n'),
+      ['SCRIPT ERROR: boom', `${ACTION_BOUNDARY_SENTINEL} 0`, 'after', ''].join('\n'),
     );
     expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'after']);
     expect(proc.totalErrorsWritten).toBe(2);
@@ -167,6 +171,7 @@ describe('GodotRunner.ingestStderrChunk', () => {
         'c',
         `${ACTION_BOUNDARY_SENTINEL} 1`,
         `${ACTION_BOUNDARY_SENTINEL} 2`,
+        '',
       ].join('\n'),
     );
     expect(proc.actionBoundaries).toEqual([
@@ -188,7 +193,7 @@ describe('GodotRunner.ingestStderrChunk', () => {
   it('recognizes an action-boundary sentinel split across two chunks', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} `);
-    runner.ingestStderrChunk(proc, '0\nb');
+    runner.ingestStderrChunk(proc, '0\nb\n');
     expect(proc.actionBoundaries).toEqual([{ index: 0, seq: 1 }]);
     expect(proc.errors).toEqual(['a', 'b']);
     expect(proc.errors.some((line) => line.includes(ACTION_BOUNDARY_SENTINEL))).toBe(false);
@@ -204,7 +209,7 @@ describe('GodotRunner.ingestStderrChunk', () => {
     expect(proc.totalErrorsWritten).toBe(2);
   });
 
-  it('ignores an empty chunk without marking the tail incomplete', () => {
+  it('ignores an empty chunk and keeps holding the unfinished line', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'a');
     runner.ingestStderrChunk(proc, '');
@@ -225,7 +230,8 @@ describe('GodotRunner.ingestStderrChunk', () => {
   it('rejoins a line whose chunk boundary fell between the carriage return and the newline', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'SCRIPT ERROR: boom\r');
-    expect(proc.errors).toEqual(['SCRIPT ERROR: boom']);
+    // Not a line until its newline arrives.
+    expect(proc.errors).toEqual([]);
     runner.ingestStderrChunk(proc, '\nnext\r\n');
     expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'next']);
     expect(proc.totalErrorsWritten).toBe(2);
@@ -246,16 +252,61 @@ describe('GodotRunner.ingestStderrChunk', () => {
     ]);
   });
 
-  it('does not treat the line after a complete boundary tail as its continuation', () => {
+  it('classifies a boundary only once its line has ended, so a split index is read whole', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
-    // The boundary is the last thing in its chunk, with no newline yet. It is
-    // recorded at once and nothing is left marked incomplete, so the next
-    // chunk cannot pop the unrelated line before it.
-    runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} 0`);
-    runner.ingestStderrChunk(proc, 'b\n');
+    // The first chunk ends in text that already reads as boundary 1. It is the
+    // front of boundary 12: recording it at once would mark the wrong action
+    // and leave a stray line "2" in the log.
+    runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} 1`);
+    expect(proc.actionBoundaries ?? []).toEqual([]);
+    runner.ingestStderrChunk(proc, '2\nb\n');
+    expect(proc.actionBoundaries).toEqual([{ index: 12, seq: 1 }]);
     expect(proc.errors).toEqual(['a', 'b']);
-    expect(proc.actionBoundaries).toEqual([{ index: 0, seq: 1 }]);
     expect(proc.totalErrorsWritten).toBe(2);
+  });
+
+  it('holds the text after the last newline out of the log until its line ends', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'whole\nhalf a ');
+    expect(proc.errors).toEqual(['whole']);
+    expect(proc.totalErrorsWritten).toBe(1);
+    runner.ingestStderrChunk(proc, 'line\n');
+    expect(proc.errors).toEqual(['whole', 'half a line']);
+    expect(proc.totalErrorsWritten).toBe(2);
+  });
+
+  it('retains the line the stream ended in the middle of when the stream finishes', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, 'a\nlast words');
+    runner.finishStderr(proc);
+    expect(proc.errors).toEqual(['a', 'last words']);
+    expect(proc.totalErrorsWritten).toBe(2);
+    // Finishing twice adds nothing.
+    runner.finishStderr(proc);
+    expect(proc.errors).toEqual(['a', 'last words']);
+  });
+
+  it('records a boundary the stream ended on without a newline', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} 3`);
+    runner.finishStderr(proc);
+    expect(proc.actionBoundaries).toEqual([{ index: 3, seq: 1 }]);
+    expect(proc.errors).toEqual(['a']);
+  });
+
+  it('cuts a line that never ends at the pending cap, once, and holds nothing more of it', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    const chunk = 'x'.repeat(NEWLINE_FREE_CHUNK_CHARS);
+    for (let i = 0; i < NEWLINE_FREE_CHUNKS; i += 1) runner.ingestStderrChunk(proc, chunk);
+    // One retained line: the cut head with its marker. The rest of the line
+    // is dropped, not accumulated.
+    const cutLine =
+      'x'.repeat(MAX_PENDING_LINE_CHARS) + truncatedLineMarker(MAX_PENDING_LINE_CHARS);
+    expect(proc.errors).toEqual([cutLine]);
+    expect(proc.stderrLines?.pendingText).toBe('');
+    // The newline that finally arrives ends the cut line; the next line is whole.
+    runner.ingestStderrChunk(proc, 'tail\nnext\n');
+    expect(proc.errors).toEqual([cutLine, 'next']);
   });
 });
 
@@ -264,9 +315,17 @@ describe('GodotRunner.ingestStdoutChunk', () => {
     const runner = new GodotRunner();
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStdoutChunk(proc, 'Godot Engine v4\r\n\r\nhalf a ');
-    expect(proc.output).toEqual(['Godot Engine v4', 'half a ']);
+    expect(proc.output).toEqual(['Godot Engine v4']);
     runner.ingestStdoutChunk(proc, 'line\r\nlast\r\n');
     expect(proc.output).toEqual(['Godot Engine v4', 'half a line', 'last']);
+  });
+
+  it('retains the line stdout ended in the middle of when the stream finishes', () => {
+    const runner = new GodotRunner();
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStdoutChunk(proc, 'done\nno newline at the end');
+    runner.finishStdout(proc);
+    expect(proc.output).toEqual(['done', 'no newline at the end']);
   });
 });
 
@@ -288,6 +347,7 @@ describe('GodotRunner.collectActionErrors', () => {
         'SCRIPT ERROR: from action 1',
         'noise',
         `${ACTION_BOUNDARY_SENTINEL} 1`,
+        '',
       ].join('\n'),
     );
     const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
@@ -305,6 +365,7 @@ describe('GodotRunner.collectActionErrors', () => {
         'SCRIPT ERROR: from action 0',
         `${ACTION_BOUNDARY_SENTINEL} 0`,
         'SCRIPT ERROR: after the last mark',
+        '',
       ].join('\n'),
     );
     const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
@@ -333,7 +394,7 @@ describe('GodotRunner.collectActionErrors', () => {
     runner.ingestStderrChunk(runner.activeProcess, `plain log line\n${ACTION_BOUNDARY_SENTINEL} `);
     runner.ingestStderrChunk(
       runner.activeProcess,
-      `0\nSCRIPT ERROR: from action 1\nnoise\n${ACTION_BOUNDARY_SENTINEL} 1`,
+      `0\nSCRIPT ERROR: from action 1\nnoise\n${ACTION_BOUNDARY_SENTINEL} 1\n`,
     );
     const collected = await runner.collectActionErrors(capture, 2, FAST_DRAIN_MS);
     expect(collected.buckets).toEqual([[], ['SCRIPT ERROR: from action 1']]);

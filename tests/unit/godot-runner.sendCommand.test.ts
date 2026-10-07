@@ -140,12 +140,22 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     expect(r2.n).toBe(2);
   });
 
-  it('rejects a second concurrent command with "another command in flight"', async () => {
+  it('holds a second concurrent command until the first has its reply, instead of rejecting it', async () => {
     const first = runner.sendCommand('slow');
-    await bridge.nextFrame(); // ensure first has been written
-    await expect(runner.sendCommand('other')).rejects.toThrow(/another command/i);
-    bridge.reply('{"ok":true}');
-    await first;
+    const firstFrame = await bridge.nextFrame(); // ensure first has been written
+    const second = runner.sendCommand('other');
+
+    bridge.reply('{"ok":"first"}');
+    expect(JSON.parse(await first)).toEqual({ ok: 'first' });
+
+    // Only now is the second command written, on the same socket.
+    const secondFrame = await bridge.nextFrame();
+    bridge.reply('{"ok":"second"}');
+    expect(JSON.parse(await second)).toEqual({ ok: 'second' });
+    expect([firstFrame, secondFrame].map((frame) => JSON.parse(frame).command)).toEqual([
+      'slow',
+      'other',
+    ]);
   });
 
   it('rejects with BridgeDisconnectedError when the peer closes mid-flight', async () => {

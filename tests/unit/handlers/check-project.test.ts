@@ -7,10 +7,13 @@ import { liveSessionInfo } from '../../helpers/fake-sessions.js';
 import { installSession } from '../../helpers/session-install.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { unwrap, hasError } from '../../helpers/assertions.js';
+import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 
 const OTHER_PROJECT_PATH = '/fake/other';
 const OTHER_BRIDGE_PORT = 6100;
 const EXIT_CODE = 3;
+const QUEUE_WAITED_MS = 30000;
 
 /**
  * Coverage for check_project's always-present `runtime` block. Argument
@@ -68,6 +71,27 @@ describe('handleCheckProject runtime block', () => {
     expect(data.runtime.processExited).toBe(true);
     expect(Array.isArray(data.runtime.diagnostics)).toBe(true);
     expect(data.runtime.diagnostics.length).toBeGreaterThan(0);
+  });
+
+  it('reports bridgeResponsive:null, with no ping sent, when another operation holds the session queue', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: false });
+    (fake.asRunner as unknown as { runExclusive: (label: string) => Promise<never> }).runExclusive =
+      async (label) => {
+        throw new SessionQueueTimeoutError(label, 'profile_project', QUEUE_WAITED_MS);
+      };
+
+    const result = await handleCheckProject(fake.asRunner, {});
+
+    const data = expectMatchesOutputSchema('check_project', result) as {
+      runtime: { activeSession: boolean; bridgeResponsive: unknown; diagnostics: string[] };
+    };
+    expect(data.runtime.activeSession).toBe(true);
+    expect(data.runtime.bridgeResponsive).toBeNull();
+    expect(data.runtime.diagnostics[0]).toMatch(
+      /^Bridge not pinged: check_project waited 30000 ms for profile_project to finish/,
+    );
+    expect(fake.bridgeCalls).toHaveLength(0);
   });
 
   it('reports bridgeResponsive:false without failing the call when the ping throws', async () => {

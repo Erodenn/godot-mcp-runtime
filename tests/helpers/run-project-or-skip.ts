@@ -52,7 +52,8 @@ export async function runProjectOrSkip(
   projectPath: string,
   opts: RunProjectOrSkipOptions = {},
 ): Promise<{ ready: true }> {
-  const scene = opts.scene === undefined ? undefined : resolveProjectPath(projectPath, opts.scene);
+  const scene =
+    opts.scene === undefined ? undefined : resolveProjectPath(projectPath, opts.scene, 'read');
   if (opts.scene !== undefined && !scene) {
     throw new Error(`runProjectOrSkip: scene is not a project sub-path: ${opts.scene}`);
   }

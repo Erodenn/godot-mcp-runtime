@@ -1,12 +1,14 @@
 import {
   NoLiveCurrentSessionError,
+  SessionStoppedError,
   type GodotRunner,
   type RuntimeSessionInfo,
   type RuntimeSessionStatus,
 } from './godot-runner.js';
-import type { ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, ToolResponse } from '../mcp.types.js';
 import { createErrorResponse, getErrorMessage } from './error-response.js';
 import { ok, err, type Result } from './result.js';
+import { SessionQueueTimeoutError } from './session-queue.js';
 
 export const SWITCH_PROJECT_SOLUTION =
   'Call switch_project with one of the listed project paths to point the runtime tools at that session';
@@ -87,6 +89,38 @@ export function noLiveCurrentSessionError(
   );
 }
 
+/**
+ * The error for a call that gave up waiting for its turn in the session
+ * queue. Nothing was sent for it, so the only thing to do is try again once
+ * the call it names has returned.
+ */
+export function sessionBusyError(error: SessionQueueTimeoutError): ToolResponse {
+  return createErrorResponse(error.message, [
+    `Wait for ${error.behind} to return, then retry this call`,
+    'A runtime session runs one operation at a time: issue runtime calls one after another, not in parallel',
+  ]);
+}
+
+/**
+ * Run a handler's session work with the session queue held, so its gate and
+ * its command, or its start, wait and teardown, are one step that no other
+ * runtime call can interleave with. `toolName` is what a call made to wait
+ * behind this one is told. A call that could not get its turn in time comes
+ * back as a structured error.
+ */
+export async function runSessionExclusive(
+  runner: GodotRunner,
+  toolName: string,
+  operation: () => Promise<HandlerResult>,
+): Promise<HandlerResult> {
+  try {
+    return await runner.runExclusive(toolName, operation);
+  } catch (error) {
+    if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
+    throw error;
+  }
+}
+
 /** The one gate the runtime and profiling handlers share. */
 export function requireRuntimeSession(
   runner: GodotRunner,
@@ -111,8 +145,16 @@ export function runtimeCommandFailure(
   if (error instanceof NoLiveCurrentSessionError) {
     return noLiveCurrentSessionError(error.status, wording);
   }
-  const message = `${failurePrefix}: ${getErrorMessage(error)}`;
+  // The command never left the queue, so nothing about the session is to
+  // blame and the caller's own solutions do not apply.
+  if (error instanceof SessionQueueTimeoutError) return sessionBusyError(error);
   const status = runner.getRuntimeSessionStatus();
+  // A stop ended the session under this call, or before its turn came. The
+  // bridge did not fail, so the caller's own solutions (check the logs, retry)
+  // do not apply, and neither does anything that says the game crashed.
+  if (error instanceof SessionStoppedError)
+    return sessionStoppedError(error, failurePrefix, status);
+  const message = `${failurePrefix}: ${getErrorMessage(error)}`;
   if (status.state === 'live') return createErrorResponse(message, solutions);
   const others = otherLiveSessionsClause(status);
   const switchSolution = others === '' ? [] : [SWITCH_PROJECT_SOLUTION];
@@ -131,6 +173,26 @@ export function runtimeCommandFailure(
     `${message}\nThe session ended during this call and no session is current now.${others}`,
     [...SESSION_GONE_SOLUTIONS, ...switchSolution],
   );
+}
+
+/**
+ * The error for a runtime call that a stop cut off, or that reached a session
+ * a stop had already ended. `error.cutOff` says which: a call that was cut
+ * off may have done part of its work in the game, and that part stays done.
+ */
+export function sessionStoppedError(
+  error: SessionStoppedError,
+  failurePrefix: string,
+  status: RuntimeSessionStatus,
+): ToolResponse {
+  const others = otherLiveSessionsClause(status);
+  return createErrorResponse(`${failurePrefix}: ${error.message}${others}`, [
+    error.cutOff
+      ? 'Do not assume the call did nothing: what it had already done before the stop stays done, and the session it ran in is gone'
+      : 'Nothing was sent to the game for this call',
+    'The session was ended by stop_project (or by the server shutting down), not by a crash: call run_project to start a new one',
+    ...(others === '' ? [] : [SWITCH_PROJECT_SOLUTION]),
+  ]);
 }
 
 const SESSION_GONE_SOLUTIONS = [
