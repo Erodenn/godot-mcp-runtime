@@ -11,7 +11,12 @@ import {
   extractJson,
   cleanStdout,
   OPERATION_RESULT_SENTINEL,
+  OPERATION_RESULT_TOKEN_END,
 } from '../../src/utils/output-parsing.js';
+
+const RUN_TOKEN = '0123456789abcdef0123456789abcdef';
+/** The start of a result line as a run holding RUN_TOKEN writes it. */
+const RESULT_FRAME = `${OPERATION_RESULT_SENTINEL}${RUN_TOKEN}${OPERATION_RESULT_TOKEN_END}`;
 
 describe('normalizeParameters', () => {
   it('converts known snake_case keys to camelCase', () => {
@@ -378,26 +383,26 @@ describe('extractJson', () => {
 
 describe('cleanStdout', () => {
   it('reduces output with a sentinel line to that line (strips banner and noise)', () => {
-    const out = `Godot Engine v4.5.stable\nINFO line\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
-    expect(JSON.parse(extractJson(cleanStdout(out)))).toEqual({ ok: true });
+    const out = `Godot Engine v4.5.stable\nINFO line\n${RESULT_FRAME}{"ok": true}`;
+    expect(JSON.parse(extractJson(cleanStdout(out, RUN_TOKEN)))).toEqual({ ok: true });
   });
 
   it('keeps a sentinel array payload (no `{` present)', () => {
-    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}[1, 2, 3]`;
-    expect(JSON.parse(extractJson(cleanStdout(out)))).toEqual([1, 2, 3]);
+    const out = `Godot Engine v4.5.stable\n${RESULT_FRAME}[1, 2, 3]`;
+    expect(JSON.parse(extractJson(cleanStdout(out, RUN_TOKEN)))).toEqual([1, 2, 3]);
   });
 
   it('routes output without a sentinel line through cleanOutput (drops banner)', () => {
     const out = 'Godot Engine v4.5.stable\nplain success';
-    expect(cleanStdout(out)).toBe('plain success');
+    expect(cleanStdout(out, RUN_TOKEN)).toBe('plain success');
   });
 
   it('does not treat bracketed lines without a sentinel as a payload', () => {
     const out = 'Godot Engine v4.5.stable\n[Audio] ready\n{"a": 1}';
-    expect(cleanStdout(out)).toBe('[Audio] ready\n{"a": 1}');
+    expect(cleanStdout(out, RUN_TOKEN)).toBe('[Audio] ready\n{"a": 1}');
   });
 
   it('handles empty stdout', () => {
-    expect(cleanStdout('')).toBe('');
+    expect(cleanStdout('', RUN_TOKEN)).toBe('');
   });
 });

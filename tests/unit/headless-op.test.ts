@@ -1,19 +1,23 @@
 /**
  * Direct unit tests for executeSceneOp.
  *
- * Currently only covered transitively via the 15 scene/node mutation
- * handlers. A direct test localizes the failure when its contract drifts -
+ * Currently only covered transitively via the 15 scene/node handlers that
+ * call it. A direct test localizes the failure when its contract drifts -
  * the empty-stdout branch and the catch branch are easy to break in a
  * refactor.
  */
 
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { hostname as osHostname } from 'os';
 import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
 import { sceneBackupsDir } from '../../src/utils/artifact-paths.js';
-import { inPlaceSceneWrite } from '../../src/utils/scene-loss-guard.js';
+import {
+  batchSceneWrites,
+  inPlaceSceneWrite,
+  type SceneWriteIntent,
+} from '../../src/utils/scene-loss-guard.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { leadWithWarnings } from '../../src/utils/structured-response.js';
 import { createFakeRunner } from '../helpers/fake-runner.js';
@@ -933,6 +937,9 @@ const CAPTURED_DEBUG_EARLY_EXIT_STDOUT = [
   '[DEBUG] Loading scene from: res://_capture/target.tscn',
 ].join('\n');
 
+/** The result token of the captured run, which wrote no result line. */
+const CAPTURED_RUN_RESULT_TOKEN = '0123456789abcdef0123456789abcdef';
+
 const CAPTURED_DEBUG_EARLY_EXIT_STDERR = [
   '[INFO] Operation: attach_script',
   '[ERROR] Node not found: NoSuchNode',
@@ -947,7 +954,7 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
     // faithful to the production path rather than testing a shape that
     // only a fake runner can produce.
     const fake = createFakeRunner({
-      stdout: cleanStdout(CAPTURED_DEBUG_EARLY_EXIT_STDOUT),
+      stdout: cleanStdout(CAPTURED_DEBUG_EARLY_EXIT_STDOUT, CAPTURED_RUN_RESULT_TOKEN),
       stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
     });
     const result = await executeSceneOp(
@@ -1339,22 +1346,49 @@ describe('executeSceneOp scene loss guard', () => {
 
 describe('executeSceneOp engine-newer-than-project warning', () => {
   const tmp = useTmpDirs();
+  const SCENE = 'main.tscn';
   const PROJECT_AT_4_5 =
     'config_version=5\n\n[application]\n\nconfig/features=PackedStringArray("4.5", "GL Compatibility")\n';
   const VERSION_WARNING =
-    "Godot 4.6 is newer than this project's config/features version 4.5: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example).";
+    "Godot 4.6 is newer than this project's config/features version 4.5: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example). Said once per project in this server session; check_project reports it on every call.";
+  const NEWER_ENGINE = '4.6.2.stable';
+  const MUTATION = {
+    parseStdoutAsJson: true,
+    mutatesSceneFile: true,
+    sceneWrites: inPlaceSceneWrite(SCENE),
+  };
 
-  function run(
-    godotVersion: string,
-    stdout: string,
-    options: Parameters<typeof executeSceneOp>[7],
-    projectContent = PROJECT_AT_4_5,
+  /** Counts every save any runner of this suite made, so no two write the same bytes. */
+  let saveCount = 0;
+
+  /**
+   * A fake runner whose every executeOperation call saves SCENE into the
+   * project it was called for, with new content each time, the way a headless
+   * save does. With `saves` false it leaves the project alone.
+   */
+  function savingRunner(options: Parameters<typeof createFakeRunner>[0], saves = true): FakeRunner {
+    const fake = createFakeRunner(options);
+    const runner = fake.asRunner;
+    const answer = runner.executeOperation.bind(runner);
+    runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
+      if (saves) {
+        const text = `[gd_scene format=3]\n\n[node name="Main${saveCount++}" type="Node2D"]\n`;
+        writeFileSync(join(args[2], SCENE), text, 'utf8');
+      }
+      return answer(...args);
+    };
+    return fake;
+  }
+
+  function op(
+    fake: FakeRunner,
+    projectPath: string,
+    options: Parameters<typeof executeSceneOp>[7] = MUTATION,
   ): ReturnType<typeof executeSceneOp> {
-    const projectPath = tmp.makeProject('engine-newer-', projectContent);
     return executeSceneOp(
-      createFakeRunner({ stdout, godotVersion }).asRunner,
+      fake.asRunner,
       'add_node',
-      { scenePath: 'main.tscn' },
+      { scenePath: SCENE },
       projectPath,
       TEST_FAILURE_PREFIX,
       EMPTY_SOLUTIONS,
@@ -1362,38 +1396,56 @@ describe('executeSceneOp engine-newer-than-project warning', () => {
       options,
     );
   }
-  const MUTATION = { parseStdoutAsJson: true, mutatesSceneFile: true };
+
+  function run(
+    godotVersion: string,
+    stdout: string,
+    options: Parameters<typeof executeSceneOp>[7] = MUTATION,
+    projectContent = PROJECT_AT_4_5,
+  ): ReturnType<typeof executeSceneOp> {
+    const projectPath = tmp.makeProject('engine-newer-', projectContent);
+    return op(savingRunner({ stdout, godotVersion }), projectPath, options);
+  }
 
   it('leads a mutation payload with the warning when the engine is newer', async () => {
-    const result = await run('4.6.2.stable.official.71f334935', '{"nodeName":"N"}', MUTATION);
+    const result = await run('4.6.2.stable.official.71f334935', '{"nodeName":"N"}');
     const payload = unwrap(result).structuredContent as Record<string, unknown>;
     expect(Object.keys(payload)).toEqual(['warnings', 'nodeName']);
     expect(payload.warnings).toEqual([VERSION_WARNING]);
   });
 
   it("puts it ahead of the operation's own warnings", async () => {
-    const result = await run('4.6.2.stable', '{"nodeName":"N","warnings":["renamed"]}', MUTATION);
+    const result = await run(NEWER_ENGINE, '{"nodeName":"N","warnings":["renamed"]}');
     const payload = unwrap(result).structuredContent as { warnings: string[] };
     expect(payload.warnings).toEqual([VERSION_WARNING, 'renamed']);
   });
 
   it('adds nothing when the engine matches the project', async () => {
-    const result = await run('4.5.1.stable', '{"nodeName":"N"}', MUTATION);
+    const result = await run('4.5.1.stable', '{"nodeName":"N"}');
     expect(unwrap(result).structuredContent).toEqual({ nodeName: 'N' });
   });
 
   it('adds nothing when the project states no version', async () => {
-    const result = await run('4.6.2.stable', '{"nodeName":"N"}', MUTATION, 'config_version=5\n');
+    const result = await run(NEWER_ENGINE, '{"nodeName":"N"}', MUTATION, 'config_version=5\n');
     expect(unwrap(result).structuredContent).toEqual({ nodeName: 'N' });
   });
 
   it('adds nothing to an operation that does not mutate a scene file', async () => {
-    const result = await run('4.6.2.stable', '{"name":"Main"}', { parseStdoutAsJson: true });
+    const result = await run(NEWER_ENGINE, '{"name":"Main"}', { parseStdoutAsJson: true });
     expect(unwrap(result).structuredContent).toEqual({ name: 'Main' });
   });
 
+  it('adds nothing to an operation that writes a file that is not a scene', async () => {
+    // export_mesh_library: it mutates the project and names no sceneWrites.
+    const result = await run(NEWER_ENGINE, '{"outputPath":"lib.res"}', {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+    });
+    expect(unwrap(result).structuredContent).toEqual({ outputPath: 'lib.res' });
+  });
+
   it('adds nothing to an error response', async () => {
-    const result = await run('4.6.2.stable', '', MUTATION);
+    const result = await run(NEWER_ENGINE, '');
     expect(hasError(result)).toBe(true);
     expect(
       unwrap(result)
@@ -1402,36 +1454,454 @@ describe('executeSceneOp engine-newer-than-project warning', () => {
     ).not.toContain('config/features');
   });
 
+  it('says it once per project for the life of a runner, whichever way the path is spelled', async () => {
+    const projectPath = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
+    const fake = savingRunner({ stdout: '{"nodeName":"N"}', godotVersion: NEWER_ENGINE });
+
+    const first = unwrap(await op(fake, projectPath)).structuredContent;
+    expect(first).toEqual({ warnings: [VERSION_WARNING], nodeName: 'N' });
+    const second = unwrap(await op(fake, projectPath)).structuredContent;
+    expect(second).toEqual({ nodeName: 'N' });
+    const respelled = unwrap(await op(fake, `${projectPath}/./`)).structuredContent;
+    expect(respelled).toEqual({ nodeName: 'N' });
+  });
+
+  it('says it again for another project and for another server session', async () => {
+    const options = { stdout: '{"nodeName":"N"}', godotVersion: NEWER_ENGINE };
+    const projectA = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
+    const projectB = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
+    const fake = savingRunner(options);
+    const noted = { warnings: [VERSION_WARNING], nodeName: 'N' };
+    expect(unwrap(await op(fake, projectA)).structuredContent).toEqual(noted);
+    expect(unwrap(await op(fake, projectB)).structuredContent).toEqual(noted);
+    expect(unwrap(await op(savingRunner(options), projectA)).structuredContent).toEqual(noted);
+  });
+
+  it('adds nothing to a call that left the scene file as it was, and still says it on the first save', async () => {
+    const projectPath = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
+    writeFileSync(join(projectPath, SCENE), '[gd_scene format=3]\n', 'utf8');
+    const options = {
+      stdout: '{"results":[{"nodePath":"root/X","error":"not found"}]}',
+      godotVersion: NEWER_ENGINE,
+    };
+    // Every update failed: nothing was saved, so there is no save to describe.
+    const idle = savingRunner(options, false);
+    const payload = unwrap(await op(idle, projectPath)).structuredContent as Record<
+      string,
+      unknown
+    >;
+    expect(payload.warnings).toBeUndefined();
+
+    // The note was not spent on the call that wrote nothing.
+    const runner = idle.asRunner;
+    const answer = runner.executeOperation.bind(runner);
+    runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
+      writeFileSync(
+        join(projectPath, SCENE),
+        '[gd_scene format=3]\n\n[node name="M" type="Node"]\n',
+        'utf8',
+      );
+      return answer(...args);
+    };
+    const saved = unwrap(await op(idle, projectPath)).structuredContent as { warnings: string[] };
+    expect(saved.warnings).toEqual([VERSION_WARNING]);
+  });
+
   it('comes after a dropped-content warning', async () => {
     const projectPath = tmp.makeProject('engine-newer-', PROJECT_AT_4_5);
-    const scenePath = join(projectPath, 'main.tscn');
+    const scenePath = join(projectPath, SCENE);
     writeFileSync(
       scenePath,
       '[gd_scene format=3 uid="uid://before"]\n\n[node name="Main" type="Node2D"]\n',
       'utf8',
     );
-    const fake = createFakeRunner({ stdout: '{"nodeName":"N"}', godotVersion: '4.6.2.stable' });
+    const fake = createFakeRunner({ stdout: '{"nodeName":"N"}', godotVersion: NEWER_ENGINE });
     const runner = fake.asRunner;
     const answer = runner.executeOperation.bind(runner);
     runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
       writeFileSync(scenePath, '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n', 'utf8');
       return answer(...args);
     };
-    const result = await executeSceneOp(
-      runner,
-      'add_node',
-      { scenePath: 'main.tscn' },
-      projectPath,
-      TEST_FAILURE_PREFIX,
-      EMPTY_SOLUTIONS,
-      EXCEPTION_SOLUTIONS,
-      { ...MUTATION, sceneWrites: inPlaceSceneWrite('main.tscn') },
-    );
-    const payload = unwrap(result).structuredContent as { warnings: string[] };
+    const payload = unwrap(await op(fake, projectPath)).structuredContent as {
+      warnings: string[];
+    };
     expect(payload.warnings).toHaveLength(3);
     expect(payload.warnings[0]).toMatch(/scene-backups/);
     expect(payload.warnings[1]).toBe('The scene lost its uid uid://before');
     expect(payload.warnings[2]).toBe(VERSION_WARNING);
+  });
+});
+
+describe('executeSceneOp scene loss guard: what it is told and what it says', () => {
+  const tmp = useTmpDirs();
+  const ADD_NODE_STDOUT = '{"nodeName":"Added"}';
+  const SCRIPTED = [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://main.gd" id="1_abc"]',
+    '',
+    '[node name="Main" type="Node2D"]',
+    'script = ExtResource("1_abc")',
+    'speed = 9.0',
+    '',
+  ].join('\n');
+
+  /** A runner that writes `files[n]` (path -> content) into the project on its nth call. */
+  function writingRunner(
+    projectPath: string,
+    files: Array<Record<string, string | Buffer>>,
+    options: Parameters<typeof createFakeRunner>[0] = { stdout: ADD_NODE_STDOUT },
+  ): FakeRunner {
+    const fake = createFakeRunner(options);
+    const runner = fake.asRunner;
+    const answer = runner.executeOperation.bind(runner);
+    let call = 0;
+    runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
+      for (const [name, content] of Object.entries(files[call++] ?? {})) {
+        writeFileSync(join(projectPath, name), content);
+      }
+      return answer(...args);
+    };
+    return fake;
+  }
+
+  function guarded(
+    fake: FakeRunner,
+    projectPath: string,
+    sceneWrites: SceneWriteIntent[],
+    extra: Partial<NonNullable<Parameters<typeof executeSceneOp>[7]>> = {},
+  ): ReturnType<typeof executeSceneOp> {
+    return executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      {},
+      projectPath,
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true, mutatesSceneFile: true, sceneWrites, ...extra },
+    );
+  }
+
+  it('takes the failed scripts from the attempt that saved, not from the cold first attempt', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'main.tscn'), SCRIPTED, 'utf8');
+    // A value equal to its default is not written back. With the script
+    // counted as failed that would read as a loss.
+    const saved =
+      SCRIPTED.replace('speed = 9.0\n', '') + '\n[node name="N" type="Node" parent="."]\n';
+    const fake = writingRunner(projectPath, [{}, { 'main.tscn': saved }], {
+      responses: [
+        {
+          stdout: '',
+          stderr:
+            'ERROR: Failed to load script "res://main.gd" with error "Parse error".\n[ERROR] [IMPORT_NEEDED] res://x.png',
+        },
+        { stdout: ADD_NODE_STDOUT },
+      ],
+    });
+    const result = await guarded(fake, projectPath, inPlaceSceneWrite('main.tscn'));
+    expect(fake.calls).toHaveLength(2);
+    expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADD_NODE_STDOUT));
+  });
+
+  it('says a binary scene was saved unchecked, once, and writes no backup', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'level.scn'), Buffer.from('RSRC\u0000before'));
+    const fake = writingRunner(projectPath, [{ 'level.scn': Buffer.from('RSRC\u0000after') }]);
+    const payload = unwrap(await guarded(fake, projectPath, inPlaceSceneWrite('level.scn')))
+      .structuredContent as { warnings: string[] };
+    expect(payload.warnings).toEqual([
+      'Saved level.scn, but the save was not checked for lost content: the file as it was before the save is not a text scene (a binary scene, or text with no [gd_scene] header). Said once per file in this server session.',
+    ]);
+    expect(existsSync(sceneBackupsDir(projectPath))).toBe(false);
+  });
+
+  it('says a binary scene was saved unchecked once per file per runner, not on every save', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    for (const name of ['level.scn', 'other.scn']) {
+      writeFileSync(join(projectPath, name), Buffer.from('RSRC\u00000'));
+    }
+    const fake = writingRunner(projectPath, [
+      { 'level.scn': Buffer.from('RSRC\u00001') },
+      { 'level.scn': Buffer.from('RSRC\u00002') },
+      { 'other.scn': Buffer.from('RSRC\u00003') },
+    ]);
+    const warningsOf = async (scene: string): Promise<string[] | undefined> =>
+      (
+        unwrap(await guarded(fake, projectPath, inPlaceSceneWrite(scene))).structuredContent as {
+          warnings?: string[];
+        }
+      ).warnings;
+
+    expect(await warningsOf('level.scn')).toHaveLength(1);
+    // The second save of the same file, spelled another way, says nothing.
+    expect(await warningsOf('./level.scn')).toBeUndefined();
+    expect((await warningsOf('other.scn'))?.[0]).toMatch(/^Saved other\.scn, but the save was not/);
+
+    // Another runner is another server session and says it again.
+    const second = writingRunner(projectPath, [{ 'level.scn': Buffer.from('RSRC\u00004') }]);
+    const again = unwrap(await guarded(second, projectPath, inPlaceSceneWrite('level.scn')))
+      .structuredContent as { warnings?: string[] };
+    expect(again.warnings).toHaveLength(1);
+  });
+
+  it('takes a deleted %Name from the path the operation reports, not from every node of that name', async () => {
+    // Two nodes are called Enemy and neither section stores the unique flag
+    // (it lives in the instanced scene). The operation deleted Squad/Enemy;
+    // the save also lost Reserve/Enemy, which nobody asked for.
+    const before = [
+      '[gd_scene format=3]',
+      '',
+      '[node name="Main" type="Node2D"]',
+      '',
+      '[node name="Squad" type="Node2D" parent="."]',
+      '',
+      '[node name="Enemy" type="Node2D" parent="Squad"]',
+      '',
+      '[node name="Reserve" type="Node2D" parent="."]',
+      '',
+      '[node name="Enemy" type="Node2D" parent="Reserve"]',
+      '',
+    ].join('\n');
+    const after = before
+      .replace('[node name="Enemy" type="Node2D" parent="Squad"]\n\n', '')
+      .replace('[node name="Enemy" type="Node2D" parent="Reserve"]\n', '');
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'main.tscn'), before, 'utf8');
+    const fake = writingRunner(projectPath, [{ 'main.tscn': after }], {
+      stdout: JSON.stringify({
+        results: [{ nodePath: '%Enemy', resolvedNodePath: 'root/Squad/Enemy', success: true }],
+      }),
+    });
+    const payload = unwrap(
+      await guarded(
+        fake,
+        projectPath,
+        inPlaceSceneWrite('main.tscn', { deletedNodes: ['%Enemy'] }),
+      ),
+    ).structuredContent as { warnings: string[] };
+    expect(payload.warnings).toHaveLength(2);
+    expect(payload.warnings[0]).toMatch(/lost content this operation did not ask to change/);
+    expect(payload.warnings[1]).toBe('Node "root/Reserve/Enemy" is no longer in the file');
+  });
+
+  it('says nothing about a binary scene the operation did not write', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'level.scn'), Buffer.from('RSRC\u0000before'));
+    const fake = writingRunner(projectPath, [{}]);
+    const result = await guarded(fake, projectPath, inPlaceSceneWrite('level.scn'));
+    expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADD_NODE_STDOUT));
+  });
+
+  it('does not compare a file the operation set out to replace', async () => {
+    // create_scene over an existing path: everything the old file held is gone
+    // by request.
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'main.tscn'), SCRIPTED, 'utf8');
+    const fresh = '[gd_scene format=3]\n\n[node name="Fresh" type="Node3D"]\n';
+    const fake = writingRunner(projectPath, [{ 'main.tscn': fresh }]);
+    const result = await guarded(
+      fake,
+      projectPath,
+      inPlaceSceneWrite('main.tscn', { replacesFile: true }),
+    );
+    expect(unwrap(result).structuredContent).toEqual(JSON.parse(ADD_NODE_STDOUT));
+    expect(existsSync(sceneBackupsDir(projectPath))).toBe(false);
+  });
+
+  it('guards a scene that starts with a byte order mark', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'main.tscn'), `﻿${SCRIPTED}`, 'utf8');
+    const lossy = '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n';
+    const fake = writingRunner(projectPath, [{ 'main.tscn': lossy }]);
+    const payload = unwrap(await guarded(fake, projectPath, inPlaceSceneWrite('main.tscn')))
+      .structuredContent as { warnings: string[] };
+    expect(payload.warnings).toContain('"root" lost its script res://main.gd');
+  });
+
+  it('treats two spellings of one file as one file: one warning, one backup', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'main.tscn'), SCRIPTED, 'utf8');
+    const lossy = '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n';
+    const fake = writingRunner(projectPath, [{ 'main.tscn': lossy }]);
+    const operations = [
+      { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node', nodeName: 'A' },
+      { operation: 'add_node', scenePath: './main.tscn', nodeType: 'Node', nodeName: 'B' },
+      { operation: 'add_node', scenePath: 'res://main.tscn', nodeType: 'Node', nodeName: 'C' },
+    ];
+    const payload = unwrap(
+      await guarded(fake, projectPath, batchSceneWrites(operations, projectPath)),
+    ).structuredContent as { warnings: string[] };
+    expect(payload.warnings.filter((line) => line.startsWith('Saved '))).toHaveLength(1);
+    expect(readdirSync(sceneBackupsDir(projectPath))).toHaveLength(1);
+  });
+
+  // Two names that differ only in case are one file where the file system
+  // folds case, and two files where it does not (`fileIdentityKey`).
+  it.runIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'treats a spelling in another case as the same file on a case-insensitive platform',
+    async () => {
+      const projectPath = tmp.makeProject('loss-guard-');
+      writeFileSync(join(projectPath, 'main.tscn'), SCRIPTED, 'utf8');
+      const lossy = '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n';
+      const fake = writingRunner(projectPath, [{ 'main.tscn': lossy }]);
+      const operations = [
+        { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node', nodeName: 'A' },
+        { operation: 'add_node', scenePath: 'Main.tscn', nodeType: 'Node', nodeName: 'B' },
+      ];
+      const payload = unwrap(
+        await guarded(fake, projectPath, batchSceneWrites(operations, projectPath)),
+      ).structuredContent as { warnings: string[] };
+      expect(payload.warnings.filter((line) => line.startsWith('Saved '))).toHaveLength(1);
+      expect(readdirSync(sceneBackupsDir(projectPath))).toHaveLength(1);
+    },
+  );
+
+  const TEXTURED = [
+    '[gd_scene load_steps=3 format=3]',
+    '',
+    '[ext_resource type="Texture2D" path="res://a.png" id="1_a"]',
+    '',
+    '[node name="Main" type="Node2D"]',
+    '',
+    '[node name="Icon" type="Sprite2D" parent="."]',
+    'texture = ExtResource("1_a")',
+    '',
+  ].join('\n');
+  const RETEXTURED = TEXTURED.replace('res://a.png', 'res://b.png');
+  const SAVE_AS_THEN_EDIT = [
+    { operation: 'save', scenePath: 'a.tscn', newPath: 'copy.tscn' },
+    {
+      operation: 'set_node_properties',
+      scenePath: 'copy.tscn',
+      updates: [{ nodePath: 'root/Icon', property: 'texture', value: 'res://b.png' }],
+    },
+  ];
+
+  it('accepts an edit made on a save-as copy after the save-as', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'a.tscn'), TEXTURED, 'utf8');
+    const fake = writingRunner(projectPath, [{ 'copy.tscn': RETEXTURED }], {
+      stdout: '{"results":[{"success":true},{"success":true}]}',
+    });
+    const result = await guarded(
+      fake,
+      projectPath,
+      batchSceneWrites(SAVE_AS_THEN_EDIT, projectPath),
+    );
+    expect((unwrap(result).structuredContent as Record<string, unknown>).warnings).toBeUndefined();
+    expect(existsSync(sceneBackupsDir(projectPath))).toBe(false);
+  });
+
+  it('judges the target against itself when the payload says the save-as failed', async () => {
+    // copy.tscn already existed and the save-as did not replace it, so the
+    // later edit acted on the old copy: its baseline is the old copy, not a.
+    const projectPath = tmp.makeProject('loss-guard-');
+    writeFileSync(join(projectPath, 'a.tscn'), SCRIPTED, 'utf8');
+    writeFileSync(join(projectPath, 'copy.tscn'), TEXTURED, 'utf8');
+    const fake = writingRunner(projectPath, [{ 'copy.tscn': RETEXTURED }], {
+      stdout: '{"results":[{"error":"Failed to save scene"},{"success":true}]}',
+    });
+    const result = await guarded(
+      fake,
+      projectPath,
+      batchSceneWrites(SAVE_AS_THEN_EDIT, projectPath),
+      {
+        refineSceneWrites: (payload) =>
+          batchSceneWrites(SAVE_AS_THEN_EDIT, projectPath, payload.results),
+      },
+    );
+    expect((unwrap(result).structuredContent as Record<string, unknown>).warnings).toBeUndefined();
+  });
+});
+
+describe('executeSceneOp refusal and recovery wording', () => {
+  function liveRunner(options: Parameters<typeof createFakeRunner>[0]): FakeRunner {
+    const fake = createFakeRunner(options);
+    const runner = fake.asRunner as GodotRunner & {
+      activeSessionMode: 'spawned' | 'attached' | null;
+      activeProjectPath: string | null;
+      activeProcess: { hasExited: boolean } | null;
+    };
+    runner.activeSessionMode = 'spawned';
+    runner.activeProjectPath = '/proj';
+    runner.activeProcess = { hasExited: false };
+    return fake;
+  }
+
+  it('refuses a read that needs an import during a live session in the words of a read', async () => {
+    const fake = liveRunner({
+      stdout: '',
+      stderr: '[ERROR] [IMPORT_NEEDED] main.tscn: res://assets/tex.png',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    expect(fake.importCalls).toEqual([]);
+    const text = unwrap(result)
+      .content.map((block) => block.text ?? '')
+      .join('\n');
+    expect(text).toMatch(/A Godot runtime session is active on this project/);
+    expect(text).toMatch(/This read changes nothing in the scene/);
+    expect(text).toMatch(/then retry the scene read/);
+    expect(text).not.toMatch(/editing scene files|scene edit|headless edit/);
+  });
+
+  it('keeps the edit wording for a mutation', async () => {
+    const fake = liveRunner({ stdout: '{"ok":true}' });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'add_node',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true, mutatesSceneFile: true },
+    );
+    const text = unwrap(result)
+      .content.map((block) => block.text ?? '')
+      .join('\n');
+    expect(text).toMatch(/Stop the session before editing scene files/);
+    expect(text).toMatch(/then retry the scene edit/);
+  });
+
+  it('tells a partial batch how the missing asset gets imported', async () => {
+    const partialBatch = JSON.stringify({
+      results: [
+        { operation: 'add_node', success: true },
+        { operation: 'load_sprite', error: 'x' },
+      ],
+    });
+    const fake = createFakeRunner({
+      stdout: partialBatch,
+      stderr: '[IMPORT_NEEDED] load_sprite: res://assets/tex.png',
+    });
+    const result = await executeSceneOp(
+      fake.asRunner,
+      'batch_scene_operations',
+      { operations: [] },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+      { parseStdoutAsJson: true },
+    );
+    const text = unwrap(result)
+      .content.map((block) => block.text ?? '')
+      .join('\n');
+    expect(text).toContain(
+      'The next headless call on the affected scene (get_scene_tree, for example) imports the missing asset before it runs',
+    );
+    expect(text).not.toContain('once the asset is imported will do');
   });
 });
 

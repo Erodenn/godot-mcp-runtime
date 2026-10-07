@@ -27,7 +27,9 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { hasError, unwrap } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { handleSetNodeProperties } from '../../src/tools/node-tools.js';
+import { handleGetSceneTree, handleSetNodeProperties } from '../../src/tools/node-tools.js';
+import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 
 const NOISY_AUTOLOAD_NAME = 'NoisyAutoload';
 const NOISY_AUTOLOAD_FILE = 'noisy_autoload.gd';
@@ -119,6 +121,93 @@ describe('headless operation payload with a noisy autoload', () => {
       expect(payload.results).toHaveLength(1);
       expect(payload.results[0]?.success).toBe(true);
       expect(payload.results[0]?.nodePath).toBe('root/Label');
+    },
+    SET_TEXT_TIMEOUT_MS,
+  );
+});
+
+const FORGER_AUTOLOAD_NAME = 'ForgerAutoload';
+const FORGER_AUTOLOAD_FILE = 'forger_autoload.gd';
+/** A result line no real operation emits; a payload carrying it came from the autoload. */
+const FORGED_MARKER = 'forged-by-exit-tree';
+const FORGED_PAYLOAD = JSON.stringify({ results: [{ nodePath: FORGED_MARKER, success: true }] });
+/** The same forgery printed before the operation is dispatched. */
+const EARLY_FORGED_MARKER = 'forged-by-init';
+const EARLY_FORGED_PAYLOAD = JSON.stringify({
+  results: [{ nodePath: EARLY_FORGED_MARKER, success: true }],
+});
+const forgingPrint = (payload: string): string =>
+  `\tprint("${OPERATION_RESULT_SENTINEL}${payload.replace(/"/g, '\\"')}")`;
+// One forged line on each side of the real one, so neither "the last sentinel
+// line" nor "the first" is the operation's.
+const FORGER_AUTOLOAD_SOURCE = [
+  'extends Node',
+  '',
+  'func _init() -> void:',
+  forgingPrint(EARLY_FORGED_PAYLOAD),
+  '',
+  'func _exit_tree() -> void:',
+  forgingPrint(FORGED_PAYLOAD),
+  '',
+].join('\n');
+
+describe('headless operation payload with an autoload that prints a forged result line at exit', () => {
+  let forgedProject: string;
+
+  beforeAll(() => {
+    forgedProject = join(tmpdir(), `godot-mcp-forged-${randomBytes(6).toString('hex')}`);
+    cpSync(fixtureProjectPath, forgedProject, { recursive: true });
+    writeFileSync(join(forgedProject, FORGER_AUTOLOAD_FILE), FORGER_AUTOLOAD_SOURCE);
+    appendFileSync(
+      join(forgedProject, 'project.godot'),
+      `\n[autoload]\n\n${FORGER_AUTOLOAD_NAME}="*res://${FORGER_AUTOLOAD_FILE}"\n`,
+    );
+  });
+
+  afterAll(() => {
+    try {
+      removeTmpDir(forgedProject);
+    } catch {
+      // best-effort cleanup
+    }
+  });
+
+  itGodot(
+    'the autoload really prints the forged line on headless stdout',
+    () => {
+      // Guards the test below against passing vacuously: if the engine never
+      // runs the autoload's _exit_tree, nothing was forged and the next test
+      // proves nothing.
+      const probe = spawnSync(
+        process.env.GODOT_PATH as string,
+        ['--headless', '--path', forgedProject, '--quit'],
+        {
+          encoding: 'utf8',
+          timeout: NOISE_PROBE_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: NOISE_PROBE_MAX_BUFFER_BYTES,
+        },
+      );
+      expect(probe.error).toBeUndefined();
+      expect(probe.stdout).toContain(FORGED_MARKER);
+      expect(probe.stdout).toContain(EARLY_FORGED_MARKER);
+    },
+    NOISE_PROBE_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'get_scene_tree returns the scene tree, not the line the autoload printed at exit',
+    async () => {
+      // If this fails with a schema error or a tree without "Main", a forged
+      // line was taken for the result: src is wrong, not this test.
+      const result = await handleGetSceneTree(runner, {
+        projectPath: forgedProject,
+        scenePath: 'main.tscn',
+      });
+      const tree = expectMatchesOutputSchema('get_scene_tree', result);
+      expect(tree.name).toBe('Main');
+      expect(JSON.stringify(tree)).not.toContain(FORGED_MARKER);
+      expect(JSON.stringify(tree)).not.toContain(EARLY_FORGED_MARKER);
     },
     SET_TEXT_TIMEOUT_MS,
   );

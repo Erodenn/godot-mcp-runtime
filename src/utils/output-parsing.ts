@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { normalize, resolve } from 'path';
 
 // A force-killed process can report its exit code as the unsigned 32-bit
@@ -75,35 +76,83 @@ export function projectPathKey(projectPath: string): string {
 export const OPERATION_RESULT_SENTINEL = 'MCP_OPERATION_RESULT:';
 
 /**
- * Return the text after the operation-result sentinel on the last line that
- * carries it, or null when no line does. Never falls back to scanning for
- * brackets: text that was not taken from a sentinel line is not a payload.
+ * Environment variable that carries one run's result token to
+ * godot_operations.gd. KEEP IN SYNC with OPERATION_RESULT_TOKEN_ENV there.
+ */
+export const OPERATION_RESULT_TOKEN_ENV = 'MCP_OPERATION_RESULT_TOKEN';
+
+/**
+ * Closes the token in a result line: sentinel, token, this, then the JSON.
+ * KEEP IN SYNC with OPERATION_RESULT_TOKEN_END in godot_operations.gd.
+ */
+export const OPERATION_RESULT_TOKEN_END = ':';
+
+const OPERATION_RESULT_TOKEN_BYTES = 16;
+
+/**
+ * A fresh result token for one headless run. The sentinel is a constant any
+ * project script can print, before the operation or after it (an autoload's
+ * `_exit_tree` runs after the result is written), so the position of a
+ * sentinel line says nothing about who wrote it. The token does: it is drawn
+ * per run and the script echoes it in its frame.
+ */
+export function newOperationResultToken(): string {
+  return randomBytes(OPERATION_RESULT_TOKEN_BYTES).toString('hex');
+}
+
+/**
+ * Return the text after `marker` on the last line that carries it, or null
+ * when no line does. Never falls back to scanning for brackets: text that was
+ * not taken from a marked line is not a payload.
  *
- * The emitter writes the sentinel once, at the start of the payload. The text
+ * The emitter writes the marker once, at the start of the payload. The text
  * can still occur more than once on that line: inside the payload itself (a
  * Label whose text quotes it, a requested node name echoed in a warning), or
  * in front of it (an unterminated `printraw` from a project script). So the
  * occurrences are tried left to right and the first one followed by valid
  * JSON is the payload. Taking the last one would start inside a string value
- * of a payload that quotes the sentinel, and report a finished operation as
+ * of a payload that quotes the marker, and report a finished operation as
  * invalid JSON. When none parses, the text after the first is returned so the
  * caller reports the parse failure against what the operation emitted.
  */
-export function extractOperationPayload(output: string): string | null {
+function payloadAfterMarker(output: string, marker: string): string | null {
   const lines = output.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i] ?? '';
-    let at = line.indexOf(OPERATION_RESULT_SENTINEL);
+    let at = line.indexOf(marker);
     if (at === -1) continue;
-    const first = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+    const first = line.substring(at + marker.length).trim();
     while (at !== -1) {
-      const candidate = line.substring(at + OPERATION_RESULT_SENTINEL.length).trim();
+      const candidate = line.substring(at + marker.length).trim();
       if (isJsonText(candidate)) return candidate;
-      at = line.indexOf(OPERATION_RESULT_SENTINEL, at + OPERATION_RESULT_SENTINEL.length);
+      at = line.indexOf(marker, at + marker.length);
     }
     return first;
   }
   return null;
+}
+
+/**
+ * The payload of the result line in the stdout `GodotRunner.executeOperation`
+ * returns, or null when it holds none. That stdout has already been through
+ * `cleanStdout`, which is where a result line is told from a forged one: do
+ * not call this on a process's raw stdout, where any script can print the
+ * sentinel. Raw stdout is read with `extractTokenFramedPayload`.
+ */
+export function extractOperationPayload(output: string): string | null {
+  return payloadAfterMarker(output, OPERATION_RESULT_SENTINEL);
+}
+
+/**
+ * The payload of the result line a headless run wrote to its raw stdout: the
+ * line framed with the sentinel and `resultToken`, the token this run was
+ * handed. A sentinel line with another token, or with none, is not a result.
+ */
+export function extractTokenFramedPayload(rawStdout: string, resultToken: string): string | null {
+  return payloadAfterMarker(
+    rawStdout,
+    OPERATION_RESULT_SENTINEL + resultToken + OPERATION_RESULT_TOKEN_END,
+  );
 }
 
 function isJsonText(text: string): boolean {
@@ -156,18 +205,21 @@ export function cleanOutput(output: string): string {
 }
 
 /**
- * Reduce a headless operation's raw stdout to what the handlers need. When a
- * sentinel line is present, only that line survives (still carrying its
- * sentinel, so downstream code can tell a payload from noise); everything
- * else is engine and user noise. Without one, banner and status lines are
- * filtered and the rest passes through as a non-payload message.
+ * Reduce a headless operation's raw stdout to what the handlers need. When the
+ * run wrote a result line framed with `resultToken`, only that payload
+ * survives, behind the bare sentinel, so downstream code can tell a payload
+ * from noise with `extractOperationPayload`. Without one, banner and status
+ * lines are filtered and the rest passes through as a non-payload message,
+ * with the sentinel text removed: what leaves here carries the sentinel only
+ * where this function put it, so a line a project script printed with it is
+ * never read as a result further down.
  */
-export function cleanStdout(stdout: string): string {
-  const payload = extractOperationPayload(stdout);
+export function cleanStdout(stdout: string, resultToken: string): string {
+  const payload = extractTokenFramedPayload(stdout, resultToken);
   if (payload !== null) {
     return OPERATION_RESULT_SENTINEL + payload;
   }
-  return cleanOutput(stdout);
+  return stripOperationSentinel(cleanOutput(stdout));
 }
 
 /**

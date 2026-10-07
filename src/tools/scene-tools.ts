@@ -2,7 +2,12 @@ import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { resolveProjectPath } from '../utils/path-validation.js';
+import {
+  isSceneFileNodeType,
+  resolveProjectPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
+} from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -358,6 +363,11 @@ export const sceneToolDefinitions = [
                   properties: {
                     nodePath: { type: 'string' },
                     property: { type: 'string' },
+                    resolvedNodePath: {
+                      type: 'string',
+                      description:
+                        'Where nodePath led, in root/... form. Present when the node was found; differs from nodePath for a %Name path.',
+                    },
                     success: { type: 'boolean' },
                     error: { type: 'string' },
                     skipped: {
@@ -384,7 +394,7 @@ export async function handleCreateScene(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args, { requireExists: false });
+  const parsed = parseSceneArgs(args, 'write', { requireExists: false });
   if (!parsed.ok) return parsed;
   const rootNodeType = optionalString(args, 'rootNodeType');
   if (!rootNodeType.ok) return rootNodeType;
@@ -401,7 +411,14 @@ export async function handleCreateScene(
     'Failed to create scene',
     ['Check if the root node type is valid'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      // The new file replaces whatever the path held, which is the request, so
+      // it is not compared. Naming it is what lets the call say once that the
+      // engine writing it is newer than the project.
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { replacesFile: true }),
+    },
   );
 }
 
@@ -413,24 +430,12 @@ export async function handleCreateScene(
  */
 const PROMOTED_SPATIAL_PARAMS = ['position', 'rotation', 'scale', 'visible', 'modulate'] as const;
 
-/**
- * Scene-file suffixes `add_node` accepts in place of a Godot class name.
- * Mirrored by `_SCENE_SUFFIXES` in `src/scripts/godot_operations.gd` --
- * KEEP IN SYNC.
- */
-const SCENE_PATH_SUFFIXES = ['.tscn', '.scn'];
-
-function isScenePath(nodeType: string): boolean {
-  const lowered = nodeType.toLowerCase();
-  return SCENE_PATH_SUFFIXES.some((suffix) => lowered.endsWith(suffix));
-}
-
 export async function handleAddNode(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodeType = requireString(args, 'nodeType');
@@ -438,14 +443,13 @@ export async function handleAddNode(
   // A scene-path nodeType is a filesystem path, so it gets the same
   // project-root containment check every other path input does -- Godot
   // resolves `res://../x.tscn` to a real file outside the project.
-  const nodeTypeScene = isScenePath(nodeType.value)
-    ? resolveProjectPath(parsed.value.projectPath, nodeType.value)
+  const nodeTypeScene = isSceneFileNodeType(nodeType.value)
+    ? resolveProjectPath(parsed.value.projectPath, nodeType.value, 'read')
     : undefined;
   if (nodeTypeScene === null) {
     return err(
-      createErrorResponse(`Scene path escapes the project root: ${nodeType.value}`, [
-        'Use a path relative to the project root (e.g. "scenes/enemy.tscn")',
-        'Remove any ".." segments from the path',
+      createErrorResponse(projectSubPathError('nodeType scene path', nodeType.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -501,7 +505,7 @@ export async function handleLoadSprite(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
@@ -509,11 +513,11 @@ export async function handleLoadSprite(
 
   const texturePath = requireString(args, 'texturePath');
   if (!texturePath.ok) return texturePath;
-  const texture = resolveProjectPath(parsed.value.projectPath, texturePath.value);
+  const texture = resolveProjectPath(parsed.value.projectPath, texturePath.value, 'read');
   if (!texture) {
     return err(
-      createErrorResponse('Valid texturePath is required', [
-        'Provide a relative texture path that stays inside the project directory',
+      createErrorResponse(projectSubPathError('texturePath', texturePath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -553,18 +557,18 @@ export async function handleSaveScene(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const newPath = optionalString(args, 'newPath');
   if (!newPath.ok) return newPath;
   const newScene = newPath.value
-    ? resolveProjectPath(parsed.value.projectPath, newPath.value)
+    ? resolveProjectPath(parsed.value.projectPath, newPath.value, 'write')
     : undefined;
   if (newScene === null) {
     return err(
-      createErrorResponse('Invalid newPath', [
-        'Provide a valid relative path without ".." that stays inside the project directory',
+      createErrorResponse(projectSubPathError('newPath', newPath.value ?? ''), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -599,16 +603,17 @@ export async function handleExportMeshLibrary(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  // The scene is only read; the library is the file this call writes.
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   const outputPath = requireString(args, 'outputPath');
   if (!outputPath.ok) return outputPath;
-  const output = resolveProjectPath(parsed.value.projectPath, outputPath.value);
+  const output = resolveProjectPath(parsed.value.projectPath, outputPath.value, 'write');
   if (!output) {
     return err(
-      createErrorResponse('Valid outputPath is required', [
-        'Provide an output path for the .res file that stays inside the project directory',
+      createErrorResponse(projectSubPathError('outputPath', outputPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -631,6 +636,7 @@ export async function handleExportMeshLibrary(
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
     undefined,
+    // Writes a .res and no scene file, so there are no sceneWrites to compare.
     { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
@@ -645,14 +651,18 @@ export async function handleBatchSceneOperations(
 
   const operations = requireArray(args, 'operations');
   if (!operations.ok) return operations;
-  const checkedOperations = checkBatchOperationItems(operations.value);
+  // Every path an item carries is resolved here, by the rules a single call
+  // applies, and the resolved operations are what the script and the loss
+  // guard both receive.
+  const checkedOperations = checkBatchOperationItems(operations.value, parsed.value.projectPath);
   if (!checkedOperations.ok) return checkedOperations;
+  const resolvedOperations = checkedOperations.value;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
   if (!abortOnError.ok) return abortOnError;
 
   const params = {
-    operations: operations.value,
+    operations: resolvedOperations,
     abortOnError: abortOnError.value ?? false,
   };
   return executeSceneOp(
@@ -666,7 +676,10 @@ export async function handleBatchSceneOperations(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      sceneWrites: batchSceneWrites(operations.value),
+      sceneWrites: batchSceneWrites(resolvedOperations, parsed.value.projectPath),
+      // The finished batch says which save-as steps wrote their copy.
+      refineSceneWrites: (payload) =>
+        batchSceneWrites(resolvedOperations, parsed.value.projectPath, payload.results),
     },
   );
 }

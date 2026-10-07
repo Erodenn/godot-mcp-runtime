@@ -7,6 +7,7 @@ import {
   handleSaveScene,
   handleExportMeshLibrary,
   handleBatchSceneOperations,
+  sceneToolDefinitions,
 } from '../../../src/tools/scene-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
@@ -566,6 +567,50 @@ describe('handleBatchSceneOperations', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
     expect(parsed.results[0].operation).toBe('add_node');
+  });
+
+  it('declares resolvedNodePath on an update entry and returns the one the engine reported', async () => {
+    const update = {
+      nodePath: '%Sprite2D',
+      property: 'visible',
+      resolvedNodePath: 'root/Sprite2D',
+      success: true,
+    };
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          {
+            operation: 'set_node_properties',
+            scenePath: fixtureScenePath,
+            success: true,
+            updates: [update],
+          },
+        ],
+      }),
+    });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: [
+        {
+          operation: 'set_node_properties',
+          scenePath: fixtureScenePath,
+          updates: [{ nodePath: '%Sprite2D', property: 'visible', value: false }],
+        },
+      ],
+    });
+    const payload = expectMatchesOutputSchema('batch_scene_operations', result);
+    expect((payload.results as Array<{ updates: unknown[] }>)[0]!.updates).toEqual([update]);
+    const definition = sceneToolDefinitions.find(
+      (tool) => tool.name === 'batch_scene_operations',
+    ) as unknown as {
+      outputSchema: {
+        properties: {
+          results: { items: { properties: { updates: { items: { properties: object } } } } };
+        };
+      };
+    };
+    const updateFields = definition.outputSchema.properties.results.items.properties.updates;
+    expect(Object.keys(updateFields.items.properties)).toContain('resolvedNodePath');
   });
 
   it('validates a batch payload with per-operation fields', async () => {

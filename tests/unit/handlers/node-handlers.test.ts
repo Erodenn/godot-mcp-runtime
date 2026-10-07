@@ -15,6 +15,15 @@ import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
+import { allToolDefinitions } from '../../../src/index.js';
+
+/** The property names a tool's outputSchema declares for one entry of its `results` array. */
+function declaredResultFields(toolName: string): string[] {
+  const definition = allToolDefinitions.find((tool) => tool.name === toolName) as
+    | { outputSchema?: { properties: { results: { items: { properties: object } } } } }
+    | undefined;
+  return Object.keys(definition?.outputSchema?.properties.results.items.properties ?? {});
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -120,6 +129,22 @@ describe('handleDeleteNodes', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
   });
+
+  it('declares resolvedNodePath on a result entry and returns the one the engine reported', async () => {
+    const fake = createFakeRunner({
+      stdout:
+        '{"results":[{"nodePath":"%Sprite2D","resolvedNodePath":"root/Sprite2D","success":true}]}',
+    });
+    const result = await handleDeleteNodes(fake.asRunner, {
+      ...validBase,
+      nodePaths: ['%Sprite2D'],
+    });
+    const payload = expectMatchesOutputSchema('delete_nodes', result);
+    expect(payload.results).toEqual([
+      { nodePath: '%Sprite2D', resolvedNodePath: 'root/Sprite2D', success: true },
+    ]);
+    expect(declaredResultFields('delete_nodes')).toContain('resolvedNodePath');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -194,6 +219,23 @@ describe('handleSetNodeProperties', () => {
     const text = unwrap(result).content[0].text;
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
+  });
+
+  it('declares resolvedNodePath on a result entry and returns the one the engine reported', async () => {
+    const entry = {
+      nodePath: '%Sprite2D',
+      property: 'visible',
+      resolvedNodePath: 'root/Sprite2D',
+      success: true,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [entry] }) });
+    const result = await handleSetNodeProperties(fake.asRunner, {
+      ...validBase,
+      updates: [{ nodePath: '%Sprite2D', property: 'visible', value: false }],
+    });
+    const payload = expectMatchesOutputSchema('set_node_properties', result);
+    expect(payload.results).toEqual([entry]);
+    expect(declaredResultFields('set_node_properties')).toContain('resolvedNodePath');
   });
 
   it('handles multi-element updates array', async () => {

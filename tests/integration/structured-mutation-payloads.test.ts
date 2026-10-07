@@ -29,6 +29,7 @@ import {
 } from '../../src/tools/scene-tools.js';
 import {
   handleConnectSignal,
+  handleDeleteNodes,
   handleDisconnectSignal,
   handleDuplicateNode,
   handleGetNodeProperties,
@@ -476,6 +477,56 @@ describe('abortOnError lists what it did not attempt', () => {
       const [landed, neverRan] = await readNodes(['root/Landed', 'root/NeverRan']);
       expect(landed).not.toHaveProperty('error');
       expect(neverRan).toHaveProperty('error');
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('per-item entries report where a node path led', () => {
+  itGodot(
+    'delete_nodes, set_node_properties and a batch entry carry resolvedNodePath for a found node',
+    async () => {
+      const set = await handleSetNodeProperties(runner, {
+        projectPath,
+        scenePath: SCENE,
+        updates: [{ nodePath: 'root/Label', property: 'text', value: 'resolved' }],
+      });
+      const setPayload = expectMatchesOutputSchema('set_node_properties', set);
+      const [setEntry] = setPayload.results as Array<Record<string, unknown>>;
+      expect(setEntry).toMatchObject({ nodePath: 'root/Label', resolvedNodePath: 'root/Label' });
+
+      const batch = await handleBatchSceneOperations(runner, {
+        projectPath,
+        operations: [
+          {
+            operation: 'set_node_properties',
+            scenePath: SCENE,
+            updates: [
+              { nodePath: 'root/Label', property: 'text', value: 'batched' },
+              { nodePath: 'root/NoSuchNode', property: 'text', value: 'x' },
+            ],
+          },
+        ],
+      });
+      const batchPayload = expectMatchesOutputSchema('batch_scene_operations', batch);
+      const [batchEntry] = batchPayload.results as Array<Record<string, unknown>>;
+      const updates = batchEntry!.updates as Array<Record<string, unknown>>;
+      expect(updates[0]).toMatchObject({ nodePath: 'root/Label', resolvedNodePath: 'root/Label' });
+      // A node that was not found has nothing to resolve to.
+      expect(updates[1]).not.toHaveProperty('resolvedNodePath');
+
+      const deleted = await handleDeleteNodes(runner, {
+        projectPath,
+        scenePath: SCENE,
+        nodePaths: ['root/Sprite2D', 'root/NoSuchNode'],
+      });
+      const deletedPayload = expectMatchesOutputSchema('delete_nodes', deleted);
+      const entries = deletedPayload.results as Array<Record<string, unknown>>;
+      expect(entries[0]).toMatchObject({
+        nodePath: 'root/Sprite2D',
+        resolvedNodePath: 'root/Sprite2D',
+      });
+      expect(entries[1]).not.toHaveProperty('resolvedNodePath');
     },
     CASE_TIMEOUT_MS,
   );

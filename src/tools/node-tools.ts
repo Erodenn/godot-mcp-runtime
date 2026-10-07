@@ -2,7 +2,11 @@ import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { resolveProjectPath } from '../utils/path-validation.js';
+import {
+  resolveProjectPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
+} from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseSceneArgs,
@@ -76,6 +80,11 @@ export const nodeToolDefinitions = [
             type: 'object',
             properties: {
               nodePath: { type: 'string' },
+              resolvedNodePath: {
+                type: 'string',
+                description:
+                  'Where nodePath led, in root/... form. Present when the node was found; differs from nodePath for a %Name path.',
+              },
               success: { type: 'boolean' },
               error: { type: 'string' },
             },
@@ -141,6 +150,11 @@ export const nodeToolDefinitions = [
             properties: {
               nodePath: { type: 'string' },
               property: { type: 'string' },
+              resolvedNodePath: {
+                type: 'string',
+                description:
+                  'Where nodePath led, in root/... form. Present when the node was found; differs from nodePath for a %Name path.',
+              },
               success: { type: 'boolean' },
               error: { type: 'string' },
               skipped: {
@@ -427,7 +441,7 @@ export async function handleDeleteNodes(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const rawPaths = requireStringArray(args, 'nodePaths');
@@ -461,7 +475,7 @@ export async function handleSetNodeProperties(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const updates = requireArray(args, 'updates');
@@ -498,7 +512,7 @@ export async function handleGetNodeProperties(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   const nodes = requireArray(args, 'nodes');
@@ -524,7 +538,7 @@ export async function handleAttachScript(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
@@ -532,11 +546,11 @@ export async function handleAttachScript(
 
   const scriptPath = requireString(args, 'scriptPath');
   if (!scriptPath.ok) return scriptPath;
-  const script = resolveProjectPath(parsed.value.projectPath, scriptPath.value);
+  const script = resolveProjectPath(parsed.value.projectPath, scriptPath.value, 'read');
   if (!script) {
     return err(
-      createErrorResponse('Valid scriptPath is required', [
-        'Provide a relative script path that stays inside the project directory',
+      createErrorResponse(projectSubPathError('scriptPath', scriptPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -580,7 +594,7 @@ export async function handleGetSceneTree(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   const parentPath = parseOptionalNodePath(args, 'parentPath');
@@ -609,7 +623,7 @@ export async function handleDuplicateNode(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
@@ -648,7 +662,7 @@ export async function handleGetNodeSignals(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
@@ -677,7 +691,7 @@ interface ParsedSignalArgs {
 }
 
 function parseSignalArgs(args: OperationParams): Result<ParsedSignalArgs, ToolResponse> {
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');

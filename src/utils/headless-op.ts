@@ -6,17 +6,26 @@ import {
   BridgeRegistryUnreadableError,
   foreignHostOwnerRemedy,
   type BridgeOwnerInfo,
+  type OwnerRegistryRead,
 } from './bridge-manager.js';
 import {
   extractOperationPayload,
   parseScriptDiagnostics,
+  projectPathKey,
   stripOperationSentinel,
   type StderrDiagnostic,
 } from './output-parsing.js';
 import { ok, err } from './result.js';
 import { liveSessionRemedy } from './session-report.js';
 import { engineNewerThanProject, readProjectFeatureVersion } from './engine-version.js';
-import { beginSceneGuard, finishSceneGuard, type SceneWriteIntent } from './scene-loss-guard.js';
+import {
+  beginSceneGuard,
+  finishSceneGuard,
+  resolveIntentPaths,
+  restateSceneGuard,
+  type SceneWriteIntent,
+  type UncheckedSave,
+} from './scene-loss-guard.js';
 
 /** Max stderr diagnostic entries surfaced in an early-exit error message. */
 const MAX_STDERR_DIAGNOSTIC_LINES = 5;
@@ -252,14 +261,27 @@ function interpretOperationResult(
 
 export interface SceneOpOptions {
   parseStdoutAsJson?: boolean;
+  /**
+   * True for an operation that writes into the project. It is refused while a
+   * game is running on the project (see `rejectIfLiveSessionOnProject`).
+   */
   mutatesSceneFile?: boolean;
   /**
    * The scene files this operation writes and what it asks to change in each.
    * When given, the files are compared before and after (see
    * `scene-loss-guard.ts`) and content lost outside that intent leads the
-   * payload as warnings.
+   * payload as warnings. The engine-newer-than-project note is given for
+   * these files too, and only when one of them was written.
    */
   sceneWrites?: SceneWriteIntent[];
+  /**
+   * `sceneWrites` restated from the operation's own payload, for an operation
+   * whose report says more than its request (a batch knows which of its
+   * save-as steps succeeded). Called only for a success payload. Without it
+   * the payload still restates the node paths of `sceneWrites`: see
+   * `resolveIntentPaths`.
+   */
+  refineSceneWrites?: (payload: Record<string, unknown>) => SceneWriteIntent[];
 }
 
 /**
@@ -287,21 +309,59 @@ function prependWarnings(result: HandlerResult, warnings: string[]): HandlerResu
 }
 
 /**
- * The warning for a project last saved by an older engine than the one doing
- * this save, or null when the versions are in order or either is unknown. The
+ * The projects each runner has already given the engine-newer note for, by
+ * `projectPathKey`. One runner is one server session, so the note is given
+ * once per project per session: it describes the project, not the call, and
+ * repeating it on every save buries the warnings that are about the call.
+ */
+const engineNewerNoted = new WeakMap<GodotRunner, Set<string>>();
+
+/**
+ * The scene files each runner has already said were saved unchecked, by the
+ * file's identity key. One runner is one server session. A scene that cannot
+ * be compared (a binary `.scn`) cannot be compared on any save, so the notice
+ * is given once per file per session, the same way as the engine-newer note:
+ * said on every mutation it would lead every payload of a binary-scene project
+ * and bury the warnings that are about the call.
+ */
+const uncheckedSaveNoted = new WeakMap<GodotRunner, Set<string>>();
+
+/** The unchecked-save notices this session has not given yet, each marked as said once. */
+function newUncheckedSaveWarnings(runner: GodotRunner, unchecked: UncheckedSave[]): string[] {
+  if (unchecked.length === 0) return [];
+  const noted = uncheckedSaveNoted.get(runner) ?? new Set<string>();
+  uncheckedSaveNoted.set(runner, noted);
+  const warnings: string[] = [];
+  for (const { fileKey, warning } of unchecked) {
+    if (noted.has(fileKey)) continue;
+    noted.add(fileKey);
+    warnings.push(`${warning} Said once per file in this server session.`);
+  }
+  return warnings;
+}
+
+/**
+ * The warning for a project last saved by an older engine than the one that
+ * just wrote one of its scenes, or null when the versions are in order, either
+ * is unknown, or this session has already said so for this project. The
  * project's version is read first: a project that states none costs no engine
- * probe.
+ * probe. `check_project` reports the same condition on every call.
  */
 async function engineNewerWarning(
   runner: GodotRunner,
   projectPath: string,
 ): Promise<string | null> {
   try {
+    const key = projectPathKey(projectPath);
+    const noted = engineNewerNoted.get(runner) ?? new Set<string>();
+    if (noted.has(key)) return null;
     if (readProjectFeatureVersion(projectPath) === null) return null;
     const newer = engineNewerThanProject(await runner.getVersion(), projectPath);
     if (newer === null) return null;
+    noted.add(key);
+    engineNewerNoted.set(runner, noted);
     const { engine, project } = newer;
-    return `Godot ${engine.major}.${engine.minor} is newer than this project's config/features version ${project.major}.${project.minor}: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example).`;
+    return `Godot ${engine.major}.${engine.minor} is newer than this project's config/features version ${project.major}.${project.minor}: this save may write scene-file format the project's engine predates (4.6 adds unique_id to every node, for example). Said once per project in this server session; check_project reports it on every call.`;
   } catch {
     // A version that cannot be read is not a reason to fail a finished save.
     return null;
@@ -310,8 +370,10 @@ async function engineNewerWarning(
 
 /**
  * Wraps the execute + empty-stdout-check + try/catch around a headless GDScript
- * operation. Used by the 15 scene/node mutation handlers in tools/scene-tools.ts
- * and tools/node-tools.ts to eliminate identical error-handling duplication.
+ * operation. Used by the 15 headless handlers in tools/scene-tools.ts and
+ * tools/node-tools.ts (12 that write, and the 3 reads get_scene_tree,
+ * get_node_properties and get_node_signals) to eliminate identical
+ * error-handling duplication.
  *
  * Handlers retain control of: parameter normalization, project/scene validation,
  * field validation, and constructing the `params` object — those run before the
@@ -326,10 +388,15 @@ async function engineNewerWarning(
  * `classifyMarkedRun`): the replay would redo what it already saved. A marker
  * counts only as a line the script itself printed (see `stderrRequestsImport`).
  *
- * Two kinds of warning are put ahead of the payload after the run, in this
+ * Three kinds of warning are put ahead of the payload after the run, in this
  * order: what the save dropped that the operation did not ask to change (when
- * `sceneWrites` is given, see `scene-loss-guard.ts`), then the engine being
- * newer than the project (for every operation that mutates a scene file).
+ * `sceneWrites` is given, see `scene-loss-guard.ts`), that a save could not be
+ * checked at all, then the engine being newer than the project. The second is
+ * given once per file and the third once per project per server session. The
+ * third is given only by a call that wrote one of its `sceneWrites` files: a
+ * call that changed no scene file has no save to describe, and a file that is
+ * not a scene (the `.res` of `export_mesh_library`) is not what the note is
+ * about.
  */
 export async function executeSceneOp(
   runner: GodotRunner,
@@ -342,7 +409,7 @@ export async function executeSceneOp(
   options: SceneOpOptions = {},
 ): Promise<HandlerResult> {
   if (options.mutatesSceneFile) {
-    const guard = rejectIfLiveSessionOnProject(runner, projectPath);
+    const guard = rejectIfLiveSessionOnProject(runner, projectPath, SCENE_EDIT);
     if (guard) return guard;
   }
   // Read before the first attempt and compared once after the last, so a
@@ -352,7 +419,7 @@ export async function executeSceneOp(
     options.sceneWrites && options.sceneWrites.length > 0
       ? beginSceneGuard(projectPath, options.sceneWrites)
       : null;
-  const stderrSeen: string[] = [];
+  const lastAttempt: LastAttempt = { stderr: '' };
   const result = await runSceneOp(
     runner,
     operation,
@@ -362,21 +429,48 @@ export async function executeSceneOp(
     emptyStdoutSolutions,
     exceptionSolutions,
     options,
-    stderrSeen,
+    lastAttempt,
   );
+  if (sceneGuard === null) return result;
+  const payload = result.ok ? result.value.structuredContent : undefined;
+  if (payload !== undefined) {
+    try {
+      // The operation's report names the node each path led to, which the
+      // request cannot (a `%Name` path): an operation with no restatement of
+      // its own still gets its node paths replaced by those.
+      const restated = options.refineSceneWrites
+        ? options.refineSceneWrites(payload)
+        : resolveIntentPaths(options.sceneWrites ?? [], payload);
+      restateSceneGuard(sceneGuard, restated);
+    } catch {
+      // The request's own intent stands when the payload cannot be read.
+    }
+  }
   // Every exit of the run comes through here, the refusals and the thrown
   // spawn error included: a run that failed late may already have saved.
-  const warnings = sceneGuard === null ? [] : finishSceneGuard(sceneGuard, stderrSeen.join('\n'));
+  const { warnings, unchecked, wroteScene } = finishSceneGuard(sceneGuard, lastAttempt.stderr);
+  warnings.push(...newUncheckedSaveWarnings(runner, unchecked));
   // Only a save that happened is worth the version note: an error response
-  // already says the operation did not complete.
-  if (options.mutatesSceneFile && result.ok && result.value.structuredContent !== undefined) {
+  // already says the operation did not complete, and a call that left every
+  // scene file as it was saved nothing.
+  if (wroteScene && payload !== undefined) {
     const versionWarning = await engineNewerWarning(runner, projectPath);
     if (versionWarning !== null) warnings.push(versionWarning);
   }
   return prependWarnings(result, warnings);
 }
 
-/** The run itself: one attempt, plus the cold-import retry. `stderrSeen` collects each attempt's stderr. */
+/**
+ * The stderr of the attempt whose result is returned. A cold first attempt can
+ * fail to load a script only because its dependencies were not imported yet;
+ * the retry that saved loaded it, so only that attempt's stderr says which
+ * scripts the saved file was written without.
+ */
+interface LastAttempt {
+  stderr: string;
+}
+
+/** The run itself: one attempt, plus the cold-import retry. `lastAttempt` receives the stderr of the attempt that counts. */
 async function runSceneOp(
   runner: GodotRunner,
   operation: string,
@@ -386,11 +480,14 @@ async function runSceneOp(
   emptyStdoutSolutions: string[],
   exceptionSolutions: string[],
   options: SceneOpOptions,
-  stderrSeen: string[],
+  lastAttempt: LastAttempt,
 ): Promise<HandlerResult> {
+  // A read never passes `mutatesSceneFile`, so a refusal reached from here by
+  // a read is worded for a read.
+  const refused = options.mutatesSceneFile ? SCENE_EDIT : SCENE_READ_NEEDING_IMPORT;
   try {
     let { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
-    stderrSeen.push(stderr);
+    lastAttempt.stderr = stderr;
     let effectiveFailurePrefix = failurePrefix;
 
     // Check for the cold-import marker (may appear even if stdout has a JSON
@@ -407,16 +504,16 @@ async function runSceneOp(
             `${failurePrefix}: an asset still needed importing after part of this operation had already been applied and saved. Refusing the automatic import-and-retry, which would apply those steps a second time.\nreported by this run: ${stripOperationSentinel(stdout.trim())}`,
             [
               'The steps reported as successful above have been applied and saved - do not re-run them',
-              'Import the project assets (any tool call on this project once the asset is imported will do), then re-run only the steps that failed',
+              'The next headless call on the affected scene (get_scene_tree, for example) imports the missing asset before it runs. After it, re-run only the steps that failed',
             ],
           ),
         );
       }
       // importAssets writes .godot/ under the project. A running session on
       // this same project is a second writer racing it, same as the
-      // mutatesSceneFile guard above — check it here too since this branch
-      // is reachable by read-only handlers that never pass that option.
-      const guard = rejectIfLiveSessionOnProject(runner, projectPath, [
+      // mutatesSceneFile guard above. It is checked here too because this
+      // branch is reachable by read-only handlers that never pass that option.
+      const guard = rejectIfLiveSessionOnProject(runner, projectPath, refused, [
         'This project also needs an asset import, which will run automatically once the session is stopped',
       ]);
       if (guard) return guard;
@@ -435,7 +532,7 @@ async function runSceneOp(
         );
       }
       ({ stdout, stderr } = await runner.executeOperation(operation, params, projectPath));
-      stderrSeen.push(stderr);
+      lastAttempt.stderr = stderr;
       effectiveFailurePrefix = `${failurePrefix} (after the asset import step ran)`;
     }
 
@@ -460,11 +557,14 @@ export type LiveSessionOnProject = { owner: 'self' } | { owner: 'other'; info: B
  * The one live-session detector. Own sessions first (this runner has a live
  * session on this project, whether or not it is the current one), then any
  * other MCP session registered as an owner of the project. Null when nothing
- * is running it.
+ * is running it. `registryRead` `'read-only'` asks the owner registry without
+ * its upkeep (dead owner files are left in place), for a caller that must not
+ * write to the project yet.
  */
 export function findLiveSessionOnProject(
   runner: GodotRunner,
   projectPath: string,
+  registryRead: OwnerRegistryRead = 'prune',
 ): LiveSessionOnProject | null {
   if (runner.hasLiveSessionOnProject(projectPath)) return { owner: 'self' };
 
@@ -472,11 +572,47 @@ export function findLiveSessionOnProject(
   // a second BridgeManager instance in this one) can also be running the
   // game on this project, and this runner has no way to stop that session —
   // it isn't its own.
-  const other = runner.otherLiveSessionsOnProject(projectPath)[0];
+  const other = runner.otherLiveSessionsOnProject(projectPath, registryRead)[0];
   if (other) return { owner: 'other', info: other };
 
   return null;
 }
+
+/** What a live game on the project is being refused for, in the words of that kind of call. */
+interface RefusedActivity {
+  /** Completes "Refusing ..." and "then retry ...". */
+  what: string;
+  /** Why this server's own running game rules the call out. */
+  ownSessionConflict: string;
+  /** What to do about this server's own running game. */
+  ownSessionInstruction: string;
+  /** Why another session's running game rules the call out. */
+  otherSessionConflict: string;
+}
+
+const SCENE_EDIT: RefusedActivity = {
+  what: 'the scene edit',
+  ownSessionConflict:
+    "The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it.",
+  ownSessionInstruction: 'Stop the session before editing scene files.',
+  otherSessionConflict:
+    "A running game can write this project's scene files at any time, so a headless edit now would race it.",
+};
+
+/**
+ * A read changes no scene file, so a live game never refuses it by itself. It
+ * is refused only when it first needs an asset import, which writes the
+ * project's `.godot/` directory under the running game.
+ */
+const SCENE_READ_NEEDING_IMPORT: RefusedActivity = {
+  what: 'the scene read',
+  ownSessionConflict:
+    "This read changes nothing in the scene, but an asset it depends on has not been imported yet, and the import writes the project's .godot/ directory while the running game uses it.",
+  ownSessionInstruction:
+    'Stop the session, then repeat the read: the import runs before it automatically.',
+  otherSessionConflict:
+    "This read changes nothing in the scene, but an asset it depends on has not been imported yet, and the import writes the project's .godot/ directory while that game uses it.",
+};
 
 // A running (spawned or attached) engine process can write its own project's
 // scene files at any point during its lifetime -- not just in response to an
@@ -484,10 +620,12 @@ export function findLiveSessionOnProject(
 // no run_script invocation is required. A headless mutation writes the same
 // files from outside that process. Two writers on one file race regardless of
 // which one triggers the write, so the guard covers the whole session rather
-// than trying to serialize around individual calls.
+// than trying to serialize around individual calls. A read is refused here
+// only for the asset import it needs first (see `SCENE_READ_NEEDING_IMPORT`).
 function rejectIfLiveSessionOnProject(
   runner: GodotRunner,
   projectPath: string,
+  refused: RefusedActivity,
   extraSolutions: string[] = [],
 ): HandlerResult | null {
   let live: LiveSessionOnProject | null;
@@ -499,7 +637,7 @@ function rejectIfLiveSessionOnProject(
     if (!(error instanceof BridgeRegistryUnreadableError)) throw error;
     return err(
       createErrorResponse(
-        `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing the scene edit.`,
+        `Could not read this project's bridge owner registry (${error.reason}), so it is unknown whether another MCP session is running its game. Refusing ${refused.what}.`,
         [
           'Retry: a registry file that another session was writing at that moment is readable again a moment later',
           'If it keeps failing, check the permissions on .mcp/godot-runtime/bridge/owners/ in the project',
@@ -511,10 +649,10 @@ function rejectIfLiveSessionOnProject(
   if (live === null) return null;
 
   if (live.owner === 'self') {
-    const remedy = liveSessionRemedy(runner, projectPath, 'the scene edit');
+    const remedy = liveSessionRemedy(runner, projectPath, refused.what);
     return err(
       createErrorResponse(
-        `A Godot runtime session is active on this project.${remedy.note} The running process can write this project's scene files at any point while it lives, so a headless edit here would be a second writer racing it. Stop the session before editing scene files.`,
+        `A Godot runtime session is active on this project.${remedy.note} ${refused.ownSessionConflict} ${refused.ownSessionInstruction}`,
         [...remedy.solutions, ...extraSolutions],
       ),
     );
@@ -526,9 +664,8 @@ function rejectIfLiveSessionOnProject(
     createErrorResponse(
       `Another MCP session (server pid ${other.pid}, ${other.mode} mode) is running this ` +
         "project's game. That game belongs to the other session, not this one, and only it can " +
-        "stop it. A running game can write this project's scene files at any time, so a " +
-        'headless edit now would race it. Wait for the other session to finish (stop_project ' +
-        `there), then retry.${foreign?.note ?? ''}`,
+        `stop it. ${refused.otherSessionConflict} Wait for the other session to finish ` +
+        `(stop_project there), then retry.${foreign?.note ?? ''}`,
       [
         'Wait and retry once the other MCP session has stopped or detached its game',
         "check_project on this project shows this session's own state, not the other session's",

@@ -3,10 +3,20 @@ import {
   cleanStdout,
   condenseProcessTail,
   extractOperationPayload,
+  extractTokenFramedPayload,
+  newOperationResultToken,
   normalizeExitCode,
   OPERATION_RESULT_SENTINEL,
+  OPERATION_RESULT_TOKEN_END,
   stripOperationSentinel,
 } from '../../src/utils/output-parsing.js';
+
+/** The token one run was handed, and another run's. */
+const RUN_TOKEN = '0123456789abcdef0123456789abcdef';
+const OTHER_TOKEN = 'fedcba9876543210fedcba9876543210';
+/** The start of a result line as godot_operations.gd writes it for a run holding `token`. */
+const framed = (token: string): string =>
+  `${OPERATION_RESULT_SENTINEL}${token}${OPERATION_RESULT_TOKEN_END}`;
 
 // Observed in production: headless operations emit Godot RID-leak warnings on
 // stdout, both AFTER a JSON payload (benign: handled) and INSTEAD of one,
@@ -14,29 +24,32 @@ import {
 describe('stdout payload extraction with interleaved engine noise', () => {
   const payload = { results: [{ ok: true }] };
   const payloadLine = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(payload)}`;
+  const framedPayloadLine = `${framed(RUN_TOKEN)}${JSON.stringify(payload)}`;
 
-  const noisyShapes: Array<[string, string]> = [
-    ['banner and payload', `Godot Engine v4.7.2\n${payloadLine}\n`],
-    ['a trailing bracketed line', `Godot Engine v4.7.2\n${payloadLine}\n[Audio] shutdown\n`],
-    ['a leading bracketed line', `Godot Engine v4.7.2\n[Autoload] ready\n${payloadLine}\n`],
+  const noisyShapes: Array<[string, (line: string) => string]> = [
+    ['banner and payload', (line) => `Godot Engine v4.7.2\n${line}\n`],
+    ['a trailing bracketed line', (line) => `Godot Engine v4.7.2\n${line}\n[Audio] shutdown\n`],
+    ['a leading bracketed line', (line) => `Godot Engine v4.7.2\n[Autoload] ready\n${line}\n`],
     [
       'a printed dictionary on each side',
-      `Godot Engine v4.7.2\n{"before": 1}\n${payloadLine}\n{"after": 2}\n`,
+      (line) => `Godot Engine v4.7.2\n{"before": 1}\n${line}\n{"after": 2}\n`,
     ],
-    ['a JSON-looking array after the payload', `${payloadLine}\n[1, 2]\n`],
+    ['a JSON-looking array after the payload', (line) => `${line}\n[1, 2]\n`],
     [
       'RID-leak warnings after the payload',
-      `${payloadLine}\nERROR: 5 RIDs of type "CanvasTexture" were leaked at exit.\n`,
+      (line) => `${line}\nERROR: 5 RIDs of type "CanvasTexture" were leaked at exit.\n`,
     ],
   ];
 
-  for (const [label, stdout] of noisyShapes) {
+  for (const [label, around] of noisyShapes) {
     it(`extractOperationPayload returns exactly the payload with ${label}`, () => {
-      expect(JSON.parse(extractOperationPayload(stdout) ?? '')).toEqual(payload);
+      expect(JSON.parse(extractOperationPayload(around(payloadLine)) ?? '')).toEqual(payload);
     });
 
     it(`cleanStdout keeps a payload that extracts identically with ${label}`, () => {
-      expect(JSON.parse(extractOperationPayload(cleanStdout(stdout)) ?? '')).toEqual(payload);
+      const cleaned = cleanStdout(around(framedPayloadLine), RUN_TOKEN);
+      expect(cleaned).toBe(payloadLine);
+      expect(JSON.parse(extractOperationPayload(cleaned) ?? '')).toEqual(payload);
     });
   }
 
@@ -55,7 +68,8 @@ describe('stdout payload extraction with interleaved engine noise', () => {
     };
     const stdout = `Godot Engine v4.7.2\n${OPERATION_RESULT_SENTINEL}${JSON.stringify(quoting)}\n`;
     expect(JSON.parse(extractOperationPayload(stdout) ?? '')).toEqual(quoting);
-    expect(JSON.parse(extractOperationPayload(cleanStdout(stdout)) ?? '')).toEqual(quoting);
+    const raw = `Godot Engine v4.7.2\n${framed(RUN_TOKEN)}${JSON.stringify(quoting)}\n`;
+    expect(JSON.parse(extractOperationPayload(cleanStdout(raw, RUN_TOKEN)) ?? '')).toEqual(quoting);
   });
 
   it('skips sentinel text left in front of the payload by an unterminated print', () => {
@@ -79,11 +93,73 @@ describe('stdout payload extraction with interleaved engine noise', () => {
 
   it('passes RID-only stdout through unchanged (no payload to extract)', () => {
     const stdout = "ERROR: 5 RID allocations of type 'P11GodotBody2D' were leaked at exit.\n";
-    const cleaned = cleanStdout(stdout);
+    const cleaned = cleanStdout(stdout, RUN_TOKEN);
     // Classifying this as an early exit rather than a JSON-format bug is
     // executeSceneOp's responsibility, covered in headless-op.test.ts.
     expect(cleaned).toBe(stdout.trim());
     expect(extractOperationPayload(cleaned)).toBeNull();
+  });
+});
+
+// The sentinel is a constant any project script can print. An autoload's
+// _exit_tree runs after the operation wrote its result, and its _init before,
+// so neither "the last sentinel line" nor "the first" identifies the result.
+// Only the token the run was handed does.
+describe('a result line is told from a forged one by the run token', () => {
+  const real = { name: 'Main', children: [] };
+  const forged = { results: [{ nodePath: 'forged', success: true }] };
+  const realLine = `${framed(RUN_TOKEN)}${JSON.stringify(real)}`;
+  const bareForgedLine = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(forged)}`;
+  const staleForgedLine = `${framed(OTHER_TOKEN)}${JSON.stringify(forged)}`;
+
+  const placements: Array<[string, string]> = [
+    ['a bare sentinel line after the result', `banner\n${realLine}\n${bareForgedLine}\n`],
+    ['a bare sentinel line before the result', `banner\n${bareForgedLine}\n${realLine}\n`],
+    ['a line framed with another token after it', `${realLine}\n${staleForgedLine}\n`],
+    [
+      'forged lines on both sides',
+      `${bareForgedLine}\n${staleForgedLine}\n${realLine}\n${bareForgedLine}\n${staleForgedLine}\n`,
+    ],
+    ['Windows line endings', `banner\r\n${realLine}\r\n${bareForgedLine}\r\n`],
+  ];
+
+  for (const [label, stdout] of placements) {
+    it(`reads the run's own payload with ${label}`, () => {
+      expect(JSON.parse(extractTokenFramedPayload(stdout, RUN_TOKEN) ?? '')).toEqual(real);
+      const cleaned = cleanStdout(stdout, RUN_TOKEN);
+      expect(JSON.parse(extractOperationPayload(cleaned) ?? '')).toEqual(real);
+      expect(cleaned).not.toContain('forged');
+    });
+  }
+
+  it("finds no payload when the only sentinel lines carry no token or another run's", () => {
+    const stdout = `banner\n${bareForgedLine}\n${staleForgedLine}\n`;
+    expect(extractTokenFramedPayload(stdout, RUN_TOKEN)).toBeNull();
+  });
+
+  it('hands on no sentinel at all from a run that wrote no result of its own', () => {
+    const cleaned = cleanStdout(`banner\n${bareForgedLine}\n${staleForgedLine}\n`, RUN_TOKEN);
+    expect(cleaned).not.toContain(OPERATION_RESULT_SENTINEL);
+    expect(extractOperationPayload(cleaned)).toBeNull();
+    // The printed text itself is still passed on, as any other noise is.
+    expect(cleaned).toContain(JSON.stringify(forged));
+  });
+
+  it('does not accept a token that only starts with the run token', () => {
+    const longer = `${OPERATION_RESULT_SENTINEL}${RUN_TOKEN}ff${OPERATION_RESULT_TOKEN_END}{"n": 1}`;
+    expect(extractTokenFramedPayload(`${longer}\n`, RUN_TOKEN)).toBeNull();
+  });
+
+  it('reads a payload that quotes its own frame', () => {
+    const quoting = { text: `${framed(RUN_TOKEN)}{"n": 1}` };
+    const stdout = `${framed(RUN_TOKEN)}${JSON.stringify(quoting)}\n`;
+    expect(JSON.parse(extractTokenFramedPayload(stdout, RUN_TOKEN) ?? '')).toEqual(quoting);
+  });
+
+  it('draws a different token for every run, in characters that cannot end the frame early', () => {
+    const drawn = new Set(Array.from({ length: 64 }, () => newOperationResultToken()));
+    expect(drawn.size).toBe(64);
+    for (const token of drawn) expect(token).toMatch(/^[0-9a-f]{32}$/);
   });
 });
 
