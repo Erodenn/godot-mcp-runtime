@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   batchSceneWrites,
+  resolveIntentPaths,
   capLossItems,
   diffSceneText,
   failedScriptsIn,
@@ -17,6 +18,7 @@ import {
   updateTouches,
   type SceneDiffOptions,
 } from '../../src/utils/scene-loss-guard.js';
+import { useTmpDirs } from '../helpers/tmp.js';
 
 const NOTHING_ASKED: SceneDiffOptions = { touchedNodes: [], deletedNodes: [] };
 const NO_FAILED_SCRIPTS: ReadonlySet<string> = new Set();
@@ -329,12 +331,14 @@ describe('diffSceneText: inherited scenes and instances', () => {
     expect(diffSceneText(pinned, DERIVED, intent, NO_FAILED_SCRIPTS)).toEqual([]);
   });
 
-  it('says nothing about a vanished plain override when the base scene cannot be read', () => {
+  it('counts a vanished plain override, without judging it, when the base scene cannot be read', () => {
     const after = DERIVED.replace(
       '[node name="Arm" parent="." index="0"]\nposition = Vector2(5, 6)\n\n',
       '',
     );
-    expect(diffSceneText(DERIVED, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([]);
+    expect(diffSceneText(DERIVED, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([
+      '1 stored override under "root" is gone and could not be checked against res://base.tscn',
+    ]);
   });
 
   it('accepts an override line removed by assigning the property it held', () => {
@@ -509,41 +513,118 @@ describe('updateTouches', () => {
   });
 });
 
-describe('batchSceneWrites', () => {
-  it('builds one intent per scene and one per save-as, reading both key spellings', () => {
-    const writes = batchSceneWrites([
-      { operation: 'add_node', scenePath: 'a.tscn', nodeType: 'Node2D', nodeName: 'N' },
-      {
-        operation: 'set_node_properties',
-        scene_path: 'a.tscn',
-        updates: [{ node_path: 'root/N', property: 'position', value: { x: 1, y: 2 } }],
-      },
-      { operation: 'save', scenePath: 'a.tscn', new_path: 'copy.tscn' },
-      { operation: 'load_sprite', scenePath: 'b.tscn', nodePath: 'root/S', texturePath: 'x.png' },
-      'not an item',
-      { operation: 'add_node' },
-    ]);
-    expect(writes).toEqual([
+describe('resolveIntentPaths', () => {
+  const intents = [
+    {
+      source: 'a.tscn',
+      target: 'a.tscn',
+      touchedNodes: ['%Hat'],
+      deletedNodes: ['%Enemy', '%Gone', 'root/Plain'],
+      touchedProperties: [{ nodePath: '%Enemy', property: 'position' }],
+    },
+  ];
+
+  it('replaces each node path by the node the operation says it led to', () => {
+    const restated = resolveIntentPaths(intents, {
+      results: [
+        { nodePath: '%Enemy', resolvedNodePath: 'root/Squad/Enemy', success: true },
+        { nodePath: '%Hat', resolvedNodePath: 'root/Squad/Enemy/Hat', success: true },
+        { nodePath: 'root/Plain', resolvedNodePath: 'root/Plain', success: true },
+        { nodePath: '%Gone', error: 'Node not found: %Gone' },
+      ],
+    });
+    expect(restated).toEqual([
       {
         source: 'a.tscn',
         target: 'a.tscn',
-        touchedNodes: [],
-        deletedNodes: [],
+        touchedNodes: ['root/Squad/Enemy/Hat'],
+        // %Gone was not deleted, so it exempts nothing.
+        deletedNodes: ['root/Squad/Enemy', 'root/Plain'],
+        touchedProperties: [{ nodePath: 'root/Squad/Enemy', property: 'position' }],
+      },
+    ]);
+  });
+
+  it('keeps a deletion the report does not mention, and every intent when there is no report', () => {
+    expect(resolveIntentPaths(intents, { results: [] })[0]?.deletedNodes).toEqual([
+      '%Enemy',
+      '%Gone',
+      'root/Plain',
+    ]);
+    expect(resolveIntentPaths(intents, { nodeName: 'N' })).toBe(intents);
+  });
+});
+
+describe('batchSceneWrites', () => {
+  const tmp = useTmpDirs();
+
+  it('names the node each update led to once the batch has reported', () => {
+    const operations = [
+      {
+        operation: 'set_node_properties',
+        scenePath: 'a.tscn',
+        updates: [
+          { nodePath: '%Enemy', property: 'position', value: { x: 1, y: 2 } },
+          { nodePath: '%Enemy', property: 'script', value: 'res://e.gd' },
+        ],
+      },
+    ];
+    const projectPath = tmp.makeProject('batch-writes-');
+    const results = [
+      {
+        operation: 'set_node_properties',
+        success: true,
+        updates: [
+          { nodePath: '%Enemy', resolvedNodePath: 'root/Squad/Enemy', success: true },
+          { nodePath: '%Enemy', resolvedNodePath: 'root/Squad/Enemy', success: true },
+        ],
+      },
+    ];
+    expect(batchSceneWrites(operations, projectPath)[0]).toMatchObject({
+      touchedNodes: ['%Enemy'],
+      touchedProperties: [{ nodePath: '%Enemy', property: 'position' }],
+    });
+    expect(batchSceneWrites(operations, projectPath, results)[0]).toMatchObject({
+      touchedNodes: ['root/Squad/Enemy'],
+      touchedProperties: [{ nodePath: 'root/Squad/Enemy', property: 'position' }],
+    });
+  });
+
+  it('builds one intent per scene file, reading both key spellings', () => {
+    const writes = batchSceneWrites(
+      [
+        { operation: 'add_node', scenePath: 'a.tscn', nodeType: 'Node2D', nodeName: 'N' },
+        {
+          operation: 'set_node_properties',
+          scene_path: 'a.tscn',
+          updates: [{ node_path: 'root/N', property: 'position', value: { x: 1, y: 2 } }],
+        },
+        { operation: 'save', scenePath: 'a.tscn', new_path: 'copy.tscn' },
+        { operation: 'load_sprite', scenePath: 'b.tscn', nodePath: 'root/S', texturePath: 'x.png' },
+        'not an item',
+        { operation: 'add_node' },
+      ],
+      tmp.makeProject('batch-writes-'),
+    );
+    const untouched = { touchedNodes: [], deletedNodes: [], removedConnections: [] };
+    expect(writes).toEqual([
+      {
+        ...untouched,
+        source: 'a.tscn',
+        target: 'a.tscn',
         touchedProperties: [{ nodePath: 'root/N', property: 'position' }],
       },
       {
-        source: 'b.tscn',
-        target: 'b.tscn',
-        touchedNodes: [],
-        deletedNodes: [],
-        touchedProperties: [{ nodePath: 'root/S', property: 'texture' }],
-      },
-      {
+        ...untouched,
         source: 'a.tscn',
         target: 'copy.tscn',
-        touchedNodes: [],
-        deletedNodes: [],
         touchedProperties: [{ nodePath: 'root/N', property: 'position' }],
+      },
+      {
+        ...untouched,
+        source: 'b.tscn',
+        target: 'b.tscn',
+        touchedProperties: [{ nodePath: 'root/S', property: 'texture' }],
       },
     ]);
   });
