@@ -71,6 +71,29 @@ const reverseParameterMappings = ((): ReverseParameterMappings => {
   return result as ReverseParameterMappings;
 })();
 
+/**
+ * The value a mapping table holds for `key`, or undefined. The key comes from
+ * the caller, so only an own entry counts: a plain object also answers
+ * `constructor`, `toString` and `__proto__` from its prototype.
+ */
+function ownMapping(table: Readonly<Record<string, string>>, key: string): string | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
+/**
+ * Set `key` on `target` as an own property. A plain assignment of the key
+ * `__proto__` replaces the object's prototype instead, which would let a
+ * caller supply inherited values for keys the handler reads.
+ */
+function setOwn(target: OperationParams, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 export function normalizeParameters(params: OperationParams): OperationParams {
   if (!params || typeof params !== 'object') {
     return params;
@@ -80,20 +103,15 @@ export function normalizeParameters(params: OperationParams): OperationParams {
 
   for (const key in params) {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
-      let normalizedKey = key;
-
-      if (key.includes('_') && parameterMappings[key as keyof ForwardMap]) {
-        normalizedKey = parameterMappings[key as keyof ForwardMap];
-      }
+      const normalizedKey = ownMapping(parameterMappings, key) ?? key;
 
       const value = params[key];
-      if (OPAQUE_VALUE_KEYS.has(key)) {
-        result[normalizedKey] = value;
-      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-        result[normalizedKey] = normalizeParameters(value as OperationParams);
-      } else {
-        result[normalizedKey] = value;
-      }
+      const nested =
+        !OPAQUE_VALUE_KEYS.has(key) &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value);
+      setOwn(result, normalizedKey, nested ? normalizeParameters(value as OperationParams) : value);
     }
   }
 
@@ -116,7 +134,7 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
 
   for (const key in params) {
     if (Object.prototype.hasOwnProperty.call(params, key)) {
-      const mapped = reverseParameterMappings[key as keyof ReverseParameterMappings];
+      const mapped = ownMapping(reverseParameterMappings, key);
       let snakeKey: string;
       if (mapped) {
         snakeKey = mapped;
@@ -133,9 +151,11 @@ export function convertCamelToSnakeCase(params: OperationParams): OperationParam
       } else {
         snakeKey = key;
       }
-      result[snakeKey] = (
-        OPAQUE_VALUE_KEYS.has(key) ? params[key] : convertCamelToSnakeValue(params[key])
-      ) as OperationParams[string];
+      setOwn(
+        result,
+        snakeKey,
+        OPAQUE_VALUE_KEYS.has(key) ? params[key] : convertCamelToSnakeValue(params[key]),
+      );
     }
   }
 
