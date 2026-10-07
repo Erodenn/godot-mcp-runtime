@@ -612,8 +612,11 @@ describe('handleGetProjectSettings: value lexing', () => {
       ].join('\n'),
     );
     expect(Object.keys(parsed)[0]).toBe('warnings');
-    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings).toHaveLength(2);
     expect(parsed.warnings?.[0]).toMatch(/input\/jump is unterminated/);
+    expect(parsed.warnings?.[1]).toMatch(
+      /1 line\(s\) that are not in the form Godot writes.*line 5 \(/,
+    );
     expect(parsed.settings.input.jump).toBe('{\n"deadzone": 0.5,');
     expect(parsed.settings.display['window/size/viewport_width']).toBe(1920);
   });
@@ -633,7 +636,7 @@ describe('handleGetProjectSettings: value lexing', () => {
     );
     expect(Object.keys(parsed)[0]).toBe('warnings');
     expect(parsed.warnings).toEqual([
-      '2 line(s) could not be parsed and were skipped; first: this line has no equals sign',
+      'project.godot has 2 line(s) that are not in the form Godot writes, so the engine may read them differently from what is reported here: line 5 (not a key=value statement); line 7 (not a key=value statement)',
     ]);
     expect(parsed.settings.application['config/name']).toBe('Game');
   });
@@ -646,7 +649,10 @@ describe('handleGetProjectSettings: value lexing', () => {
     );
     expect(parsed.settings.application['config/tags']).toBeNull();
     expect(Object.keys(parsed)[0]).toBe('warnings');
-    expect(parsed.warnings).toEqual(['Value of application/config/tags is empty and is null']);
+    expect(parsed.warnings).toEqual([
+      'Value of application/config/tags is empty and is null',
+      'project.godot has 1 line(s) that are not in the form Godot writes, so the engine may read them differently from what is reported here: line 5 (no value follows the = on its line)',
+    ]);
   });
 
   it('string escapes are unescaped', async () => {

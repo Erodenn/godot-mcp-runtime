@@ -1,7 +1,12 @@
 import { readFileSync } from 'fs';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { resolveProjectPath, projectGodotPath } from '../utils/path-validation.js';
+import {
+  projectGodotPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
+  resolveProjectPath,
+} from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -23,7 +28,7 @@ import {
 // --- Tool definitions ---
 
 const ADD_AUTOLOAD_TIP =
-  'Autoloads initialize in headless mode too: if this script has errors, every headless operation fails. Run get_scene_tree to verify; if it fails, remove_autoload undoes this.';
+  'Autoloads load in headless mode too: one that stops the engine before an operation is dispatched (it quits in _init, for example) fails every headless operation, while one that only errors in _ready does not. Run validate on the script to check it; remove_autoload undoes this.';
 
 const AUTOLOAD_ENTRY_SCHEMA = {
   type: 'object',
@@ -39,7 +44,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
-      'List the autoloads registered in a project, with their paths and singleton flags. Use first when diagnosing headless failures: a broken autoload crashes every headless operation, so this shows what is loaded. Reads project.godot directly, no Godot process. Returns: autoloads[], each { name, path, singleton }; empty when none are registered. warnings leads when [autoload] holds lines that could not be parsed and are not listed.',
+      'List the autoloads registered in a project, with their paths and singleton flags. Use first when diagnosing headless failures: an autoload that stops the engine before an operation is dispatched fails every headless operation. Reads project.godot directly, no Godot process. Returns: autoloads[], each { name, path, singleton }, one per name (the last assignment, which the engine keeps); empty when none. warnings leads when a line is not listed or is not in the form Godot writes.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -55,7 +60,7 @@ export const autoloadToolDefinitions = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'Present only when a line of [autoload] could not be parsed and is not listed.',
+            'Present only when an autoload line could not be parsed, or assigns a name a later line assigns again (neither is listed in autoloads), or when project.godot holds lines that are not in the form Godot writes, named by line number: the engine may register an autoload from such a line that is not listed.',
         },
         autoloads: { type: 'array', items: AUTOLOAD_ENTRY_SCHEMA },
       },
@@ -65,7 +70,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a project. autoloadPath takes res://... or a project-relative path (auto-prefixed). singleton defaults to true (reachable globally by name). No Godot process is used. Autoloads also initialize in headless mode, so a broken script crashes every later headless operation: validate it first. Returns: autoload { name, path, singleton } read back from project.godot, and a tip on verifying it. Errors if the name is already registered; use update_autoload to change it.',
+      'Register a new autoload in a project. autoloadPath takes res://... or a path inside the project. singleton defaults to true. No Godot process is used. An autoload that stops the engine before a headless operation is dispatched fails all of them (one that only errors in _ready does not): run validate on it first. Returns: autoload { name, path, singleton } read back from project.godot, and a tip. Errors if the name is already registered; use update_autoload to change it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -98,7 +103,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'remove_autoload',
     description:
-      'Unregister an autoload from a project by name. Use to recover from a broken autoload that is crashing headless operations. No Godot process is used. Returns: removed (the name) and autoloads[], the entries that remain, read back from project.godot. Errors if no autoload has that name.',
+      'Unregister an autoload from a project by name. Use to recover from an autoload that stops the engine before headless operations are dispatched. No Godot process is used. Returns: removed (the name) and autoloads[], the entries that remain, read back from project.godot. Errors if no autoload has that name.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -164,13 +169,21 @@ export function handleListAutoloads(args: OperationParams): HandlerResult {
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const { entries, unparsed } = parseAutoloadSection(projectFile);
-    const warnings =
-      unparsed.length > 0
-        ? [
-            `[autoload] has ${unparsed.length} line(s) that could not be parsed and are not listed: ${unparsed.join(' | ')}`,
-          ]
-        : [];
+    const { entries, unparsed, shadowed, nonCanonical } = parseAutoloadSection(projectFile);
+    const warnings: string[] = [];
+    if (nonCanonical !== null) {
+      warnings.push(`${nonCanonical}. An autoload such a line registers may not be listed`);
+    }
+    if (unparsed.length > 0) {
+      warnings.push(
+        `[autoload] has ${unparsed.length} line(s) that could not be parsed and are not listed: ${unparsed.join(' | ')}`,
+      );
+    }
+    if (shadowed.length > 0) {
+      warnings.push(
+        `${shadowed.length} autoload line(s) assign a name that a later line assigns again. The engine keeps the last assignment, so these are not listed: ${shadowed.join(' | ')}`,
+      );
+    }
     return createStructuredResponse(leadWithWarnings({ warnings, autoloads: entries }));
   } catch (error: unknown) {
     return err(
@@ -195,11 +208,11 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
   const forbiddenAdd = rejectForbiddenPathCharacters(autoloadPath.value);
   if (forbiddenAdd) return forbiddenAdd;
 
-  const resolvedAutoload = resolveProjectPath(parsed.value.projectPath, autoloadPath.value);
+  const resolvedAutoload = resolveProjectPath(parsed.value.projectPath, autoloadPath.value, 'read');
   if (!resolvedAutoload) {
     return err(
-      createErrorResponse('Invalid autoload path', [
-        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      createErrorResponse(projectSubPathError('autoload path', autoloadPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -305,11 +318,11 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   const resolvedAutoload =
     autoloadPath.value === undefined
       ? undefined
-      : resolveProjectPath(parsed.value.projectPath, autoloadPath.value);
+      : resolveProjectPath(parsed.value.projectPath, autoloadPath.value, 'read');
   if (autoloadPath.value !== undefined && !resolvedAutoload) {
     return err(
-      createErrorResponse('Invalid autoload path', [
-        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      createErrorResponse(projectSubPathError('autoload path', autoloadPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -337,7 +350,7 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
     if (!updated) {
       return err(
         createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
-          'Use list_autoloads to see existing autoloads',
+          'Use list_autoloads to see existing autoloads; a line it reports as not parsed cannot be updated, remove_autoload removes it',
           'Use add_autoload to register a new one',
         ]),
       );

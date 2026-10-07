@@ -85,11 +85,12 @@ describe('parseAutoloads', () => {
     ]);
   });
 
-  it('tolerates an unquoted path (hand-edited project.godot)', () => {
+  it('does not read an unquoted path as an entry', () => {
     const dir = makeProject('config_version=5\n\n[autoload]\nA=*res://a.gd\n');
-    expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([
-      { name: 'A', path: 'res://a.gd', singleton: true },
-    ]);
+    const section = parseAutoloadSection(join(dir, 'project.godot'));
+    expect(section.entries).toEqual([]);
+    expect(section.unparsed).toEqual(['A=*res://a.gd']);
+    expect(section.nonCanonical).toContain('line 4 (');
   });
 
   it('stops parsing entries when a new section header begins', () => {
@@ -166,13 +167,17 @@ describe('addAutoloadEntry', () => {
   // code (handleAddAutoload) guards via parseAutoloads first. This test pins
   // that contract so a future change to addAutoloadEntry that rejects duplicates
   // breaks loudly and prompts the reviewer to update both layers in lockstep.
-  it('appends a duplicate entry when called twice with the same name', () => {
+  it('appends a second line when called twice with the same name, and the last one is the entry', () => {
     const dir = makeProject('config_version=5\n');
     const file = join(dir, 'project.godot');
     addAutoloadEntry(file, 'Dup', 'one.gd', true);
     addAutoloadEntry(file, 'Dup', 'two.gd', true);
-    const entries = parseAutoloads(file).filter((e) => e.name === 'Dup');
-    expect(entries).toHaveLength(2);
+    expect(readProject(dir)).toBe(
+      'config_version=5\n\n[autoload]\nDup="*res://one.gd"\nDup="*res://two.gd"\n',
+    );
+    const section = parseAutoloadSection(file);
+    expect(section.entries).toEqual([{ name: 'Dup', path: 'res://two.gd', singleton: true }]);
+    expect(section.shadowed).toEqual(['Dup="*res://one.gd" (line 4, overridden by line 5)']);
   });
 });
 
@@ -208,6 +213,23 @@ describe('removeAutoloadEntry', () => {
     const content = readProject(dir);
     expect(content).not.toContain('[autoload]');
     expect(content).toContain('[rendering]');
+  });
+
+  it('with a predicate removes only the assignments whose path satisfies it', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\nA="*res://keep.gd"\nA="*res://drop.gd"\nA="res://drop.gd"\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'A', (path) => path === 'res://drop.gd')).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\nA="*res://keep.gd"\n');
+  });
+
+  it('with a predicate nothing satisfies leaves the file untouched', () => {
+    const dir = makeProject('config_version=5\n\n[autoload]\nA="*res://keep.gd"\n');
+    const file = join(dir, 'project.godot');
+    const before = readProject(dir);
+    expect(removeAutoloadEntry(file, 'A', () => false)).toBe(false);
+    expect(readProject(dir)).toBe(before);
   });
 });
 
@@ -307,6 +329,8 @@ describe('parseAutoloadSection', () => {
     expect(parseAutoloadSection(join(dir, 'project.godot'))).toEqual({
       entries: [{ name: 'Spaced', path: 'res://a.gd', singleton: true }],
       unparsed: [],
+      shadowed: [],
+      nonCanonical: null,
     });
   });
 
@@ -353,6 +377,8 @@ describe('a commented [autoload] header', () => {
     expect(parseAutoloadSection(join(dir, 'project.godot'))).toEqual({
       entries: [{ name: 'A', path: 'res://a.gd', singleton: true }],
       unparsed: [],
+      shadowed: [],
+      nonCanonical: null,
     });
   });
 
@@ -382,6 +408,8 @@ describe('an entry with a trailing comment', () => {
         { name: 'B', path: 'res://b.gd', singleton: false },
       ],
       unparsed: [],
+      shadowed: [],
+      nonCanonical: null,
     });
   });
 
@@ -503,10 +531,12 @@ describe('an entry that spans lines', () => {
     '',
   ].join('\n');
 
-  it('is not hidden and does not hide its neighbours', () => {
+  it('is reported as unparsed and does not hide its neighbours', () => {
     const dir = makeProject(MULTI_LINE);
-    const names = parseAutoloads(join(dir, 'project.godot')).map((a) => a.name);
-    expect(names).toEqual(['Before', 'Odd', 'After']);
+    const section = parseAutoloadSection(join(dir, 'project.godot'));
+    expect(section.entries.map((a) => a.name)).toEqual(['Before', 'After']);
+    expect(section.unparsed).toEqual(['Odd={']);
+    expect(section.nonCanonical).toBeNull();
   });
 
   it('is removed whole', () => {
@@ -535,6 +565,9 @@ describe('an entry that spans lines', () => {
     expect(parseAutoloadSection(join(dir, 'project.godot'))).toEqual({
       entries: [],
       unparsed: ['Open="*res://a.gd'],
+      shadowed: [],
+      nonCanonical:
+        'project.godot has 1 line(s) that are not in the form Godot writes, so the engine may read them differently from what is reported here: line 4 (the value is not one complete value with nothing after it)',
     });
   });
 });
@@ -607,5 +640,180 @@ describe('a section that is not empty after a removal', () => {
     const dir = makeProject('config_version=5\n\n[autoload]\n; keep me\nA="*res://a.gd"\n');
     expect(removeAutoloadEntry(join(dir, 'project.godot'), 'A')).toBe(true);
     expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\n; keep me\n');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The engine's reading: a setting is its path, and the last assignment wins
+// ---------------------------------------------------------------------------
+
+describe('the project.godot the engine experiment used', () => {
+  // Godot 4.6 loaded probe_a, probe_second and probe_c from this file, and
+  // refused the [autoload/] entry with "Trying to add autoload with no name".
+  // probe_c is registered by a value on the line after its `=`, a form Godot
+  // never writes: it is reported as unparsed and flagged, not listed.
+  const EXPERIMENT = [
+    'config_version=5',
+    'autoload/ProbeA="*res://probe_a.gd"',
+    '',
+    '[autoload]',
+    'Dup="*res://probe_first.gd"',
+    'Dup="*res://probe_second.gd"',
+    'NextLine=',
+    '"*res://probe_c.gd"',
+    '',
+    '[autoload/]',
+    'ProbeD="*res://probe_d.gd"',
+    '',
+  ].join('\n');
+
+  it('lists the canonical entries, one per name, and reports the rest', () => {
+    const dir = makeProject(EXPERIMENT);
+    const section = parseAutoloadSection(join(dir, 'project.godot'));
+    expect(section.entries).toEqual([
+      { name: 'ProbeA', path: 'res://probe_a.gd', singleton: true },
+      { name: 'Dup', path: 'res://probe_second.gd', singleton: true },
+    ]);
+    expect(section.nonCanonical).toContain('line 7 (no value follows the = on its line)');
+    expect(section.shadowed).toEqual([
+      'Dup="*res://probe_first.gd" (line 5, overridden by line 6)',
+    ]);
+    expect(section.unparsed).toEqual(['NextLine=', 'ProbeD="*res://probe_d.gd"']);
+  });
+});
+
+describe('an autoload written as a top-level autoload/Name line', () => {
+  const TOP_LEVEL = 'config_version=5\nautoload/Top="*res://top.gd"\n\n[application]\nx=1\n';
+
+  it('is updated where it is, under the key it is written with', () => {
+    const dir = makeProject(TOP_LEVEL);
+    expect(updateAutoloadEntry(join(dir, 'project.godot'), 'Top', 'top2.gd', false)).toBe(true);
+    expect(readProject(dir)).toBe(
+      'config_version=5\nautoload/Top="res://top2.gd"\n\n[application]\nx=1\n',
+    );
+  });
+
+  it('is removed, and every other line is kept', () => {
+    const dir = makeProject(TOP_LEVEL);
+    expect(removeAutoloadEntry(join(dir, 'project.godot'), 'Top')).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[application]\nx=1\n');
+  });
+
+  it('is overridden by a later [autoload] line of the same name', () => {
+    const dir = makeProject(`${TOP_LEVEL}\n[autoload]\nTop="res://later.gd"\n`);
+    const file = join(dir, 'project.godot');
+    expect(parseAutoloads(file)).toEqual([
+      { name: 'Top', path: 'res://later.gd', singleton: false },
+    ]);
+    expect(removeAutoloadEntry(file, 'Top')).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[application]\nx=1\n');
+  });
+});
+
+describe('a name assigned twice', () => {
+  const TWICE =
+    'config_version=5\n\n[autoload]\nA="*res://first.gd"\nB="res://b.gd"\nA="res://last.gd"\n';
+
+  it('is listed once, at the position of the first line with the value of the last', () => {
+    const dir = makeProject(TWICE);
+    expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([
+      { name: 'A', path: 'res://last.gd', singleton: false },
+      { name: 'B', path: 'res://b.gd', singleton: false },
+    ]);
+  });
+
+  it('update rewrites the line the engine keeps and leaves the overridden one', () => {
+    const dir = makeProject(TWICE);
+    expect(updateAutoloadEntry(join(dir, 'project.godot'), 'A', undefined, true)).toBe(true);
+    expect(readProject(dir)).toBe(TWICE.replace('A="res://last.gd"', 'A="*res://last.gd"'));
+  });
+
+  it('remove takes both lines, so the earlier one does not take over', () => {
+    const dir = makeProject(TWICE);
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'A')).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\nB="res://b.gd"\n');
+  });
+});
+
+describe('remove leaves untouched lines byte for byte', () => {
+  it('keeps trailing blank lines and adds no final line break', () => {
+    const dir = makeProject('[autoload]\nA="res://a.gd"\nB="res://b.gd"\n\n[x]\ny=1  \n\n\n');
+    expect(removeAutoloadEntry(join(dir, 'project.godot'), 'A')).toBe(true);
+    expect(readProject(dir)).toBe('[autoload]\nB="res://b.gd"\n\n[x]\ny=1  \n\n\n');
+
+    const unterminated = makeProject('[autoload]\nA="res://a.gd"\nB="res://b.gd"\n\n[x]\ny=1');
+    expect(removeAutoloadEntry(join(unterminated, 'project.godot'), 'A')).toBe(true);
+    expect(readProject(unterminated)).toBe('[autoload]\nB="res://b.gd"\n\n[x]\ny=1');
+  });
+
+  it('keeps the line ending of the line before a removed last line', () => {
+    const dir = makeProject('[autoload]\r\nA="res://a.gd"\r\nB="res://b.gd"');
+    expect(removeAutoloadEntry(join(dir, 'project.godot'), 'B')).toBe(true);
+    expect(readProject(dir)).toBe('[autoload]\r\nA="res://a.gd"\r\n');
+  });
+
+  it('add then remove gives back the original file', () => {
+    for (const original of [
+      'config_version=5\n',
+      'config_version=5\r\n\r\n[a]\r\nx=1\r\n',
+      'x=1',
+    ]) {
+      const dir = makeProject(original);
+      const file = join(dir, 'project.godot');
+      addAutoloadEntry(file, 'Bridge', 'bridge.gd', true);
+      expect(removeAutoloadEntry(file, 'Bridge')).toBe(true);
+      const expected = original.endsWith('\n') ? original : `${original}\n`;
+      expect(readProject(dir)).toBe(expected);
+    }
+  });
+});
+
+describe('an autoload line Godot did not write', () => {
+  const parse = (body: string): ReturnType<typeof parseAutoloadSection> =>
+    parseAutoloadSection(join(makeProject(`config_version=5\n\n${body}\n`), 'project.godot'));
+
+  it('a second registration after an entry on its line makes the line unparsed', () => {
+    const line = 'A="*res://a.gd" Evil="*res://evil.gd"';
+    const section = parse(`[autoload]\n${line}`);
+    expect(section.entries).toEqual([]);
+    expect(section.unparsed).toEqual([line]);
+    expect(section.nonCanonical).toContain('line 4 (');
+  });
+
+  it('update and remove-by-path leave such a line as it is', () => {
+    const content = 'config_version=5\n\n[autoload]\nA="*res://a.gd" Evil="*res://evil.gd"\n';
+    const dir = makeProject(content);
+    const file = join(dir, 'project.godot');
+    expect(updateAutoloadEntry(file, 'A', 'res://b.gd')).toBe(false);
+    expect(removeAutoloadEntry(file, 'A', () => true)).toBe(false);
+    expect(readProject(dir)).toBe(content);
+  });
+
+  it('a StringName value is unparsed', () => {
+    const section = parse('[autoload]\nA=&"*res://a.gd"');
+    expect(section.entries).toEqual([]);
+    expect(section.unparsed).toEqual(['A=&"*res://a.gd"']);
+    expect(section.nonCanonical).toBeNull();
+  });
+
+  it('an entry on the line of the header is flagged, with no entry', () => {
+    const section = parse('[autoload] Evil="*res://evil.gd"');
+    expect(section.entries).toEqual([]);
+    expect(section.nonCanonical).toContain('line 3 (a section header must be alone on its line');
+  });
+
+  it('a # line under [autoload] is unparsed, not a comment', () => {
+    const section = parse('[autoload]\n#Evil="*res://evil.gd"\nGood="*res://a.gd"');
+    expect(section.entries).toEqual([{ name: 'Good', path: 'res://a.gd', singleton: true }]);
+    expect(section.unparsed).toEqual(['#Evil="*res://evil.gd"']);
+    expect(section.nonCanonical).toContain("line 4 ('#' does not start a comment");
+  });
+
+  it('a line outside [autoload] that is not canonical is still passed on', () => {
+    const section = parse('[application]\nx\n\n[autoload]\nGood="*res://a.gd"');
+    expect(section.entries).toHaveLength(1);
+    expect(section.unparsed).toEqual([]);
+    expect(section.nonCanonical).toContain('line 4 (not a key=value statement)');
   });
 });

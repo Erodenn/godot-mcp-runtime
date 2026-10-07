@@ -69,6 +69,76 @@ describe('handleListAutoloads', () => {
     });
   });
 
+  it('lists one entry per name and reports the overridden line in warnings, which lead', async () => {
+    const dir = makeTmpProject();
+    writeFileSync(
+      join(dir, 'project.godot'),
+      'config_version=5\nautoload/Top="*res://top.gd"\n\n[autoload]\nDup="*res://first.gd"\nDup="res://second.gd"\n',
+      'utf8',
+    );
+    const result = await handleListAutoloads({ projectPath: dir });
+    const payload = expectMatchesOutputSchema('list_autoloads', result) as {
+      warnings: string[];
+      autoloads: unknown[];
+    };
+    expect(Object.keys(payload)).toEqual(['warnings', 'autoloads']);
+    expect(payload.autoloads).toEqual([
+      { name: 'Top', path: 'res://top.gd', singleton: true },
+      { name: 'Dup', path: 'res://second.gd', singleton: false },
+    ]);
+    expect(payload.warnings).toEqual([
+      '1 autoload line(s) assign a name that a later line assigns again. The engine keeps the last assignment, so these are not listed: Dup="*res://first.gd" (line 5, overridden by line 6)',
+    ]);
+  });
+
+  it('update_autoload and remove_autoload act on a top-level autoload/Name line where it is', async () => {
+    const dir = makeTmpProject();
+    const original = 'config_version=5\nautoload/Top="*res://top.gd"\n\n[application]\nx=1\n';
+    writeFileSync(join(dir, 'project.godot'), original, 'utf8');
+    writeFileSync(join(dir, 'new.gd'), 'extends Node\n', 'utf8');
+
+    const updated = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'Top',
+      autoloadPath: 'new.gd',
+    });
+    expect(expectMatchesOutputSchema('update_autoload', updated)).toEqual({
+      autoload: { name: 'Top', path: 'res://new.gd', singleton: true },
+    });
+    expect(readProjectGodot(dir)).toBe(original.replace('res://top.gd', 'res://new.gd'));
+
+    const removed = await handleRemoveAutoload({ projectPath: dir, autoloadName: 'Top' });
+    expect(expectMatchesOutputSchema('remove_autoload', removed)).toEqual({
+      removed: 'Top',
+      autoloads: [],
+    });
+    expect(readProjectGodot(dir)).toBe('config_version=5\n\n[application]\nx=1\n');
+  });
+
+  it('add_autoload refuses a name a top-level autoload/Name line already registers', async () => {
+    const dir = makeTmpProject();
+    writeFileSync(join(dir, 'project.godot'), 'autoload/Top="*res://top.gd"\n', 'utf8');
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Top',
+      autoloadPath: 'other.gd',
+    });
+    expectErrorMatching(result, /already exists/);
+  });
+
+  it('accepts an autoload file whose name holds two dots', async () => {
+    const dir = makeTmpProject();
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Dotted',
+      autoloadPath: 'res://boot..old.gd',
+    });
+    expect(hasError(result)).toBe(false);
+    expect(parseAutoloads(join(dir, 'project.godot'))).toEqual([
+      { name: 'Dotted', path: 'res://boot..old.gd', singleton: true },
+    ]);
+  });
+
   it('returns an empty autoloads array for a project with no [autoload] section', async () => {
     const dir = makeTmpProject();
     const result = await handleListAutoloads({ projectPath: dir });
@@ -513,5 +583,38 @@ describe('autoload tools accept the snake_case spellings of their parameters', (
     });
     expect(hasError(result)).toBe(false);
     expect(readProjectGodot(dir)).toContain('Manager="*res://manager.gd"');
+  });
+});
+
+describe('handleListAutoloads lines Godot did not write', () => {
+  const projectWith = (content: string): string => {
+    const dir = makeTmpProject();
+    writeFileSync(join(dir, 'project.godot'), content, 'utf8');
+    return dir;
+  };
+
+  it('names the line of an entry written on the line of its header', async () => {
+    const dir = projectWith('config_version=5\n\n[autoload] Evil="*res://evil.gd"\n');
+    const result = await handleListAutoloads({ projectPath: dir });
+    const payload = expectMatchesOutputSchema('list_autoloads', result) as {
+      warnings: string[];
+      autoloads: unknown[];
+    };
+    expect(payload.autoloads).toEqual([]);
+    expect(payload.warnings).toHaveLength(1);
+    expect(payload.warnings[0]).toContain('line 3 (a section header must be alone on its line');
+    expect(payload.warnings[0]).toContain('may not be listed');
+  });
+
+  it('update_autoload refuses an entry that shares its line with a second statement', async () => {
+    const content = 'config_version=5\n\n[autoload]\nA="*res://a.gd" Evil="*res://evil.gd"\n';
+    const dir = projectWith(content);
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'A',
+      singleton: false,
+    });
+    expectErrorMatching(result, /not found/i);
+    expect(readProjectGodot(dir)).toBe(content);
   });
 });
