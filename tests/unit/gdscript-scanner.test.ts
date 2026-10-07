@@ -7,7 +7,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { tokenize } from '../../src/utils/gdscript-scanner.js';
+import {
+  decodeStringLiteral,
+  tokenize,
+  tokenizeStripped,
+  type Token,
+} from '../../src/utils/gdscript-scanner.js';
 
 function chains(source: string): string[][] {
   return tokenize(source)
@@ -276,5 +281,155 @@ describe('tokenize: precededByDot', () => {
   it('is false for a bare global call', () => {
     expect(flag('load(x)\n', 'load')).toBe(false);
     expect(flag('x = 1\nload(x)\n', 'load')).toBe(false);
+  });
+});
+
+describe('tokenize: a name declared with func', () => {
+  it('marks the name after func, and no other use of it', () => {
+    const tokens = tokenize('func load(slot: int) -> void:\n\tload(slot)\n');
+    const loads = tokens.filter((t) => t.text === 'load');
+    expect(loads.map((t) => [t.line, t.precededByFunc === true])).toEqual([
+      [1, true],
+      [2, false],
+    ]);
+  });
+
+  it('marks the name of a static func', () => {
+    const tokens = tokenize('static func str_to_var(text):\n\tpass\n');
+    expect(tokens.find((t) => t.text === 'str_to_var')?.precededByFunc).toBe(true);
+  });
+
+  it('does not mark the first name of a lambda body or a name on the next line', () => {
+    const tokens = tokenize('var f = func(): load(p)\nfunc\nload(p)\n');
+    expect(tokens.filter((t) => t.text === 'load').some((t) => t.precededByFunc)).toBe(false);
+  });
+});
+
+describe('tokenize: a parenthesised receiver', () => {
+  const chainsOf = (source: string): string[][] =>
+    tokenize(source)
+      .filter((t) => t.kind === 'memberChain')
+      .map((t) => t.chain!);
+
+  it('reads (OS).execute as the chain OS.execute', () => {
+    expect(chainsOf('(OS).execute("rm", [])\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('reads through nested parentheses, blanks and line breaks', () => {
+    expect(chainsOf('((OS)).execute()\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('( OS ) . execute ()\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('x = (\n\tOS\n)\n\t.execute()\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('(Engine).get_singleton("X").call("y")\n')).toEqual([
+      ['Engine', 'get_singleton'],
+    ]);
+  });
+
+  it('reads it after a keyword, an operator, an opening bracket and a comma', () => {
+    expect(chainsOf('return (OS).execute()\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('var x = (OS).execute()\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('print((OS).execute())\n').slice(-1)).toEqual([['OS', 'execute']]);
+    expect(chainsOf('f(a, (OS).execute())\n')).toEqual([['OS', 'execute']]);
+    expect(chainsOf('if not (OS).has_feature("x"):\n')).toEqual([['OS', 'has_feature']]);
+  });
+
+  it('keeps the position of the opening parenthesis', () => {
+    const chain = tokenize('var x = 1\n\t(OS).execute()\n').find((t) => t.kind === 'memberChain');
+    expect([chain?.line, chain?.column, chain?.text]).toEqual([2, 2, '(OS).execute']);
+  });
+
+  it('leaves an argument list alone: the method belongs to what the call returns', () => {
+    expect(chainsOf('wrap(OS).execute()\n')).toEqual([]);
+    expect(chainsOf('a.wrap(OS).execute()\n')).toEqual([['a', 'wrap']]);
+    expect(chainsOf('make()(OS).execute()\n')).toEqual([]);
+    expect(chainsOf('table[0](OS).execute()\n')).toEqual([]);
+  });
+
+  it('leaves parentheses that hold anything but one name, or that nothing is read from', () => {
+    expect(chainsOf('(a + OS).execute()\n')).toEqual([]);
+    expect(chainsOf('x = (OS)\n')).toEqual([]);
+    expect(
+      tokenize('x = (OS)\n')
+        .filter((t) => t.kind === 'punct')
+        .map((t) => t.text),
+    ).toEqual(['=', '(', ')']);
+  });
+});
+
+describe('tokenize: the characters of a string literal', () => {
+  const literals = (source: string): Array<string | undefined> =>
+    tokenize(source)
+      .filter((t) => t.kind === 'string')
+      .map((t) => t.literal);
+
+  it('carries them for quoted, triple-quoted and StringName forms', () => {
+    expect(literals('a("execute")')).toEqual(['execute']);
+    expect(literals("a('execute')")).toEqual(['execute']);
+    expect(literals('a("""execute""")')).toEqual(['execute']);
+    expect(literals('a(&"execute")')).toEqual(['execute']);
+    expect(literals('a("")')).toEqual(['']);
+  });
+
+  it('keeps escapes as written and reads an unterminated string to the end', () => {
+    expect(literals('a("ex\\"ec")')).toEqual(['ex\\"ec']);
+    expect(literals('a("open')).toEqual(['open']);
+  });
+
+  it('carries none for a node path', () => {
+    expect(literals('$Foo/Bar')).toEqual([undefined]);
+  });
+
+  it('reads &"..." as one string and a lone & as an operator', () => {
+    const tokens = tokenize('a & b\nc = &"OS.execute"\n');
+    expect(tokens.filter((t) => t.kind === 'string')).toHaveLength(1);
+    expect(tokens.some((t) => t.kind === 'memberChain')).toBe(false);
+    expect(tokens.some((t) => t.kind === 'other' && t.text === '&')).toBe(true);
+  });
+});
+
+describe('raw strings and decoded literals', () => {
+  const strings = (source: string): Token[] => tokenize(source).filter((t) => t.kind === 'string');
+
+  it('reads r"..." and r\'...\' as one string token marked raw', () => {
+    const tokens = tokenizeStripped('load(r"res://x.gd", r\'y\')');
+    expect(tokens.map((t) => t.kind)).toEqual([
+      'identifier',
+      'punct',
+      'string',
+      'punct',
+      'string',
+      'punct',
+    ]);
+    expect(strings('r"res://x.gd"')[0]).toMatchObject({ literal: 'res://x.gd', raw: true });
+    expect(strings("r'''a\nb'''")[0]).toMatchObject({ literal: 'a\nb', raw: true });
+  });
+
+  it('keeps an identifier that merely starts or ends with r', () => {
+    expect(tokenizeStripped('r = 1').map((t) => t.text)).toEqual(['r', '=', '1']);
+    expect(tokenizeStripped('var"x"').map((t) => t.kind)).toEqual(['identifier', 'string']);
+    expect(tokenizeStripped('r.x').map((t) => t.kind)).toEqual(['memberChain']);
+  });
+
+  it('gives a NodePath literal its body', () => {
+    expect(strings('^"a/b"')[0]).toMatchObject({ literal: 'a/b' });
+  });
+
+  it.each([
+    ['"plain"', 'plain'],
+    ['"\\u0065xecute"', 'execute'],
+    ['"\\U000065xecute"', 'execute'],
+    ['"a\\nb\\t\\"c\\"\\\\"', 'a\nb\t"c"\\'],
+    ['"exe\\\ncute"', 'execute'],
+    ['r"\\u0065"', '\\u0065'],
+    ['&"n\\u0061me"', 'name'],
+  ])('decodes %s', (source, value) => {
+    expect(decodeStringLiteral(strings(source)[0]!)).toBe(value);
+  });
+
+  it.each(['"\\q"', '"\\u12"', '"\\uzzzz"', '"\\U110000"'])('gives null for %s', (source) => {
+    expect(decodeStringLiteral(strings(source)[0]!)).toBeNull();
+  });
+
+  it('gives null for a token with no literal', () => {
+    expect(decodeStringLiteral(strings('$Node/Path')[0]!)).toBeNull();
   });
 });

@@ -21,7 +21,7 @@
  * decision with the elicitor and audit sidecar.
  */
 
-import { tokenize, type Token } from './gdscript-scanner.js';
+import { decodeStringLiteral, tokenize, type Token } from './gdscript-scanner.js';
 
 export type Tier = 1 | 2 | 3;
 
@@ -128,6 +128,16 @@ interface PolicyRule {
    * but which also appears as a type annotation (`cb: Callable`).
    */
   callOnly?: boolean;
+  /**
+   * Optional: the rule targets a guarded class or singleton name used as a
+   * value, which is how it gets another name (`var o = OS`, `foo(OS)`,
+   * `[OS][0]`, `OS["execute"]`). It matches the name only as a bare
+   * identifier: not the head of a member chain (the chain rules judge that),
+   * not after a `.`, and not where the name is a type or is being declared
+   * (`valueReferencePositions`). Only for a name whose every use as a value
+   * is worth a prompt; never above Tier 2.
+   */
+  valueReferenceOnly?: boolean;
   reason: string;
   solutions: string[];
 }
@@ -139,59 +149,194 @@ interface PolicyRule {
 export type ArgumentClassification = 'literal' | 'nonliteral' | 'none';
 
 /**
+ * The tokens of each top-level argument of the call whose `(` is at
+ * `openParenIndex`. Bracket depth is tracked so a nested `(...)` or `[...]`
+ * (e.g. `foo(bar(x), y)`) does not end an argument early: a top-level `,`
+ * ends one argument and a top-level `)` ends the call. Newline tokens carry no
+ * argument content and are skipped. A call with no arguments has one empty
+ * argument.
+ */
+function argumentsOf(tokens: readonly Token[], openParenIndex: number): Token[][] {
+  const args: Token[][] = [[]];
+  let depth = 0;
+
+  for (let j = openParenIndex + 1; j < tokens.length; j++) {
+    const tok = tokens[j]!;
+    if (tok.kind === 'newline') continue;
+    const current = args[args.length - 1]!;
+
+    if (tok.kind === 'punct') {
+      if (tok.text === '(' || tok.text === '[') {
+        depth++;
+      } else if (tok.text === ')') {
+        if (depth === 0) break; // terminator: end of the call
+        depth--;
+      } else if (tok.text === ']') {
+        if (depth > 0) depth--;
+      } else if (tok.text === ',' && depth === 0) {
+        args.push([]);
+        continue;
+      }
+    }
+    current.push(tok);
+  }
+  return args;
+}
+
+/**
+ * Classify the tokens of one whole argument.
+ *
+ * - No tokens → 'none' (a no-arg call — must not match a non-literal rule,
+ *   preserving "don't fire on load()").
+ * - Exactly one token and it is a string literal → 'literal'.
+ * - Anything else (an identifier, an operator, multiple tokens) → 'nonliteral'.
+ */
+function classifyArgument(argument: readonly Token[]): ArgumentClassification {
+  if (argument.length === 0) return 'none';
+  if (argument.length === 1 && argument[0]!.kind === 'string') return 'literal';
+  return 'nonliteral';
+}
+
+/**
  * Classify a call's whole first argument, not just its first token — so
  * `load("res://" + evil_var)` is correctly 'nonliteral' instead of matching
- * on the leading string literal alone.
- *
- * Scans from `openParenIndex + 1`, tracking bracket depth so nested
- * `(...)`/`[...]` in the first argument (e.g. `foo(bar(x), y)`) don't
- * mistake an inner terminator for the outer one. A top-level `,` or `)` ends
- * the argument. Newline tokens are skipped (they carry no argument content).
- *
- * - Zero collected tokens → 'none' (a no-arg call — must not match a
- *   non-literal rule, preserving "don't fire on load()").
- * - Exactly one collected token and it is a string literal → 'literal'.
- * - Anything else (an identifier, an operator, multiple tokens) → 'nonliteral'.
+ * on the leading string literal alone. See `argumentsOf` and
+ * `classifyArgument`.
  */
 export function classifyFirstArgument(
   tokens: readonly Token[],
   openParenIndex: number,
 ): ArgumentClassification {
-  let depth = 0;
-  const collected: Token[] = [];
+  return classifyArgument(argumentsOf(tokens, openParenIndex)[0] ?? []);
+}
 
-  for (let j = openParenIndex + 1; j < tokens.length; j++) {
-    const tok = tokens[j]!;
-    if (tok.kind === 'newline') continue;
+// ---------------------------------------------------------------------------
+// Reflective dispatch
+// ---------------------------------------------------------------------------
 
-    if (tok.kind === 'punct') {
-      if (tok.text === '(' || tok.text === '[') {
-        depth++;
-        collected.push(tok);
-        continue;
-      }
-      if (tok.text === ')') {
-        if (depth === 0) break; // terminator: end of the call
-        depth--;
-        collected.push(tok);
-        continue;
-      }
-      if (tok.text === ']') {
-        if (depth > 0) depth--;
-        collected.push(tok);
-        continue;
-      }
-      if (tok.text === ',' && depth === 0) {
-        break; // terminator: end of the first argument
-      }
+/**
+ * The receivers of the Tier 1 chain-prefix rules that can be handed a method
+ * name at runtime: the engine singletons, and `Object` for the static-looking
+ * `Object.call(...)` form. Naming a method on one of them with a non-literal
+ * string reaches every Tier 1 primitive it has, so the dispatch itself is
+ * Tier 1 (`reflectiveDispatchRules`). `Node` and `ConfigFile` carry Tier 1
+ * rules too and are deliberately absent: they are classes, a script names
+ * them to construct or annotate, and their reflective use goes through an
+ * instance the scanner cannot see. A new Tier 1 singleton belongs here; the
+ * unit test over the rule table fails when one is missing.
+ */
+export const TIER1_DISPATCH_RECEIVERS: readonly string[] = [
+  'Object',
+  'OS',
+  'Engine',
+  'ClassDB',
+  'ProjectSettings',
+  'ResourceLoader',
+  'GDExtensionManager',
+];
+
+/** The `Object` methods that call a method named by their first argument. */
+const OBJECT_DISPATCH_METHODS: readonly string[] = ['call', 'callv', 'call_deferred'];
+
+/** The dispatch method whose forwarded arguments are the elements of an array. */
+const ARRAY_DISPATCH_METHOD = 'callv';
+
+/**
+ * Every method that calls a method named by its first argument: the three on
+ * `Object`, and the two `Node` adds. A call to one of them with a literal name
+ * is evaluated as the call it makes (`reflectiveCallTarget`).
+ */
+const REFLECTIVE_DISPATCH_METHODS: ReadonlySet<string> = new Set([
+  ...OBJECT_DISPATCH_METHODS,
+  'call_deferred_thread_group',
+  'call_thread_safe',
+]);
+
+/** A string literal that can be a method name. */
+const METHOD_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * How many dispatch methods a reflective call may name in a row
+ * (`OS.call("call", "callv", ...)`) before the policy stops following and
+ * treats the method as not known.
+ */
+const MAX_DISPATCH_DEPTH = 4;
+
+/**
+ * The guarded names that are a value in their own right, so that giving one
+ * another name carries every Tier 1 primitive it has past the chain rules:
+ * the engine singletons with Tier 1 chain rules, and `GDScript`, whose static
+ * `new()` is the primitive. Each gets a Tier 2 `tier2.alias.<Name>` rule.
+ */
+export const TIER1_ALIASABLE_NAMES: readonly string[] = [
+  'OS',
+  'Engine',
+  'ClassDB',
+  'ProjectSettings',
+  'ResourceLoader',
+  'GDExtensionManager',
+  'GDScript',
+];
+
+/**
+ * Heads of Tier 1 chain rules that get no alias rule, with the reason. The
+ * unit test over the rule table fails when a Tier 1 chain head is in neither
+ * list.
+ *  - `Object`, `Node`: classes named in annotations, `extends` and
+ *    `is_instance_of` throughout ordinary code. Their Tier 1 rules guard the
+ *    static-looking spelling of an instance method, which an alias of the
+ *    class does not reach either.
+ *  - `ConfigFile`: every reference already fires `tier2.config.ConfigFile`.
+ */
+export const TIER1_NAMES_WITHOUT_ALIAS_RULE: readonly string[] = ['Object', 'Node', 'ConfigFile'];
+
+/** One Tier 2 rule per aliasable name: the name used as a value. */
+function aliasRules(): PolicyRule[] {
+  return TIER1_ALIASABLE_NAMES.map((name) => ({
+    id: `tier2.alias.${name}`,
+    tier: 2 as const,
+    chain: [name],
+    valueReferenceOnly: true,
+    reason: `${name} is used as a value, so it can be called under another name or by subscript, past the ${name}.* rules`,
+    solutions: [`Call ${name} methods directly as ${name}.method(...)`],
+  }));
+}
+
+/**
+ * One Tier 1 rule and one Tier 3 rule per dispatch receiver and method: a
+ * non-literal method name is dynamic dispatch onto a receiver whose methods
+ * include Tier 1 primitives; a literal name that reached this rule names a
+ * method no other rule covers, and is only noted. "Literal" means the policy
+ * read the method the call ends at (`resolveReflectiveCall`): a first argument
+ * that is a string but does not compile to an identifier, or that names a
+ * further dispatch the policy could not follow, counts as non-literal.
+ */
+function reflectiveDispatchRules(tier: 1 | 3): PolicyRule[] {
+  const rules: PolicyRule[] = [];
+  for (const receiver of TIER1_DISPATCH_RECEIVERS) {
+    for (const method of OBJECT_DISPATCH_METHODS) {
+      rules.push(
+        tier === 1
+          ? {
+              id: `tier1.indirect.${receiver}.${method}.nonliteral`,
+              tier: 1,
+              chain: [receiver, method],
+              argumentKind: 'nonliteral',
+              reason: `${receiver}.${method} with a non-literal method name is dynamic dispatch that bypasses the ${receiver}.* rules`,
+              solutions: [`Call the ${receiver} method directly by name`],
+            }
+          : {
+              id: `tier3.literal.${receiver}.${method}`,
+              tier: 3,
+              chain: [receiver, method],
+              argumentKind: 'literal',
+              reason: `${receiver}.${method} with a literal method name`,
+              solutions: [`Consider calling the ${receiver} method directly`],
+            },
+      );
     }
-
-    collected.push(tok);
   }
-
-  if (collected.length === 0) return 'none';
-  if (collected.length === 1 && collected[0]!.kind === 'string') return 'literal';
-  return 'nonliteral';
+  return rules;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +403,21 @@ export const policyRules: readonly PolicyRule[] = [
     chain: ['OS', 'set_restart_on_exit'],
     reason: 'OS.set_restart_on_exit changes process restart behavior',
     solutions: ['Remove the call'],
+  },
+
+  {
+    id: 'tier1.direct_exec.OS.create_instance',
+    tier: 1,
+    chain: ['OS', 'create_instance'],
+    reason: 'OS.create_instance starts another Godot process with arbitrary arguments',
+    solutions: ['Restructure the script to operate only on the scene tree'],
+  },
+  {
+    id: 'tier1.native.GDExtensionManager.load_extension',
+    tier: 1,
+    chain: ['GDExtensionManager', 'load_extension'],
+    reason: 'GDExtensionManager.load_extension loads a native library into the process',
+    solutions: ['Register extensions in the project, not from a script at runtime'],
   },
 
   // ---- Tier 1: resource-pack persistence ----
@@ -345,10 +505,15 @@ export const policyRules: readonly PolicyRule[] = [
       'Callable(target, "method") constructs runtime dynamic dispatch that bypasses static analysis',
     solutions: ['Call the method directly by name instead of constructing a Callable'],
   },
+  // `set_script` is an instance method: the idiomatic call is
+  // `node.set_script(s)` on a local, which the two class-name rules above
+  // never see. The name is distinctive, so it is matched on any receiver, and
+  // bare (on self, or after a call that breaks the chain).
   {
     id: 'tier2.reflection.set_script.bareIdentifier',
     tier: 2,
     chain: ['set_script'],
+    matchLastSegment: true,
     matchAsBareIdentifier: true,
     reason: 'set_script attaches arbitrary code to an object (receiver type not statically known)',
     solutions: [
@@ -364,6 +529,21 @@ export const policyRules: readonly PolicyRule[] = [
     chain: ['Expression'],
     reason: 'Expression evaluates arbitrary GDScript expressions at runtime',
     solutions: ['Compute the value directly in GDScript instead of via Expression'],
+  },
+  // `GDScript.new()` is how source held in a string becomes running code
+  // (`source_code = ...` then `reload()`), which is what `Expression` does for
+  // one expression. Keyed on the `.new` chain, a static constructor whose
+  // receiver is always the literal class name, so a `: GDScript` annotation
+  // and an `is GDScript` test are not matched.
+  {
+    id: 'tier1.dynamic.GDScript.new',
+    tier: 1,
+    chain: ['GDScript', 'new'],
+    reason:
+      'GDScript.new() creates a script object whose source can be set and compiled at runtime',
+    solutions: [
+      'Write the code as a script file in the project and attach it with the attach_script MCP tool',
+    ],
   },
   {
     id: 'tier1.dynamic.str_to_var',
@@ -383,6 +563,49 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'bytes_to_var_with_objects deserializes objects, including scripts',
     solutions: ['Use bytes_to_var (no _with_objects) for data-only deserialization'],
   },
+
+  // Reading or assigning a script's source at runtime is the other half of
+  // `GDScript.new()`: `get_script().duplicate()` gives a script object without
+  // naming the class, and `source_code = ...` then `reload()` compiles it.
+  // Tier 2, not Tier 1: `source_code` is also a plausible name for a game's
+  // own variable (a code-editor widget, a programming puzzle), and a bare
+  // name cannot be told from the `Script` property.
+  {
+    id: 'tier2.dynamic.source_code',
+    tier: 2,
+    chain: ['source_code'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
+    reason:
+      'source_code is the text a script object compiles: assigning it and reloading runs code held in a string',
+    solutions: [
+      'Write the code as a script file in the project and attach it with the attach_script MCP tool',
+      'Rename the variable if `source_code` is a name of your own',
+    ],
+  },
+  // `JavaScriptBridge` is a singleton, so the class name is the receiver.
+  // Tier 2: a web export calls it for ordinary browser integration.
+  {
+    id: 'tier2.dynamic.JavaScriptBridge.eval',
+    tier: 2,
+    chain: ['JavaScriptBridge', 'eval'],
+    reason: 'JavaScriptBridge.eval runs a string as JavaScript in the hosting page (web exports)',
+    solutions: ['Confirm the JavaScript being evaluated is intentional'],
+  },
+  // An instance id is a number, so the object it names is invisible to every
+  // receiver-based rule.
+  {
+    id: 'tier2.reflection.instance_from_id',
+    tier: 2,
+    chain: ['instance_from_id'],
+    matchAsBareIdentifier: true,
+    globalFunctionOnly: true,
+    reason: 'instance_from_id returns any live object by number, past every rule keyed on a name',
+    solutions: ['Reach the object through the scene tree or a reference you already hold'],
+  },
+  // A guarded singleton or class used as a value: `var o = OS`, `foo(OS)`,
+  // `[OS][0]`, `OS["execute"]`.
+  ...aliasRules(),
 
   // ---- Tier 1: ConfigFile load family ----
   // These three fire only on the static-looking `ConfigFile.method(p)` form.
@@ -445,54 +668,17 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Pass a literal `res://...` path to ResourceLoader.load'],
   },
   {
-    id: 'tier1.indirect.Object.call.nonliteral',
+    id: 'tier1.indirect.ResourceLoader.load_threaded_request.nonliteral',
     tier: 1,
-    chain: ['Object', 'call'],
+    chain: ['ResourceLoader', 'load_threaded_request'],
     argumentKind: 'nonliteral',
-    reason: 'Object.call with a non-literal method name is a dynamic dispatch',
-    solutions: ['Call the method directly by name'],
+    reason: 'ResourceLoader.load_threaded_request with a non-literal path can be redirected',
+    solutions: ['Pass a literal `res://...` path to ResourceLoader.load_threaded_request'],
   },
-  {
-    id: 'tier1.indirect.Object.callv.nonliteral',
-    tier: 1,
-    chain: ['Object', 'callv'],
-    argumentKind: 'nonliteral',
-    reason: 'Object.callv with a non-literal method name is a dynamic dispatch',
-    solutions: ['Call the method directly by name'],
-  },
-  {
-    id: 'tier1.indirect.OS.call.nonliteral',
-    tier: 1,
-    chain: ['OS', 'call'],
-    argumentKind: 'nonliteral',
-    reason: 'OS.call with a non-literal method name bypasses the OS.* allowlist',
-    solutions: ['Call the OS method directly by name'],
-  },
-  {
-    id: 'tier1.indirect.Engine.call.nonliteral',
-    tier: 1,
-    chain: ['Engine', 'call'],
-    argumentKind: 'nonliteral',
-    reason: 'Engine.call with a non-literal method name bypasses the Engine.* allowlist',
-    solutions: ['Call the Engine method directly by name'],
-  },
-  {
-    id: 'tier1.indirect.ClassDB.call.nonliteral',
-    tier: 1,
-    chain: ['ClassDB', 'call'],
-    argumentKind: 'nonliteral',
-    reason: 'ClassDB.call with a non-literal method name bypasses the ClassDB.* allowlist',
-    solutions: ['Call the ClassDB method directly by name'],
-  },
-  {
-    id: 'tier1.indirect.ProjectSettings.call.nonliteral',
-    tier: 1,
-    chain: ['ProjectSettings', 'call'],
-    argumentKind: 'nonliteral',
-    reason:
-      'ProjectSettings.call with a non-literal method name bypasses the ProjectSettings.* allowlist',
-    solutions: ['Call the ProjectSettings method directly by name'],
-  },
+  // A method name that is not a literal, on a receiver that carries Tier 1
+  // primitives: `OS.call(name)`, `Engine.callv(name, args)`,
+  // `ClassDB.call_deferred(name)`.
+  ...reflectiveDispatchRules(1),
 
   // ---- Tier 2: filesystem writes ----
   // NOTE: FileAccess.open with WRITE mode requires looking at the second
@@ -509,6 +695,9 @@ export const policyRules: readonly PolicyRule[] = [
       'If writing, restructure the script to use a dedicated MCP write tool',
     ],
   },
+  // `remove`, `copy` and `rename` are instance methods with generic names, so
+  // these three guard the static-looking spelling only; instance use is noted
+  // by the `tier3.fs.DirAccess` class anchor (docs/security.md).
   {
     id: 'tier2.fs.DirAccess.remove',
     tier: 2,
@@ -538,9 +727,25 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Confirm the rename is intentional'],
   },
   {
+    id: 'tier2.fs.DirAccess.copy_absolute',
+    tier: 2,
+    chain: ['DirAccess', 'copy_absolute'],
+    reason: 'DirAccess.copy_absolute writes a file anywhere on disk',
+    solutions: ['Confirm the copy is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.rename_absolute',
+    tier: 2,
+    chain: ['DirAccess', 'rename_absolute'],
+    reason: 'DirAccess.rename_absolute moves or renames a file anywhere on disk',
+    solutions: ['Confirm the rename is intentional'],
+  },
+  {
     id: 'tier2.fs.DirAccess.create_link',
     tier: 2,
-    chain: ['DirAccess', 'create_link'],
+    chain: ['create_link'],
+    matchLastSegment: true,
+    matchAsBareIdentifier: true,
     reason: 'DirAccess.create_link creates filesystem links',
     solutions: ['Confirm the link creation is intentional'],
   },
@@ -647,45 +852,16 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Verify the resource path is trusted'],
   },
   {
-    id: 'tier3.literal.Object.call',
+    id: 'tier3.literal.ResourceLoader.load_threaded_request',
     tier: 3,
-    chain: ['Object', 'call'],
+    chain: ['ResourceLoader', 'load_threaded_request'],
     argumentKind: 'literal',
-    reason: 'Object.call with a literal method name',
-    solutions: ['Consider calling the method directly'],
+    reason: 'ResourceLoader.load_threaded_request with a literal path can run _init code',
+    solutions: ['Verify the resource path is trusted'],
   },
-  {
-    id: 'tier3.literal.OS.call',
-    tier: 3,
-    chain: ['OS', 'call'],
-    argumentKind: 'literal',
-    reason: 'OS.call with a literal method name',
-    solutions: ['Consider calling the OS method directly'],
-  },
-  {
-    id: 'tier3.literal.Engine.call',
-    tier: 3,
-    chain: ['Engine', 'call'],
-    argumentKind: 'literal',
-    reason: 'Engine.call with a literal method name',
-    solutions: ['Consider calling the Engine method directly'],
-  },
-  {
-    id: 'tier3.literal.ClassDB.call',
-    tier: 3,
-    chain: ['ClassDB', 'call'],
-    argumentKind: 'literal',
-    reason: 'ClassDB.call with a literal method name',
-    solutions: ['Consider calling the ClassDB method directly'],
-  },
-  {
-    id: 'tier3.literal.ProjectSettings.call',
-    tier: 3,
-    chain: ['ProjectSettings', 'call'],
-    argumentKind: 'literal',
-    reason: 'ProjectSettings.call with a literal method name',
-    solutions: ['Consider calling the ProjectSettings method directly'],
-  },
+  // A literal method name is first evaluated as the call it makes, so these
+  // are reached only for a method no other rule covers.
+  ...reflectiveDispatchRules(3),
   {
     id: 'tier3.os_alert',
     tier: 3,
@@ -867,6 +1043,16 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'DirAccess.make_dir_recursive_absolute creates a directory tree on disk',
     solutions: ['Confirm the directory creation is intentional'],
   },
+  // After every DirAccess rule above, so a call one of them names keeps its
+  // own finding. Tier 3, one below the primitives it stands for.
+  {
+    id: 'tier3.fs.DirAccess',
+    tier: 3,
+    chain: ['DirAccess'],
+    reason:
+      'A DirAccess instance can remove, copy and rename files, and those method names are too common to match on their own',
+    solutions: ['Check what the script does with the directory it opens'],
+  },
   {
     id: 'tier2.fs.OS.move_to_trash',
     tier: 2,
@@ -915,12 +1101,16 @@ export const policyRules: readonly PolicyRule[] = [
   // first-match-wins, so Object.call(var) still fires the more specific
   // Tier 1 rule ahead of this one). Tier 2, not Tier 1: plenty of benign code
   // does `some_callable.call(...)`, and over-blocking here would train
-  // reflexive elicitation approval.
+  // reflexive elicitation approval. Both also match as a bare identifier:
+  // `call(name)` with no receiver is `Object.call` on self, and
+  // `get_node("A").call(name)` leaves `call` bare after the call that breaks
+  // the chain. The name is `Object`'s own method in either position.
   {
     id: 'tier2.generic.call.nonliteral',
     tier: 2,
     chain: ['call'],
     matchLastSegment: true,
+    matchAsBareIdentifier: true,
     argumentKind: 'nonliteral',
     reason:
       'A non-literal .call on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
@@ -934,6 +1124,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 2,
     chain: ['callv'],
     matchLastSegment: true,
+    matchAsBareIdentifier: true,
     argumentKind: 'nonliteral',
     reason:
       'A non-literal .callv on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
@@ -975,8 +1166,16 @@ function matchesBareIdentifier(tok: Token, rule: PolicyRule): boolean {
   );
 }
 
-function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
+function tokenMatchesRule(tok: Token, rule: PolicyRule, isValueReference: boolean): boolean {
   if (rule.globalFunctionOnly && tok.precededByDot) return false;
+  if (rule.valueReferenceOnly) {
+    return (
+      isValueReference &&
+      tok.kind === 'identifier' &&
+      !tok.precededByDot &&
+      tok.text === rule.chain[0]
+    );
+  }
   if (rule.matchLastSegment) {
     if (tok.kind === 'memberChain' && tok.chain && tok.chain.length >= 2) {
       return tok.chain[tok.chain.length - 1] === rule.chain[0];
@@ -1011,47 +1210,308 @@ function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
   return true;
 }
 
+/**
+ * The first rule the token fires, or undefined. `openParen` is the index of
+ * the `(` of the call the token makes, or -1 when it is not called;
+ * `firstArgument` classifies the argument an `argumentKind` rule looks at;
+ * `isValueReference` says whether the token stands where a value does (see
+ * `valueReferencePositions`).
+ */
+function firstMatchingRule(
+  tok: Token,
+  openParen: number,
+  firstArgument: () => ArgumentClassification,
+  isValueReference: boolean,
+): PolicyRule | undefined {
+  for (const rule of policyRules) {
+    if (!tokenMatchesRule(tok, rule, isValueReference)) continue;
+    if (rule.callOnly && openParen === -1) continue;
+    if (rule.argumentKind) {
+      if (openParen === -1) continue;
+      if (firstArgument() !== rule.argumentKind) continue;
+    }
+    return rule;
+  }
+  return undefined;
+}
+
+/** The call a reflective dispatch makes, as the policy evaluates it. */
+interface ReflectiveCallTarget {
+  /** The token of the equivalent direct call: `OS.execute` for `OS.call("execute", ...)`. */
+  token: Token;
+  /** The dispatch as written, with the method names it gives: `OS.call("execute")`. */
+  matchedText: string;
+  /** Classification of the first argument that call receives. */
+  firstArgument: () => ArgumentClassification;
+}
+
+/**
+ * What a reflective dispatch resolves to: the direct call it stands for, or
+ * `opaque` when the method it names cannot be read from the source.
+ */
+type DispatchResolution = { kind: 'target'; target: ReflectiveCallTarget } | { kind: 'opaque' };
+
+const OPAQUE_DISPATCH: DispatchResolution = { kind: 'opaque' };
+
+/**
+ * The method name an argument gives, or null when it is not one plain string
+ * literal whose compiled value is an identifier. The literal is decoded first,
+ * so `"\u0065xecute"` names `execute`; an expression, an escape GDScript does
+ * not define, and a string that is not an identifier all give null.
+ */
+function methodNameOf(argument: readonly Token[]): string | null {
+  if (argument.length !== 1 || argument[0]!.kind !== 'string') return null;
+  const name = decodeStringLiteral(argument[0]!);
+  return name !== null && METHOD_NAME_REGEX.test(name) ? name : null;
+}
+
+/**
+ * The elements of an argument that is exactly one array literal, or null when
+ * it is anything else (a variable, `[a] + b`, no argument at all).
+ */
+function arrayLiteralElements(
+  tokens: readonly Token[],
+  argument: readonly Token[],
+): Token[][] | null {
+  const first = argument[0];
+  if (first === undefined || first.kind !== 'punct' || first.text !== '[') return null;
+  let depth = 0;
+  for (let k = 0; k < argument.length; k++) {
+    const tok = argument[k]!;
+    if (tok.kind !== 'punct') continue;
+    if (tok.text === '[' || tok.text === '(') depth++;
+    else if (tok.text === ']' || tok.text === ')') depth--;
+    // The bracket that opened the argument must close on its last token.
+    if (depth === 0 && k < argument.length - 1) return null;
+  }
+  if (depth !== 0) return null;
+  return argumentsOfArray(tokens, tokens.indexOf(first));
+}
+
+/**
+ * `X.call("m", a)`, `X.callv("m", [a])` and `X.call_deferred("m", a)` call
+ * `X.m(a)`. When the token at `tokens[i]` is such a dispatch, resolve the call
+ * it stands for, so the same rule fires at the same tier as the direct
+ * spelling. A method that is itself a dispatch (`X.call("callv", "m", [a])`)
+ * is followed to the method it names in turn, up to `MAX_DISPATCH_DEPTH`.
+ *
+ * Null when the token is not a dispatch method, or is one called with no
+ * argument. `opaque` when the method cannot be read: the name is not a plain
+ * string literal that compiles to an identifier, a `callv` in the chain gets
+ * something other than an array literal, or the chain is deeper than the
+ * bound. The caller then judges the call as dispatch by a non-literal name.
+ *
+ * With no receiver in the token (`call("m")` on self, or after a call that
+ * broke the chain) the target is a method of an object the scanner cannot
+ * see, so it is marked as following a `.`: rules for a global function never
+ * read it as one.
+ */
+function resolveReflectiveCall(
+  tokens: readonly Token[],
+  i: number,
+  openParen: number,
+): DispatchResolution | null {
+  const tok = tokens[i]!;
+  const chain = tok.kind === 'memberChain' && tok.chain ? tok.chain : [tok.text];
+  let dispatch = chain[chain.length - 1]!;
+  if (!REFLECTIVE_DISPATCH_METHODS.has(dispatch)) return null;
+
+  let args = argumentsOf(tokens, openParen);
+  if ((args[0] ?? []).length === 0) return null;
+
+  const names: string[] = [];
+  for (let depth = 0; depth < MAX_DISPATCH_DEPTH; depth++) {
+    const method = methodNameOf(args[0] ?? []);
+    if (method === null) return OPAQUE_DISPATCH;
+    names.push(method);
+    // callv forwards the elements of its array argument; the others forward
+    // what follows the name.
+    const forwardedArray = args[1] ?? [];
+    const forwarded =
+      dispatch === ARRAY_DISPATCH_METHOD
+        ? arrayLiteralElements(tokens, forwardedArray)
+        : args.slice(1);
+
+    if (REFLECTIVE_DISPATCH_METHODS.has(method)) {
+      if (forwarded === null) return OPAQUE_DISPATCH;
+      dispatch = method;
+      args = forwarded;
+      continue;
+    }
+
+    const receiver = chain.slice(0, -1);
+    const token: Token =
+      receiver.length > 0
+        ? { ...tok, kind: 'memberChain', chain: [...receiver, method] }
+        : { ...tok, kind: 'identifier', text: method, precededByDot: true };
+    const firstArgument = (): ArgumentClassification => {
+      // Anything but an array literal is an argument list the scanner cannot read.
+      if (forwarded === null) return forwardedArray.length === 0 ? 'none' : 'nonliteral';
+      return classifyArgument(forwarded[0] ?? []);
+    };
+    const matchedText = `${tok.text}(${names.map((name) => `"${name}"`).join(', ')})`;
+    return { kind: 'target', target: { token, matchedText, firstArgument } };
+  }
+  return OPAQUE_DISPATCH;
+}
+
+/** The tokens of each top-level element of the array literal whose `[` is at `openBracketIndex`. */
+function argumentsOfArray(tokens: readonly Token[], openBracketIndex: number): Token[][] {
+  const elements: Token[][] = [[]];
+  let depth = 0;
+  for (let j = openBracketIndex + 1; j < tokens.length; j++) {
+    const tok = tokens[j]!;
+    if (tok.kind === 'newline') continue;
+    if (tok.kind === 'punct') {
+      if (tok.text === '(' || tok.text === '[') {
+        depth++;
+      } else if (tok.text === ']' || tok.text === ')') {
+        if (depth === 0) break;
+        depth--;
+      } else if (tok.text === ',' && depth === 0) {
+        elements.push([]);
+        continue;
+      }
+    }
+    elements[elements.length - 1]!.push(tok);
+  }
+  return elements;
+}
+
+/** Keywords after which a name is a type, not a value. */
+const TYPE_KEYWORDS: ReadonlySet<string> = new Set(['as', 'is', 'extends']);
+/** Keywords after which a name is being declared. */
+const DECLARATION_KEYWORDS: ReadonlySet<string> = new Set([
+  'var',
+  'const',
+  'func',
+  'class',
+  'class_name',
+  'signal',
+  'enum',
+]);
+/** The generic containers whose `[...]` holds types: `Array[OS]`, `Dictionary[String, OS]`. */
+const TYPED_CONTAINER_NAMES: ReadonlySet<string> = new Set(['Array', 'Dictionary']);
+const OPENING_BRACKETS: ReadonlySet<string> = new Set(['(', '[', '{']);
+const CLOSING_BRACKETS: ReadonlySet<string> = new Set([')', ']', '}']);
+const DICTIONARY_OPEN = '{';
+
+/**
+ * For every token index, whether an identifier there stands where a value
+ * does. False where the name is a type or is being declared:
+ *  - after `:` that follows a name outside a dictionary literal (`var x: OS`,
+ *    `func f(a: OS)`); inside `{...}` the colon separates a key from a value;
+ *  - after `->` (a return type), `as`, `is`, `is not` and `extends`;
+ *  - inside the brackets of `Array[...]` or `Dictionary[...]`;
+ *  - after `var`, `const`, `func`, `class`, `class_name`, `signal`, `enum`.
+ * `:=` is an assignment, so the name after it is a value.
+ */
+function valueReferencePositions(tokens: readonly Token[]): boolean[] {
+  const positions: boolean[] = new Array<boolean>(tokens.length).fill(false);
+  const open: Array<{ bracket: string; holdsTypes: boolean }> = [];
+  let previous: Token | undefined;
+  let beforePrevious: Token | undefined;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (tok.kind === 'newline') continue;
+    const innermost = open[open.length - 1];
+
+    if (tok.kind === 'identifier') {
+      const afterAnnotationColon =
+        previous?.kind === 'other' &&
+        previous.text === ':' &&
+        beforePrevious?.kind === 'identifier' &&
+        innermost?.bracket !== DICTIONARY_OPEN;
+      const afterArrow =
+        previous?.kind === 'other' &&
+        previous.text === '>' &&
+        beforePrevious?.kind === 'other' &&
+        beforePrevious.text === '-';
+      const afterKeyword =
+        previous?.kind === 'identifier' &&
+        (TYPE_KEYWORDS.has(previous.text) ||
+          DECLARATION_KEYWORDS.has(previous.text) ||
+          (previous.text === 'not' &&
+            beforePrevious?.kind === 'identifier' &&
+            beforePrevious.text === 'is'));
+      positions[i] =
+        !afterAnnotationColon && !afterArrow && !afterKeyword && innermost?.holdsTypes !== true;
+    }
+
+    if (OPENING_BRACKETS.has(tok.text) && (tok.kind === 'punct' || tok.kind === 'other')) {
+      open.push({
+        bracket: tok.text,
+        holdsTypes:
+          tok.text === '[' &&
+          previous?.kind === 'identifier' &&
+          TYPED_CONTAINER_NAMES.has(previous.text),
+      });
+    } else if (CLOSING_BRACKETS.has(tok.text) && (tok.kind === 'punct' || tok.kind === 'other')) {
+      open.pop();
+    }
+    beforePrevious = previous;
+    previous = tok;
+  }
+  return positions;
+}
+
+/** The first argument of a dispatch whose method name the policy could not read. */
+const UNREADABLE_METHOD_NAME: ArgumentClassification = 'nonliteral';
+
 export function evaluateScript(source: string, strict = false): PolicyDecision {
   const tokens = tokenize(source);
+  const valueReferences = valueReferencePositions(tokens);
   const matches: PolicyMatch[] = [];
   let promotedByStrict = false;
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
     if (tok.kind !== 'identifier' && tok.kind !== 'memberChain') continue;
+    // The name a `func` declaration gives is not a use of that name.
+    if (tok.precededByFunc) continue;
 
-    for (const rule of policyRules) {
-      if (!tokenMatchesRule(tok, rule)) continue;
+    const openParen = indexOfOpenParen(tokens, i);
 
-      const openParen = indexOfOpenParen(tokens, i);
-
-      if (rule.callOnly && openParen === -1) continue;
-
-      if (rule.argumentKind) {
-        if (openParen === -1) continue;
-        const classification = classifyFirstArgument(tokens, openParen);
-        if (classification !== rule.argumentKind) continue;
-      }
-
-      let effectiveTier: Tier = rule.tier;
-      if (strict && rule.tier === 2) {
-        effectiveTier = 1;
-        promotedByStrict = true;
-      }
-
-      matches.push({
-        ruleId: rule.id,
-        tier: effectiveTier,
-        line: tok.line,
-        column: tok.column,
-        matchedText: tok.text,
-        reason: rule.reason,
-        solutions: rule.solutions,
-      });
+    // A reflective dispatch with a literal method name is the direct call it
+    // makes. When that call fires a rule, the finding is that rule's; when it
+    // fires none, the token is evaluated as written. A dispatch whose method
+    // name cannot be read is evaluated as written too, as dispatch by a
+    // non-literal name, whatever its first argument looks like.
+    let matched: { rule: PolicyRule; text: string } | undefined;
+    const dispatch = openParen === -1 ? null : resolveReflectiveCall(tokens, i, openParen);
+    if (dispatch?.kind === 'target') {
+      const { target } = dispatch;
+      const rule = firstMatchingRule(target.token, openParen, target.firstArgument, false);
+      if (rule !== undefined) matched = { rule, text: target.matchedText };
+    }
+    if (matched === undefined) {
       // Each token may only fire one rule (the first match wins). Subsequent
       // rules of the same kind would only duplicate the finding.
-      break;
+      const firstArgument =
+        dispatch?.kind === 'opaque'
+          ? (): ArgumentClassification => UNREADABLE_METHOD_NAME
+          : (): ArgumentClassification => classifyFirstArgument(tokens, openParen);
+      const rule = firstMatchingRule(tok, openParen, firstArgument, valueReferences[i] === true);
+      if (rule !== undefined) matched = { rule, text: tok.text };
     }
+    if (matched === undefined) continue;
+
+    let effectiveTier: Tier = matched.rule.tier;
+    if (strict && matched.rule.tier === 2) {
+      effectiveTier = 1;
+      promotedByStrict = true;
+    }
+
+    matches.push({
+      ruleId: matched.rule.id,
+      tier: effectiveTier,
+      line: tok.line,
+      column: tok.column,
+      matchedText: matched.text,
+      reason: matched.rule.reason,
+      solutions: matched.rule.solutions,
+    });
   }
 
   let highest: Tier | null = null;
