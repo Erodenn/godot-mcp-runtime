@@ -66,6 +66,19 @@ The integration suite hides game windows by default. Set `GODOT_MCP_TEST_SHOW_WI
 
 On Windows the suite compiles a small helper from `tests/helpers/private-desktop-launcher.cs` on first run (cached under `node_modules/.cache`) and starts every Godot process on a private desktop, so test runs do not take keyboard focus. `GODOT_MCP_TEST_SHOW_WINDOWS=1` turns this off. When the compiler is unavailable the suite falls back to hidden windows, which can still take focus. Anything a game pops up (a dialog, a crash box) appears on the private desktop where it cannot be seen, so a test that hangs under the launcher should be re-run with the opt-out. Details are in `tests/README.md`.
 
+## Comments
+
+The default is no comment. Names, types and structure carry the meaning, and a comment earns its place only by stating what the code cannot: a hazard (ordering, lifetime, timing, a platform difference, units), an external contract (a Godot, Node or MCP SDK quirk, a wire format), or a reason whose absence invites a wrong fix. This applies to TypeScript and GDScript under `src/` and `tests/` alike.
+
+- **One line.** A second line needs a real footgun. Anything longer belongs in `docs/architecture.md`, with at most a one-line pointer in the code. No comment run is longer than two lines.
+- **Never write:** narration of what the code or a name already says, walkthroughs of branches, file-header essays, section banners, history or provenance ("was", "previously", "now that", an issue or PR number as the whole reason), lists of callers, readers or writers, or planning labels of any kind.
+- **JSDoc** on an exported symbol is one line unless the contract carries a hazard. A declaration is not a reason to comment it.
+- **Keep:** `KEEP IN SYNC` markers (one line on each side, naming the other side), the one-line reason on an `eslint-disable`, and in a test the one-line derivation of a hand-computed expected value.
+- **Not comments:** tool `description` strings and per-property descriptions are product text, and this section does not apply to them.
+- **Stale comments:** when you edit near one, delete it rather than rewriting it.
+
+The pre-commit hook runs `scripts/comment-share.js` over the staged diff and prints a warning when a file adds a comment run longer than two lines, or when comments are more than 30% of the lines it adds (with at least four comment lines). It only warns and never blocks the commit.
+
 ## Architectural invariants
 
 These rules are not all encodable in the linter, but they hold across the codebase. Changes that violate them should be flagged in review.
