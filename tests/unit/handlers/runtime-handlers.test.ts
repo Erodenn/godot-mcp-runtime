@@ -12,7 +12,7 @@
  * runtime-tools is the only consumer.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
@@ -59,6 +59,23 @@ import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
+
+// handleRunProject checks for a display before the launch gate. Nothing real is
+// spawned here, so satisfy that check on Linux CI (no X server) instead of
+// letting the platform decide the outcome.
+let savedDisplay: string | undefined;
+let displayWasSet = false;
+beforeAll(() => {
+  savedDisplay = process.env.DISPLAY;
+  displayWasSet =
+    process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+  if (displayWasSet) process.env.DISPLAY = ':0';
+});
+afterAll(() => {
+  if (!displayWasSet) return;
+  if (savedDisplay === undefined) delete process.env.DISPLAY;
+  else process.env.DISPLAY = savedDisplay;
+});
 
 // ---------------------------------------------------------------------------
 // MCP context fakes

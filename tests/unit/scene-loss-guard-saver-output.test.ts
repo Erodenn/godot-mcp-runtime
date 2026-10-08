@@ -17,6 +17,7 @@ import {
   toolPathToFilePath,
   type SceneDiffOptions,
 } from '../../src/utils/scene-loss-guard.js';
+import { fileIdentityKey } from '../../src/utils/path-validation.js';
 import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
@@ -568,13 +569,18 @@ describe('batchSceneWrites: a save-as moves the baseline of its target', () => {
   });
 
   it('folds every spelling of one file into one intent', () => {
-    const spelled = ['a.tscn', './a.tscn', 'res://a.tscn', 'A.tscn'].map((scenePath) => ({
-      ...EDIT_SOURCE,
-      scenePath,
-    }));
+    const foldsCase = fileIdentityKey('/x/A') === fileIdentityKey('/x/a');
+    const names = ['a.tscn', './a.tscn', 'res://a.tscn', ...(foldsCase ? ['A.tscn'] : [])];
+    const spelled = names.map((scenePath) => ({ ...EDIT_SOURCE, scenePath }));
     const writes = batchSceneWrites(spelled, tmp.makeProject('batch-writes-'));
     expect(writes).toHaveLength(1);
     expect(writes[0]?.touchedProperties).toHaveLength(spelled.length);
+  });
+
+  it('keeps two case spellings apart where the file system is case-sensitive', () => {
+    if (fileIdentityKey('/x/A') === fileIdentityKey('/x/a')) return;
+    const spelled = ['a.tscn', 'A.tscn'].map((scenePath) => ({ ...EDIT_SOURCE, scenePath }));
+    expect(batchSceneWrites(spelled, tmp.makeProject('batch-writes-'))).toHaveLength(2);
   });
 
   it('skips an item whose scene escapes the project', () => {
