@@ -14,15 +14,7 @@ import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 
-// ---------------------------------------------------------------------------
-// Shared test helpers
-// ---------------------------------------------------------------------------
-
 const validBase = { projectPath: fixtureProjectPath, scenePath: fixtureScenePath };
-
-// ---------------------------------------------------------------------------
-// handleCreateScene
-// ---------------------------------------------------------------------------
 
 describe('handleCreateScene', () => {
   it('rejects missing projectPath', async () => {
@@ -109,10 +101,6 @@ describe('handleCreateScene', () => {
     expectMatchesOutputSchema('create_scene', result);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleAddNode
-// ---------------------------------------------------------------------------
 
 describe('handleAddNode', () => {
   it('rejects missing projectPath', async () => {
@@ -259,10 +247,6 @@ describe('handleAddNode', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleLoadSprite
-// ---------------------------------------------------------------------------
-
 describe('handleLoadSprite', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -341,10 +325,6 @@ describe('handleLoadSprite', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleSaveScene
-// ---------------------------------------------------------------------------
-
 describe('handleSaveScene', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -398,10 +378,6 @@ describe('handleSaveScene', () => {
     expect(expectMatchesOutputSchema('save_scene', result)).toEqual(saved);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleExportMeshLibrary
-// ---------------------------------------------------------------------------
 
 describe('handleExportMeshLibrary', () => {
   it('rejects missing projectPath', async () => {
@@ -494,10 +470,6 @@ describe('handleExportMeshLibrary', () => {
     expect(Object.keys(payload)[0]).toBe('warnings');
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleBatchSceneOperations
-// ---------------------------------------------------------------------------
 
 describe('handleBatchSceneOperations', () => {
   const validOps = [
@@ -668,10 +640,6 @@ describe('handleBatchSceneOperations', () => {
     expect(payload.results).toHaveLength(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Path spellings: res://, absolute-inside, forwarded as project-relative
-// ---------------------------------------------------------------------------
 
 describe('scene tools accept every project path spelling', () => {
   const spellings = [

@@ -1,12 +1,3 @@
-/**
- * Batch-mode per-target checks[] for handleValidate.
- *
- * The contract under test: every target's checks travel inside the single
- * validate_batch call (one Godot process for the whole batch), a failure on
- * one target never costs the others their result, and the cold-import retry
- * fires at most once per call.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner, type FakeRunner } from '../../helpers/fake-runner.js';
@@ -313,9 +304,8 @@ describe('handleValidate batch mode - per-target checks', () => {
     expectErrorMatching(result, /Batch validate failed/);
   });
 
-  // The import writes .godot/ under the project. A game another MCP server is
-  // running there is the same second writer this server's own session is, and
-  // a registry that cannot be read does not say there is none.
+  // The import writes .godot/: a game another MCP server runs there is a second writer, and an
+  // unreadable registry does not say there is none.
   it("skips the import retry while another MCP server's session is live on the project", async () => {
     const fake = createFakeRunner({
       stdout: '',

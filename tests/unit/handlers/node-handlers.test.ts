@@ -25,15 +25,7 @@ function declaredResultFields(toolName: string): string[] {
   return Object.keys(definition?.outputSchema?.properties.results.items.properties ?? {});
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 const validBase = { projectPath: fixtureProjectPath, scenePath: fixtureScenePath };
-
-// ---------------------------------------------------------------------------
-// handleDeleteNodes
-// ---------------------------------------------------------------------------
 
 describe('handleDeleteNodes', () => {
   it('rejects missing projectPath', async () => {
@@ -146,10 +138,6 @@ describe('handleDeleteNodes', () => {
     expect(declaredResultFields('delete_nodes')).toContain('resolvedNodePath');
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleSetNodeProperties
-// ---------------------------------------------------------------------------
 
 describe('handleSetNodeProperties', () => {
   const validUpdates = [{ nodePath: 'root/Sprite2D', property: 'visible', value: true }];
@@ -283,10 +271,6 @@ describe('handleSetNodeProperties', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetNodeProperties (always-array)
-// ---------------------------------------------------------------------------
-
 describe('handleGetNodeProperties', () => {
   const validNodes = [{ nodePath: 'root' }];
 
@@ -394,10 +378,6 @@ describe('handleGetNodeProperties', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleAttachScript
-// ---------------------------------------------------------------------------
-
 describe('handleAttachScript', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -501,10 +481,6 @@ describe('handleAttachScript', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetSceneTree
-// ---------------------------------------------------------------------------
-
 describe('handleGetSceneTree', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -564,10 +540,6 @@ describe('handleGetSceneTree', () => {
     expectMatchesOutputSchema('get_scene_tree', result);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleDuplicateNode
-// ---------------------------------------------------------------------------
 
 describe('handleDuplicateNode', () => {
   it('rejects missing projectPath', async () => {
@@ -654,10 +626,6 @@ describe('handleDuplicateNode', () => {
     expectMatchesOutputSchema('duplicate_node', result);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleConnectSignal
-// ---------------------------------------------------------------------------
 
 describe('handleConnectSignal', () => {
   it('rejects missing projectPath', async () => {
@@ -799,10 +767,6 @@ describe('handleConnectSignal', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleDisconnectSignal
-// ---------------------------------------------------------------------------
-
 describe('handleDisconnectSignal', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -920,10 +884,6 @@ describe('handleDisconnectSignal', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetNodeSignals
-// ---------------------------------------------------------------------------
-
 describe('handleGetNodeSignals', () => {
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
@@ -1003,10 +963,6 @@ describe('handleGetNodeSignals', () => {
     expect(parsed.signals[0].name).toBe('pressed');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Path spellings: res://, absolute-inside, forwarded as project-relative
-// ---------------------------------------------------------------------------
 
 describe('attach_script accepts every project path spelling', () => {
   it.each([

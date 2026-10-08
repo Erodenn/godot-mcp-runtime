@@ -14,10 +14,6 @@ import { validateTempDir } from '../../../src/utils/artifact-paths.js';
 const projectCopyPath = copyProjectToTmp(fixtureProjectPath, 'mcp-validate-handler-');
 afterAll(() => removeTmpDir(projectCopyPath));
 
-// ---------------------------------------------------------------------------
-// handleValidate: single-target mode
-// ---------------------------------------------------------------------------
-
 describe('handleValidate', () => {
   it('rejects missing projectPath in single-target mode', async () => {
     const fake = createFakeRunner();
@@ -151,10 +147,8 @@ describe('handleValidate', () => {
   });
 
   it('returns valid:false when stdout reports valid:true but stderr contains parse errors', async () => {
-    // Regression: GDScript-side _validate_single returns valid: resource != null,
-    // but load() returns a non-null placeholder for malformed scripts. The
-    // handler must override `valid` to false whenever stderr produced any
-    // parse-error entries.
+    // GDScript _validate_single returns valid: resource != null, but load() returns a placeholder for
+    // malformed scripts: the handler must force `valid` false when stderr produced parse errors.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ valid: true, errors: [] }),
       stderr:
@@ -171,12 +165,9 @@ describe('handleValidate', () => {
     expect(parsed.errors[0].message).toContain('Unexpected token');
   });
 
-  // --- Autoload-aware validation + diagnostic quality regressions ---
-
   it('reports autoload-reference compile errors with file and line (error-43 class)', async () => {
-    // Real-world failure class: scripts referencing autoload singletons produce a
-    // "Compile Error: Identifier not found" on stderr that the handler must
-    // overlay (message + line) instead of reporting a bare invalid.
+    // Scripts referencing autoload singletons print "Compile Error: Identifier not found" on stderr, which the
+    // handler must overlay (message + line) instead of a bare invalid.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ valid: true, errors: [] }),
       stderr: [
@@ -199,10 +190,8 @@ describe('handleValidate', () => {
   });
 
   it('does not surface engine-source line numbers from "Failed to load" echoes', async () => {
-    // The engine echo "ERROR: Failed to load script ..." carries an at: line
-    // pointing into Godot's C++ source (e.g. gdscript_resource_format.cpp:46).
-    // Before the shared-parser dedup, that surfaced as a bogus error entry
-    // with a line number belonging to nobody's script.
+    // The engine echo "ERROR: Failed to load script ..." carries an at: line into Godot's C++ source
+    // (e.g. gdscript_resource_format.cpp:46), not a line of anyone's script.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ valid: true, errors: [] }),
       stderr: [
@@ -223,15 +212,9 @@ describe('handleValidate', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleValidate: batch (targets[]) mode
-// ---------------------------------------------------------------------------
-
 describe('handleValidate batch mode', () => {
   it('invokes validate_batch (not validate_resource) when a targets array is provided', async () => {
-    // Boundary contract: targets[] routes through the batch operation.
-    // Asserting only on the result shape can't distinguish batch from single,
-    // so we inspect the spy.
+    // targets[] must route through the batch operation; the result shape cannot tell batch from single, so inspect the spy.
     const fake = createFakeRunner({
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
@@ -244,9 +227,7 @@ describe('handleValidate batch mode', () => {
     expect(fake.calls[0].operation).toBe('validate_batch');
   });
 
-  // A single-target parameter beside targets used to be dropped: the batch ran
-  // and reported the targets alone, with no sign the other parameter was never
-  // read. It is refused before Godot runs, naming the parameter.
+  // A single-target parameter beside targets is refused before Godot runs, naming the parameter.
   it.each([
     ['scenePath', { scenePath: fixtureScenePath }],
     ['scriptPath', { scriptPath: 'placeholder.gd' }],
@@ -475,16 +456,14 @@ describe('handleValidate batch mode', () => {
   });
 
   it('short-circuits and reports per-target failure when batch scriptPath contains ..', async () => {
-    // Regression: path validation ran in single-target mode but the batch
-    // branch built snakeTargets without it. An agent could pass a traversal
-    // path and bypass the documented path-traversal protection.
+    // Path validation must also run in batch mode, or a traversal path bypasses the path-traversal protection.
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
       projectPath: projectCopyPath,
       targets: [{ scriptPath: '../escape.gd' }],
     });
     expect(hasError(result)).toBe(false);
-    expect(fake.calls).toHaveLength(0); // short-circuit: no runner spawn
+    expect(fake.calls).toHaveLength(0);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(1);
     expect(parsed.results[0].valid).toBe(false);
@@ -527,7 +506,7 @@ describe('handleValidate batch mode', () => {
     const sentTargets = (
       fake.calls[0].params as { targets: Array<{ script_path?: string; scene_path?: string }> }
     ).targets;
-    expect(sentTargets).toHaveLength(2); // only the two valid ones reach Godot
+    expect(sentTargets).toHaveLength(2);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.results).toHaveLength(3);
     expect(parsed.results[0].valid).toBe(true);
@@ -540,15 +519,8 @@ describe('handleValidate batch mode', () => {
   });
 
   it('reports valid:false for parse-broken targets from real Godot 4.5 stderr', async () => {
-    // Regression: real Godot 4.5 stderr formats the `at:` line as
-    //   "   at: GDScript::reload (res://path/to/file.gd:LINE)"
-    //: the res:// path appears inside parentheses after a method name, not bare
-    // after `at:`. The tolerant `at:` regex must capture that path. As a
-    // belt-and-suspenders fallback, the secondary "Failed to load script: \"res://...\""
-    // message lands several lines below after a GDScript backtrace, so the
-    // lookahead window must clear it (10 lines covers any realistic trace).
-    // Without either fix, batch error attribution returns an empty Map and
-    // valid falls back to GDScript's unreliable `resource != null` flag.
+    // Real Godot 4.5 prints the at: line as "   at: GDScript::reload (res://path/to/file.gd:LINE)": the path is in
+    // parentheses, and the "Failed to load script" message lands up to 10 lines below, after a backtrace.
     const fake = createFakeRunner({
       stdout: JSON.stringify({
         results: [
@@ -586,13 +558,6 @@ describe('handleValidate batch mode', () => {
     expect(ok.valid).toBe(true);
   });
 });
-
-// ---------------------------------------------------------------------------
-// writeTempGdScript placement: observed through handleValidate, which
-// is the only caller. The fake runner records the script path it was handed;
-// the directory it was written into survives the per-call unlink, so its
-// presence plus the file's absence proves both halves.
-// ---------------------------------------------------------------------------
 
 describe('handleValidate inline-source temp files', () => {
   const tmp = useTmpDirs();
@@ -657,10 +622,6 @@ describe('handleValidate targets shape', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleValidate batch mode: attribution, unattributed diagnostics, check shapes
-// ---------------------------------------------------------------------------
-
 const BROKEN_SCRIPT_STDERR = [
   'SCRIPT ERROR: Parse Error: Expected parameter name.',
   '   at: GDScript::reload (res://broken.gd:3)',
@@ -678,9 +639,8 @@ function batchPayload(result: unknown): {
 
 describe('handleValidate batch attribution', () => {
   it('batch attribution uses the path Godot resolved, not the raw target', async () => {
-    // The caller wrote ./broken.gd; Godot reports the simplified res://broken.gd.
-    // Keyed on the raw spelling the diagnostic matched nothing and the target
-    // stayed valid.
+    // The caller wrote ./broken.gd; Godot reports res://broken.gd. Keyed on the raw spelling, the diagnostic
+    // matched nothing and the target stayed valid.
     const fake = createFakeRunner({
       stdout: JSON.stringify({
         results: [
@@ -813,10 +773,6 @@ describe('handleValidate batch attribution', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleValidate: shapes the checks[] array must have
-// ---------------------------------------------------------------------------
-
 describe('handleValidate check shapes', () => {
   it("a batch target whose checks is an object is that target's error", async () => {
     const fake = createFakeRunner();
@@ -901,10 +857,6 @@ describe('handleValidate check shapes', () => {
     expect(fake.calls).toHaveLength(0);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Path spellings: res://, absolute-inside
-// ---------------------------------------------------------------------------
 
 describe('validate accepts every project path spelling', () => {
   const absolute = (p: string) => join(projectCopyPath, p);

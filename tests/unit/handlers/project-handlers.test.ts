@@ -21,25 +21,15 @@ function parseText<T>(result: unknown): T {
   return JSON.parse(text);
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 const tmp = useTmpDirs();
 
-/** Create a minimal tmp Godot project (project.godot only). */
 function makeTmpProject(): string {
   return tmp.makeProject('mcp-test-');
 }
 
-/** Create an empty tmp directory (no project.godot inside). */
 function makeTmpEmptyDir(): string {
   return tmp.make('mcp-empty-');
 }
-
-// ---------------------------------------------------------------------------
-// handleGetProjectFiles
-// ---------------------------------------------------------------------------
 
 describe('handleGetProjectFiles', () => {
   it('rejects missing projectPath', async () => {
@@ -85,10 +75,6 @@ describe('handleGetProjectFiles', () => {
     expect(files.every((f) => f.extension === 'gd')).toBe(true);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleSearchProject
-// ---------------------------------------------------------------------------
 
 describe('handleSearchProject', () => {
   it('rejects missing projectPath', async () => {
@@ -145,10 +131,6 @@ describe('handleSearchProject', () => {
     expect(parsed.truncated).toBe(true);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleGetSceneDependencies
-// ---------------------------------------------------------------------------
 
 describe('handleGetSceneDependencies', () => {
   it('rejects missing projectPath', async () => {
@@ -245,10 +227,6 @@ describe('handleGetSceneDependencies', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetProjectSettings
-// ---------------------------------------------------------------------------
-
 describe('handleGetProjectSettings', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleGetProjectSettings({});
@@ -335,10 +313,6 @@ describe('handleGetProjectSettings', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleCheckProject
-// ---------------------------------------------------------------------------
-
 describe('handleCheckProject', () => {
   it('returns version-only payload plus an inactive runtime block when no projectPath is provided', async () => {
     const fake = createFakeRunner({ godotVersion: '4.4.1.stable.official' });
@@ -403,10 +377,6 @@ describe('handleCheckProject', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleListProjects
-// ---------------------------------------------------------------------------
-
 describe('handleListProjects', () => {
   it('rejects missing directory', async () => {
     const result = await handleListProjects({});
@@ -433,7 +403,6 @@ describe('handleListProjects', () => {
 
   it('finds a project in a tmp dir that contains one', async () => {
     const dir = makeTmpProject();
-    // parentDir is the dir that contains dir
     const parentDir = join(dir, '..').replace(/[/\\]$/, '');
     const projectName = dir.split(sep).pop()!;
     const result = await handleListProjects({ directory: parentDir });
@@ -443,9 +412,7 @@ describe('handleListProjects', () => {
   });
 
   it('descends into dot-prefixed project dirs that are not on the blacklist', async () => {
-    // Regression: an earlier blanket dot-prefix exclusion silently dropped
-    // legitimate projects whose directory name began with a dot. Only known
-    // noise dirs (.git, .godot, .mcp, node_modules, .svn, .hg) should be skipped.
+    // Only known noise dirs (.git, .godot, .mcp, node_modules, .svn, .hg) are skipped, not every dot-prefixed one.
     const parent = makeTmpEmptyDir();
     const dotProject = join(parent, '.dot-project');
     mkdirSync(dotProject, { recursive: true });
@@ -498,10 +465,6 @@ describe('handleGetProjectSettings: section names are data, not object keys', ()
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetProjectSettings: values as Godot writes them
-// ---------------------------------------------------------------------------
-
 describe('handleGetProjectSettings: value lexing', () => {
   type SettingsPayload = {
     warnings?: string[];
@@ -545,9 +508,8 @@ describe('handleGetProjectSettings: value lexing', () => {
         '',
         'custom/drives=["C:\\\\", "D:\\\\"]',
         'custom/after=7',
-        // One such string alone on a line with its closing bracket. A scan that
-        // reads the closing quote as escaped never sees the bracket, and nothing
-        // later on the line re-balances it the way a second string does above.
+        // A scan that reads the closing quote as escaped never sees the bracket, and nothing later on the line
+        // re-balances it the way a second string does above.
         String.raw`custom/drive=["C:\\"]`,
         String.raw`custom/root={"path": "C:\\"}`,
         'custom/next=8',
@@ -773,10 +735,6 @@ describe('handleGetProjectSettings: value lexing', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// get_project_files and search_project: what was not listed or searched
-// ---------------------------------------------------------------------------
-
 describe('handleGetProjectFiles: depth limits', () => {
   type TreeNode = {
     name: string;
@@ -879,10 +837,6 @@ describe('handleSearchProject: what was searched', () => {
     );
   });
 });
-
-// ---------------------------------------------------------------------------
-// get_scene_dependencies: what could not be read
-// ---------------------------------------------------------------------------
 
 describe('handleGetSceneDependencies: unreadable input', () => {
   type DepsPayload = {

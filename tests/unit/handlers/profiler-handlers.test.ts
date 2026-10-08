@@ -1,12 +1,3 @@
-/**
- * Unit tests for the profiler-tools handlers.
- *
- * The handlers own argument defaults, the sort enum, and the mapping from a
- * `ProfilerError` code to a user-facing solution list. The receiver itself is
- * covered in `unit/profiler.test.ts`, so here it is a stub that records what
- * the handler asked it for.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   PROFILE_PROJECT_WORST_CASE_MS,
@@ -40,7 +31,6 @@ interface ProfilerCall {
 interface ProfilerFake {
   asRunner: GodotRunner;
   calls: ProfilerCall[];
-  /** Bridge commands the handler sent, in order. */
   bridge: Array<{ command: string; params: Record<string, unknown> }>;
 }
 
@@ -191,9 +181,8 @@ function createProfilerFake(
     hasActiveRuntimeSession() {
       return options.session !== false && options.exited !== true;
     },
-    // The real queue, as the runner uses it: a handler holds it through
-    // runExclusive, and a bridge command takes its own turn unless it is sent
-    // from inside the operation that holds it.
+    // The real queue: a handler holds it through runExclusive, and a bridge command takes its own turn
+    // unless sent from inside the operation that holds it.
     runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
       return queue.run(label, operation);
     },

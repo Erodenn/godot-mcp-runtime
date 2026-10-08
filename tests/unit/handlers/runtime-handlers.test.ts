@@ -1,17 +1,3 @@
-/**
- * Unit tests for the runtime-tools handlers.
- *
- * The runtime-tools file has the largest concentration of non-trivial logic
- * in the project: bridge response shaping, runtime-error escalation, mode
- * branching for debug-output and stop, ensureRuntimeSession gating, and the
- * timeout calculation in simulate_input. None of these need a Godot binary
- * to verify: they all branch on runner state + bridge response strings.
- *
- * The fake runner here extends the standard fake with the runtime surface
- * (sendCommandWithErrors, session state, stopProject). Kept inline because
- * runtime-tools is the only consumer.
- */
-
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
@@ -65,9 +51,7 @@ import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import { ElicitationUnsupportedError } from '../../../src/utils/mcp-context.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
-// handleRunProject checks for a display before the launch gate. Nothing real is
-// spawned here, so satisfy that check on Linux CI (no X server) instead of
-// letting the platform decide the outcome.
+// handleRunProject checks for a display before the launch gate; satisfy it on Linux CI (no X server).
 let savedDisplay: string | undefined;
 let displayWasSet = false;
 beforeAll(() => {
@@ -82,15 +66,7 @@ afterAll(() => {
   else process.env.DISPLAY = savedDisplay;
 });
 
-// ---------------------------------------------------------------------------
-// MCP context fakes
-// ---------------------------------------------------------------------------
-
-/**
- * Build a test context with the given elicitor behavior. Defaults to
- * `() => ({ action: 'accept', content: { confirm: true } })`, which auto-accepts
- * both the run_project session gate and any Tier 2 run_script elicitation.
- */
+/** Test context with the given elicitor; the default accepts every prompt (run_project gate and Tier 2 run_script). */
 function makeContext(
   opts: {
     elicit?: Elicitor;
@@ -128,19 +104,12 @@ const unansweredElicitor: Elicitor = async () => {
   throw new Error('Request timed out');
 };
 
-// ---------------------------------------------------------------------------
-// Runtime fake runner
-// ---------------------------------------------------------------------------
-
 /** Pid of a game whose kill the fake reports as unconfirmed. */
 const UNCONFIRMED_KILL_PID = 31337;
 /** Side and color of the small valid PNG used where a screenshot has to decode. */
 const INLINE_PNG_SIDE = 4;
 const INLINE_PNG_COLOR = [10, 120, 200, 255] as const;
-/**
- * One-frame waits whose budget (100 ms a frame, twice per action: the wait and
- * the settle) passes the batch ceiling on count alone.
- */
+/** One-frame waits: 100 ms a frame, twice per action (wait and settle), passes the batch ceiling on count alone. */
 const ACTIONS_PAST_BUDGET = 3000;
 /** How long the fake says a caller waited before the session queue gave up on it. */
 const QUEUE_WAITED_MS = 30000;
@@ -164,11 +133,8 @@ interface BridgeCall {
 interface RuntimeFake {
   asRunner: GodotRunner;
   bridgeCalls: BridgeCall[];
-  /** Number of times stopProject() has been invoked. */
   stopCalls(): number;
-  /** Number of times runProject() has been invoked (the spawn path). */
   runProjectCalls(): number;
-  /** Number of times attachProject() has been invoked (the attach path). */
   attachProjectCalls(): number;
   setSession(opts: {
     mode: RuntimeSessionMode | null;
@@ -191,9 +157,7 @@ interface RuntimeFake {
   /** Runs inside sendCommandWithErrors, before it returns: models session
    *  state changing while a bridge command is in flight. */
   setBridgeHook(hook: (() => void) | null): void;
-  /** Stands in for the boundary-sentinel attribution the real runner derives
-   *  from stderr, so the handler's attachment logic is testable without a
-   *  process. Defaults to no errors and no drain timeout. */
+  /** Stands in for the boundary-sentinel attribution the real runner derives from stderr; defaults to no errors and no drain timeout. */
   setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
   /** Models BridgeManager.isBridgeAutoloadRegistered for the bridge-not-ready
    *  timeout diagnostic. Defaults to true (autoload present). */
@@ -254,9 +218,7 @@ function createRuntimeFake(): RuntimeFake {
   let queueWait: { waitedMs: number; behind: string } | null = null;
   let profilerStreamProblem: string | null = null;
   let alreadyAttachedPort: number | null = null;
-  // Defaults model a healthy inject: the autoload is registered and no other
-  // server session is on this project. Tests override via
-  // setBridgeAutoloadRegistered / setOtherLiveOwners.
+  // Defaults model a healthy inject; tests override via setBridgeAutoloadRegistered / setOtherLiveOwners.
   let bridgeAutoloadRegistered = true;
   let otherLiveOwners: Array<{
     pid: number;
@@ -347,9 +309,7 @@ function createRuntimeFake(): RuntimeFake {
     async stopProject() {
       stopCallCount++;
       if (stopProjectError) throw stopProjectError;
-      // Bridge-failure paths in handleRunProject tear down the session before
-      // returning the error, so reset the mode/project/port state to mirror
-      // the real runner's stopProject behavior.
+      // Bridge-failure paths tear down the session before returning; reset mode/project/port to mirror the real stopProject.
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
@@ -524,7 +484,6 @@ interface RunProjectPayload {
   message: string;
 }
 
-/** The structured payload of a run_project success, as a strict client reads it. */
 function runProjectPayload(result: unknown): RunProjectPayload {
   return unwrap(result).structuredContent as unknown as RunProjectPayload;
 }
@@ -542,10 +501,6 @@ function makeRunningProcess(opts: Partial<GodotProcess> = {}): GodotProcess {
     sessionToken: 'tok',
   };
 }
-
-// ---------------------------------------------------------------------------
-// Validation paths for handleRunProject / handleLaunchEditor
-// ---------------------------------------------------------------------------
 
 describe('handleRunProject validation', () => {
   it('rejects missing projectPath', async () => {
@@ -566,11 +521,6 @@ describe('handleRunProject validation', () => {
     expectErrorMatching(result, /not a valid godot project/i);
   });
 
-  // Regression: issue #15: without an explicit Godot-path precheck, an
-  // unresolved godotPath used to bubble up as a generic "Failed to run
-  // Godot project" error pointing at a hardcoded `C:\Program Files\...`
-  // fallback path the user never configured. The handler must now surface
-  // a clear "set GODOT_PATH" message before attempting to spawn.
   it('returns a "set GODOT_PATH" error when no Godot executable can be resolved', async () => {
     const fake = createRuntimeFake();
     // godotPath stays empty (default), so the precheck must fire.
@@ -830,9 +780,7 @@ describe('handleRunProject bridge failure paths', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(false, 'process gone');
-    // After runProject sets the session, mark the process as already exited
-    // so the handler takes the "process exited" branch (not the timeout
-    // branch) and tears down before returning.
+    // Mark the process exited so the handler takes the process-exited branch, not the timeout branch.
     fake.setRunProjectAfterHook((projectPath) => {
       fake.setSession({
         mode: 'spawned',
@@ -874,14 +822,12 @@ describe('handleRunProject bridge failure paths', () => {
     expectErrorMatching(result, /exited before the MCP bridge could initialize/);
     expect(fake.stopCalls()).toBe(0);
     expect(unwrap(result).content[1]?.text ?? '').toContain('Call get_debug_output');
-    // The advice holds: the logs are still readable.
     const logs = handleGetDebugOutput(fake.asRunner, {});
     expect(hasError(logs)).toBe(false);
     expect(JSON.parse(unwrap(logs).content[0]!.text!).errors).toContain(
       'SCRIPT ERROR: startup crash',
     );
 
-    // And a retry starts a session with no stop_project in between.
     fake.setBridgeReady(true);
     fake.setRunProjectAfterHook(null);
     const retry = await handleRunProject(
@@ -1010,11 +956,6 @@ describe('handleLaunchEditor payload', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// ensureRuntimeSession (via handleTakeScreenshot: same gate every runtime
-// handler uses)
-// ---------------------------------------------------------------------------
-
 describe('ensureRuntimeSession (via handleTakeScreenshot)', () => {
   it('rejects when no session is active', async () => {
     const fake = createRuntimeFake();
@@ -1060,15 +1001,11 @@ describe('ensureRuntimeSession (via handleTakeScreenshot)', () => {
   it('passes through to bridge when attached session is active (no live process required)', async () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'attached', projectPath: '/p' });
-    fake.setBridgeResponse(JSON.stringify({ error: 'irrelevant' })); // forces error response
+    fake.setBridgeResponse(JSON.stringify({ error: 'irrelevant' }));
     await handleTakeScreenshot(fake.asRunner, {});
     expect(fake.bridgeCalls).toHaveLength(1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleGetDebugOutput
-// ---------------------------------------------------------------------------
 
 describe('handleGetDebugOutput', () => {
   it('rejects when no session is active', () => {
@@ -1227,10 +1164,6 @@ describe('handleGetDebugOutput', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleStopProject
-// ---------------------------------------------------------------------------
-
 describe('handleStopProject', () => {
   it('returns the spawned-stopped message when stopProject reports mode:spawned', async () => {
     const fake = createRuntimeFake();
@@ -1337,7 +1270,6 @@ describe('handleStopProject', () => {
     expect(fake.stopCalls()).toBe(1);
   });
 
-  // The process exited on its own; the bridge was cleaned then.
   it('reports alreadyExited with the exit code and captured logs', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({
@@ -1396,9 +1328,8 @@ describe('handleStopProject', () => {
     });
     const result = await handleStopProject(fake.asRunner);
     const parsed = JSON.parse(unwrap(result).content[0].text);
-    // Every line is filtered, so this exercises the fallback rather than the
-    // ordinary keep path -- a bare 'Metal 4.0 - Forward+' would survive the
-    // banner pattern and never reach it.
+    // Every line is filtered, so this reaches the fallback: a bare 'Metal 4.0 - Forward+'
+    // would survive the banner pattern.
     expect(parsed.finalOutput).toEqual(['Metal 4.0 - Forward+ - Using Device #1: Apple M3 Pro']);
     expect(parsed.finalErrors).toEqual([]);
   });
@@ -1506,21 +1437,11 @@ describe('handleStopProject', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// computeInputTimeoutMs + handleSimulateInput
-//
-// The handler's whole job is shaping: caps before the bridge call, a derived
-// timeout, and per-action error attribution onto the bridge's results[]. The
-// bridge response is a fixture string here, so none of this needs Godot.
-// ---------------------------------------------------------------------------
-
 const TIMEOUT_BUFFER_MS = 10000;
 /** Mirrors INPUT_PESSIMISTIC_FRAME_MS: a 10 fps floor, not a frame-rate guess. */
 const PESSIMISTIC_FRAME_MS = 100;
 
 describe('handleStopProject on a record that holds only a finished profiler capture', () => {
-  // switch_project and check_project both tell the caller that stop_project
-  // frees this record. It does, so the answer is the success it is.
   it('reports the release as a success with null logs and a leading warning', async () => {
     const fake = createRuntimeFake();
     fake.setStopResult({
@@ -1580,9 +1501,8 @@ describe('a bridge frame missing what its command always sends is an error, not 
     expectErrorMatching(result, /Invalid response from bridge \(simulate_input\)/);
   });
 
-  // The bridge sends this in place of a reply that passed the frame limit,
-  // after the actions ran. Its flat `error` must not be read as the
-  // pre-validation refusal, whose advice is to fix the batch and resend it.
+  // The bridge sends this instead of a reply that passed the frame limit, after the actions ran.
+  // Its flat `error` must not be read as the pre-validation refusal (fix the batch and resend).
   it('simulate_input: an oversize reply says the batch ran, never that nothing was injected', async () => {
     const fake = activeSession({
       error:
@@ -1730,11 +1650,8 @@ describe('computeInputTimeoutMs', () => {
   });
 
   it('ignores negative wait and hold durations instead of subtracting them', () => {
-    // hold_ms stays explicit (never omitted) across all three variants below:
-    // an *omitted* hold_ms with no `pressed` field reclassifies the action as
-    // a tap and adds INPUT_TAP_HOLD_FRAMES, which is a different, correct code
-    // path and not what this test is about. Only wait.ms/wait.frames vary
-    // between explicit and absent, since a `wait` action never counts as a tap.
+    // hold_ms stays explicit across the three variants: omitting it with no `pressed` field reclassifies
+    // the action as a tap and adds INPUT_TAP_HOLD_FRAMES. Only wait.ms/wait.frames vary.
     const withNegative = [
       { type: 'wait', ms: -5000, frames: -10 },
       { type: 'key', key: 'W', hold_ms: -400 },
@@ -1845,9 +1762,8 @@ describe('handleSimulateInput', () => {
   });
 
   it('forwards watch only when non-empty and passes actions through byte-identical', async () => {
-    // normalizeParameters does not recurse into arrays, so per-action
-    // snake_case fields (hold_ms, relative_x, double_click) must survive
-    // unrewritten all the way to the bridge frame.
+    // normalizeParameters does not recurse into arrays: per-action snake_case fields
+    // (hold_ms, relative_x, double_click) must reach the bridge frame unrewritten.
     const fake = setupActive();
     const actions = [{ type: 'key', key: 'X', hold_ms: 50, double_click: false }];
     await handleSimulateInput(fake.asRunner, { actions });
@@ -1962,9 +1878,7 @@ describe('handleSimulateInput', () => {
   });
 
   it('emits only success and results, dropping the retired count, warnings and tip fields', async () => {
-    // Exact key set rather than three absence assertions: it also catches any
-    // new top-level field arriving without a schema entry, and it keeps the
-    // retired field names out of the tree entirely.
+    // Exact key set, not absence assertions: catches any new top-level field without a schema entry.
     const fake = setupActive();
     fake.setBridgeResponse(JSON.stringify({ success: true, results: [] }), [
       'SCRIPT ERROR: in _process',
@@ -1995,10 +1909,6 @@ describe('handleSimulateInput', () => {
     expect((payload.warnings as string[])[0]).toMatch(/get_debug_output/);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Runtime-error lists: a cut is counted, never silent
-// ---------------------------------------------------------------------------
 
 describe('runtime error lists end with a count of what was cut', () => {
   const SHOWN_LINES = 30;
@@ -2057,10 +1967,6 @@ describe('runtime error lists end with a count of what was cut', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleGetUiElements: defaulting + parameter renaming
-// ---------------------------------------------------------------------------
-
 describe('handleGetUiElements', () => {
   function setupActive(): RuntimeFake {
     const fake = createRuntimeFake();
@@ -2106,10 +2012,6 @@ describe('handleGetUiElements', () => {
     expect(payload.warnings).toEqual(['SCRIPT ERROR: boom']);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleRunScript: false-positive null-result detection + audit write
-// ---------------------------------------------------------------------------
 
 describe('handleRunScript', () => {
   const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn null\n';
@@ -2224,9 +2126,8 @@ describe('handleRunScript', () => {
     expect(payload.tip as string).toContain('get_debug_output to review print() output');
   });
 
-  // The mode is the one captured at the gate. Read after the await it is null
-  // once the game has exited, and a script that raised on its way out would
-  // come back as a plain success with a null result.
+  // The mode is the one captured at the gate: read after the await it is null once the game exited,
+  // and a script that raised on its way out would read as a plain success.
   it('still reports a runtime error when the spawned game exits while the script is in flight', async () => {
     const dir = tmp.makeProject('run-script-');
     const fake = createRuntimeFake();
@@ -2282,13 +2183,11 @@ describe('handleRunScript', () => {
     const files = readdirSync(scriptsDir).filter((f) => f.endsWith('.gd'));
     expect(files).toHaveLength(1);
     expect(readFileSync(join(scriptsDir, files[0]), 'utf8')).toBe(VALID_SCRIPT);
-    // Filename is a numeric timestamp + UUID suffix to avoid collisions.
     expect(files[0]).toMatch(/^\d+-[0-9a-f-]+\.gd$/);
   });
 
-  // Asserts the raw Result shape directly (not via the `unwrap` helper, which
-  // tolerates both the Result wrapper and a raw ToolResponse and would mask a
-  // regression back to the pre-Result-pattern return type).
+  // Asserts the raw Result shape, not via `unwrap`, which tolerates a raw ToolResponse and would mask
+  // a regression to the old return type.
   it('returns the Result<HandlerResult, ToolResponse> shape on success', async () => {
     const dir = tmp.makeProject('run-script-result-shape-');
     const fake = createRuntimeFake();
@@ -2303,10 +2202,6 @@ describe('handleRunScript', () => {
     expect((result as { ok: true; value: { content: unknown } }).value).toHaveProperty('content');
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleRunScript: security policy gate (Tier 1 / Tier 2 / Tier 3)
-// ---------------------------------------------------------------------------
 
 describe('handleRunScript security policy', () => {
   const TIER1_SCRIPT =
@@ -2333,7 +2228,6 @@ describe('handleRunScript security policy', () => {
     const result = await handleRunScript(fake.asRunner, { script: TIER1_SCRIPT });
     expectErrorMatching(result, /Blocked.*OS\.execute/);
     expect(fake.bridgeCalls).toHaveLength(0);
-    // Sidecar should record hard_block.
     const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
@@ -2355,7 +2249,6 @@ describe('handleRunScript security policy', () => {
       { script: TIER1_SCRIPT },
       makeContext({ elicit: countingElicitor, disableSecurity: true }),
     );
-    // Complete no-op: the Tier 1 script actually reaches the bridge and succeeds.
     expect(hasError(result)).toBe(false);
     expect(fake.bridgeCalls).toHaveLength(1);
     expect(elicitCalls).toBe(0);
@@ -2373,7 +2266,6 @@ describe('handleRunScript security policy', () => {
     expect(fake.bridgeCalls).toHaveLength(1);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
-    // Sidecar must record elicit_accepted distinctly from a plain warn.
     const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
@@ -2392,7 +2284,6 @@ describe('handleRunScript security policy', () => {
     );
     expectErrorMatching(result, /User declined.*HTTPRequest/);
     expect(fake.bridgeCalls).toHaveLength(0);
-    // A person said no: nothing points at the opt-out, and the audit says denied.
     expect(unwrap(result).content[1]?.text ?? '').not.toContain('GODOT_MCP_DISABLE_ELICITATION');
     const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
@@ -2400,10 +2291,8 @@ describe('handleRunScript security policy', () => {
     expect(sidecar.decision).toBe('elicit_denied');
   });
 
-  // A cancel is a prompt dismissed without a choice, which some clients do
-  // without ever showing it. It still refuses the script, but it is not
-  // reported as a person declining, and it names the opt-out, as run_project
-  // does.
+  // A cancel is a prompt dismissed without a choice: it refuses the script but is not reported as a
+  // person declining, and names the opt-out as run_project does.
   it('rejects Tier 2 when the elicitor returns cancel, reported apart from a decline', async () => {
     const dir = tmp.makeProject('run-script-tier2-cancel-');
     const fake = activeFake(dir);
@@ -2465,7 +2354,6 @@ describe('handleRunScript security policy', () => {
     );
     expectErrorMatching(result, /Elicitation unavailable.*does not support elicitation/);
     expect(fake.bridgeCalls).toHaveLength(0);
-    // Sidecar must record elicit_denied even on throw, preserving the audit trail.
     const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
@@ -2486,7 +2374,6 @@ describe('handleRunScript security policy', () => {
     expect(fake.bridgeCalls).toHaveLength(1);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
-    // Sidecar records elicit_bypassed, distinct from a user-confirmed accept.
     const scriptsDir = auditScriptsDir(dir);
     const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
     expect(sidecarFile).toBeDefined();
@@ -2543,7 +2430,6 @@ describe('handleRunScript security policy', () => {
     const sidecar = files.find((f) => f.endsWith('.policy.json'));
     expect(gd).toBeDefined();
     expect(sidecar).toBeDefined();
-    // Same base name prefix.
     expect(gd!.replace(/\.gd$/, '')).toBe(sidecar!.replace(/\.policy\.json$/, ''));
     const parsed = JSON.parse(readFileSync(join(scriptsDir, sidecar!), 'utf8'));
     expect(parsed.decision).toBe('warn');
@@ -2583,10 +2469,6 @@ describe('handleRunScript security policy', () => {
     expect(parsed.admitted_as).toBeUndefined();
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleRunProject: security policy pre-flight scan + session gate
-// ---------------------------------------------------------------------------
 
 describe('handleRunProject security pre-flight', () => {
   function makeProjectWithAutoload(prefix: string, autoloadGd: string): string {
@@ -2632,7 +2514,6 @@ describe('handleRunProject security pre-flight', () => {
       acceptingContext({ strict: true }),
     );
     expectErrorMatching(result, /Strict mode: refusing to launch/);
-    // Bridge must NOT be reached.
     expect(fake.bridgeCalls).toHaveLength(0);
   });
 
@@ -2978,9 +2859,8 @@ describe('handleRunProject security pre-flight', () => {
     expect(fake.lastRunProjectScene()?.resPath).toBe('res://other.tscn');
   });
 
-  // Godot runs a positional argument as the scene only when it ends in a scene
-  // extension; anything else is ignored and run/main_scene launches. The gate
-  // would then have scanned the named file while the main scene ran unscanned.
+  // The engine runs a positional argument as the scene only when it ends in a scene extension;
+  // otherwise run/main_scene launches unscanned.
   it.each([
     ['a file that is not a scene', 'icon.svg'],
     ['a scene path with its extension forgotten', 'scenes/level'],
@@ -3095,10 +2975,6 @@ describe('handleRunProject security pre-flight', () => {
     expect(fake.runProjectCalls()).toBe(0);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleRunProject: attach mode (attach: true)
-// ---------------------------------------------------------------------------
 
 describe('handleRunProject attach mode', () => {
   const PINNED_BRIDGE_PORT = 12345;
@@ -3336,10 +3212,6 @@ describe('handleRunProject attach mode', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// run_project: the success payload against its declared outputSchema
-// ---------------------------------------------------------------------------
-
 describe('run_project outputSchema', () => {
   const runProjectDef = runtimeToolDefinitions.find((t) => t.name === 'run_project');
   if (!runProjectDef || !('outputSchema' in runProjectDef)) {
@@ -3442,10 +3314,6 @@ describe('run_project outputSchema', () => {
     ).toBe(false);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleTakeScreenshot: bridge response shape branches
-// ---------------------------------------------------------------------------
 
 describe('handleTakeScreenshot bridge response shapes', () => {
   let fake: RuntimeFake;
@@ -3773,10 +3641,6 @@ describe('handleTakeScreenshot bridge response shapes', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleTakeScreenshot: pixel statistics
-// ---------------------------------------------------------------------------
-
 describe('handleTakeScreenshot pixel stats', () => {
   const screenshotDef = runtimeToolDefinitions.find((t) => t.name === 'take_screenshot');
   if (!screenshotDef || !('outputSchema' in screenshotDef)) {
@@ -3936,10 +3800,6 @@ describe('handleTakeScreenshot pixel stats', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Reads of the fields the auto-clear nulls
-// ---------------------------------------------------------------------------
-
 describe('session auto-clear interactions', () => {
   it('take_screenshot validates the path against the session captured at the gate when the game exits mid-call', async () => {
     const projectPath = tmp.make('mcp-autoclear-');
@@ -3951,9 +3811,8 @@ describe('session auto-clear interactions', () => {
     const fake = createRuntimeFake();
     fake.setSession({ mode: 'spawned', projectPath, process: makeRunningProcess() });
     fake.setBridgeResponse(JSON.stringify({ path: shot, width: 1, height: 1 }));
-    // The process exits while the screenshot command is in flight: the auto-clear nulls
-    // activeProjectPath, and the containment check runs after the await. The
-    // bridge answered, so the file it saved is this session's screenshot.
+    // The process exits mid-screenshot: the auto-clear nulls activeProjectPath before the containment check,
+    // but the bridge answered, so the saved file is this session's screenshot.
     fake.setBridgeHook(() => {
       fake.setSession({
         mode: null,
@@ -4011,14 +3870,9 @@ describe('session auto-clear interactions', () => {
 
     expect(hasError(result)).toBe(false);
     expect(fake.asRunner.activeSessionMode).toBe('spawned');
-    // The exit handler already cleaned this session up; nothing re-stops it.
     expect(fake.stopCalls()).toBe(0);
   });
 });
-
-// ---------------------------------------------------------------------------
-// One session operation at a time, on the session the call was admitted for
-// ---------------------------------------------------------------------------
 
 describe('a stop that lands on a runtime call or a start', () => {
   /** Replace what the fake's bridge wait reports. */
@@ -4683,9 +4537,8 @@ describe('the queue wait is charged against the command it delayed', () => {
     expect(payload.result).toBe(1);
   });
 
-  // Red when the Node side stops reading the bridge's non-finite count: the
-  // field would reach the payload, or a result the bridge nulled would read as
-  // a script that failed.
+  // Red when the Node side stops reading the bridge's non-finite count: the field would not reach
+  // the payload, or a nulled result would read as a script failure.
   it('run_script leads with the non-finite warning and strips the internal field', async () => {
     const fake = spawnedFake();
     fake.setBridgeResponse(

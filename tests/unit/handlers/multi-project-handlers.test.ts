@@ -1,14 +1,3 @@
-/**
- * Handler tests for sessions on several projects, against a real GodotRunner
- * holding installed session records (no Godot process, no bridge socket).
- *
- * Covers switch_project, the runtime and profiling handlers refusing to fall
- * back to another live session, the project path every runtime response
- * names, and a profiler capture's track staying with the session that ran it.
- * The bridge is a spy on `sendCommandWithErrors`, or on `sendCommand` for the
- * profiler's track.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Ajv from 'ajv';
 import { resolve } from 'path';

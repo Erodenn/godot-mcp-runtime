@@ -15,12 +15,6 @@ const OTHER_BRIDGE_PORT = 6100;
 const EXIT_CODE = 3;
 const QUEUE_WAITED_MS = 30000;
 
-/**
- * Coverage for check_project's always-present `runtime` block. Argument
- * validation and the projectPath-present payload shape (name/path/structure)
- * live in project-handlers.test.ts; this file exercises only the runtime
- * probe branches, via the bridge-command fake in runtime-fakes.ts.
- */
 describe('handleCheckProject runtime block', () => {
   it('reports { activeSession: false } exactly when there is no session', async () => {
     const fake = createRuntimeFake();
@@ -44,10 +38,8 @@ describe('handleCheckProject runtime block', () => {
   });
 
   it('reports processExited:true after a spawned game exited on its own', async () => {
-    // The state the real runner lands in: handleSpawnedProcessExit nulls the
-    // session fields and keeps the process, so a report gated on the session
-    // fields alone would call this "no session" and withhold the one thing
-    // worth saying about it.
+    // handleSpawnedProcessExit nulls the session fields and keeps the process: a report gated on the session
+    // fields alone would say "no session" and withhold the one useful thing.
     const fake = createRuntimeFake();
     fake.setSession({ mode: null, projectPath: null, hasExited: true });
     const result = await handleCheckProject(fake.asRunner, {});

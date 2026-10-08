@@ -100,8 +100,6 @@ interface Payload {
   bytesWritten?: number | null;
 }
 
-// --- Frame builders ---
-
 function frameRgba(
   blockX: number | null,
   background: readonly [number, number, number, number] = DARK,
@@ -136,8 +134,6 @@ function tinyFrame(): Buffer {
     solidRgba(SMALL_FRAME_SIZE, SMALL_FRAME_SIZE, RED),
   );
 }
-
-// --- Stub process runner ---
 
 interface StubRunInfo {
   dir: string;
@@ -448,9 +444,8 @@ describe('render_movie arguments', () => {
   });
 });
 
-// Godot runs a positional argument as the scene only when it ends in a scene
-// extension. Anything else is ignored and the main scene renders, so the frames
-// would be measured, and the gate would have scanned, a scene nobody named.
+// Godot runs a positional argument as the scene only when it ends in a scene extension; otherwise the
+// main scene renders and the gate would have scanned a scene nobody named.
 describe('render_movie refuses a scene argument the engine would not run as a scene', () => {
   it.each([
     ['a file that is not a scene', 'icon.svg'],
@@ -480,9 +475,8 @@ describe('render_movie refuses a scene argument the engine would not run as a sc
 });
 
 describe('render_movie asks again whether the bridge may load once the gate returns', () => {
-  // The confirmation prompt can stay open as long as a human takes to answer.
-  // A session started on the project in that time has injected the bridge, and
-  // the movie process would load it with no token and no port of its own.
+  // The confirmation prompt can stay open as long as a human takes: a session started meanwhile has
+  // injected the bridge, and the movie process would load it with no token or port.
   it('refuses when a session went live on the project while the prompt was open', async () => {
     const { dir, runner, stub, handler } = setup();
 
@@ -508,11 +502,8 @@ describe('render_movie asks again whether the bridge may load once the gate retu
 });
 
 describe('render_movie and a start on the same project', () => {
-  // The handler's last session check and its spawn are one step under the
-  // session queue, and the run is registered on the runner inside that step.
-  // A run_project on the project therefore runs wholly before the step (the
-  // check sees its session) or wholly after it (the runner refuses it, see
-  // godot-runner-multi-session.test.ts).
+  // The last session check and the spawn are one step under the session queue, with the run registered
+  // inside it: a run_project runs wholly before (check sees it) or wholly after (runner refuses it).
   it('registers the run and spawns with the session queue held, then frees the queue while the movie runs', async () => {
     let heldAtSpawn: string | null | undefined;
     let endProcess!: () => void;

@@ -17,28 +17,18 @@ function readProjectGodot(dir: string): string {
   return readFileSync(join(dir, 'project.godot'), 'utf8');
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 const tmp = useTmpDirs();
 
-/** Create a minimal tmp Godot project (project.godot only). */
 function makeTmpProject(): string {
   return tmp.makeProject('mcp-test-');
 }
 
-/** Create a minimal project with one autoload registered. */
 function makeTmpProjectWithAutoload(name: string, path: string): string {
   const dir = makeTmpProject();
   const content = `config_version=5\n\n[autoload]\n${name}="*res://${path}"\n`;
   writeFileSync(join(dir, 'project.godot'), content, 'utf8');
   return dir;
 }
-
-// ---------------------------------------------------------------------------
-// handleListAutoloads
-// ---------------------------------------------------------------------------
 
 describe('handleListAutoloads', () => {
   it('rejects missing projectPath', async () => {
@@ -145,10 +135,6 @@ describe('handleListAutoloads', () => {
     expect(expectMatchesOutputSchema('list_autoloads', result)).toEqual({ autoloads: [] });
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleAddAutoload
-// ---------------------------------------------------------------------------
 
 describe('autoload path characters and empty updates', () => {
   const FORBIDDEN = [
@@ -376,10 +362,6 @@ describe('handleAddAutoload', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// handleRemoveAutoload
-// ---------------------------------------------------------------------------
-
 describe('handleRemoveAutoload', () => {
   it('rejects missing projectPath', async () => {
     const result = await handleRemoveAutoload({ autoloadName: 'MyManager' });
@@ -432,10 +414,6 @@ describe('handleRemoveAutoload', () => {
     });
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleUpdateAutoload
-// ---------------------------------------------------------------------------
 
 describe('handleUpdateAutoload', () => {
   it('rejects missing projectPath', async () => {
