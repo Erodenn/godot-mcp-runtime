@@ -1390,6 +1390,11 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 	_collect_control_nodes(root, elements, visible_only, type_filter)
 	_send_response(peer, {"elements": elements})
 
+# A rect number as JSON can carry it. Not _finite_or_null: this walk also runs for
+# every input action's UI snapshot, where a count would land on a reply with no rect in it.
+func _rect_number(number: float) -> Variant:
+	return number if is_finite(number) else null
+
 func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "") -> void:
 	if node is Control:
 		var ctrl := node as Control
@@ -1406,10 +1411,10 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 			"type": ctrl.get_class(),
 			"path": str(ctrl.get_path()),
 			"rect": {
-				"x": rect.position.x,
-				"y": rect.position.y,
-				"width": rect.size.x,
-				"height": rect.size.y,
+				"x": _rect_number(rect.position.x),
+				"y": _rect_number(rect.position.y),
+				"width": _rect_number(rect.size.x),
+				"height": _rect_number(rect.size.y),
 			},
 			"visible": ctrl.is_visible_in_tree(),
 		}

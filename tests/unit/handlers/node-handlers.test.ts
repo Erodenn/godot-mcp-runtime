@@ -433,7 +433,6 @@ describe('handleAttachScript', () => {
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
-        success: true,
         nodePath: 'root/Sprite2D',
         scriptPath: 'placeholder.gd',
       }),
@@ -446,7 +445,6 @@ describe('handleAttachScript', () => {
     expect(hasError(result)).toBe(false);
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({
-      success: true,
       nodePath: 'root/Sprite2D',
       scriptPath: 'placeholder.gd',
     });
@@ -589,7 +587,6 @@ describe('handleDuplicateNode', () => {
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
-        success: true,
         nodePath: 'root/Sprite2D',
         newNodePath: 'root/Sprite2D2',
       }),
@@ -601,7 +598,6 @@ describe('handleDuplicateNode', () => {
     expect(hasError(result)).toBe(false);
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({
-      success: true,
       nodePath: 'root/Sprite2D',
       newNodePath: 'root/Sprite2D2',
     });

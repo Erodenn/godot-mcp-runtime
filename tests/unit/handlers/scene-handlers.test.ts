@@ -57,7 +57,7 @@ describe('handleCreateScene', () => {
 
   it('accepts a scenePath pointing at a not-yet-existing file', async () => {
     const fake = createFakeRunner({
-      stdout: JSON.stringify({ success: true, scenePath: 'scenes/not-yet-created.tscn' }),
+      stdout: JSON.stringify({ scenePath: 'scenes/not-yet-created.tscn' }),
     });
     const result = await handleCreateScene(fake.asRunner, {
       projectPath: fixtureProjectPath,
@@ -96,7 +96,7 @@ describe('handleCreateScene', () => {
 
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
-      stdout: JSON.stringify({ success: true, scenePath: 'scenes/x.tscn' }),
+      stdout: JSON.stringify({ scenePath: 'scenes/x.tscn' }),
     });
     const result = await handleCreateScene(fake.asRunner, {
       projectPath: fixtureProjectPath,
@@ -104,7 +104,7 @@ describe('handleCreateScene', () => {
     });
     expect(hasError(result)).toBe(false);
     const env = unwrap(result);
-    expect(env.structuredContent).toEqual({ success: true, scenePath: 'scenes/x.tscn' });
+    expect(env.structuredContent).toEqual({ scenePath: 'scenes/x.tscn' });
     expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
     expectMatchesOutputSchema('create_scene', result);
   });

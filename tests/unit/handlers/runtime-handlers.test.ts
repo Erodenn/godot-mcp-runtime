@@ -119,9 +119,6 @@ const confirmFalseElicitor: Elicitor = async () => ({
   action: 'accept',
   content: { confirm: false },
 });
-const throwingElicitor: Elicitor = async () => {
-  throw new Error('Method not found');
-};
 /** A client that did not declare the elicitation capability. */
 const unsupportedElicitor: Elicitor = async () => {
   throw new ElicitationUnsupportedError();
@@ -1612,6 +1609,49 @@ describe('a bridge frame missing what its command always sends is an error, not 
     expect(allText(result)).toContain('nothing was injected');
   });
 
+  // Red when the handler stops naming the Controls whose rect came back with a
+  // null number, or the schema stops admitting null there.
+  it('get_ui_elements leads with the Controls whose rect is not finite', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    const sound = { name: 'Ok', path: '/root/Ok', type: 'Button', visible: true };
+    const broken = { name: 'Bad', path: '/root/Bad', type: 'Label', visible: true };
+    fake.setBridgeResponse(
+      JSON.stringify({
+        elements: [
+          { ...sound, rect: { x: 1, y: 2, width: 30, height: 40 } },
+          { ...broken, rect: { x: null, y: 2, width: 30, height: null } },
+        ],
+      }),
+      ['SCRIPT ERROR: seen during the read'],
+    );
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    expect(payload.warnings).toEqual([
+      '1 Control(s) have a non-finite position or size (INF, NAN), so those rect numbers are null: /root/Bad',
+      'SCRIPT ERROR: seen during the read',
+    ]);
+    const elements = payload.elements as Array<{ rect: Record<string, unknown> }>;
+    expect(elements[1]?.rect).toEqual({ x: null, y: 2, width: 30, height: null });
+  });
+
+  it('get_ui_elements with every rect finite carries no warning', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    fake.setBridgeResponse(
+      JSON.stringify({
+        elements: [{ name: 'Ok', path: '/root/Ok', rect: { x: 0, y: 0, width: 0, height: 0 } }],
+      }),
+    );
+    const payload = expectMatchesOutputSchema(
+      'get_ui_elements',
+      await handleGetUiElements(fake.asRunner, {}),
+    );
+    expect(payload).not.toHaveProperty('warnings');
+  });
+
   it('get_ui_elements: a frame with no elements array', async () => {
     const fake = activeSession({ status: 'ok' });
     const result = await handleGetUiElements(fake.asRunner, {});
@@ -2398,15 +2438,32 @@ describe('handleRunScript security policy', () => {
     expect(fake.bridgeCalls).toHaveLength(0);
   });
 
-  it('falls back to denial when elicitation throws (older client)', async () => {
+  // Red when the catch words every throw as a client without elicitation again.
+  it('says the confirmation was not answered when the prompt timed out', async () => {
+    const dir = tmp.makeProject('run-script-tier2-unanswered-');
+    const fake = activeFake(dir);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: unansweredElicitor }),
+    );
+    expectErrorMatching(
+      result,
+      /run_script confirmation was not answered \(Request timed out\)\. The script was not run\./,
+    );
+    expect(JSON.stringify(result)).not.toMatch(/does not support elicitation/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('falls back to denial when the client lacks elicitation', async () => {
     const dir = tmp.makeProject('run-script-tier2-noclient-');
     const fake = activeFake(dir);
     const result = await handleRunScript(
       fake.asRunner,
       { script: TIER2_SCRIPT },
-      makeContext({ elicit: throwingElicitor }),
+      makeContext({ elicit: unsupportedElicitor }),
     );
-    expectErrorMatching(result, /Elicitation unavailable/);
+    expectErrorMatching(result, /Elicitation unavailable.*does not support elicitation/);
     expect(fake.bridgeCalls).toHaveLength(0);
     // Sidecar must record elicit_denied even on throw, preserving the audit trail.
     const scriptsDir = auditScriptsDir(dir);
@@ -4573,9 +4630,38 @@ describe('the queue wait is charged against the command it delayed', () => {
     const result = handleGetDebugOutput(fake.asRunner, { limit: bad });
     expectErrorMatching(
       result,
-      new RegExp(`limit must be a whole number from 1 or more, got ${bad}`),
+      new RegExp(`limit must be a whole number of 1 or more, got ${bad}`),
     );
   });
+
+  // Red when the limit is parsed after the attached-session answer again.
+  it('get_debug_output refuses a bad limit in an attached session too', () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'attached', projectPath: '/p' });
+    const result = handleGetDebugOutput(fake.asRunner, { limit: 0 });
+    expectErrorMatching(result, /limit must be a whole number of 1 or more, got 0/);
+  });
+
+  // Red when optionalNumber starts coercing strings, or the parser stops going through it.
+  it.each(['5000', 'abc', null, true])(
+    'timeout and limit given as %j are refused, not coerced',
+    async (bad) => {
+      const fake = spawnedFake();
+      const script = await handleRunScript(
+        fake.asRunner,
+        { script: BENIGN_SCRIPT, timeout: bad },
+        makeContext(),
+      );
+      const shot = await handleTakeScreenshot(fake.asRunner, { timeout: bad });
+      expectErrorMatching(script, /timeout must be a finite number/);
+      expectErrorMatching(shot, /timeout must be a finite number/);
+      expectErrorMatching(
+        handleGetDebugOutput(fake.asRunner, { limit: bad }),
+        /limit must be a finite number/,
+      );
+      expect(fake.bridgeCalls).toHaveLength(0);
+    },
+  );
 
   it('accepts the largest timeout and a limit of 1', async () => {
     const fake = spawnedFake();

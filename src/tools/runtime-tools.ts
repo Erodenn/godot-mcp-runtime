@@ -42,6 +42,7 @@ import { parseScriptDiagnostics, condenseProcessTail } from '../utils/output-par
 import { randomUUID } from 'crypto';
 import {
   createNullContext,
+  ElicitationUnsupportedError,
   isElicitAccepted,
   type McpContext,
   type ElicitorResult,
@@ -703,10 +704,10 @@ export const runtimeToolDefinitions = [
               rect: {
                 type: 'object',
                 properties: {
-                  x: { type: 'number' },
-                  y: { type: 'number' },
-                  width: { type: 'number' },
-                  height: { type: 'number' },
+                  x: { type: ['number', 'null'] },
+                  y: { type: ['number', 'null'] },
+                  width: { type: ['number', 'null'] },
+                  height: { type: ['number', 'null'] },
                 },
               },
               visible: { type: 'boolean' },
@@ -1769,10 +1770,10 @@ function parseIntegerRangeArg(
   if (value === undefined) return ok(undefined);
   const { min, max } = range;
   if (!Number.isInteger(value) || value < min || (max !== undefined && value > max)) {
-    const rangeText = max === undefined ? `${min} or more` : `${min} to ${max}`;
+    const rangeText = max === undefined ? `of ${min} or more` : `from ${min} to ${max}`;
     return err(
-      createErrorResponse(`${name} must be a whole number from ${rangeText}, got ${value}`, [
-        `Omit ${name} for its default, or pass a whole number from ${rangeText}`,
+      createErrorResponse(`${name} must be a whole number ${rangeText}, got ${value}`, [
+        `Omit ${name} for its default, or pass a whole number ${rangeText}`,
       ]),
     );
   }
@@ -1802,6 +1803,8 @@ export function handleGetDebugOutput(
   args: OperationParams = {},
 ): HandlerResult {
   args = normalizeParameters(args);
+  const limitResult = parseIntegerRangeArg(args, 'limit', { min: MIN_DEBUG_OUTPUT_LIMIT });
+  if (!limitResult.ok) return limitResult;
 
   // The mode is nulled the moment a spawned process exits, but its logs
   // live on the retained process and are exactly what the caller is here
@@ -1846,8 +1849,6 @@ export function handleGetDebugOutput(
     );
   }
 
-  const limitResult = parseIntegerRangeArg(args, 'limit', { min: MIN_DEBUG_OUTPUT_LIMIT });
-  if (!limitResult.ok) return limitResult;
   const limit = limitResult.value ?? DEFAULT_DEBUG_OUTPUT_LIMIT;
   const response: {
     projectPath: string;
@@ -2574,6 +2575,27 @@ export function handleGetUiElements(
   return runSessionExclusive(runner, 'get_ui_elements', () => queryUiElements(runner, args));
 }
 
+/** Most Control paths named in the non-finite rect warning; the rest are counted. */
+const NON_FINITE_RECT_PATH_CAP = 8;
+
+/**
+ * The warning for Controls whose rect the bridge sent with a null number (a
+ * position or size that is INF or NAN in the game), or null when there are none.
+ */
+function nonFiniteRectWarning(elements: unknown[]): string | null {
+  const paths: string[] = [];
+  for (const element of elements) {
+    if (typeof element !== 'object' || element === null) continue;
+    const { rect, path } = element as { rect?: unknown; path?: unknown };
+    if (typeof rect !== 'object' || rect === null) continue;
+    if (Object.values(rect).some((value) => value === null)) paths.push(String(path));
+  }
+  if (paths.length === 0) return null;
+  const shown = paths.slice(0, NON_FINITE_RECT_PATH_CAP);
+  const more = paths.length > shown.length ? ` (and ${paths.length - shown.length} more)` : '';
+  return `${paths.length} Control(s) have a non-finite position or size (INF, NAN), so those rect numbers are null: ${shown.join(', ')}${more}`;
+}
+
 async function queryUiElements(runner: GodotRunner, args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
@@ -2633,6 +2655,10 @@ async function queryUiElements(runner: GodotRunner, args: OperationParams): Prom
       tip: "Use simulate_input with type 'click_element' and a path or node name from this list to interact with these elements.",
     };
     attachRuntimeWarnings(payload, runtimeErrors);
+    const rectWarning = nonFiniteRectWarning(parsed.elements);
+    if (rectWarning !== null) {
+      payload.warnings = [rectWarning, ...((payload.warnings as string[] | undefined) ?? [])];
+    }
 
     return createStructuredResponse(leadWithWarnings(payload));
   } catch (error: unknown) {
@@ -2743,6 +2769,17 @@ export async function handleRunScript(
         } catch (error) {
           if (projectPath) {
             writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+          }
+          if (!(error instanceof ElicitationUnsupportedError)) {
+            return err(
+              createErrorResponse(
+                `run_script confirmation was not answered (${getErrorMessage(error)}). The script was not run.`,
+                [
+                  'Restructure the script to avoid the flagged primitive',
+                  ELICITATION_OPT_OUT_SOLUTION,
+                ],
+              ),
+            );
           }
           return err(
             createErrorResponse(
