@@ -22,7 +22,7 @@ import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
 import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
-import { liveSessionRemedy, sessionBusyError } from '../utils/session-report.js';
+import { chargeQueueWait, liveSessionRemedy, sessionBusyError } from '../utils/session-report.js';
 import { SessionQueueTimeoutError } from '../utils/session-queue.js';
 import {
   BRIDGE_AUTOLOAD_NAME,
@@ -1107,6 +1107,12 @@ export function createRenderMovieHandler(
     let launched: Launch;
     try {
       launched = await runner.runExclusive<Launch>('render_movie', async () => {
+        // The wait for this turn counts against the client's request timeout.
+        const charged = chargeQueueWait(runner, 'render_movie', {
+          kind: 'fixed',
+          worstCaseMs: rc.timeoutMs + MOVIE_KILL_GRACE_MS,
+        });
+        if (!charged.ok) return charged;
         // The gate can hold a confirmation prompt open for as long as a human
         // takes to answer it, and a session started on this project in that
         // time has injected the bridge. Asked again, now that the wait is over.

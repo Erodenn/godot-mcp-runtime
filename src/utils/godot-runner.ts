@@ -48,6 +48,7 @@ import {
 } from './process-tree.js';
 import { LineAssembler, Utf8StreamDecoder } from './child-output.js';
 import { SessionQueue, type QueueTurn } from './session-queue.js';
+import { stderrTailLines } from './error-response.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -215,8 +216,6 @@ export const HEADLESS_OPERATION_TIMEOUT_MS = 30000;
  * set out to write; one that does not is killed as before.
  */
 export const HEADLESS_SHUTDOWN_WAIT_MS = 10000;
-/** How many trailing stderr lines of a failed `--version` probe are kept. */
-const PROBE_STDERR_TAIL_LINES = 5;
 /** Timeout of a bridge command when the caller names none. */
 const BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS = 10000;
 /** How many trailing stderr lines a caller gets when it names no count. */
@@ -706,11 +705,7 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
 /** Why a `--version` probe failed, from what `spawnAsync` rejected with. */
 function describeProbeFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  const tail = (asSpawnError(error)?.stderr ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '')
-    .slice(-PROBE_STDERR_TAIL_LINES);
+  const tail = stderrTailLines(asSpawnError(error)?.stderr ?? '').map((line) => line.trim());
   return tail.length === 0 ? message : `${message}; stderr: ${tail.join(' | ')}`;
 }
 

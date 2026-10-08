@@ -168,6 +168,9 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       if (options.exclusiveThrows) return Promise.reject(options.exclusiveThrows);
       return queue.run(label, operation);
     },
+    queueTurn() {
+      return queue.turn();
+    },
     beginMovieRun(projectPath: string): () => void {
       const run: FakeMovieRun = { projectPath, queueHeldBy: queue.running, ended: false };
       movieRuns.push(run);

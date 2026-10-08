@@ -577,6 +577,48 @@ describe('render_movie and a start on the same project', () => {
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
   });
 
+  it('charges the wait for its turn: a run that no longer fits the request is refused with nothing written, one already over it is not', async () => {
+    const QUEUE_HELD_MS = 28000;
+    const FRAMES_OVER_THE_REQUEST = 200;
+    vi.useFakeTimers();
+    try {
+      const waited = async (frames: number) => {
+        const ctx = setup();
+        let release!: () => void;
+        const held = ctx.fake.queue.run(
+          'run_project',
+          () =>
+            new Promise<void>((done) => {
+              release = done;
+            }),
+        );
+        const pending = ctx.handler(ctx.runner, { projectPath: ctx.dir, frames }, NO_GATE);
+        await vi.advanceTimersByTimeAsync(QUEUE_HELD_MS);
+        release();
+        await held;
+        return { ctx, result: await pending };
+      };
+
+      // Red when the chargeQueueWait call is removed from the handler's queue
+      // step: the run is spawned after a 28 s wait with a 38 s worst case.
+      const refused = await waited(TEST_FRAMES);
+      expectErrorMatching(
+        refused.result,
+        /render_movie waited 28000 ms for run_project to finish, and the call can take up to 38000 ms/,
+      );
+      expect(refused.ctx.stub.calls.length).toBe(0);
+      expect(refused.ctx.fake.movieRuns).toEqual([]);
+      expect(existsSync(moviesDir(resolve(refused.ctx.dir)))).toBe(false);
+
+      // Red when every waited call is refused: this run never fitted 60 s, so
+      // the wait took no promise away from it.
+      const admitted = await waited(FRAMES_OVER_THE_REQUEST);
+      expect(admitted.ctx.stub.calls.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('makes the second session check inside the queue step, and registers nothing when it refuses', async () => {
     const { dir, runner, fake, stub, handler } = setup();
     const heldAtCheck: Array<string | null> = [];

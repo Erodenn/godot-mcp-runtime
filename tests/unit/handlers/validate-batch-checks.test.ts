@@ -7,10 +7,10 @@
  * fires at most once per call.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner, type FakeRunner } from '../../helpers/fake-runner.js';
-import type { GodotRunner } from '../../../src/utils/godot-runner.js';
+import { CLIENT_REQUEST_TIMEOUT_MS, type GodotRunner } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 
@@ -417,5 +417,99 @@ describe('handleValidate batch mode - per-target checks', () => {
 
     expectErrorMatching(result, /broken asset blocks the import/);
     expect(fake.calls).toHaveLength(1);
+  });
+});
+
+describe('handleValidate cold-import wait and no-result wording', () => {
+  const MARKER_STDERR = '[IMPORT_NEEDED] main.tscn: res://placeholder.png';
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('answers "still importing, retry" before the request times out and leaves the import running', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunner({
+      importPending: new Promise<void>(() => {}),
+      responses: [{ stdout: '', stderr: MARKER_STDERR }],
+    });
+
+    let answer: Awaited<ReturnType<typeof handleValidate>> | undefined;
+    void handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    }).then((result) => {
+      answer = result;
+    });
+    await vi.advanceTimersByTimeAsync(CLIENT_REQUEST_TIMEOUT_MS - 1);
+
+    // Red when executeValidateOp awaits importAssets without the bound: no
+    // answer exists by the time the client stopped listening.
+    expect(answer).toBeDefined();
+    expectErrorMatching(
+      answer,
+      /Batch validation failed: the project's assets are still being imported, nothing was changed; retry this call/,
+    );
+    // Red when the solutions of a thrown runner error are kept for this case.
+    expect(unwrap(answer).content[1]?.text ?? '').toContain('joins the import');
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('gives the retry after a finished import only the time the request has left', async () => {
+    vi.useFakeTimers();
+    let finishImport!: () => void;
+    const importPending = new Promise<void>((done) => {
+      finishImport = done;
+    });
+    const fake = createFakeRunner({
+      importPending,
+      responses: [
+        { stdout: '', stderr: MARKER_STDERR },
+        {
+          stdout: JSON.stringify({
+            results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+          }),
+        },
+      ],
+    });
+    const IMPORT_TOOK_MS = 40000;
+
+    const pending = handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+    await vi.advanceTimersByTimeAsync(IMPORT_TOOK_MS);
+    finishImport();
+    const result = await pending;
+
+    expect(hasError(result)).toBe(false);
+    // Red when the retry runs with the default timeout: 40 s of import plus a
+    // 30 s retry passes the client's 60 s.
+    const retryTimeoutMs = fake.calls[1]?.timeoutMs;
+    expect(retryTimeoutMs).toBeDefined();
+    expect(IMPORT_TOOK_MS + retryTimeoutMs!).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+  });
+
+  it('shows parsed engine diagnostics once, without the raw stderr tail beside them', async () => {
+    const fake = createFakeRunner({
+      stdout: '[Audio] ready\n',
+      stderr:
+        "SCRIPT ERROR: Invalid call. Nonexistent function 'nope' in base 'Node'.\n   at: _run (res://godot_operations.gd:12)",
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn' }],
+    });
+
+    const text = unwrap(result).content[0]?.text ?? '';
+    expect(hasError(result)).toBe(true);
+    expect(text).toContain(
+      'Batch validate failed: no result was emitted - the operation gave no reason',
+    );
+    // Red when the head is built from extractGdError while diagnostics parsed:
+    // the same stderr then appears as a raw tail and again as diagnostics.
+    expect(text).not.toContain('stderr (last lines)');
+    expect(text.split("Nonexistent function 'nope'")).toHaveLength(2);
   });
 });

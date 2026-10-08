@@ -9,7 +9,6 @@ import {
   extractGdError,
   getErrorMessage,
   NO_SCRIPT_ERROR_LINE_MESSAGE,
-  STDERR_TAIL_LINES,
   stderrTailLines,
 } from './error-response.js';
 import { createStructuredResponse, leadWithWarnings } from './structured-response.js';
@@ -123,7 +122,7 @@ function renderStderrDiagnostic(d: StderrDiagnostic): string {
 function renderStderrForEarlyExit(stderr: string): string | undefined {
   const diagnostics = renderParsedDiagnostics(stderr);
   if (diagnostics !== undefined) return diagnostics;
-  const tail = stderrTailLines(stderr, STDERR_TAIL_LINES);
+  const tail = stderrTailLines(stderr);
   return tail.length > 0 ? `stderr (last lines): ${tail.join('\n')}` : undefined;
 }
 
@@ -519,9 +518,7 @@ async function runSceneOp(
   // A read never passes `mutatesSceneFile`, so a refusal reached from here by
   // a read is worded for a read.
   const refused = options.mutatesSceneFile ? SCENE_EDIT : SCENE_READ_NEEDING_IMPORT;
-  // The call has to answer inside the client's request timeout. An import
-  // can take minutes, so it is waited for only while a retry still fits.
-  const answerBy = Date.now() + CLIENT_REQUEST_TIMEOUT_MS - HEADLESS_RESPONSE_MARGIN_MS;
+  const answerBy = headlessAnswerDeadline();
   try {
     let { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
     lastAttempt.stderr = stderr;
@@ -554,12 +551,9 @@ async function runSceneOp(
         'This project also needs an asset import, which will run automatically once the session is stopped',
       ]);
       if (guard) return guard;
-      let imported: boolean;
+      let retryTimeoutMs: number | null;
       try {
-        imported = await finishesBy(
-          runner.importAssets(projectPath),
-          answerBy - IMPORT_RETRY_RESERVE_MS,
-        );
+        retryTimeoutMs = await importWithinBudget(runner, projectPath, answerBy);
       } catch (importErr) {
         return err(
           createErrorResponse(
@@ -572,16 +566,11 @@ async function runSceneOp(
           ),
         );
       }
-      if (!imported) {
-        // The import was left running: the next call on this project joins it
-        // (`GodotRunner.importAssets`) instead of starting a second one.
+      if (retryTimeoutMs === null) {
         return err(
           createErrorResponse(
-            `${failurePrefix}: the project's assets are still being imported, nothing was changed; retry this call.`,
-            [
-              'Retry this call: it joins the import that is already running and goes on once it has finished',
-              'A first import of a large project can take a few minutes, so several retries may be needed',
-            ],
+            `${failurePrefix}: ${IMPORT_STILL_RUNNING_MESSAGE}`,
+            IMPORT_STILL_RUNNING_SOLUTIONS,
           ),
         );
       }
@@ -589,7 +578,7 @@ async function runSceneOp(
         operation,
         params,
         projectPath,
-        Math.min(HEADLESS_OPERATION_TIMEOUT_MS, Math.max(0, answerBy - Date.now())),
+        retryTimeoutMs,
       ));
       lastAttempt.stderr = stderr;
       effectiveFailurePrefix = `${failurePrefix} (after the asset import step ran)`;
@@ -607,6 +596,37 @@ async function runSceneOp(
       createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions),
     );
   }
+}
+
+/** What a call answers when the import it needed outlasted its budget. The import was left running. */
+export const IMPORT_STILL_RUNNING_MESSAGE =
+  "the project's assets are still being imported, nothing was changed; retry this call.";
+export const IMPORT_STILL_RUNNING_SOLUTIONS = [
+  'Retry this call: it joins the import that is already running and goes on once it has finished',
+  'A first import of a large project can take a few minutes, so several retries may be needed',
+];
+
+/** When a headless call that starts now has to have answered: inside the client's request timeout. */
+export function headlessAnswerDeadline(): number {
+  return Date.now() + CLIENT_REQUEST_TIMEOUT_MS - HEADLESS_RESPONSE_MARGIN_MS;
+}
+
+/**
+ * Run or join the project's asset import and wait for it only while a retry
+ * still fits before `answerBy`. Returns the timeout the retry may run with, or
+ * null when the import is still running; a failed import rejects.
+ */
+export async function importWithinBudget(
+  runner: GodotRunner,
+  projectPath: string,
+  answerBy: number,
+): Promise<number | null> {
+  const imported = await finishesBy(
+    runner.importAssets(projectPath),
+    answerBy - IMPORT_RETRY_RESERVE_MS,
+  );
+  if (!imported) return null;
+  return Math.min(HEADLESS_OPERATION_TIMEOUT_MS, Math.max(0, answerBy - Date.now()));
 }
 
 /**

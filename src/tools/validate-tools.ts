@@ -2,7 +2,7 @@ import { isAbsolute, join } from 'path';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import {
   projectSubPathError,
@@ -10,7 +10,12 @@ import {
   resolveProjectPath,
   type ResolvedProjectPath,
 } from '../utils/path-validation.js';
-import { createErrorResponse, extractGdError, getErrorMessage } from '../utils/error-response.js';
+import {
+  createErrorResponse,
+  extractGdError,
+  getErrorMessage,
+  NO_SCRIPT_ERROR_LINE_MESSAGE,
+} from '../utils/error-response.js';
 import { parseProjectArgs, optionalString } from '../utils/arg-parsing.js';
 import {
   extractOperationPayload,
@@ -20,7 +25,14 @@ import {
 import { err } from '../utils/result.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
-import { findLiveSessionOnProject, stderrRequestsImport } from '../utils/headless-op.js';
+import {
+  findLiveSessionOnProject,
+  headlessAnswerDeadline,
+  IMPORT_STILL_RUNNING_MESSAGE,
+  IMPORT_STILL_RUNNING_SOLUTIONS,
+  importWithinBudget,
+  stderrRequestsImport,
+} from '../utils/headless-op.js';
 import { BridgeManager, BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
 
 /**
@@ -316,8 +328,9 @@ function capUnattributedWarnings(lines: string[]): string[] {
  * another project does not block it. Skipping costs the caller the import
  * only: the target's own result names the dependency that was not imported.
  *
- * An importAssets rejection propagates: both call sites sit inside a try whose
- * catch produces a structured error response.
+ * The import is waited for only while the retry still fits in the request
+ * (`importWithinBudget`); one still running then throws, and so does a failed
+ * one: both call sites sit inside a try whose catch answers with an error.
  */
 async function executeValidateOp(
   runner: GodotRunner,
@@ -325,12 +338,33 @@ async function executeValidateOp(
   params: OperationParams,
   projectPath: string,
 ): Promise<{ stdout: string; stderr: string }> {
+  const answerBy = headlessAnswerDeadline();
   const first = await runner.executeOperation(operation, params, projectPath);
   if (!stderrRequestsImport(first.stderr) || gameMayBeRunningOnProject(runner, projectPath)) {
     return first;
   }
-  await runner.importAssets(projectPath);
-  return runner.executeOperation(operation, params, projectPath);
+  const retryTimeoutMs = await importWithinBudget(runner, projectPath, answerBy);
+  if (retryTimeoutMs === null) throw new ImportStillRunningError();
+  return runner.executeOperation(operation, params, projectPath, retryTimeoutMs);
+}
+
+/** The import a validate run needed was still running when the call had to answer. */
+class ImportStillRunningError extends Error {
+  constructor() {
+    super(IMPORT_STILL_RUNNING_MESSAGE);
+    this.name = 'ImportStillRunningError';
+  }
+}
+
+/** The response for an exception out of a validate run. */
+function validateExceptionResponse(prefix: string, error: unknown): ToolResponse {
+  if (error instanceof ImportStillRunningError) {
+    return createErrorResponse(`${prefix}: ${error.message}`, IMPORT_STILL_RUNNING_SOLUTIONS);
+  }
+  return createErrorResponse(`${prefix}: ${getErrorMessage(error)}`, [
+    'Ensure Godot is installed correctly',
+    'Check if the GODOT_PATH environment variable is set correctly',
+  ]);
 }
 
 /**
@@ -398,15 +432,18 @@ const NO_RESULT_SOLUTIONS = [
  * diagnostics that are the only account of why it stopped.
  */
 function noResultMessage(prefix: string, stderr: string): string {
-  const head = `${prefix}: no result was emitted - ${extractGdError(stderr)}`;
-  if (stderr.includes('[ERROR]')) return head;
+  const head = `${prefix}: no result was emitted - `;
+  if (stderr.includes('[ERROR]')) return `${head}${extractGdError(stderr)}`;
   const diagnostics = parseScriptDiagnostics(stderr)
     .slice(0, MAX_NO_RESULT_DIAGNOSTICS_SHOWN)
     .map((d) => {
       const where = d.filePath ? `${d.filePath}${d.line !== undefined ? `:${d.line}` : ''}: ` : '';
       return `${where}${d.message}`;
     });
-  return diagnostics.length === 0 ? head : `${head}\nstderr: ${diagnostics.join('\n')}`;
+  // One account of stderr, not two: extractGdError carries its tail when nothing parsed.
+  return diagnostics.length === 0
+    ? `${head}${extractGdError(stderr)}`
+    : `${head}${NO_SCRIPT_ERROR_LINE_MESSAGE}\nstderr: ${diagnostics.join('\n')}`;
 }
 
 export async function handleValidate(
@@ -782,12 +819,7 @@ export async function handleValidate(
         leadWithWarnings({ warnings: capUnattributedWarnings(unattributed), results }),
       );
     } catch (error: unknown) {
-      return err(
-        createErrorResponse(`Batch validation failed: ${getErrorMessage(error)}`, [
-          'Ensure Godot is installed correctly',
-          'Check if the GODOT_PATH environment variable is set correctly',
-        ]),
-      );
+      return err(validateExceptionResponse('Batch validation failed', error));
     } finally {
       for (const f of tempFiles) {
         try {
@@ -1019,12 +1051,7 @@ export async function handleValidate(
 
     return createStructuredResponse(result);
   } catch (error: unknown) {
-    return err(
-      createErrorResponse(`Validation failed: ${getErrorMessage(error)}`, [
-        'Ensure Godot is installed correctly',
-        'Check if the GODOT_PATH environment variable is set correctly',
-      ]),
-    );
+    return err(validateExceptionResponse('Validation failed', error));
   } finally {
     if (tempFileAbsPath) {
       try {
