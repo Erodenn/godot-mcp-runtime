@@ -4,7 +4,7 @@ The full MCP tool reference for Godot MCP Runtime. This file always reflects `ma
 
 ## Response conventions
 
-Every tool returns one JSON object. It is sent as `structuredContent` and repeated as JSON in a text block, and every tool declares an `outputSchema` for it. Two tools add image blocks after that text block: `take_screenshot` (an inline PNG in `preview` and `full` mode) and `render_movie` in `check` mode (the downscaled inline frames). The JSON is the whole payload, and the images are not described in it beyond `previewPath` and `inlineFrames`. An error is separate: it carries `isError: true` and a message with suggested next steps, never a payload.
+Every tool returns one JSON object. It is sent as `structuredContent` and repeated as JSON in a text block, and every tool declares an `outputSchema` for it. Two tools add image blocks before that text block, so the JSON is always the last content block: `take_screenshot` (an inline PNG in `preview` and `full` mode) and `render_movie` in `check` mode (the downscaled inline frames). The JSON is the whole payload, and the images are not described in it beyond `previewPath` and `inlineFrames`. An error is separate: it carries `isError: true` and a message with suggested next steps, never a payload.
 
 The same thing has the same name in every payload:
 
@@ -131,6 +131,8 @@ One call executes a batch of actions in order and returns one result entry per a
 A single `frames` wait is capped at 600 and a single `hold_ms` at 10000; an `ms` wait has no cap of its own. The batch as a whole has one: its time budget is every wait and hold, plus every frame it spends charged at a 10 fps floor (100 ms per frame, so a slow or minimized game is never timed out mid-batch), plus a fixed buffer. A batch whose budget is over 600 s is refused before anything is injected, with an error giving the figure. A budget far under that can still describe a call longer than the 60 s default per-request timeout most MCP clients use, and a client that registered no progress handler will abort it before the server answers. Split a long wait across calls rather than relying on one.
 
 A result larger than the 16 MiB bridge frame cannot be delivered. The batch has run by then, so the error says exactly that: its inputs were injected and are not undone, and the batch must not be resent. Read the state it left with `get_ui_elements` or `take_screenshot`, and send fewer actions or fewer `watch` entries per call. This is the one flat error that does not mean nothing was injected.
+
+That error is the rare path. The bridge keeps a reply under about 4 MiB: once the full entries of `results[]` reach that size, every later entry is cut to `index`, `type`, `ok`, `frame`, `elapsed_ms` and `error`, and carries `details_dropped: true`. The action still ran; only what it observed (`hit`, `signals`, `changes`, `watch`) is gone, so an entry with `details_dropped` does not mean nothing changed. A batch of more than 10000 actions is refused before anything is injected: split it across calls.
 
 **`text`** types a string into whatever Control currently holds focus, expanded to one key press and release per character with the unicode codepoint set. It does not focus anything itself: click or focus the `LineEdit` first, or the action fails.
 
