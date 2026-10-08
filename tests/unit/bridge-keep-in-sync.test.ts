@@ -24,6 +24,7 @@ import {
   PARENT_WATCH_PORT_ENV,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
+import { stderrRequestsImport } from '../../src/utils/headless-op.js';
 import { TRACK_MAX_ENTRIES, TRACK_MIN_INTERVAL_MS } from '../../src/tools/profiler-tools.js';
 import {
   extractTokenFramedPayload,
@@ -33,7 +34,11 @@ import {
   OPERATION_RESULT_TOKEN_ENV,
 } from '../../src/utils/output-parsing.js';
 import {
+  MAX_HOLD_MS,
   MAX_INPUT_BATCH_BUDGET_MS,
+  MAX_TEXT_LENGTH,
+  MAX_WAIT_FRAMES,
+  MAX_WATCH_ENTRIES,
   runtimeToolDefinitions,
   SCREENSHOT_DEFAULT_TIMEOUT_MS,
   SCREENSHOT_FRAME_RENDER_BUDGET_MS,
@@ -98,6 +103,15 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(gdConst('NON_FINITE_COUNT_FIELD')).toBe(`"${NON_FINITE_COUNT_FIELD}"`);
   });
 
+  it('declares the same input batch caps', () => {
+    // Red when a cap is retuned on one side: the schema would promise a limit
+    // the bridge does not apply.
+    expect(gdConst('MAX_WAIT_FRAMES')).toBe(String(MAX_WAIT_FRAMES));
+    expect(gdConst('MAX_HOLD_MS')).toBe(String(MAX_HOLD_MS));
+    expect(gdConst('MAX_TEXT_LENGTH')).toBe(String(MAX_TEXT_LENGTH));
+    expect(gdConst('MAX_WATCH_ENTRIES')).toBe(String(MAX_WATCH_ENTRIES));
+  });
+
   it('declares the same profiler track caps', () => {
     expect(gdConst('MAX_TRACK_ENTRIES')).toBe(String(TRACK_MAX_ENTRIES));
     expect(gdConst('MIN_TRACK_INTERVAL_MS')).toBe(String(TRACK_MIN_INTERVAL_MS));
@@ -154,6 +168,23 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
   it('reads the parent-watch port from the variable the server sets', () => {
     expect(gdConst('PARENT_WATCH_PORT_ENV')).toBe(`"${PARENT_WATCH_PORT_ENV}"`);
     expect(gdFunctionBody('_ready')).toContain('OS.get_environment(PARENT_WATCH_PORT_ENV)');
+  });
+
+  it('reads the session token, bridge port and background flag from the variables the runner sets', () => {
+    // Red when a name changes on one side only: the game would then start
+    // with no token or on the baked port, and the start would time out.
+    const runnerSource = readFileSync(
+      new URL('../../src/utils/godot-runner.ts', import.meta.url),
+      'utf8',
+    );
+    const set = [...runnerSource.matchAll(/\b(MCP_[A-Z_]+): /g)].map((match) => match[1]!);
+    expect(set.sort()).toEqual(['MCP_BACKGROUND', 'MCP_BRIDGE_PORT', 'MCP_SESSION_TOKEN']);
+    const ready = gdFunctionBody('_ready');
+    for (const name of set) {
+      expect(ready, `mcp_bridge.gd _ready must read ${name}`).toContain(
+        `OS.get_environment("${name}")`,
+      );
+    }
   });
 });
 
@@ -375,7 +406,7 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
 });
 
 /**
- * Two values the headless script shares with TypeScript modules that do not
+ * Values the headless script shares with TypeScript modules that do not
  * export them, so the TypeScript half is read as text like the GDScript half.
  */
 describe('godot_operations.gd agrees with unexported TypeScript constants', () => {
@@ -389,6 +420,14 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   );
   const sceneToolsSource = readFileSync(
     new URL('../../src/tools/scene-tools.ts', import.meta.url),
+    'utf8',
+  );
+  const pathValidationSource = readFileSync(
+    new URL('../../src/utils/path-validation.ts', import.meta.url),
+    'utf8',
+  );
+  const argParsingSource = readFileSync(
+    new URL('../../src/utils/arg-parsing.ts', import.meta.url),
     'utf8',
   );
 
@@ -412,6 +451,22 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     expect(`${logPrefix![1]!}${started![1]!}`.trimEnd()).toBe(marker![1]!);
   });
 
+  it('prints the import request as a line the retry check recognises', () => {
+    // Red when the marker text or the log_error prefix changes on one side
+    // only: a cold project would then fail every scene operation instead of
+    // importing and retrying.
+    const errorPrefix = operationsSource.match(
+      /^func log_error\(message\):\s*printerr\("([^"]*)" \+ message\)$/m,
+    );
+    expect(errorPrefix, 'godot_operations.gd log_error must print a quoted prefix').not.toBeNull();
+    const request = operationsSource.match(
+      /^\t\tlog_error\("([^"]*)" \+ context \+ ": " \+ paths\)$/m,
+    );
+    expect(request, 'godot_operations.gd must print the import request').not.toBeNull();
+    const printed = `${errorPrefix![1]!}${request![1]!}res://main.tscn: res://icon.png`;
+    expect(stderrRequestsImport(`Godot Engine v4\n${printed}\n`)).toBe(true);
+  });
+
   it('promotes the same add_node parameters on both sides', () => {
     // Red when one list gains or loses a name: a top-level parameter would then
     // be applied by the standalone tool and ignored inside a batch, or the
@@ -427,6 +482,45 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     const promoted = quotedItems(gdList![1]!);
     expect(promoted.length).toBeGreaterThan(0);
     expect(promoted).toEqual(quotedItems(tsList![1]!));
+  });
+
+  it('takes the same suffixes for a node type that names a scene', () => {
+    // Red when one list gains or loses a suffix: the path check would then
+    // resolve a node type the script instantiates as a class, or the reverse.
+    const gdList = operationsSource.match(/^const _SCENE_SUFFIXES: Array = \[([^\]]*)\]$/m);
+    expect(gdList, 'godot_operations.gd must declare _SCENE_SUFFIXES').not.toBeNull();
+    const tsList = pathValidationSource.match(
+      /^const NODE_TYPE_SCENE_SUFFIXES: readonly string\[\] = \[([^\]]*)\];$/m,
+    );
+    expect(tsList, 'path-validation.ts must declare NODE_TYPE_SCENE_SUFFIXES').not.toBeNull();
+    const suffixes = quotedItems(gdList![1]!);
+    expect(suffixes.length).toBeGreaterThan(0);
+    expect(suffixes).toEqual(quotedItems(tsList![1]!));
+  });
+
+  it('dispatches the batch operations the item check admits, and names them in its hint', () => {
+    // Red when an operation is added to or removed from one side only: the
+    // item check would then refuse an operation the script runs, or admit one
+    // the script answers with "Unknown batch operation".
+    const tsList = argParsingSource.match(
+      /^const BATCH_OPERATION_NAMES = \[([^\]]*)\] as const;$/m,
+    );
+    expect(tsList, 'arg-parsing.ts must declare BATCH_OPERATION_NAMES').not.toBeNull();
+    const admitted = quotedItems(tsList![1]!);
+    expect(admitted.length).toBeGreaterThan(0);
+
+    const batchStart = operationsSource.indexOf('\nfunc batch_scene_operations(');
+    expect(
+      batchStart,
+      'godot_operations.gd must define batch_scene_operations',
+    ).toBeGreaterThanOrEqual(0);
+    const batchBody = operationsSource.slice(batchStart);
+    const dispatch = batchBody.match(/^(\t+)match op_name:\n([\s\S]*?)^\1\t_:$/m);
+    expect(dispatch, 'batch_scene_operations must match on op_name').not.toBeNull();
+    const armPattern = new RegExp(`^${dispatch![1]!}\t"([^"]+)":$`, 'gm');
+    const arms = [...dispatch![2]!.matchAll(armPattern)].map((arm) => arm[1]!);
+    expect(arms).toEqual(admitted);
+    expect(batchBody).toContain(`(one of: ${admitted.join(', ')})`);
   });
 
   it('ends the process in one place', () => {

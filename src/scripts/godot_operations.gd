@@ -521,6 +521,7 @@ func _classify_dep_path(path: String) -> String:
 # Returns the error string the caller reports for the failed operation.
 func _report_import_needed(context: String, paths: String) -> String:
 	if import_marker_armed:
+		# KEEP IN SYNC with IMPORT_NEEDED_LINE in src/utils/headless-op.ts: the marker and log_error's prefix.
 		log_error("[IMPORT_NEEDED] " + context + ": " + paths)
 		return "asset not yet imported: " + paths
 	log_error("Asset not yet imported, and an earlier operation in this batch has already mutated a scene: " + paths + " (" + context + "). Refusing the automatic import-and-retry, which would re-apply those mutations a second time.")
@@ -937,7 +938,7 @@ func create_scene(params):
 # which merges them on the standalone path -- KEEP IN SYNC.
 const _PROMOTED_SPATIAL_PARAMS: Array = ["position", "rotation", "scale", "visible", "modulate"]
 
-# Scene-file suffixes accepted where a node type may name a scene to instance.
+# Suffixes of a node type that names a scene to instance. KEEP IN SYNC with NODE_TYPE_SCENE_SUFFIXES in src/utils/path-validation.ts.
 const _SCENE_SUFFIXES: Array = [".tscn", ".scn"]
 
 # True when the value names a scene file rather than a Godot class.
@@ -1055,7 +1056,6 @@ func _name_not_kept_warning(requested_name: String, final_name: String) -> Strin
 		return ""
 	return "Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [requested_name, final_name]
 
-# Add a node to an existing scene
 # Apply an add_node mutation without saving. Shared by standalone add_node
 # and batch_scene_operations so both paths validate identically.
 # Returns {"ok": bool, "error": String}; on success also "payload" (the result
@@ -1063,9 +1063,8 @@ func _name_not_kept_warning(requested_name: String, final_name: String) -> Strin
 # a property was set that the scene file does not store, or Godot did not keep
 # the requested name).
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
-	# The batch path forwards operations without any Node-side check, and each of
-	# these is handed to a typed parameter or method below, where a wrong type
-	# raises and aborts the whole batch instead of failing this one operation.
+	# Checked here as well as by the Node-side item check: each of these is handed
+	# to a typed parameter or method below, where a wrong type raises.
 	for string_param in ["parent_node_path", "node_type", "node_name"]:
 		if op.has(string_param) and typeof(op[string_param]) != TYPE_STRING:
 			return {"ok": false, "error": "%s must be a string" % string_param}
@@ -1461,7 +1460,6 @@ func _claim_for_serialization(scene_root: Node, target: Node) -> void:
 			scene_root.set_editable_instance(cur, true)
 		cur = cur.get_parent()
 
-# Update one or more node properties in a single headless process (saves once)
 # Apply one property-update list to a loaded scene without saving. Shared by
 # standalone set_node_properties and batch_scene_operations so both paths
 # validate identically (including instanced-child serialization claiming).
@@ -1480,9 +1478,8 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 
 	for i in range(updates.size()):
 		var update = updates[i]
-		# The batch path forwards operations without any Node-side check, so a
-		# malformed item is reported here instead of read by dot access, which
-		# aborts the whole script on a missing key.
+		# A malformed item is reported here instead of read by dot access, which
+		# raises on a missing key.
 		var well_formed: bool = (
 			typeof(update) == TYPE_DICTIONARY
 			and update.has("node_path")
@@ -2390,15 +2387,10 @@ func validate_resource(params):
 	var result = _validate_single(params)
 	emit_result({"valid": result.valid, "errors": result.errors})
 
-# Validate a scene file against a structural schema. Schema: { type?: string, children?: Schema[], hasProperty?: string }.
-# Returns { valid, missingNodes: [{ path, expected }], missingProperties: [{ path, property }], errors: string[] }.
-
-# Unified entry point for the validate tool's checks[] array. Runs structural
+# Entry point for the validate tool's checks[] array. Runs structural
 # and signal-verification checks against one scene in a single Godot process,
 # emitting a { valid, errors: [{ check, message, ... }] } payload compatible
-# with the validate tool's output shape. Reuses the same collection helpers
-# as the standalone checks: _validate_schema_node for structure,
-# _collect_connection_issues / _collect_orphaned_handlers for signals.
+# with the validate tool's output shape.
 func validate_checks(params):
 	var outcome = _run_scene_checks(str(params.scene_path), params.checks if params.has("checks") else [])
 	if not outcome.ok:
@@ -2435,9 +2427,8 @@ func _run_scene_checks(scene_path: String, checks) -> Dictionary:
 # and returns the collected error dictionaries. Does not free scene_root: the
 # caller owns that instance. A non-Array checks value collects nothing.
 #
-# Every entry is hedged rather than trusted: batch sub-operations reach this
-# function without passing through the Node-side check validators, so a
-# malformed entry must be reported, not crash the process.
+# Every entry is hedged rather than trusted, whatever the Node side checked:
+# a malformed entry must be reported, not raise.
 func _collect_check_errors(scene_root: Node, checks) -> Array:
 	var errors: Array = []
 	if typeof(checks) != TYPE_ARRAY:
@@ -2512,9 +2503,8 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 	return errors
 
 func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
-	# A malformed entry is reported, not fatal: the recursion below and the
-	# batch path both reach this function with values that never passed through
-	# the Node-side validators. issues entries are stringified by the caller.
+	# A malformed entry is reported, not fatal. issues entries are stringified by
+	# the caller.
 	if not (schema is Dictionary):
 		issues.append("Invalid schema entry: expected an object, got " + type_string(typeof(schema)))
 		return
@@ -4192,6 +4182,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 
 		var scene_root = scene_cache.get(scene_key, null) if scene_key != "" else null
 
+		# KEEP IN SYNC with BATCH_OPERATION_NAMES in src/utils/arg-parsing.ts: the arms below and the list in the hint.
 		match op_name:
 			"add_node":
 				if scene_root == null:

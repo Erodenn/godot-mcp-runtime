@@ -42,9 +42,8 @@ const FRAME_HEADER_BYTES := 4
 # spelling lives in both places and the two MUST move together.
 const ACTION_BOUNDARY_SENTINEL := "MCP_ACTION_BOUNDARY"
 
-# Input batch caps. Mirrored Node-side in src/tools/runtime-tools.ts, which
-# rejects an over-cap batch before it reaches the bridge; these are the
-# independent bridge-side enforcement.
+# KEEP IN SYNC: MAX_WAIT_FRAMES, MAX_HOLD_MS, MAX_TEXT_LENGTH and MAX_WATCH_ENTRIES with their twins in src/tools/runtime-tools.ts.
+# That side rejects an over-cap batch before it reaches the bridge; these are the independent bridge-side enforcement.
 const MAX_WAIT_FRAMES := 600
 const MAX_HOLD_MS := 10000
 const MAX_TEXT_LENGTH := 1000
@@ -272,6 +271,7 @@ var _parent_watch_beat: PackedByteArray = PackedByteArray()
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	# KEEP IN SYNC: MCP_SESSION_TOKEN, MCP_BRIDGE_PORT and MCP_BACKGROUND with the env the runner sets in src/utils/godot-runner.ts.
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
 	if session_token == "":
 		session_token = SESSION_TOKEN_BAKED
