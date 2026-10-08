@@ -391,10 +391,12 @@ export async function runLaunchGate(
         for (const target of targets) {
           const lowered = target.toLowerCase();
           if (lowered.endsWith(GDSCRIPT_EXTENSION)) scanScriptPath(target);
-          else if (lowered.endsWith(SCENE_EXTENSION)) scanScene(target);
-          else {
+          else if (lowered.endsWith(SCENE_EXTENSION) || lowered.endsWith(TEXT_RESOURCE_EXTENSION)) {
+            // The engine loads an autoload by what the file holds: a `.tres` can be a script or a scene.
+            scanScene(target);
+          } else {
             scanWarnings.push(
-              `Autoload ${entry.name} (${entry.path}) was not scanned: only ${GDSCRIPT_EXTENSION} scripts and ${SCENE_EXTENSION} scenes are scanned`,
+              `Autoload ${entry.name} (${entry.path}) was not scanned: only ${GDSCRIPT_EXTENSION} scripts, ${SCENE_EXTENSION} scenes and ${TEXT_RESOURCE_EXTENSION} resources are scanned`,
             );
           }
         }

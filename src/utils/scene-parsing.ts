@@ -42,9 +42,10 @@ const GDSCRIPT_EXTENSION = '.gd';
  * Path extensions an `ext_resource` is walked as a scene for, whatever its
  * `type` says. A `.tres` is a text resource with the same statement grammar
  * (`gd_resource`), so its scripts, inline GDScript and further references are
- * collected like a scene's. A binary `.scn` is walked and reported as not text.
+ * collected like a scene's, and so is an `.escn`. A binary `.scn` is walked and
+ * reported as not text.
  */
-const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.tres'];
+const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
 /** Path extensions of binary resource files, which can carry a script the scan cannot read. */
 const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.res'];
 /**
@@ -58,6 +59,11 @@ const UNICODE_LONG_ESCAPE_DIGITS = 6;
 const HEX_BASE = 16;
 const UNICODE_MAX_CODE_POINT = 0x10ffff;
 const INLINE_SCRIPT_SOURCE_KEY = 'script/source';
+const GDSCRIPT_RESOURCE_TYPE = 'GDScript';
+/** The section holding the properties of a `.tres` file's own resource. */
+const MAIN_RESOURCE_TAG = 'resource';
+/** Names a `.tres` file's own resource where an inline script's sub-resource id would stand. */
+const MAIN_RESOURCE_SCRIPT_ID = 'resource';
 const SCENE_HEADER_TAGS: ReadonlySet<string> = new Set(['gd_scene', 'gd_resource']);
 const SIMPLE_ESCAPES: ReadonlyMap<string, string> = new Map([
   ['n', '\n'],
@@ -712,10 +718,11 @@ function resReferenceToAbs(projectDir: string, resPath: string): string {
   return join(projectDir, rel);
 }
 
-/** An inline `[sub_resource type="GDScript"]` and the source it carries. */
+/** An inline `[sub_resource type="GDScript"]`, or a `.tres` that is itself a GDScript, and its source. */
 export interface InlineSceneScript {
   /** Absolute path of the scene file that holds the sub-resource. */
   scenePath: string;
+  /** The sub-resource id, or `resource` for the file's own resource. */
   id: string;
   source: string;
   /** Line of the sub-resource header in the scene file. */
@@ -741,7 +748,8 @@ export interface UnscannedSceneItem {
   unresolved?: true;
   /**
    * True for a statement of a scene file the scan read but could not take as
-   * written (an entry of `TscnScan.malformed`). The file was read in part: the
+   * written (an entry of `TscnScan.malformed`, or a script source that is not
+   * one plain string). The file was read in part: the
    * engine may load something from that statement that the scan did not see,
    * so a caller that must not launch on an incomplete scan treats it like
    * `readFailed`.
@@ -770,7 +778,7 @@ function resPathOf(attrs: Map<string, string>): string | null {
  * An `ext_resource` is classified by its path as well as by its `type`
  * attribute. The engine loads the file the path names, and `type` is a hint a
  * hand-edited scene can set to anything: a `.gd` path is scanned and a `.tscn`
- * or `.scn` path is walked whatever the hint says, and so is a `.tres`. A reference the walk does
+ * or `.scn` path is walked whatever the hint says, and so is a `.tres` or `.escn`. A reference the walk does
  * not follow and that can still bring a script in (a script that is not
  * GDScript, a binary `.res` resource, a reference with no `res://` path)
  * is listed in `unscanned`, never dropped.
@@ -833,6 +841,25 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
       return;
     }
 
+    // A `.tres` whose own type is GDScript carries its source under `[resource]`.
+    const fileIsScript = scan.headers[0]?.attrs.get('type') === GDSCRIPT_RESOURCE_TYPE;
+    const hasSourceProperty = (header: TscnHeader): boolean =>
+      header.stringProps.has(INLINE_SCRIPT_SOURCE_KEY) ||
+      header.rawProps.has(INLINE_SCRIPT_SOURCE_KEY);
+    const collectInlineScript = (header: TscnHeader, id: string): void => {
+      const source = header.stringProps.get(INLINE_SCRIPT_SOURCE_KEY);
+      if (source !== undefined) {
+        inlineScripts.push({ scenePath: absScenePath, id, source, line: header.line });
+      } else if (header.rawProps.has(INLINE_SCRIPT_SOURCE_KEY)) {
+        // The engine converts any value to source text (`&"..."`), so it compiles what was not read.
+        unscanned.push({
+          scenePath: absScenePath,
+          reason: `inline GDScript ${id} has no readable script/source (the value is not one plain string)`,
+          malformed: true,
+        });
+      } else skip(`inline GDScript ${id} has no readable script/source`);
+    };
+
     for (const header of scan.headers) {
       if (header.tag === 'ext_resource') {
         const type = header.attrs.get('type') ?? '';
@@ -856,11 +883,13 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
             skip(`resource ${path} is not scanned (a binary .res file can carry a script)`);
           }
         }
-      } else if (header.tag === 'sub_resource' && header.attrs.get('type') === 'GDScript') {
-        const id = header.attrs.get('id') ?? '?';
-        const source = header.stringProps.get(INLINE_SCRIPT_SOURCE_KEY);
-        if (source === undefined) skip(`inline GDScript ${id} has no readable script/source`);
-        else inlineScripts.push({ scenePath: absScenePath, id, source, line: header.line });
+      } else if (
+        header.tag === 'sub_resource' &&
+        header.attrs.get('type') === GDSCRIPT_RESOURCE_TYPE
+      ) {
+        collectInlineScript(header, header.attrs.get('id') ?? '?');
+      } else if (header.tag === MAIN_RESOURCE_TAG && (fileIsScript || hasSourceProperty(header))) {
+        collectInlineScript(header, MAIN_RESOURCE_SCRIPT_ID);
       }
     }
     // A malformed header loses the properties under it whatever its tag was,

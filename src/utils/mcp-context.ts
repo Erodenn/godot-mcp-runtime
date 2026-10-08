@@ -44,6 +44,15 @@ export class ElicitationUnsupportedError extends Error {
   }
 }
 
+/** True when the client declared form elicitation; an empty `elicitation` object is its older spelling, `url` alone is not it. */
+export function clientSupportsFormElicitation(
+  capabilities: { elicitation?: Record<string, unknown> | undefined } | undefined,
+): boolean {
+  const elicitation = capabilities?.elicitation;
+  if (elicitation === undefined || elicitation === null) return false;
+  return Object.keys(elicitation).length === 0 || elicitation.form !== undefined;
+}
+
 /**
  * Async function that prompts the user via the MCP elicitation channel.
  * Throws `ElicitationUnsupportedError` when the client does not declare the
@@ -51,6 +60,34 @@ export class ElicitationUnsupportedError extends Error {
  * neither as a confirmation.
  */
 export type Elicitor = (request: ElicitorRequest) => Promise<ElicitorResult>;
+
+/** How long a confirmation prompt waits. Held under the client's 60 s tool-call timeout so the refusal still arrives. */
+export const ELICITATION_PROMPT_TIMEOUT_MS = 45000;
+
+/** The part of the MCP server an elicitor needs; structural, so the SDK stays out of this module. */
+export interface ElicitationClient {
+  getClientCapabilities(): { elicitation?: Record<string, unknown> | undefined } | undefined;
+  elicitInput(
+    params: ElicitorRequest,
+    options: { timeout: number },
+  ): Promise<{ action: ElicitorResult['action']; content?: Record<string, unknown> | undefined }>;
+}
+
+/** The elicitor both confirmation prompts share: typed refusal for a client that cannot be asked, bounded wait otherwise. */
+export function createElicitor(client: ElicitationClient): Elicitor {
+  return async (request) => {
+    if (!clientSupportsFormElicitation(client.getClientCapabilities())) {
+      throw new ElicitationUnsupportedError();
+    }
+    const result = await client.elicitInput(
+      { message: request.message, requestedSchema: request.requestedSchema },
+      { timeout: ELICITATION_PROMPT_TIMEOUT_MS },
+    );
+    return result.content
+      ? { action: result.action, content: result.content }
+      : { action: result.action };
+  };
+}
 
 /**
  * True only for an explicit accept. An `accept` that carries a `confirm` field

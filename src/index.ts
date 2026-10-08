@@ -22,10 +22,9 @@ import { MS_PER_SECOND } from './utils/profiler.js';
 
 import { dispatchToolCall } from './dispatch.js';
 import {
+  createElicitor,
   describeIgnoredFlagValues,
-  ElicitationUnsupportedError,
   resolveDisableSecurity,
-  type Elicitor,
   type McpContext,
 } from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
@@ -83,21 +82,19 @@ Security gate (run_script / run_project / render_movie): a static-analysis scan 
  * (not in `utils/mcp-context.ts`) so the SDK coupling stays in the bin entry.
  */
 function createContextFromServer(server: Server): McpContext {
-  const elicitor: Elicitor = async (request) => {
-    if (server.getClientCapabilities()?.elicitation === undefined) {
-      throw new ElicitationUnsupportedError();
-    }
-    // The SDK's elicitInput param type is a strict zod-inferred shape; we
-    // build the request with an `object`-shaped requestedSchema that matches
-    // the protocol at runtime, so cast to satisfy the narrower TS check.
-    const result = await server.elicitInput({
-      message: request.message,
-      requestedSchema: request.requestedSchema,
-    } as unknown as Parameters<typeof server.elicitInput>[0]);
-    return result.content
-      ? { action: result.action, content: result.content as Record<string, unknown> }
-      : { action: result.action };
-  };
+  const elicitor = createElicitor({
+    getClientCapabilities: () => server.getClientCapabilities(),
+    elicitInput: async (params, options) => {
+      // The SDK's param type is a strict zod-inferred shape; the request matches the protocol at runtime.
+      const result = await server.elicitInput(
+        params as unknown as Parameters<typeof server.elicitInput>[0],
+        options,
+      );
+      return result.content
+        ? { action: result.action, content: result.content as Record<string, unknown> }
+        : { action: result.action };
+    },
+  });
   // A flag set to anything but the exact string "true" is off; say so, because
   // a value like "1" otherwise leaves the operator believing it took effect.
   for (const line of describeIgnoredFlagValues(process.env)) console.error(line);

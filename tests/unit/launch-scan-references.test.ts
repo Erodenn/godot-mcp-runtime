@@ -360,6 +360,70 @@ ${lines.join('\n')}
     expectErrorMatching(await strictGate(dir), /pre-flight scan could not read/);
   });
 
+  const SCRIPT_RESOURCE = [
+    '[gd_resource type="GDScript" format=3]',
+    '',
+    '[resource]',
+    'script/source = "extends Node\\nfunc _ready():\\n\\tOS.execute(\\"x\\")\\n"',
+    '',
+  ].join('\n');
+
+  // Breaks when collectSceneScripts stops reading script/source under [resource].
+  it('scans the source of a .tres that is itself a GDScript', async () => {
+    const dir = projectWithMainScene(
+      'scan-tres-is-script-',
+      sceneWith('[ext_resource type="Script" path="res://evil.tres" id="1"]'),
+    );
+    writeFileSync(join(dir, 'evil.tres'), SCRIPT_RESOURCE, 'utf8');
+
+    expect((await gateWarnings(dir)).join('\n')).toMatch(
+      /evil\.tres\[GDScript resource\]:3 OS\.execute/,
+    );
+    expectErrorMatching(await strictGate(dir), /evil\.tres\[GDScript resource\]:3 OS\.execute/);
+  });
+
+  // Breaks when the gate sends a .tres autoload to the not-scanned branch.
+  it('scans a .tres an autoload entry names', async () => {
+    const dir = tmp.makeProject(
+      'scan-tres-autoload-',
+      'config_version=5\n\n[autoload]\nBoot="*res://boot.tres"\n',
+    );
+    writeFileSync(join(dir, 'boot.tres'), SCRIPT_RESOURCE, 'utf8');
+
+    const warnings = await gateWarnings(dir);
+
+    expect(warnings.join('\n')).toMatch(/boot\.tres\[GDScript resource\]:3 OS\.execute/);
+    expect(warnings.some((w) => /Autoload Boot .* was not scanned/.test(w))).toBe(false);
+  });
+
+  // Breaks when an unread script/source value stops being marked malformed.
+  it('a script source that is not one plain string is a failed read, so strict mode refuses', async () => {
+    const dir = projectWithMainScene(
+      'scan-source-stringname-',
+      sceneWith(
+        '[sub_resource type="GDScript" id="1"]',
+        'script/source = &"extends Node\\nfunc _ready():\\n\\tOS.execute(\\"x\\")\\n"',
+      ),
+    );
+
+    expect((await gateWarnings(dir)).join('\n')).toMatch(
+      /inline GDScript 1 has no readable script\/source \(the value is not one plain string\)/,
+    );
+    expectErrorMatching(await strictGate(dir), /pre-flight scan could not read/);
+  });
+
+  // Breaks when .escn leaves SCENE_FILE_EXTENSIONS.
+  it('walks an .escn referenced with a type other than PackedScene', async () => {
+    const dir = projectWithMainScene(
+      'scan-escn-hint-',
+      sceneWith('[ext_resource type="Texture2D" path="res://part.escn" id="1"]'),
+    );
+    writeFileSync(join(dir, 'part.escn'), sceneWith(scriptRef('res://evil.gd')), 'utf8');
+    writeFileSync(join(dir, 'evil.gd'), TIER1_BODY, 'utf8');
+
+    expect((await gateWarnings(dir)).join('\n')).toMatch(/evil\.gd:3 OS\.execute/);
+  });
+
   it('a .res is still only a Not scanned notice, which strict mode does not refuse', async () => {
     const dir = projectWithMainScene(
       'scan-res-notice-',

@@ -381,7 +381,7 @@ describe('launch scan: autoloads', () => {
     );
     const warnings = await gateWarnings(dir);
     expect(warnings).toContain(
-      'Autoload Native (res://native.cs) was not scanned: only .gd scripts and .tscn scenes are scanned',
+      'Autoload Native (res://native.cs) was not scanned: only .gd scripts, .tscn scenes and .tres resources are scanned',
     );
   });
 

@@ -11,10 +11,16 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  clientSupportsFormElicitation,
+  createElicitor,
+  ELICITATION_PROMPT_TIMEOUT_MS,
+  ElicitationUnsupportedError,
+  type ElicitationClient,
   describeIgnoredFlagValues,
   normalizeProjectKey,
   resolveDisableSecurity,
 } from '../../src/utils/mcp-context.js';
+import { CLIENT_REQUEST_TIMEOUT_MS } from '../../src/utils/godot-runner.js';
 
 describe('normalizeProjectKey', () => {
   it.runIf(process.platform === 'win32')(
@@ -23,6 +29,62 @@ describe('normalizeProjectKey', () => {
       expect(normalizeProjectKey('D:\\proj')).toBe(normalizeProjectKey('d:\\proj'));
     },
   );
+});
+
+// Breaks when the predicate reads any declared `elicitation` object as promptable.
+describe('clientSupportsFormElicitation', () => {
+  it.each([
+    [undefined, false],
+    [{}, false],
+    [{ elicitation: {} }, true],
+    [{ elicitation: { form: {} } }, true],
+    [{ elicitation: { form: {}, url: {} } }, true],
+    [{ elicitation: { url: {} } }, false],
+  ])('%j -> %s', (capabilities, expected) => {
+    expect(clientSupportsFormElicitation(capabilities)).toBe(expected);
+  });
+});
+
+describe('createElicitor', () => {
+  const REQUEST = {
+    message: 'Proceed?',
+    requestedSchema: { type: 'object' as const, properties: {} },
+  };
+  const clientWith = (
+    elicitation: Record<string, unknown> | undefined,
+    calls: Array<{ timeout: number }>,
+  ): ElicitationClient => ({
+    getClientCapabilities: () => (elicitation === undefined ? {} : { elicitation }),
+    elicitInput: async (_params, options) => {
+      calls.push(options);
+      return { action: 'accept', content: { confirm: true } };
+    },
+  });
+
+  // Breaks when the prompt is sent without the timeout, so it waits on the SDK's 60 s default.
+  it('sends the prompt with the named timeout', async () => {
+    const calls: Array<{ timeout: number }> = [];
+
+    const result = await createElicitor(clientWith({ form: {} }, calls))(REQUEST);
+
+    expect(result).toEqual({ action: 'accept', content: { confirm: true } });
+    expect(calls).toEqual([{ timeout: ELICITATION_PROMPT_TIMEOUT_MS }]);
+  });
+
+  // Breaks when the timeout is raised to or past the client's tool-call timeout.
+  it('keeps the prompt wait under the client request timeout', () => {
+    expect(ELICITATION_PROMPT_TIMEOUT_MS).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+  });
+
+  // Breaks when a client without form elicitation is sent the prompt anyway.
+  it('throws the typed error and sends nothing to a client that cannot be asked', async () => {
+    const calls: Array<{ timeout: number }> = [];
+
+    await expect(createElicitor(clientWith({ url: {} }, calls))(REQUEST)).rejects.toBeInstanceOf(
+      ElicitationUnsupportedError,
+    );
+    expect(calls).toEqual([]);
+  });
 });
 
 describe('resolveDisableSecurity', () => {
