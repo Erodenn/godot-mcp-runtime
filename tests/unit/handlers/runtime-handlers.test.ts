@@ -3017,7 +3017,7 @@ describe('handleRunProject security pre-flight', () => {
     expect(fake.runProjectCalls()).toBe(0);
   });
 
-  // The engine runs these as a scene; the pre-flight scan reads only .tscn.
+  // The engine runs these as a scene; the pre-flight scan does not read them as one.
   it.each(['other.tres', 'other.res', 'other.escn'])(
     'launches %s as scene with a Not scanned warning, and strict mode refuses it',
     async (scene) => {
@@ -3034,7 +3034,7 @@ describe('handleRunProject security pre-flight', () => {
       );
       expect(hasError(launched)).toBe(false);
       expect((runProjectPayload(launched).warnings ?? []).join('\n')).toContain(
-        `Not scanned: ${scene}: the pre-flight scan reads only .tscn scenes`,
+        `Not scanned: ${scene}: the pre-flight scan reads a launch scene only when it is a .tscn file`,
       );
 
       const strict = await handleRunProject(

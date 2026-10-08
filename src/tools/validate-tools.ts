@@ -399,9 +399,9 @@ interface BatchTarget {
 
 /**
  * Read one `targets[]` item. `normalizeParameters` does not descend into
- * arrays, so an item reaches the handler spelled however the caller wrote it;
- * both spellings are read, as the items of `nodes`, `updates` and `operations`
- * are. Null when the item is not an object.
+ * arrays, so an item reaches the handler spelled however the caller wrote it.
+ * Both spellings are read here and the value read is the one forwarded, under
+ * a key this handler writes. Null when the item is not an object.
  */
 function readBatchTarget(raw: unknown): BatchTarget | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;

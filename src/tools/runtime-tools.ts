@@ -55,7 +55,11 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
-import { TIMESTAMP_OVERFLOW_ERRORS, TIMESTAMP_OVERFLOW_FIX } from '../utils/profiler.js';
+import {
+  MS_PER_SECOND,
+  TIMESTAMP_OVERFLOW_ERRORS,
+  TIMESTAMP_OVERFLOW_FIX,
+} from '../utils/profiler.js';
 import {
   BridgeAttachConflictError,
   BridgeAutoloadCollisionError,
@@ -99,14 +103,12 @@ const STATS_NOT_MEASURED_WARNING_PREFIX = 'Pixel stats were not measured: ';
 const STATS_NOT_MEASURED_WARNING_SUFFIX =
   '. The screenshot was saved; stats is null, which does not mean the frame is blank.';
 
-// Input batch caps, mirrored in src/scripts/mcp_bridge.gd. Enforced here so an
-// over-cap batch never reaches the bridge, and there so the bridge is safe on
-// its own. Declared above the tool definitions because the input schema
-// references MAX_WATCH_ENTRIES while that array is being built.
-const MAX_WAIT_FRAMES = 600;
-const MAX_HOLD_MS = 10000;
-const MAX_TEXT_LENGTH = 1000;
-const MAX_WATCH_ENTRIES = 16;
+// KEEP IN SYNC: the constants of the same names in src/scripts/mcp_bridge.gd,
+// which the bridge enforces independently.
+export const MAX_WAIT_FRAMES = 600;
+export const MAX_HOLD_MS = 10000;
+export const MAX_TEXT_LENGTH = 1000;
+export const MAX_WATCH_ENTRIES = 16;
 
 // Timeout math for simulate_input. The progress-heartbeat invariant makes the
 // server-side timeout load-bearing, so every term is a named multiplier and the
@@ -125,7 +127,6 @@ const INPUT_TIMEOUT_BUFFER_MS = 10000;
  * wall-clock waits of a batch at the same figure on the bridge side.
  */
 export const MAX_INPUT_BATCH_BUDGET_MS = MAX_RUNTIME_TIMEOUT_MS;
-const MS_PER_SECOND = 1000;
 /** `get_debug_output` `limit` when omitted, and the least it accepts. */
 const DEFAULT_DEBUG_OUTPUT_LIMIT = 200;
 const MIN_DEBUG_OUTPUT_LIMIT = 1;
@@ -175,12 +176,12 @@ export const SCREENSHOT_FRAME_RENDER_BUDGET_MS = 5000;
 const BRIDGE_PORT_MIN = 1;
 const BRIDGE_PORT_MAX = 65535;
 
-// run_project parameters that only mean something when this server spawns
-// Godot itself. Attach mode rejects them instead of silently ignoring them.
 /** What a background-mode run says about itself in its success and failure text. */
 const BACKGROUND_MODE_NOTE =
   'Background mode: window not shown on Windows, moved off-screen elsewhere; mouse input passes through';
 
+// run_project parameters that only mean something when this server spawns
+// Godot itself. Attach mode rejects them instead of silently ignoring them.
 const SPAWN_ONLY_RUN_PROJECT_PARAMS = ['scene', 'background', 'profiling'] as const;
 
 type ScreenshotResponseMode = (typeof SCREENSHOT_RESPONSE_MODES)[number];
@@ -236,7 +237,7 @@ export const runtimeToolDefinitions = [
         },
         attach: {
           type: 'boolean',
-          description: `If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to ${BRIDGE_WAIT_ATTACHED_TIMEOUT_MS / 1000}s for it to start listening, ${BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS / 1000}s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project; attaching again keeps this server's attached session unless its bridge is gone, and says so in warnings. Cannot be combined with scene, background or profiling. Nothing is captured: get_debug_output returns null logs with a warning, and the profiler is unavailable.`,
+          description: `If true, do not spawn Godot: inject the bridge and wait for a Godot process you launch yourself (up to ${BRIDGE_WAIT_ATTACHED_TIMEOUT_MS / MS_PER_SECOND}s for it to start listening, ${BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS / MS_PER_SECOND}s total once it has). Call before Godot launches, or start the launch in parallel, because Godot reads autoloads only at startup. One attach session per project; attaching again keeps this server's attached session unless its bridge is gone, and says so in warnings. Cannot be combined with scene, background or profiling. Nothing is captured: get_debug_output returns null logs with a warning, and the profiler is unavailable.`,
         },
         scene: {
           type: 'string',

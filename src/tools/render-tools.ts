@@ -60,6 +60,8 @@ import {
   type RgbaFrame,
 } from '../utils/pixel-stats.js';
 import { buildFramePreview } from '../utils/frame-preview.js';
+import { MS_PER_SECOND } from '../utils/profiler.js';
+import { CLIENT_REQUEST_TIMEOUT_MS } from '../utils/godot-runner.js';
 import { DEFAULT_PREVIEW_MAX_HEIGHT, DEFAULT_PREVIEW_MAX_WIDTH } from './runtime-tools.js';
 
 export const RENDER_MOVIE_MODES = ['check', 'frames', 'video'] as const;
@@ -89,6 +91,10 @@ export const MOVIE_WARMUP_FRAMES = 5;
 export const MOVIE_FRAME_PATHS_LISTED_MAX = 60;
 export const MOVIE_TIMEOUT_BASE_MS = 30000;
 export const MOVIE_TIMEOUT_PER_FRAME_MS = 250;
+/** Frame count at which a timed-out run's worst case (budget plus kill grace) reaches the client's request timeout. */
+const MOVIE_CLIENT_TIMEOUT_FRAMES =
+  (CLIENT_REQUEST_TIMEOUT_MS - MOVIE_TIMEOUT_BASE_MS - MOVIE_KILL_GRACE_MS) /
+  MOVIE_TIMEOUT_PER_FRAME_MS;
 const MOVIE_STDERR_TAIL_LINES = 20;
 /**
  * Cap on the warning lines taken from the run's stderr. Measurement and
@@ -99,7 +105,6 @@ export const MOVIE_RUNTIME_WARNINGS_MAX = 30;
 const MOVIE_CLEANUP_MAX_RETRIES = 3;
 const MOVIE_CLEANUP_RETRY_DELAY_MS = 100;
 
-const MS_PER_SECOND = 1000;
 const MOVIE_PNG_EXTENSION = 'png' as const;
 const MOVIE_FRAME_FILE_PATTERN = new RegExp(`^${MOVIE_FRAME_BASENAME}(\\d+)\\.png$`);
 const STATS_NOTE =
@@ -135,7 +140,7 @@ export const renderToolDefinitions = [
           type: 'integer',
           minimum: MIN_MOVIE_FRAMES,
           maximum: MAX_MOVIE_FRAMES,
-          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, and a run that overruns it takes up to 10s more to stop, so above about 80 frames a client with a 60s request timeout may cut the call off before this server can report the timeout.`,
+          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, and a run that overruns it takes up to ${MOVIE_KILL_GRACE_MS / MS_PER_SECOND}s more to stop, so at ${MOVIE_CLIENT_TIMEOUT_FRAMES} frames or more a client with a ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout may cut the call off before this server can report the timeout.`,
         },
         fps: {
           type: 'integer',

@@ -712,16 +712,12 @@ async function startTrack(
     );
   } catch (error: unknown) {
     const message = getErrorMessage(error);
-    // The runner takes one bridge command at a time and refuses the rest.
-    const busy = message.includes('in flight');
     const unreadable = error instanceof SyntaxError;
     return err(
       createErrorResponse(`Could not start the track: ${message}`, [
-        busy
-          ? 'Another bridge command (simulate_input, run_script, ...) was still running - start the capture before driving the game, or retry once it finished'
-          : unreadable
-            ? 'The game bridge answered with something that is not JSON - check get_debug_output'
-            : 'The game bridge did not answer - check get_debug_output',
+        unreadable
+          ? 'The game bridge answered with something that is not JSON - check get_debug_output'
+          : 'The game bridge did not answer - check get_debug_output',
         'Retry without track to profile without positions',
       ]),
     );
