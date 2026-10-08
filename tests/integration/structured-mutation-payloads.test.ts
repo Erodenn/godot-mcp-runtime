@@ -24,10 +24,12 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import {
   handleAddNode,
   handleBatchSceneOperations,
+  handleCreateScene,
   handleLoadSprite,
   handleSaveScene,
 } from '../../src/tools/scene-tools.js';
 import {
+  handleAttachScript,
   handleConnectSignal,
   handleDeleteNodes,
   handleDisconnectSignal,
@@ -158,10 +160,41 @@ describe('duplicate_node reports where the duplicate is', () => {
       const payload = expectMatchesOutputSchema('duplicate_node', result);
       expect(payload.nodePath).toBe('root/Label');
       expect(payload.newNodePath).toBe('root/LabelCopy');
+      // Red when the script puts the constant success field back.
+      expect(payload).not.toHaveProperty('success');
 
       const read = await readNode(String(payload.newNodePath));
       expect(read).not.toHaveProperty('error');
       expect(read.nodeType).toBe('Label');
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('create_scene and attach_script carry no constant success field', () => {
+  itGodot(
+    'create_scene answers with the scenePath alone and attach_script with nodePath and scriptPath',
+    async () => {
+      // Red when either script puts "success": true back into its payload.
+      const created = await handleCreateScene(runner, {
+        projectPath,
+        scenePath: 'fresh.tscn',
+        rootNodeType: 'Node2D',
+      });
+      const createdPayload = expectMatchesOutputSchema('create_scene', created);
+      expect(createdPayload.scenePath).toBe('fresh.tscn');
+      expect(createdPayload).not.toHaveProperty('success');
+
+      writeFileSync(join(projectPath, 'plain.gd'), 'extends Node2D\n', 'utf-8');
+      const attached = await handleAttachScript(runner, {
+        projectPath,
+        scenePath: 'fresh.tscn',
+        nodePath: 'root',
+        scriptPath: 'plain.gd',
+      });
+      const attachedPayload = expectMatchesOutputSchema('attach_script', attached);
+      expect(attachedPayload.scriptPath).toBe('plain.gd');
+      expect(attachedPayload).not.toHaveProperty('success');
     },
     CASE_TIMEOUT_MS,
   );

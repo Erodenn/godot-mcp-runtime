@@ -54,10 +54,52 @@ var result_emitted := false
 # warnings, so a helper that returns a plain bool can still say something.
 var result_warnings: Array = []
 
+# Most paths named in the warning for non-finite numbers; the rest are counted.
+const _NON_FINITE_PATH_CAP := 8
+
+# JSON has no INF or NAN, and JSON.stringify writes them as bare words no parser
+# accepts. Replaces every non-finite float anywhere in `value` (Dictionary values
+# and Array elements, at any depth) with null, in place, and appends the path of
+# each to `found`. A float that is not a number is a value nobody measured, so
+# it is reported rather than written as a zero.
+func _null_non_finite(value, path: String, found: Array):
+	match typeof(value):
+		TYPE_FLOAT:
+			if not is_finite(value):
+				found.append(path if path != "" else "(result)")
+				return null
+		TYPE_DICTIONARY:
+			var dict: Dictionary = value
+			for key in dict.keys():
+				var child_path: String = str(key) if path == "" else path + "." + str(key)
+				dict[key] = _null_non_finite(dict[key], child_path, found)
+		TYPE_ARRAY:
+			var arr: Array = value
+			for i in range(arr.size()):
+				arr[i] = _null_non_finite(arr[i], path + "[" + str(i) + "]", found)
+	return value
+
+# Called from emit_result only. The warning goes into a Dictionary payload's own
+# `warnings`; an Array payload has nowhere to put one.
+func _sanitize_non_finite(payload) -> void:
+	var found: Array = []
+	_null_non_finite(payload, "", found)
+	if found.is_empty() or not (payload is Dictionary):
+		return
+	var shown: Array = found.slice(0, _NON_FINITE_PATH_CAP)
+	var text := "%d non-finite numbers (INF, NAN) were returned as null at: %s" % [found.size(), ", ".join(PackedStringArray(shown))]
+	if found.size() > shown.size():
+		text += " (and %d more)" % (found.size() - shown.size())
+	var existing = payload.get("warnings", [])
+	var combined: Array = existing.duplicate() if existing is Array else []
+	combined.append(text)
+	payload["warnings"] = combined
+
 # The one emitter for an operation's JSON result. Every operation that returns
 # a JSON payload goes through here; never print a result line directly.
 func emit_result(payload) -> void:
 	result_emitted = true
+	_sanitize_non_finite(payload)
 	if payload is Dictionary and not result_warnings.is_empty():
 		var combined: Array = result_warnings.duplicate()
 		combined.append_array(payload.get("warnings", []))
@@ -857,7 +899,7 @@ func create_scene(params):
 	if save_scene_to_path(scene_root, full_scene_path):
 		# The project-relative form of the path that was written, not the
 		# spelling the caller used ("./a.tscn", "res://a.tscn").
-		emit_result({"success": true, "scenePath": _project_relative(full_scene_path)})
+		emit_result({"scenePath": _project_relative(full_scene_path)})
 	else:
 		log_error("Failed to create scene: " + params.scene_path)
 		_fail_operation()
@@ -1730,7 +1772,6 @@ func attach_script(params):
 		# Both paths in the form every tool accepts back, read from the node and
 		# from the path that was loaded, not copied from the request.
 		emit_result({
-			"success": true,
 			"nodePath": _relative_path(scene_root, node),
 			"scriptPath": _project_relative(full_script_path)
 		})
@@ -1881,7 +1922,6 @@ func duplicate_node(params):
 
 	if save_scene_to_path(scene_root, params.scene_path):
 		var payload := {
-			"success": true,
 			"nodePath": _relative_path(scene_root, node),
 			"newNodePath": _relative_path(scene_root, duplicate)
 		}
@@ -2531,29 +2571,28 @@ func _is_json_number(value) -> bool:
 # unchanged, so the caller's type check reports it instead of a constructor
 # failing on it.
 func _coerce_property_value(value):
-	if typeof(value) == TYPE_DICTIONARY:
-		if value.has("x") and value.has("y"):
-			if not (_is_json_number(value.x) and _is_json_number(value.y)):
-				return value
-			# Widest form first: every Vector4 dict is also a valid Vector3 dict
-			# and a valid Vector2 dict, so testing w before z before neither is
-			# what keeps {x, y, z, w} from collapsing to Vector3 and dropping w.
-			# An {x, y, w} dict with no z is a Vector2; Vector4 needs all four.
-			if value.has("z"):
-				if not _is_json_number(value.z):
-					return value
-				if value.has("w"):
-					if not _is_json_number(value.w):
-						return value
-					return Vector4(value.x, value.y, value.z, value.w)
-				return Vector3(value.x, value.y, value.z)
-			else:
-				return Vector2(value.x, value.y)
-		elif value.has("r") and value.has("g") and value.has("b"):
-			var a = value.a if value.has("a") else 1.0
-			if not (_is_json_number(value.r) and _is_json_number(value.g) and _is_json_number(value.b) and _is_json_number(a)):
-				return value
-			return Color(value.r, value.g, value.b, a)
+	if typeof(value) != TYPE_DICTIONARY:
+		return value
+	# Only an exact key set is a vector or a color. A dictionary with any other
+	# key, or a mix such as {x, y, w}, is the author's own data and is returned
+	# as it came: a typed property then reports the mismatch, and an untyped
+	# variable stores the dictionary.
+	var count: int = value.size()
+	if count == 2 and value.has("x") and value.has("y"):
+		if _is_json_number(value.x) and _is_json_number(value.y):
+			return Vector2(value.x, value.y)
+	elif count == 3 and value.has("x") and value.has("y") and value.has("z"):
+		if _is_json_number(value.x) and _is_json_number(value.y) and _is_json_number(value.z):
+			return Vector3(value.x, value.y, value.z)
+	elif count == 4 and value.has("x") and value.has("y") and value.has("z") and value.has("w"):
+		if _is_json_number(value.x) and _is_json_number(value.y) and _is_json_number(value.z) and _is_json_number(value.w):
+			return Vector4(value.x, value.y, value.z, value.w)
+	elif count == 3 and value.has("r") and value.has("g") and value.has("b"):
+		if _is_json_number(value.r) and _is_json_number(value.g) and _is_json_number(value.b):
+			return Color(value.r, value.g, value.b)
+	elif count == 4 and value.has("r") and value.has("g") and value.has("b") and value.has("a"):
+		if _is_json_number(value.r) and _is_json_number(value.g) and _is_json_number(value.b) and _is_json_number(value.a):
+			return Color(value.r, value.g, value.b, value.a)
 	return value
 
 # Helper: element-wise coercion for packed-array properties. Called from

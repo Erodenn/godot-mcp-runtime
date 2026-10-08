@@ -18,6 +18,7 @@ import {
   DEFAULT_BRIDGE_PORT,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
+  NON_FINITE_COUNT_FIELD,
   OVERSIZE_RESPONSE_FIELD,
   PARENT_WATCH_PORT_ENV,
 } from '../../src/utils/bridge-protocol.js';
@@ -80,6 +81,12 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     // Red when either side renames the field: the handler would then report a
     // script that ran as a refusal where nothing ran.
     expect(gdConst('OVERSIZE_RESPONSE_FIELD')).toBe(`"${OVERSIZE_RESPONSE_FIELD}"`);
+  });
+
+  it('declares the same non-finite count field', () => {
+    // Red when either side renames the field: the count would reach the payload
+    // as an unknown key and the warning would never be given.
+    expect(gdConst('NON_FINITE_COUNT_FIELD')).toBe(`"${NON_FINITE_COUNT_FIELD}"`);
   });
 
   it('declares the same profiler track caps', () => {

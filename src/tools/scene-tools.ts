@@ -29,7 +29,7 @@ export const sceneToolDefinitions = [
   {
     name: 'create_scene',
     description:
-      'Create a new scene file with a single root node, written to scenePath. Use to start a scene from scratch; to add nodes to an existing scene use add_node. rootNodeType defaults to Node2D: pass "Node3D" for 3D or "Control" for UI. Saves automatically and overwrites an existing file silently. Returns: success and the scenePath that was written. Errors while a runtime session is live on this project.',
+      'Create a new scene file with a single root node, written to scenePath. Use to start a scene from scratch; to add nodes to an existing scene use add_node. rootNodeType defaults to Node2D: pass "Node3D" for 3D or "Control" for UI. Saves automatically and overwrites an existing file silently. Returns: the scenePath that was written. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -47,13 +47,12 @@ export const sceneToolDefinitions = [
       type: 'object',
       properties: {
         warnings: { type: 'array', items: { type: 'string' } },
-        success: { type: 'boolean' },
         scenePath: {
           type: 'string',
           description: 'Project-relative path of the scene file that was written.',
         },
       },
-      required: ['success', 'scenePath'],
+      required: ['scenePath'],
     },
   },
   {

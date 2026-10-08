@@ -142,6 +142,11 @@ const TRUNCATED_STRING_MARKER := "<truncated: %d more characters>"
 # tell it apart from a refusal, which means nothing was done.
 # KEEP IN SYNC: OVERSIZE_RESPONSE_FIELD in src/utils/bridge-protocol.ts.
 const OVERSIZE_RESPONSE_FIELD := "response_too_large"
+# A reply that carried non-finite numbers (INF, NAN) as null says how many on
+# this key, written by _send_response and stripped on the Node side, which turns
+# it into a leading warning. Absent when there were none.
+# KEEP IN SYNC: NON_FINITE_COUNT_FIELD in src/utils/bridge-protocol.ts.
+const NON_FINITE_COUNT_FIELD := "non_finite_count"
 const OVERSIZE_RESPONSE_ERROR := "The response is %d bytes, over the %d byte frame limit, and was not sent. Ask for less in one call: return a smaller value from run_script, pass a filter to get_ui_elements, or send fewer actions per batch."
 
 # Where background mode parks the window: far enough off every monitor layout
@@ -244,6 +249,13 @@ var _serialize_string_limit: int = MAX_RESULT_STRING_CHARS
 # The containers the walk is inside right now, outermost first. A container
 # found on it again holds itself, directly or through others.
 var _serialize_path: Array = []
+# Non-finite floats the serializer has replaced with null since the last reply
+# was sent. _send_response writes it and resets it. A track sample is taken
+# between replies, so _poll_track keeps its own tally in _track_non_finite and
+# hands it to the track_stop reply: otherwise it would land on whatever reply
+# went out next.
+var _non_finite_count: int = 0
+var _track_non_finite: int = 0
 
 # Parent watch: one connection to the server that spawned this game, kept only
 # to notice that server going away. Null when no watch port was given (an
@@ -1277,6 +1289,7 @@ func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
 	_track_next_ms = now
 	_track_until_ms = now + clampi(int(duration), MIN_TRACK_INTERVAL_MS, MAX_TRACK_DURATION_MS)
 	_track_samples = []
+	_track_non_finite = 0
 	_send_response(peer, {"status": "tracking"})
 
 # Hands the samples over once. A second track_stop, or one after another call
@@ -1290,6 +1303,8 @@ func _handle_track_stop(peer: PeerState) -> void:
 	_track_active = false
 	_track_watch = []
 	_track_samples = []
+	_non_finite_count += _track_non_finite
+	_track_non_finite = 0
 	_send_response(peer, {"samples": samples})
 
 # Past max_ms, or once the buffer is full, the samples are kept for track_stop
@@ -1302,7 +1317,11 @@ func _poll_track() -> void:
 	if now < _track_next_ms:
 		return
 	_track_next_ms = now + _track_interval_ms
-	_track_samples.append({"frame": Engine.get_process_frames(), "values": _sample_watch(_track_watch)})
+	var tally_before := _non_finite_count
+	var values := _sample_watch(_track_watch)
+	_track_non_finite += _non_finite_count - tally_before
+	_non_finite_count = tally_before
+	_track_samples.append({"frame": Engine.get_process_frames(), "values": values})
 
 # The Control under the mouse after the settle frame. Reached through call() so
 # this script still parses on 4.x builds that predate the method; has_method
@@ -1566,6 +1585,14 @@ func _serialize_sample(value: Variant) -> Variant:
 	_serialize_path.clear()
 	return _serialize_bounded(value, 0)
 
+# JSON has no INF or NAN. A float that is neither finite goes out as null and is
+# counted, so the reply can say so (see NON_FINITE_COUNT_FIELD).
+func _finite_or_null(number: float) -> Variant:
+	if is_finite(number):
+		return number
+	_non_finite_count += 1
+	return null
+
 # Cuts text to `limit` characters, with the number of characters cut.
 func _cut_text(text: String, limit: int) -> String:
 	if text.length() <= limit:
@@ -1599,26 +1626,28 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 		return null
 
 	match typeof(value):
-		TYPE_BOOL, TYPE_INT, TYPE_FLOAT:
+		TYPE_BOOL, TYPE_INT:
 			return value
+		TYPE_FLOAT:
+			return _finite_or_null(value)
 		TYPE_STRING:
 			var text: String = value
 			return _bound_text(text)
 		TYPE_VECTOR2:
 			var v: Vector2 = value
-			return {"x": v.x, "y": v.y}
+			return {"x": _finite_or_null(v.x), "y": _finite_or_null(v.y)}
 		TYPE_VECTOR2I:
 			var v: Vector2i = value
 			return {"x": v.x, "y": v.y}
 		TYPE_VECTOR3:
 			var v: Vector3 = value
-			return {"x": v.x, "y": v.y, "z": v.z}
+			return {"x": _finite_or_null(v.x), "y": _finite_or_null(v.y), "z": _finite_or_null(v.z)}
 		TYPE_VECTOR3I:
 			var v: Vector3i = value
 			return {"x": v.x, "y": v.y, "z": v.z}
 		TYPE_COLOR:
 			var c: Color = value
-			return {"r": c.r, "g": c.g, "b": c.b, "a": c.a}
+			return {"r": _finite_or_null(c.r), "g": _finite_or_null(c.g), "b": _finite_or_null(c.b), "a": _finite_or_null(c.a)}
 		TYPE_DICTIONARY:
 			if depth >= _serialize_depth_limit:
 				return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
@@ -1695,6 +1724,9 @@ func _handle_shutdown(peer: PeerState) -> void:
 # --- Utility ---
 
 func _send_response(peer: PeerState, data: Dictionary) -> void:
+	if _non_finite_count > 0:
+		data[NON_FINITE_COUNT_FIELD] = _non_finite_count
+	_non_finite_count = 0
 	var resp := JSON.stringify(data)
 	var body := resp.to_utf8_buffer()
 	if body.size() > MAX_FRAME_BYTES:

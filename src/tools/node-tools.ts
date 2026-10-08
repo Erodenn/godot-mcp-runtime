@@ -222,7 +222,7 @@ export const nodeToolDefinitions = [
   {
     name: 'attach_script',
     description:
-      'Attach a GDScript or C# script to a node in a scene, replacing any script it had. Check the script with the validate tool first. C# needs the Godot .NET build with the class compiled into the project assembly. Saves automatically. Returns: success, nodePath and scriptPath. Errors if the script cannot be instantiated (parse errors, @abstract, or an unbuilt C# class), or if scriptPath or nodePath does not exist. Errors while a runtime session is live on this project.',
+      'Attach a GDScript or C# script to a node in a scene, replacing any script it had. Check the script with the validate tool first. C# needs the Godot .NET build with the class compiled into the project assembly. Saves automatically. Returns: nodePath and scriptPath. Errors if the script cannot be instantiated (parse errors, @abstract, or an unbuilt C# class), or if scriptPath or nodePath does not exist. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -242,7 +242,6 @@ export const nodeToolDefinitions = [
       type: 'object',
       properties: {
         warnings: { type: 'array', items: { type: 'string' } },
-        success: { type: 'boolean' },
         nodePath: {
           type: 'string',
           description: 'Path from the scene root in "root/..." form, read from the node.',
@@ -252,7 +251,7 @@ export const nodeToolDefinitions = [
           description: 'Project-relative path of the script that was attached.',
         },
       },
-      required: ['success', 'nodePath', 'scriptPath'],
+      required: ['nodePath', 'scriptPath'],
     },
   },
   {
@@ -310,7 +309,7 @@ export const nodeToolDefinitions = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a scene, instead of rebuilding it node by node with add_node. newName defaults to the original name plus "2"; targetParentPath defaults to the parent of the original. Saves automatically. Returns: success, nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or is the scene root, or if targetParentPath is not found. Errors while a runtime session is live on this project.',
+      'Duplicate a node and its descendants in a scene, instead of rebuilding it node by node with add_node. newName defaults to the original name plus "2"; targetParentPath defaults to the parent of the original. Saves automatically. Returns: nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or is the scene root, or if targetParentPath is not found. Errors while a runtime session is live on this project.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -332,11 +331,10 @@ export const nodeToolDefinitions = [
       type: 'object',
       properties: {
         warnings: { type: 'array', items: { type: 'string' } },
-        success: { type: 'boolean' },
         nodePath: { type: 'string' },
         newNodePath: { type: 'string' },
       },
-      required: ['success', 'nodePath', 'newNodePath'],
+      required: ['nodePath', 'newNodePath'],
     },
   },
   {

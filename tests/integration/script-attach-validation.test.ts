@@ -97,13 +97,13 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
         30000,
       );
 
-      // attach_script quits(1) before printing its success payload, so
-      // stdout carries no success JSON -- the error is on stderr. Not
+      // attach_script quits(1) before printing its result payload, so
+      // stdout carries no result line -- the error is on stderr. Not
       // asserting stdout is empty outright: on some engine builds a stray
       // RID-leak warning at process exit lands on stdout instead of stderr
       // (see STDOUT_NOISE_LINE_PATTERN in src/utils/headless-op.ts), which
       // is exit noise, not a payload.
-      expect(stdout).not.toMatch(/"success"\s*:\s*true/);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/cannot be instantiated/i);
       expect(stderr).toMatch(/parse error/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -127,7 +127,7 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
       );
 
       const parsed = JSON.parse(extractJson(stdout));
-      expect(parsed.success).toBe(true);
+      expect(parsed.scriptPath).toBe('good.gd');
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toMatch(/ext_resource type="Script" path="res:\/\/good\.gd"/);
       expect(sceneText).toMatch(/script = ExtResource\(/);
@@ -157,7 +157,7 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
         30000,
       );
 
-      expect(stdout).not.toMatch(/"success"\s*:\s*true/);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/no c# support/i);
       expect(stderr).toMatch(/GODOT_PATH/);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -303,7 +303,7 @@ describe('C# script attachment against a Godot .NET build', () => {
         monoProject,
         30000,
       );
-      expect(before.stdout).not.toMatch(/"success"\s*:\s*true/);
+      expect(before.stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(before.stderr).toMatch(/cannot be instantiated/i);
       expect(before.stderr).toMatch(/dotnet build/i);
       expect(readFileSync(scenePath, 'utf-8')).toBe(originalTscn);
@@ -318,7 +318,7 @@ describe('C# script attachment against a Godot .NET build', () => {
         30000,
       );
       const parsed = JSON.parse(extractJson(after.stdout));
-      expect(parsed.success).toBe(true);
+      expect(parsed.scriptPath).toBe('Player.cs');
       const sceneAfter = readFileSync(scenePath, 'utf-8');
       expect(sceneAfter).toMatch(/ext_resource type="Script" path="res:\/\/Player\.cs"/);
       expect(sceneAfter).toMatch(/script = ExtResource\(/);

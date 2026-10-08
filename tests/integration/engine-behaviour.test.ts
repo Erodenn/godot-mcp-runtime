@@ -18,7 +18,7 @@ import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import net from 'net';
-import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
 import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
 import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
@@ -40,13 +40,6 @@ import {
 } from '../../src/tools/runtime-tools.js';
 import { scanProjectFile } from '../../src/utils/project-godot.js';
 
-/**
- * Godot writes an infinite float into JSON as a number a JSON reader accepts
- * from this version onward. Before it the text is a bare `inf`, which is not
- * JSON, and what a tool should answer there is not settled.
- */
-const NON_FINITE_JSON_MIN_MAJOR = 4;
-const NON_FINITE_JSON_MIN_MINOR = 6;
 const FIXTURE_MAIN_SCENE = 'main.tscn';
 
 const CASE_TIMEOUT_MS = 120_000;
@@ -80,13 +73,6 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------- helpers
-
-/** Whether the engine under test writes a non-finite float as parseable JSON. */
-async function writesNonFiniteAsJson(): Promise<boolean> {
-  const { major, minor } = await engineMajorMinor();
-  if (major !== NON_FINITE_JSON_MIN_MAJOR) return major > NON_FINITE_JSON_MIN_MAJOR;
-  return minor >= NON_FINITE_JSON_MIN_MINOR;
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -700,11 +686,11 @@ describe('headless scene saves', () => {
   );
 
   itGodot(
-    'run_script returning an infinite float still returns a parsed payload',
+    'run_script returning an infinite float answers null with a non-finite warning',
     async (ctx) => {
-      // Red when the bridge frame of a result holding an infinite float stops
-      // parsing on an engine that writes it as a JSON number.
-      if (!(await writesNonFiniteAsJson())) ctx.skip();
+      // Red when the bridge stops replacing a non-finite float with null (the
+      // frame then stops parsing on an engine that writes it as a bare word),
+      // or when the reply loses the count the Node side turns into the warning.
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
@@ -719,16 +705,22 @@ describe('headless scene saves', () => {
           'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\tvar zero := 0.0\n\treturn 1.0 / zero\n',
       });
       expect(claim.ok, `an infinite float broke the response; ${describeResult(claim)}`).toBe(true);
+      const claimed = payloadOf(claim, 'run_script returning 1.0 / 0.0');
+      expect(claimed.result).toBeNull();
+      // Prediction, not observed: the warning text and its position first.
+      const warnings = claimed.warnings as string[];
+      expect(warnings[0]).toMatch(/1 non-finite numbers \(INF, NAN\) were returned as null/);
+      expect(claimed).not.toHaveProperty('success');
     },
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
   itGodot(
-    'get_node_properties on a script variable holding INF still returns a parsed payload',
-    async (ctx) => {
-      // Red when a non-finite float in a read-back makes the result line
-      // invalid JSON on an engine that writes it as a JSON number.
-      if (!(await writesNonFiniteAsJson())) ctx.skip();
+    'get_node_properties on a script variable holding INF returns null and a warning',
+    async () => {
+      // Red when emit_result stops replacing a non-finite float with null (the
+      // result line is then invalid JSON on an engine that writes a bare word)
+      // or stops naming its path in a warning.
       const { project } = authoredCopy();
       writeFileSync(join(project, 'inf_holder.gd'), 'extends Node\n\n@export var x := INF\n');
       writeFileSync(
@@ -760,6 +752,12 @@ describe('headless scene saves', () => {
       const entries = payloadOf(claim, 'get_node_properties on inf_holder.tscn')
         .results as UpdateEntry[];
       expect(entries[0]?.error).toBeUndefined();
+      // Prediction, not observed: the exact path the warning names, and that the
+      // exported variable appears in the unfiltered property list.
+      const warnings = (payloadOf(claim, 'inf_holder.tscn').warnings ?? []) as string[];
+      expect(warnings.some((w) => /non-finite numbers.*results\[0\]\.properties\.x/.test(w))).toBe(
+        true,
+      );
     },
     CASE_TIMEOUT_MS,
   );

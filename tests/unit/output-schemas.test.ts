@@ -85,8 +85,9 @@ describe('outputSchema: fields a tool always returns are declared required', () 
       ],
     ],
     ['search_project', ['matches', 'truncated', 'filesSearched', 'fileTypes']],
-    ['create_scene', ['success', 'scenePath']],
-    ['attach_script', ['success', 'nodePath', 'scriptPath']],
+    ['create_scene', ['scenePath']],
+    ['attach_script', ['nodePath', 'scriptPath']],
+    ['duplicate_node', ['nodePath', 'newNodePath']],
     ['delete_nodes', ['results']],
     ['set_node_properties', ['results']],
     ['get_node_signals', ['nodePath', 'nodeType', 'signals']],
@@ -309,6 +310,7 @@ describe('renamed response fields: the old names no longer satisfy the schema', 
   // list would accept every one of them.
   const retiredPayloads: Array<[string, Record<string, unknown>]> = [
     ['duplicate_node', { success: true, originalPath: 'root/A', newPath: 'root/A2' }],
+    ['duplicate_node', { success: true }],
     ['get_scene_dependencies', { scene: 'main.tscn', dependencies: [] }],
     [
       'get_debug_output',

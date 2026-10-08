@@ -717,6 +717,27 @@ describe('handleStopProfiler', () => {
     expect(fake.bridge.map((b) => b.command)).toEqual(['track_stop']);
   });
 
+  // Breaks if the stop stops reading the bridge's non-finite count off the
+  // track_stop reply, or stops leading the capture's warnings with it.
+  it('stop_profiler leads with the non-finite warning of its track', async () => {
+    const samples = [{ frame: 3, values: { '/root/Main:position': null } }];
+    const fake = createProfilerFake({
+      replies: { track_stop: JSON.stringify({ samples, non_finite_count: 3 }) },
+    });
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    profiler.stop = async (...args: unknown[]) => {
+      await (args[2] as TrackCollector)();
+      return captureResult;
+    };
+
+    const payload = unwrap(await handleStopProfiler(fake.asRunner, {})).structuredContent as {
+      warnings?: string[];
+    };
+    expect(payload.warnings?.[0]).toBe('3 non-finite numbers (INF, NAN) were returned as null');
+  });
+
   // Breaks if a held track outlives its capture: the next capture on the same
   // profiler would be handed another capture's samples.
   it('does not hand a held track to a capture started afterwards', async () => {

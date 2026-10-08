@@ -1,5 +1,6 @@
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import { takeNonFiniteWarning } from '../utils/bridge-protocol.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
@@ -739,7 +740,17 @@ function isTrackSample(value: unknown): value is TrackSample {
   );
 }
 
-type TrackOutcome = Awaited<ReturnType<TrackCollector>>;
+type TrackOutcome = Awaited<ReturnType<TrackCollector>> & {
+  /** The bridge's warning for non-finite track values it sent as null, if any. */
+  nonFiniteWarning?: string | null;
+};
+
+/**
+ * The non-finite warning of the track each profiler last collected. Held here
+ * and not in the profiler's result, so the result's shape does not change; the
+ * capture's warnings read it when they are built.
+ */
+const trackNonFiniteWarnings = new WeakMap<DebuggerProfiler, string | null>();
 
 /** Stop the bridge's track and hand over what it sampled, or why there is nothing. */
 async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promise<TrackOutcome> {
@@ -756,6 +767,8 @@ async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promi
   try {
     const raw = await runner.sendCommand('track_stop', {}, TRACK_COMMAND_TIMEOUT_MS);
     const reply = JSON.parse(raw) as { samples?: unknown; error?: unknown };
+    const nonFiniteWarning = takeNonFiniteWarning(reply);
+    trackNonFiniteWarnings.set(owner, nonFiniteWarning);
     if (typeof reply.error === 'string') return { samples: null, error: reply.error };
     if (!Array.isArray(reply.samples)) {
       return { samples: null, error: 'The bridge returned no track samples' };
@@ -770,7 +783,11 @@ async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promi
         error: `The bridge returned ${malformed} of ${reply.samples.length} track samples in an unrecognized shape`,
       };
     }
-    return { samples: reply.samples as TrackSample[], error: null };
+    return {
+      samples: reply.samples as TrackSample[],
+      error: null,
+      ...(nonFiniteWarning === null ? {} : { nonFiniteWarning }),
+    };
   } catch (error: unknown) {
     return { samples: null, error: getErrorMessage(error) };
   }
@@ -807,8 +824,8 @@ function stopReachedACapture(error: unknown): boolean {
  * the result because that is where the agent is looking when it matters; the
  * parameter descriptions were read once, at the handshake.
  */
-function captureWarnings(result: ProfileResult): string[] {
-  const warnings: string[] = [];
+function captureWarnings(result: ProfileResult, nonFiniteWarning: string | null): string[] {
+  const warnings: string[] = nonFiniteWarning === null ? [] : [nonFiniteWarning];
   const visual = result.visual ?? null;
   if (visual !== null && visual.frames === 0) {
     warnings.push(
@@ -1023,6 +1040,7 @@ export async function handleProfileProject(
     });
     if (!charged.ok) return charged;
     tracksHeldForReRead.delete(receiver);
+    trackNonFiniteWarnings.delete(receiver);
     const tracking = await startTrack(
       runner,
       capture.track,
@@ -1041,7 +1059,7 @@ export async function handleProfileProject(
         trackCollector(runner, receiver),
       );
       return profilerResponse(projectPath, result, [
-        ...captureWarnings(result),
+        ...captureWarnings(result, trackNonFiniteWarnings.get(receiver) ?? null),
         ...widenedTimelineWarning(requestedTimelineMs, result.timeline?.bucketMs, windowSeconds),
       ]);
     } catch (error: unknown) {
@@ -1093,6 +1111,7 @@ export async function handleStartProfiler(
     const startable = checkCanStart(receiver, maxSeconds, limit, capture, PROFILE_MAX_SECONDS);
     if (!startable.ok) return startable;
     tracksHeldForReRead.delete(receiver);
+    trackNonFiniteWarnings.delete(receiver);
     const tracking = await startTrack(
       runner,
       capture.track,
@@ -1139,12 +1158,22 @@ export async function handleStopProfiler(
     const held = tracksHeldForReRead.get(receiver);
     let collecting: Promise<TrackOutcome> | null = null;
     const collect: TrackCollector = () =>
-      (collecting ??= held === undefined ? collectTrack(runner, receiver) : Promise.resolve(held));
+      (collecting ??=
+        held === undefined ? collectTrack(runner, receiver) : Promise.resolve(held)).then(
+        (outcome) => {
+          trackNonFiniteWarnings.set(receiver, outcome.nonFiniteWarning ?? null);
+          return outcome;
+        },
+      );
 
     try {
       const result = await receiver.stop(top.value, sort.value, collect);
       tracksHeldForReRead.delete(receiver);
-      return profilerResponse(projectPath, result, captureWarnings(result));
+      return profilerResponse(
+        projectPath,
+        result,
+        captureWarnings(result, trackNonFiniteWarnings.get(receiver) ?? null),
+      );
     } catch (error: unknown) {
       // A stop that failed on a capture must not leave the bridge sampling a
       // track nobody reads. The handler cannot see whether that capture asked

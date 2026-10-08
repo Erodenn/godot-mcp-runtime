@@ -642,3 +642,66 @@ describe('values a scene file cannot store are refused or reported', () => {
     CASE_TIMEOUT_MS,
   );
 });
+
+describe('a dictionary becomes a vector or color only with exactly that key set', () => {
+  // GDScript refuses `@export` on a variable with neither a type nor an
+  // initializer, and a variable without `@export` is not written to the scene
+  // file. So the untyped variable's setter records what it was handed in two
+  // exported strings, and those are what the scene file holds.
+  const UNTYPED_HOLDER_SCRIPT = [
+    'extends Node2D',
+    '',
+    '@export var seen_kind: String = ""',
+    '@export var seen_name: String = ""',
+    'var anything:',
+    '\tset(value):',
+    '\t\tanything = value',
+    '\t\tseen_kind = "Dictionary" if value is Dictionary else "other"',
+    '\t\tseen_name = str(value.get("name", "")) if value is Dictionary else ""',
+    '',
+  ].join('\n');
+
+  itGodot(
+    'an {x, y, name} dictionary on an untyped script variable is stored as a dictionary',
+    async () => {
+      // Red when _coerce_property_value tests has("x") and has("y") alone: the
+      // dictionary then becomes a Vector2 and its name key is dropped.
+      writeFileSync(join(projectPath, 'untyped_holder.gd'), UNTYPED_HOLDER_SCRIPT, 'utf-8');
+      const attached = await handleAttachScript(runner, {
+        projectPath,
+        scenePath: SCENE,
+        nodePath: 'root',
+        scriptPath: 'untyped_holder.gd',
+      });
+      expect(hasError(attached), String(errorText(attached))).toBe(false);
+
+      const entry = await setProp('root', 'anything', { x: 4, y: 2, name: 'gate' });
+      expect(entry.success).toBe(true);
+
+      const saved = readFileSync(join(projectPath, SCENE), 'utf-8');
+      expect(saved).toContain('seen_kind = "Dictionary"');
+      expect(saved).toContain('seen_name = "gate"');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'an {x, y, name} dictionary on a typed Vector2 is an error, and the exact shapes still convert',
+    async () => {
+      // Red when extra keys are ignored: the dictionary then lands as a Vector2.
+      const mixed = await setProp('root', 'position', { x: 4, y: 2, name: 'gate' });
+      expect(mixed).not.toHaveProperty('success');
+      expect(String(mixed.error)).toMatch(/expected Vector2, got Dictionary/);
+
+      const noZ = await setProp('root', 'position', { x: 4, y: 2, w: 1 });
+      expect(noZ).not.toHaveProperty('success');
+
+      expect((await setProp('root', 'position', { x: 12, y: 34 })).success).toBe(true);
+      expect((await setProp('root', 'modulate', { r: 1, g: 0, b: 0 })).success).toBe(true);
+      const props = await readProps(SCENE, 'root');
+      expect(props.position).toEqual({ x: 12, y: 34 });
+      expect(props.modulate).toEqual({ r: 1, g: 0, b: 0, a: 1 });
+    },
+    CASE_TIMEOUT_MS,
+  );
+});

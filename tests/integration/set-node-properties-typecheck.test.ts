@@ -579,7 +579,7 @@ describe('set_node_properties type validation against a scripted node', () => {
         tmpProject,
         30000,
       );
-      expect(JSON.parse(extractJson(attachResult.stdout)).success).toBe(true);
+      expect(JSON.parse(extractJson(attachResult.stdout)).scriptPath).toBe('typed.gd');
 
       const { stdout: speedStdout } = await runner.executeOperation(
         'set_node_properties',
@@ -981,7 +981,7 @@ async function attachTypedArrayScript(tmpProject: string, scenePath: string): Pr
     tmpProject,
     30000,
   );
-  expect(JSON.parse(extractJson(stdout)).success).toBe(true);
+  expect(JSON.parse(extractJson(stdout)).scriptPath).toBe(TYPED_ARRAY_SCRIPT_NAME);
 }
 
 describe('typed Array[T] element coercion', () => {
@@ -1346,7 +1346,7 @@ describe('typed Array[T] element coercion', () => {
         tmpProject,
         30000,
       );
-      expect(JSON.parse(extractJson(createStdout)).success).toBe(true);
+      expect(JSON.parse(extractJson(createStdout)).scenePath).toBe('typed_child.tscn');
       await attachTypedArrayScript(tmpProject, 'typed_child.tscn');
 
       const { stdout } = await runner.executeOperation(

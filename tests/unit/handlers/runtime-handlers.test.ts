@@ -53,7 +53,10 @@ import {
   type RuntimeSessionMode,
   type RuntimeStopResult,
 } from '../../../src/utils/godot-runner.js';
-import { OVERSIZE_RESPONSE_FIELD } from '../../../src/utils/bridge-protocol.js';
+import {
+  NON_FINITE_COUNT_FIELD,
+  OVERSIZE_RESPONSE_FIELD,
+} from '../../../src/utils/bridge-protocol.js';
 import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
@@ -4592,6 +4595,32 @@ describe('the queue wait is charged against the command it delayed', () => {
     const payload = expectMatchesOutputSchema('run_script', result);
     expect(payload).not.toHaveProperty('success');
     expect(payload.result).toBe(1);
+  });
+
+  // Red when the Node side stops reading the bridge's non-finite count: the
+  // field would reach the payload, or a result the bridge nulled would read as
+  // a script that failed.
+  it('run_script leads with the non-finite warning and strips the internal field', async () => {
+    const fake = spawnedFake();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, result: null, [NON_FINITE_COUNT_FIELD]: 2 }),
+    );
+    const result = await handleRunScript(fake.asRunner, { script: BENIGN_SCRIPT }, makeContext());
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(payload.warnings).toEqual(['2 non-finite numbers (INF, NAN) were returned as null']);
+    expect(payload.result).toBeNull();
+    expect(JSON.stringify(payload)).not.toContain(NON_FINITE_COUNT_FIELD);
+  });
+
+  it('simulate_input leads its warnings with the non-finite warning', async () => {
+    const fake = spawnedFake();
+    fake.setBridgeResponse(
+      JSON.stringify({ success: true, results: [], [NON_FINITE_COUNT_FIELD]: 1 }),
+    );
+    const result = await handleSimulateInput(fake.asRunner, { actions: [{ type: 'wait', ms: 1 }] });
+    const payload = expectMatchesOutputSchema('simulate_input', result);
+    expect(payload.warnings).toEqual(['1 non-finite numbers (INF, NAN) were returned as null']);
+    expect(JSON.stringify(payload)).not.toContain(NON_FINITE_COUNT_FIELD);
   });
 
   // Red when the budget constants are retuned and the description keeps the old figure.

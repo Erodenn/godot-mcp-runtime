@@ -763,7 +763,7 @@ describe('mutations inside instanced children persist or are refused', () => {
         nodePath: 'root/A/Inner',
         scriptPath: 'inner_script.gd',
       });
-      expect(attached.success).toBe(true);
+      expect(attached.scriptPath).toBe('inner_script.gd');
 
       expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
       const inner = await reloadedNode(tmpProject, 'root/A/Inner');

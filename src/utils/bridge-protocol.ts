@@ -47,6 +47,36 @@ export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 30000;
 export const OVERSIZE_RESPONSE_FIELD = 'response_too_large';
 
 /**
+ * Key the bridge sets on a reply that carried non-finite numbers (INF, NAN) as
+ * null, holding how many. Absent when there were none. The reader strips it and
+ * leads its payload with `nonFiniteWarning`.
+ *
+ * KEEP IN SYNC: `NON_FINITE_COUNT_FIELD` in src/scripts/mcp_bridge.gd.
+ */
+export const NON_FINITE_COUNT_FIELD = 'non_finite_count';
+
+/**
+ * The warning for a reply whose numbers were not all finite, or null when they
+ * were. Takes the count the bridge sent; anything that is not a positive whole
+ * number counts as none.
+ */
+export function nonFiniteWarning(count: unknown): string | null {
+  if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) return null;
+  return `${count} non-finite numbers (INF, NAN) were returned as null`;
+}
+
+/**
+ * Remove the non-finite count from a parsed bridge reply and return the
+ * warning for it, or null. The field is internal and never reaches a payload.
+ */
+export function takeNonFiniteWarning(reply: object): string | null {
+  const record = reply as Record<string, unknown>;
+  const warning = nonFiniteWarning(record[NON_FINITE_COUNT_FIELD]);
+  delete record[NON_FINITE_COUNT_FIELD];
+  return warning;
+}
+
+/**
  * Largest delay `setTimeout` honors. A larger value overflows its 32-bit
  * signed field and the timer fires after 1 ms instead, so a caller-supplied
  * timeout of a few months would expire at once while the work it bounds is

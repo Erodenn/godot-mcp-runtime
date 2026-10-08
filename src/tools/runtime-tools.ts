@@ -13,6 +13,7 @@ import {
 import {
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
   OVERSIZE_RESPONSE_FIELD,
+  takeNonFiniteWarning,
 } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -2483,6 +2484,7 @@ async function simulateInput(runner: GodotRunner, args: OperationParams): Promis
     });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
+    const nonFiniteWarning = takeNonFiniteWarning(parsed);
 
     // A flat `error` is a pre-validation refusal: nothing was injected. The
     // one flat error sent after the actions ran, the oversize reply, never
@@ -2532,7 +2534,14 @@ async function simulateInput(runner: GodotRunner, args: OperationParams): Promis
       // that did arrive may sit on the wrong entry, and lines still in flight
       // are on no entry at all, so the per-action `errors` cannot be read as
       // complete. That has to lead the payload, not sit in a debug log.
-      ...(sentinelTimedOut ? { warnings: [PARTIAL_ERROR_ATTRIBUTION_WARNING] } : {}),
+      ...(sentinelTimedOut || nonFiniteWarning !== null
+        ? {
+            warnings: [
+              ...(nonFiniteWarning !== null ? [nonFiniteWarning] : []),
+              ...(sentinelTimedOut ? [PARTIAL_ERROR_ATTRIBUTION_WARNING] : []),
+            ],
+          }
+        : {}),
       projectPath: sessionProjectPath,
       success: parsed.success === true,
       results,
@@ -2929,6 +2938,7 @@ async function executeAdmittedScript(
     });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
+    const nonFiniteWarning = takeNonFiniteWarning(parsed);
 
     if (parsed.error) {
       // Compilation failures (error 43 class): the bridge returns a bare
@@ -2974,7 +2984,10 @@ async function executeAdmittedScript(
 
     // Detect false-positive success: GDScript has no try-catch, so runtime errors
     // return null and the real error only appears in stderr.
-    if (parsed.success && parsed.result === null && sessionMode === 'spawned') {
+    // A null that is a non-finite number the script returned is not a script
+    // that failed, so it is told apart before either null check.
+    const nullIsNonFinite = nonFiniteWarning !== null && parsed.result === null;
+    if (parsed.success && parsed.result === null && sessionMode === 'spawned' && !nullIsNonFinite) {
       if (runtimeErrors.length > 0) {
         const errorContext = capRuntimeErrorLines(runtimeErrors).join('\n');
         return err(
@@ -3000,7 +3013,12 @@ async function executeAdmittedScript(
     // An attached session captures no stderr, so the check above cannot run
     // there: a script that raised and a script that returned null produce the
     // same frame. The result is reported, and so is what could not be seen.
-    if (parsed.success && parsed.result === null && sessionMode === 'attached') {
+    if (
+      parsed.success &&
+      parsed.result === null &&
+      sessionMode === 'attached' &&
+      !nullIsNonFinite
+    ) {
       return createStructuredResponse({
         warnings: [ATTACHED_NULL_RESULT_WARNING, ...warningsFromPolicy],
         projectPath: sessionProjectPath,
@@ -3016,7 +3034,11 @@ async function executeAdmittedScript(
     };
     // Only the runtime-error lines are capped: they are the unbounded part,
     // and the count entry names the log that holds the rest of them.
-    const combinedWarnings = [...warningsFromPolicy, ...capRuntimeErrorLines(runtimeErrors)];
+    const combinedWarnings = [
+      ...(nonFiniteWarning !== null ? [nonFiniteWarning] : []),
+      ...warningsFromPolicy,
+      ...capRuntimeErrorLines(runtimeErrors),
+    ];
     if (combinedWarnings.length > 0) {
       payload.warnings = combinedWarnings;
     }
