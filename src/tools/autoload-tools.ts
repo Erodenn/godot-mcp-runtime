@@ -25,8 +25,6 @@ import {
   updateAutoloadEntry,
 } from '../utils/autoload-ini.js';
 
-// --- Tool definitions ---
-
 const ADD_AUTOLOAD_TIP =
   'Autoloads load in headless mode too: one that stops the engine before an operation is dispatched (it quits in _init, for example) fails every headless operation, while one that only errors in _ready does not. Run validate on the script to check it; remove_autoload undoes this.';
 
@@ -150,8 +148,6 @@ export const autoloadToolDefinitions = [
     },
   },
 ] as const satisfies readonly ToolDefinition[];
-
-// --- Handlers ---
 
 function rejectForbiddenPathCharacters(autoloadPath: string): HandlerResult | undefined {
   if (!AUTOLOAD_PATH_FORBIDDEN_REGEX.test(autoloadPath)) return undefined;

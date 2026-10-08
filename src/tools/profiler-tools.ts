@@ -55,28 +55,15 @@ const DEFAULT_TIMELINE_MS = 500;
 export const TRACK_MAX_ENTRIES = 4;
 export const TRACK_MIN_INTERVAL_MS = 50;
 const TRACK_INTERVAL_MS = 250;
-/** How long the bridge keeps sampling past the window if nobody stops it. */
 const TRACK_GRACE_MS = 10000;
-/**
- * How long a track command may wait on the bridge. Shorter than the bridge's
- * usual command timeout because profile_project sends one on each side of its
- * window, and both count toward the time the call blocks.
- */
+// Shorter than the usual command timeout: profile_project sends one track command on each side of its window.
 const TRACK_COMMAND_TIMEOUT_MS = 4000;
-/**
- * The longest profile_project can block: the receiver's own worst case plus
- * the track commands either side of it. Held under the 60 s after which a
- * client that attached no progress token abandons the request, because a
- * result or an error that arrives later is never read.
- */
+// Held under the 60 s after which a client with no progress token abandons the request; a later result or error is never read.
 export const PROFILE_PROJECT_WORST_CASE_MS =
   PROFILE_WINDOW_WORST_CASE_MS + 2 * TRACK_COMMAND_TIMEOUT_MS;
-/** How much of an unrecognized bridge reply an error quotes. */
 const TRACK_REPLY_PREVIEW_CHARS = 200;
 const TRACK_OWNER_NOT_CURRENT =
   'The session that ran this capture is no longer the current one, so its track was not collected';
-
-// --- Tool definitions ---
 
 const sortProperty = {
   type: 'string',
@@ -131,7 +118,6 @@ const statSchema = {
   properties: { avg: { type: 'number' }, max: { type: 'number' } },
 } as const;
 
-/** A stat that is null when the thing it describes was not measured. */
 const nullableStatSchema = { ...statSchema, type: ['object', 'null'] } as const;
 const UNTIMED_GPU = 'Null when the renderer timed no GPU work (gpuTimed false).';
 const gpuStatSchema = { ...nullableStatSchema, description: UNTIMED_GPU } as const;
@@ -347,8 +333,7 @@ const captureResultSchema = {
     visual: visualSchema,
     timeline: timelineSchema,
   },
-  // Every field of a capture result is always present. A capture that folded
-  // no frame is an error, never a payload with fields left out.
+  // A capture that folded no frame is an error, never a payload with fields left out.
   required: [
     'projectPath',
     'complete',
@@ -464,8 +449,6 @@ export const profilerToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Helpers ---
-
 const PROFILER_WORDING: NoSessionWording = {
   action: 'capture a profile',
   noneMessage: 'No active runtime session. A project must be running to profile it.',
@@ -479,11 +462,7 @@ const PROFILER_WORDING: NoSessionWording = {
   ],
 };
 
-/**
- * The profiler lives on the runner for as long as the spawned session does.
- * Its absence is always the same user-facing story: this session was not
- * launched with the debugger channel, so there is nothing to measure.
- */
+// Absence means this session was not launched with the debugger channel, so there is nothing to measure.
 function requireProfiler(
   runner: GodotRunner,
 ): Result<{ profiler: DebuggerProfiler; projectPath: string }, ToolResponse> {
@@ -491,8 +470,7 @@ function requireProfiler(
   const profiler = runner.activeProfiler;
   if (status.current === null) return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
   if (profiler === null) {
-    // "Nothing is running" and "running without profiling" have different
-    // fixes, and every sibling runtime tool already draws this line.
+    // "Nothing is running" and "running without profiling" have different fixes.
     if (status.state !== 'live') return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
@@ -501,19 +479,14 @@ function requireProfiler(
       ]),
     );
   }
-  // A finished capture outlives the engine: re-ranking folded data needs no
-  // process, and the capture taken just before a crash is the one worth having.
+  // A finished capture outlives the engine: re-ranking folded data needs no process.
   if (status.state !== 'live' && !profiler.hasResult) {
     return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
   }
   return ok({ profiler, projectPath: status.current.projectPath });
 }
 
-/**
- * Range-check `top` here rather than leaving it to `stop()`. A capture window
- * runs for seconds before that check is reached, so a bad value would cost the
- * whole window before erroring.
- */
+/** Checked here, not in `stop()`: the capture window runs for seconds first, so a bad value would cost the whole window. */
 function parseTop(args: OperationParams): Result<number, ToolResponse> {
   const raw = optionalNumber(args, 'top');
   if (!raw.ok) return raw;
@@ -546,15 +519,10 @@ function parseSort(args: OperationParams): Result<ProfileSort, ToolResponse> {
 
 interface ParsedCaptureOptions {
   options: CaptureOptions & { track: string[] };
-  /** `timelineMs` as the caller gave it, to say so when a long window widens it. */
   requestedTimelineMs: number | undefined;
 }
 
-/**
- * `visual`, `timeline`, `timelineMs`, `targetFps` and `track`, checked here
- * for the same reason as `top`: a bad value found after the window would
- * cost the whole window. `timelineMs` or a `track` imply a timeline.
- */
+/** Checked here for the same reason as `top`. `timelineMs` or a `track` imply a timeline. */
 function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions, ToolResponse> {
   const visual = optionalBoolean(args, 'visual');
   if (!visual.ok) return visual;
@@ -609,9 +577,7 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
     );
   }
 
-  // timelineMs and track each imply a timeline. An explicit timeline: false
-  // beside one of them contradicts it, and picking a side would ignore half of
-  // what the caller asked for.
+  // An explicit timeline: false beside timelineMs or track contradicts it; picking a side would ignore half the request.
   const implied = [
     ...(timelineMs.value !== undefined ? ['timelineMs'] : []),
     ...(specs.length > 0 ? ['track'] : []),
@@ -638,12 +604,7 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
   });
 }
 
-/**
- * Refuse a capture the profiler would refuse anyway (a bad argument, or one
- * already open) before the bridge is asked for a track: track_start replaces
- * any running track, so a refused call would take the running capture's
- * track down with it.
- */
+/** track_start replaces any running track, so a refused call would take the running capture's track down with it. */
 function checkCanStart(
   profiler: DebuggerProfiler,
   seconds: number,
@@ -669,13 +630,7 @@ function checkCanStart(
   }
 }
 
-/**
- * Have the bridge start sampling the tracked properties. It runs inside the
- * game on its own clock, so it keeps sampling while simulate_input or any
- * other command holds the bridge, and stops by itself if nobody collects it.
- * The bucket interval it samples for is the one the capture will use, a long
- * window's widened one included: the timeline keeps one sample per interval.
- */
+/** The bridge samples on its own clock, so it keeps sampling while another command holds the bridge, and stops by itself if nobody collects. */
 async function startTrack(
   runner: GodotRunner,
   track: string[],
@@ -699,8 +654,7 @@ async function startTrack(
     );
     const reply = JSON.parse(raw) as { status?: unknown; error?: unknown };
     if (reply.status === 'tracking') return ok(undefined);
-    // Anything but the bridge's own acknowledgement is a refusal: treating an
-    // unrecognized reply as success would profile with a track nobody runs.
+    // Treating an unrecognized reply as success would profile with a track nobody runs.
     const reason =
       typeof reply.error === 'string'
         ? reply.error
@@ -737,26 +691,16 @@ function isTrackSample(value: unknown): value is TrackSample {
 }
 
 type TrackOutcome = Awaited<ReturnType<TrackCollector>> & {
-  /** The bridge's warning for non-finite track values it sent as null, if any. */
   nonFiniteWarning?: string | null;
 };
 
-/**
- * The non-finite warning of the track each profiler last collected. Held here
- * and not in the profiler's result, so the result's shape does not change; the
- * capture's warnings read it when they are built.
- */
+// Held here, not in the profiler's result, so the result's shape does not change.
 const trackNonFiniteWarnings = new WeakMap<DebuggerProfiler, string | null>();
 
-/** Stop the bridge's track and hand over what it sampled, or why there is nothing. */
 async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promise<TrackOutcome> {
-  // A capture belongs to one session, and sendCommand addresses whichever
-  // session is current. Each session has its own profiler, so its identity
-  // says whether the current session is still the one that ran this capture.
-  // A track_stop sent anywhere else would take another game's samples.
+  // sendCommand addresses the current session; a track_stop sent to another session would take another game's samples.
   if (runner.activeProfiler !== owner) return { samples: null, error: TRACK_OWNER_NOT_CURRENT };
-  // Once the game has exited the session has no bridge port left, and the
-  // runner would refuse the send. Say what happened in the capture's terms.
+  // Once the game has exited the session has no bridge port left; say so in the capture's terms.
   if (!runner.hasActiveRuntimeSession()) {
     return { samples: null, error: 'The game exited before its track was collected' };
   }
@@ -769,9 +713,7 @@ async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promi
     if (!Array.isArray(reply.samples)) {
       return { samples: null, error: 'The bridge returned no track samples' };
     }
-    // The bridge writes every sample in one shape, so a malformed one means
-    // the two sides disagree; dropping it quietly would thin the track with
-    // nothing saying why.
+    // A malformed sample means the two sides disagree; dropping it quietly would thin the track with nothing saying why.
     const malformed = reply.samples.filter((sample) => !isTrackSample(sample)).length;
     if (malformed > 0) {
       return {
@@ -789,23 +731,13 @@ async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promi
   }
 }
 
-/**
- * How a capture fetches its track. The profiler calls it once the capture has
- * closed, and only for a capture that asked for a track.
- */
 function trackCollector(runner: GodotRunner, owner: DebuggerProfiler): TrackCollector {
   return () => collectTrack(runner, owner);
 }
 
-/**
- * What a failed stop_profiler took from the bridge when it ended the track,
- * per profiler. The bridge gives its samples up once, so the stop that
- * re-reads the capture is handed them from here. A new capture on the same
- * profiler drops the entry.
- */
+// The bridge gives its samples up once, so a stop that re-reads the capture is handed them from here; a new capture drops the entry.
 const tracksHeldForReRead = new WeakMap<DebuggerProfiler, TrackOutcome>();
 
-/** Stop failures raised before any capture was reached, so no track is theirs to end. */
 const STOP_REACHED_NO_CAPTURE: ReadonlySet<ProfilerErrorCode> = new Set([
   'bad_args',
   'profile_not_started',
@@ -815,11 +747,7 @@ function stopReachedACapture(error: unknown): boolean {
   return !(error instanceof ProfilerError && STOP_REACHED_NO_CAPTURE.has(error.code));
 }
 
-/**
- * What compromised this capture's numbers, and what to do about it. Said in
- * the result because that is where the agent is looking when it matters; the
- * parameter descriptions were read once, at the handshake.
- */
+// Said in the result, where the agent is looking; the parameter descriptions were read once, at the handshake.
 function captureWarnings(result: ProfileResult, nonFiniteWarning: string | null): string[] {
   const warnings: string[] = nonFiniteWarning === null ? [] : [nonFiniteWarning];
   const visual = result.visual ?? null;
@@ -842,12 +770,7 @@ function captureWarnings(result: ProfileResult, nonFiniteWarning: string | null)
   return warnings;
 }
 
-/**
- * Why a requested track shows nothing, said where a truncating client still
- * sees it: `timeline.trackError` sits at the end of a long payload. A track
- * that came back but never lands on an interval, or an entry that is null in
- * every interval, is as empty as one that failed, and says nothing by itself.
- */
+// `timeline.trackError` sits at the end of a long payload, so a truncating client would miss it; an all-null track is as empty as a failed one.
 function trackWarnings(timeline: ProfileResult['timeline']): string[] {
   if (timeline === null || timeline.track.length === 0) return [];
   if (timeline.trackError !== null) {
@@ -870,12 +793,7 @@ function trackWarnings(timeline: ProfileResult['timeline']): string[] {
   ];
 }
 
-/**
- * A null that stands for "not measured" gets a sentence saying so, the same
- * as percentOfFrame does. A timeline interval's other nulls (frameMs, render,
- * track) are left alone: they are per interval by design and would bury
- * everything else. `drawCalls` is the exception, summed into one sentence.
- */
+// A timeline interval's other nulls are per interval by design and would bury everything else; `drawCalls` is the exception.
 function unmeasuredWarnings(result: ProfileResult): string[] {
   const warnings: string[] = [];
   if (result.fps === null) {
@@ -926,7 +844,6 @@ function unmeasuredWarnings(result: ProfileResult): string[] {
   return warnings;
 }
 
-/** Say so when a long window made the timeline coarser than the caller asked. */
 function widenedTimelineWarning(
   requestedMs: number | undefined,
   actualMs: number | null | undefined,
@@ -939,12 +856,7 @@ function widenedTimelineWarning(
   ];
 }
 
-/**
- * The one exit for every success. The capture's own warnings (an incomplete
- * capture, a null percentOfFrame) come first, then what this handler found.
- * `leadWithWarnings` puts the list ahead of everything else, or drops it when
- * empty, so a client that cuts a long result short still shows it.
- */
+// `leadWithWarnings` puts the list ahead of everything else so a client that cuts a long result short still shows it.
 function profilerResponse(
   projectPath: string,
   payload: ProfileResult | ProfileStartResult,
@@ -990,8 +902,6 @@ function profilerFailure(error: unknown, extraSolutions: string[] = []): ToolRes
   return createErrorResponse(message, [...extraSolutions, ...solutions[error.code]]);
 }
 
-// --- Handlers ---
-
 export async function handleProfileProject(
   runner: GodotRunner,
   args: OperationParams,
@@ -1009,8 +919,7 @@ export async function handleProfileProject(
   const options = parseCaptureOptions(args);
   if (!options.ok) return options;
 
-  // The gate, the track commands and the capture are one step: the session
-  // the gate read is the one every command below reaches.
+  // The session the gate read is the one every command below reaches.
   return runSessionExclusive(runner, 'profile_project', async () => {
     const profiler = requireProfiler(runner);
     if (!profiler.ok) return profiler;
@@ -1027,8 +936,7 @@ export async function handleProfileProject(
       PROFILE_WINDOW_MAX_SECONDS,
     );
     if (!startable.ok) return startable;
-    // The worst case of this window: the receiver's waits, the window itself
-    // and the track commands either side of it.
+    // The worst case of this window: the receiver's waits, the window itself and the track commands either side.
     const unusedWindowMs = (PROFILE_WINDOW_MAX_SECONDS - windowSeconds) * MS_PER_SECOND;
     const charged = chargeQueueWait(runner, 'profile_project', {
       kind: 'fixed',
@@ -1059,10 +967,8 @@ export async function handleProfileProject(
         ...widenedTimelineWarning(requestedTimelineMs, result.timeline?.bucketMs, windowSeconds),
       ]);
     } catch (error: unknown) {
-      // Stop the bridge sampling for a capture that will never read it.
       if (capture.track.length > 0) await collectTrack(runner, receiver);
-      // The window closed the capture out when the connection dropped, so the
-      // frames it folded are still there to read.
+      // The window closed the capture out when the connection dropped; the folded frames are still there.
       const partial =
         error instanceof ProfilerError &&
         error.code === 'profile_disconnected' &&
@@ -1094,8 +1000,7 @@ export async function handleStartProfiler(
   const options = parseCaptureOptions(args);
   if (!options.ok) return options;
 
-  // The gate, the track commands and the capture are one step: the session
-  // the gate read is the one every command below reaches.
+  // The session the gate read is the one every command below reaches.
   return runSessionExclusive(runner, 'start_profiler', async () => {
     const profiler = requireProfiler(runner);
     if (!profiler.ok) return profiler;
@@ -1141,16 +1046,13 @@ export async function handleStopProfiler(
   const sort = parseSort(args);
   if (!sort.ok) return sort;
 
-  // The gate, the track commands and the capture are one step: the session
-  // the gate read is the one every command below reaches.
+  // The session the gate read is the one every command below reaches.
   return runSessionExclusive(runner, 'stop_profiler', async () => {
     const profiler = requireProfiler(runner);
     if (!profiler.ok) return profiler;
     const { profiler: receiver, projectPath } = profiler.value;
 
-    // One track_stop per call at most: the capture's own collection and the
-    // cleanup below share it, and a track an earlier failed stop already took
-    // is handed over instead of asked for again.
+    // One track_stop per call at most; a track an earlier failed stop took is handed over, not asked for again.
     const held = tracksHeldForReRead.get(receiver);
     let collecting: Promise<TrackOutcome> | null = null;
     const collect: TrackCollector = () =>
@@ -1171,12 +1073,8 @@ export async function handleStopProfiler(
         captureWarnings(result, trackNonFiniteWarnings.get(receiver) ?? null),
       );
     } catch (error: unknown) {
-      // A stop that failed on a capture must not leave the bridge sampling a
-      // track nobody reads. The handler cannot see whether that capture asked
-      // for one, so it ends whatever its own session's bridge is sampling and
-      // keeps the answer for the stop that re-reads the capture. A stop that
-      // found no capture ends nothing, and a session that is no longer current
-      // is left sampling: its track is still there for a later stop to read.
+      // A failed stop must not leave the bridge sampling a track nobody reads; the answer is kept for the stop that re-reads the capture.
+      // A session no longer current is left sampling: its track is still there for a later stop.
       if (stopReachedACapture(error)) {
         const outcome = await collect();
         if (outcome.error !== TRACK_OWNER_NOT_CURRENT) tracksHeldForReRead.set(receiver, outcome);

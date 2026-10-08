@@ -386,8 +386,6 @@ export const sceneToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Handlers ---
-
 export async function handleCreateScene(
   runner: GodotRunner,
   args: OperationParams,
@@ -413,20 +411,13 @@ export async function handleCreateScene(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      // The new file replaces whatever the path held, which is the request, so
-      // it is not compared. Naming it is what lets the call say once that the
-      // engine writing it is newer than the project.
+      // The new file replaces whatever the path held, so it is not compared; naming it lets the call say once the engine writing it is newer than the project.
       sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { replacesFile: true }),
     },
   );
 }
 
-/**
- * Spatial properties `add_node` accepts as top-level params instead of under
- * `properties`. Mirrored by `_PROMOTED_SPATIAL_PARAMS` in
- * `src/scripts/godot_operations.gd`, which applies them on the batch path --
- * KEEP IN SYNC.
- */
+// KEEP IN SYNC: `_PROMOTED_SPATIAL_PARAMS` in src/scripts/godot_operations.gd applies these on the batch path.
 const PROMOTED_SPATIAL_PARAMS = ['position', 'rotation', 'scale', 'visible', 'modulate'] as const;
 
 export async function handleAddNode(
@@ -439,9 +430,7 @@ export async function handleAddNode(
 
   const nodeType = requireString(args, 'nodeType');
   if (!nodeType.ok) return nodeType;
-  // A scene-path nodeType is a filesystem path, so it gets the same
-  // project-root containment check every other path input does -- Godot
-  // resolves `res://../x.tscn` to a real file outside the project.
+  // A scene-path nodeType is a filesystem path and Godot resolves `res://../x.tscn` outside the project, so it gets the same containment check.
   const nodeTypeScene = isSceneFileNodeType(nodeType.value)
     ? resolveProjectPath(parsed.value.projectPath, nodeType.value, 'read')
     : undefined;
@@ -458,8 +447,7 @@ export async function handleAddNode(
   const properties = optionalObject(args, 'properties');
   if (!properties.ok) return properties;
 
-  // Merge promoted top-level params into the properties dict. `properties` wins,
-  // as on the batch path and in docs/tools.md.
+  // `properties` wins over promoted top-level params, as on the batch path and in docs/tools.md.
   const mergedProps: OperationParams = {};
   for (const key of PROMOTED_SPATIAL_PARAMS) {
     if (args[key] !== undefined) {
@@ -650,9 +638,7 @@ export async function handleBatchSceneOperations(
 
   const operations = requireArray(args, 'operations');
   if (!operations.ok) return operations;
-  // Every path an item carries is resolved here, by the rules a single call
-  // applies, and the resolved operations are what the script and the loss
-  // guard both receive.
+  // Every item path is resolved here by the single-call rules; the resolved operations go to both the script and the loss guard.
   const checkedOperations = checkBatchOperationItems(operations.value, parsed.value.projectPath);
   if (!checkedOperations.ok) return checkedOperations;
   const resolvedOperations = checkedOperations.value;
@@ -676,7 +662,6 @@ export async function handleBatchSceneOperations(
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
       sceneWrites: batchSceneWrites(resolvedOperations, parsed.value.projectPath),
-      // The finished batch says which save-as steps wrote their copy.
       refineSceneWrites: (payload) =>
         batchSceneWrites(resolvedOperations, parsed.value.projectPath, payload.results),
     },

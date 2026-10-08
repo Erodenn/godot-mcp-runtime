@@ -35,12 +35,6 @@ import {
 } from '../utils/headless-op.js';
 import { BridgeManager, BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
 
-/**
- * Item schema for the checks[] array. Referenced by both the top-level
- * `checks` property and `targets[].checks`, which are the same shape;
- * inputSchema ships on every handshake, so the duplicate costs bytes as
- * well as maintenance.
- */
 const CHECK_ITEM_SCHEMA = {
   type: 'object',
   properties: {
@@ -62,27 +56,15 @@ const CHECK_ITEM_SCHEMA = {
   required: ['type'],
 } as const;
 
-/** Most diagnostics that matched no target a batch result lists before it counts the rest. */
 const MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN = 10;
 
-/**
- * The error a target gets when the engine called it invalid and no diagnostic
- * could be tied to it. The first form points at `warnings`, so it is used only
- * when the batch has unattributed diagnostics to show there.
- */
 const UNATTRIBUTED_FAILURE_MESSAGE =
   'The file failed to load. Its diagnostics could not be attributed to this path; see warnings.';
 const UNEXPLAINED_FAILURE_MESSAGE =
   'The file failed to load, and the engine printed no diagnostic that names it.';
 
-/** Keys a structure schema node accepts. `has_property` is the snake_case spelling of `hasProperty`. */
 const SCHEMA_NODE_KEYS: readonly string[] = ['type', 'children', 'hasProperty', 'has_property'];
-/**
- * Top-level keys the tool accepts, after `normalizeParameters` has folded the
- * snake_case spellings. Anything else is a misspelling that would be dropped
- * without a word, such as `scenepath` or a lone `check`, and the call would
- * validate nothing it was asked to.
- */
+// Anything else is a misspelling that would be dropped without a word, and the call would validate nothing it was asked to.
 const VALIDATE_TOP_LEVEL_KEYS: readonly string[] = [
   'projectPath',
   'scriptPath',
@@ -91,7 +73,7 @@ const VALIDATE_TOP_LEVEL_KEYS: readonly string[] = [
   'checks',
   'targets',
 ];
-/** Keys one `targets[]` item accepts, in both spellings: items are not normalized. */
+// Both spellings: `targets[]` items are not normalized.
 const VALIDATE_TARGET_KEYS: readonly string[] = [
   'scriptPath',
   'script_path',
@@ -100,11 +82,9 @@ const VALIDATE_TARGET_KEYS: readonly string[] = [
   'scene_path',
   'checks',
 ];
-/** Keys a check item accepts, per check type. `node_path` is the snake_case spelling of `nodePath`. */
 const STRUCTURE_CHECK_KEYS: readonly string[] = ['type', 'schema'];
 const SIGNALS_CHECK_KEYS: readonly string[] = ['type', 'nodePath', 'node_path'];
 
-/** One entry of an `errors` array: a parse error, or a checks[] finding. */
 const VALIDATE_ERROR_SCHEMA = {
   type: 'object',
   properties: {
@@ -217,7 +197,6 @@ interface ValidationError {
   message: string;
 }
 
-/** A check-attributed error from the checks[] array (structure/signals). */
 interface CheckError {
   check?: string;
   message: string;
@@ -232,17 +211,7 @@ function parseGodotErrors(stderr: string): ValidationError[] {
   });
 }
 
-/**
- * Write inline GDScript source to a uniquely-named file under
- * <projectPath>/.mcp/godot-runtime/validate/ for validation. Returns the
- * project-relative path (e.g. ".mcp/godot-runtime/validate/validate_temp_xxx.gd")
- * that the runner consumes plus the absolute path the caller cleans up.
- *
- * The file is deleted per call at the two unlinkSync sites below; there is no
- * orphan sweep. `ensureArtifactRoot` runs first, so `.mcp/.gdignore` and the
- * `.gitignore` entry exist before any `.gd` file lands under `.mcp/`, even in
- * a project this server has never run a game on.
- */
+// Deleted per call at the two unlinkSync sites; no orphan sweep. `ensureArtifactRoot` runs first so `.mcp/.gdignore` exists before any `.gd` lands.
 function writeTempGdScript(
   projectPath: string,
   source: string,
@@ -257,28 +226,16 @@ function writeTempGdScript(
   return { resPath: `${VALIDATE_RES_DIR}/${name}`, absPath };
 }
 
-/**
- * The `target` a batch result reports for a path target: the caller's own
- * spelling (a bare path or a `res://` path reads back as given), or the
- * project-relative path when the caller gave an absolute one. What travels to
- * GDScript is always `relPath`; this is only the echo.
- */
+/** Only the echo: what travels to GDScript is always `relPath`. */
 function batchTargetEcho(resolved: ResolvedProjectPath): string {
   return isAbsolute(resolved.input) ? resolved.relPath : resolved.input;
 }
 
-/** A stderr diagnostic that named no res:// file. */
 interface UnpathedDiagnostic {
   message: string;
   line?: number;
 }
 
-/**
- * Group Godot stderr errors by their res:// file path.
- * Used for batch validation where multiple files produce output in one stderr
- * stream. Diagnostics that named no res:// file come back in `unpathed`, so a
- * caller can count them instead of losing them.
- */
 function parseGodotErrorsByPath(stderr: string): {
   byPath: Map<string, ValidationError[]>;
   unpathed: UnpathedDiagnostic[];
@@ -298,40 +255,20 @@ function parseGodotErrorsByPath(stderr: string): {
   return { byPath, unpathed };
 }
 
-/** One unattributed diagnostic as a warning line: "<file>:<line>: <message>", or the message alone. */
 function formatUnattributedDiagnostic(file: string | undefined, error: ValidationError): string {
   if (file === undefined) return error.message;
   const where = error.line === undefined ? file : `${file}:${error.line}`;
   return `${where}: ${error.message}`;
 }
 
-/** Cap a warning list at `MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN` entries and say how many were cut. */
 function capUnattributedWarnings(lines: string[]): string[] {
   if (lines.length <= MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN) return lines;
   const hidden = lines.length - MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN;
   return [...lines.slice(0, MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN), `+${hidden} more`];
 }
 
-/**
- * Runs a validate operation, and on the `[IMPORT_NEEDED]` stderr marker runs
- * the asset import step and retries exactly once. Structurally capped: a
- * marker on the retried run falls through to the caller's normal error
- * handling instead of importing again. Mirrors the retry in `executeSceneOp`,
- * which validate cannot use (it returns a wrapped HandlerResult, while both
- * validate branches need raw stdout plus stderr for the per-path diagnostic
- * overlay).
- *
- * The retry is skipped while a game is, or may be, running on this project:
- * this server's own session (current or not), another MCP server's session,
- * or an owner registry that cannot be read. importAssets writes .godot/ under
- * the project and a running engine there is a second writer. A session on
- * another project does not block it. Skipping costs the caller the import
- * only: the target's own result names the dependency that was not imported.
- *
- * The import is waited for only while the retry still fits in the request
- * (`importWithinBudget`); one still running then throws, and so does a failed
- * one: both call sites sit inside a try whose catch answers with an error.
- */
+// Retries once after the asset import on [IMPORT_NEEDED]; skipped while a game is or may be running on this project (importAssets writes .godot/, a second writer).
+// A still-running or failed import throws; both call sites catch and answer with an error.
 async function executeValidateOp(
   runner: GodotRunner,
   operation: string,
@@ -348,7 +285,6 @@ async function executeValidateOp(
   return runner.executeOperation(operation, params, projectPath, retryTimeoutMs);
 }
 
-/** The import a validate run needed was still running when the call had to answer. */
 class ImportStillRunningError extends Error {
   constructor() {
     super(IMPORT_STILL_RUNNING_MESSAGE);
@@ -356,7 +292,6 @@ class ImportStillRunningError extends Error {
   }
 }
 
-/** The response for an exception out of a validate run. */
 function validateExceptionResponse(prefix: string, error: unknown): ToolResponse {
   if (error instanceof ImportStillRunningError) {
     return createErrorResponse(`${prefix}: ${error.message}`, IMPORT_STILL_RUNNING_SOLUTIONS);
@@ -367,11 +302,6 @@ function validateExceptionResponse(prefix: string, error: unknown): ToolResponse
   ]);
 }
 
-/**
- * True when a session is live on the project, whoever owns it, or when that
- * cannot be ruled out. The same detector the scene-edit guard uses, so a
- * validate call never runs an asset import under another server's game.
- */
 function gameMayBeRunningOnProject(runner: GodotRunner, projectPath: string): boolean {
   try {
     return findLiveSessionOnProject(runner, projectPath) !== null;
@@ -381,15 +311,12 @@ function gameMayBeRunningOnProject(runner: GodotRunner, projectPath: string): bo
   }
 }
 
-/** The single-target parameters, which a call that passes `targets` must not also pass. */
 const SINGLE_TARGET_PATH_PARAMS = ['scriptPath', 'source', 'scenePath'] as const;
 
-/** A defined `checks` value that asks for something: anything but an empty array. */
 function requestsChecks(checks: unknown): boolean {
   return checks !== undefined && (!Array.isArray(checks) || checks.length > 0);
 }
 
-/** One `targets[]` item as the batch loop reads it, after both key spellings are folded. */
 interface BatchTarget {
   scriptPath?: unknown;
   source?: unknown;
@@ -397,12 +324,7 @@ interface BatchTarget {
   checks?: unknown;
 }
 
-/**
- * Read one `targets[]` item. `normalizeParameters` does not descend into
- * arrays, so an item reaches the handler spelled however the caller wrote it.
- * Both spellings are read here and the value read is the one forwarded, under
- * a key this handler writes. Null when the item is not an object.
- */
+/** `normalizeParameters` does not descend into arrays: both key spellings are read and the value is forwarded under a key this handler writes. */
 function readBatchTarget(raw: unknown): BatchTarget | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const item = raw as Record<string, unknown>;
@@ -416,7 +338,6 @@ function readBatchTarget(raw: unknown): BatchTarget | null {
 
 const TARGET_SHAPE_MESSAGE = 'Target must have exactly one of scriptPath, source, or scenePath';
 
-/** Most engine diagnostics quoted when a validate run ended without a result. */
 const MAX_NO_RESULT_DIAGNOSTICS_SHOWN = 5;
 
 const NO_RESULT_SOLUTIONS = [
@@ -425,12 +346,6 @@ const NO_RESULT_SOLUTIONS = [
   'Ensure Godot is installed correctly',
 ];
 
-/**
- * The error for a validate run that printed no result line. All three branches
- * (single, single with checks, targets) word it the same way: what the script
- * said on its own [ERROR] line, and when it said nothing, the engine
- * diagnostics that are the only account of why it stopped.
- */
 function noResultMessage(prefix: string, stderr: string): string {
   const head = `${prefix}: no result was emitted - `;
   if (stderr.includes('[ERROR]')) return `${head}${extractGdError(stderr)}`;
@@ -469,8 +384,7 @@ export async function handleValidate(
     );
   }
 
-  // A `targets` that is not an array would fall through to single mode, which
-  // never reads it: the call would validate less than it was asked to.
+  // An unread `targets` would fall through to single mode and validate less than asked.
   if (args.targets !== undefined && !Array.isArray(args.targets)) {
     return err(
       createErrorResponse('targets must be an array of { scriptPath | source | scenePath } items', [
@@ -480,12 +394,8 @@ export async function handleValidate(
     );
   }
 
-  // Batch mode: targets array
   if (Array.isArray(args.targets)) {
-    // The batch branch reads `targets` and nothing else. A single-target
-    // parameter passed beside it used to be dropped without a word, so a
-    // top-level `checks` came back as targets reported valid with the checks
-    // never run. Single mode refuses every mixed combination; so does this.
+    // The batch branch reads `targets` alone: a single-target parameter beside it was once dropped silently, leaving checks never run.
     for (const key of SINGLE_TARGET_PATH_PARAMS) {
       if (args[key] !== undefined && args[key] !== '') {
         return err(
@@ -520,16 +430,12 @@ export async function handleValidate(
         scene_path?: string;
         checks?: unknown[];
       }> = [];
-      // One entry per forwarded target, in the same order: the `target` its
-      // result reports, or null to keep the path the script answers with (an
-      // inline source, which has no caller spelling).
+      // One entry per forwarded target: its reported `target`, or null to keep the script's path (inline source).
       const targetEchoes: Array<string | null> = [];
       const preErrors = new Map<number, { target: string; errors: ValidationError[] }>();
 
       for (const [i, raw] of targets.entries()) {
-        // A target that is not an object, or names a path with something other
-        // than a string, is this target's own failure. Reading it further would
-        // throw and cost every other target its result.
+        // A malformed target is its own failure: reading further would throw and cost every other target its result.
         const read = readBatchTarget(raw);
         const mistyped =
           read === null
@@ -551,9 +457,7 @@ export async function handleValidate(
           });
           continue;
         }
-        // A key the target does not take is a misspelling (`check` for `checks`):
-        // forwarded, the target would be validated without what it asked for and
-        // come back valid. It is this target's own failure; the rest still run.
+        // An unknown key is a misspelling (`check`): forwarded, the target would come back valid without the checks.
         const unknownTargetKey = Object.keys(raw as Record<string, unknown>).find(
           (key) => !VALIDATE_TARGET_KEYS.includes(key),
         );
@@ -575,16 +479,9 @@ export async function handleValidate(
           scenePath?: string;
           checks?: unknown;
         };
-        // An empty array means no checks, as in single mode. Any other defined
-        // value that is not an array is not "no checks": it is a mistake that
-        // used to be dropped, leaving the target reported valid with its checks
-        // never run.
+        // An empty array means no checks; any other non-array value is a mistake, not "no checks".
         const tChecks = Array.isArray(t.checks) && t.checks.length > 0 ? t.checks : undefined;
-        // A target naming more than one mode is ambiguous, and the arms below
-        // pick one and drop the rest - a scriptPath plus a scenePath plus checks
-        // used to report the script's validity with no sign the checks never
-        // ran. Single mode rejects the same input outright; here it is this
-        // target's own failure so the rest of the batch still reports.
+        // More than one mode is ambiguous and the arms below would drop the rest; it is this target's own failure so the batch still reports.
         if ([t.scriptPath, t.source, t.scenePath].filter(Boolean).length > 1) {
           preErrors.set(i, {
             target: t.scenePath ?? t.scriptPath ?? '',
@@ -602,9 +499,7 @@ export async function handleValidate(
             continue;
           }
         }
-        // Checks run against an instantiated scene, so a target without a
-        // scenePath has nothing to run them on. That is this target's own
-        // failure: it is never forwarded, and every other target still reports.
+        // Checks need a scenePath to run on; this target fails alone and is never forwarded.
         if (tChecks && !t.scenePath) {
           preErrors.set(i, {
             target: t.scriptPath ?? '',
@@ -612,9 +507,7 @@ export async function handleValidate(
           });
           continue;
         }
-        // Same shape guards single mode runs. Without them a structure check
-        // with a missing or misspelled schema crosses into GDScript, asserts
-        // nothing, and comes back valid:true for this target.
+        // Same shape guards as single mode: a bad structure check would cross into GDScript and come back valid:true.
         if (tChecks) {
           const checkFailure = validateCheckItems(tChecks);
           if (checkFailure) {
@@ -649,10 +542,7 @@ export async function handleValidate(
               errors: [{ message: projectSubPathError('scenePath', t.scenePath) }],
             });
           } else {
-            // Check items are forwarded camelCase and untouched: the runner's
-            // convertCamelToSnakeCase rewrites nodePath and every nested
-            // hasProperty on the way out, so pre-converting here would
-            // double-convert.
+            // Forwarded camelCase: the runner's convertCamelToSnakeCase rewrites nodePath and nested hasProperty; pre-converting would double-convert.
             const accepted: { scene_path: string; checks?: unknown[] } = {
               scene_path: sceneTarget.relPath,
             };
@@ -661,10 +551,7 @@ export async function handleValidate(
             targetEchoes.push(batchTargetEcho(sceneTarget));
           }
         } else {
-          // A target that names nothing never reaches Godot. Forwarded empty, it
-          // came back as "provide script_path or scene_path", which names keys
-          // the tool does not declare and, for a caller who misspelled one,
-          // the keys it had just provided.
+          // A target that names nothing never reaches Godot: forwarded empty, its error named keys the tool does not declare.
           preErrors.set(i, {
             target: '',
             errors: [{ message: `targets[${i}]: ${TARGET_SHAPE_MESSAGE}` }],
@@ -672,8 +559,7 @@ export async function handleValidate(
         }
       }
 
-      // Short-circuit when every target failed pre-validation — no work for
-      // Godot, and spawning it would just cost ~3s for a no-op.
+      // Every target failed pre-validation: skip spawning Godot.
       if (snakeTargets.length === 0 && preErrors.size === targets.length) {
         const results = targets.map((_, i) => {
           const pre = preErrors.get(i)!;
@@ -700,8 +586,7 @@ export async function handleValidate(
 
       const batchPayload = extractOperationPayload(stdout);
       if (batchPayload === null) {
-        // Output without a result line: the script stopped before it emitted
-        // one, and stdout is engine or project noise. The reason is on stderr.
+        // No result line: the script stopped before emitting one and stdout is noise; the reason is on stderr.
         return err(
           createErrorResponse(
             noResultMessage('Batch validate failed', stderr),
@@ -732,20 +617,10 @@ export async function handleValidate(
 
       const { byPath: errorsByPath, unpathed } = parseGodotErrorsByPath(stderr || '');
 
-      // Three error sources per target: Godot's stderr diagnostics (which
-      // supersede the GDScript-reported parse errors when present), and the
-      // per-target checks[] findings, which are additive because they describe
-      // something else entirely. checkErrors is internal to this merge; the
-      // tool keeps returning one flat errors array per target.
-      //
-      // The attribution key is the path Godot resolved (`resolvedPath`), the
-      // spelling its diagnostics use. The raw target is only a fallback for a
-      // payload without one: a path written "./a.gd", with a backslash, or under
-      // a directory containing a space never equals the engine's own spelling.
+      // Godot's stderr diagnostics supersede GDScript parse errors; checks[] findings are additive. Attribution keys on `resolvedPath`,
+      // the engine's spelling: a raw "./a.gd", a backslash path or a path with a space never equals it.
       const claimedPaths = new Set<string>();
-      // The errors arrays of targets the engine called invalid with nothing to
-      // explain it. Their one entry is written after the unattributed
-      // diagnostics are known, because its wording depends on them.
+      // Targets the engine called invalid with nothing to explain it; their entry is written once the unattributed diagnostics are known.
       const unexplainedFailures: Array<Array<ValidationError | CheckError>> = [];
       const godotResults = batchParsed.results.map((r, resultIndex) => {
         const key =
@@ -756,8 +631,7 @@ export async function handleValidate(
         const parseErrors = stderrErrors.length > 0 ? stderrErrors : (r.errors ?? []);
         const checkErrors = Array.isArray(r.checkErrors) ? r.checkErrors : [];
         const errors = [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>;
-        // The engine's own verdict was "invalid" and nothing explains it: say so
-        // instead of returning valid:false with an empty errors array.
+        // Invalid with nothing to explain it: say so rather than valid:false with an empty errors array.
         if (r.valid === false && errors.length === 0) unexplainedFailures.push(errors);
         return {
           target: targetEchoes[resultIndex] ?? r.target,
@@ -766,10 +640,7 @@ export async function handleValidate(
         };
       });
 
-      // Diagnostics that belong to no target: a script attached inside a
-      // validated scene, or an `at:` line that named no file. Single mode takes
-      // every diagnostic; here they lead the payload so a clean-looking target
-      // is not the whole story.
+      // Diagnostics for no target (a script attached inside a validated scene, an `at:` line naming no file) lead the payload.
       const unattributed: string[] = [];
       for (const [file, errors] of errorsByPath) {
         if (claimedPaths.has(file)) continue;
@@ -782,9 +653,7 @@ export async function handleValidate(
         unattributed.length > 0 ? UNATTRIBUTED_FAILURE_MESSAGE : UNEXPLAINED_FAILURE_MESSAGE;
       for (const errors of unexplainedFailures) errors.push({ message: unexplainedMessage });
 
-      // Merge pre-validation failures back into their original positions so
-      // output order matches input order. Pre-validation errors are ours, not
-      // Godot's — they bypass the stderr overlay above.
+      // Pre-validation failures are ours, not Godot's: merged back by input position, bypassing the stderr overlay.
       const results: Array<{
         target: string;
         valid: boolean;
@@ -797,10 +666,7 @@ export async function handleValidate(
           results.push({ target: pre.target, valid: false, errors: pre.errors });
         } else {
           const r = godotResults[godotIdx++];
-          // Not reachable with the shipped script, which answers every target
-          // it is sent. If it ever answered fewer, the target is reported as
-          // not validated: leaving it out would shorten `results` without a
-          // sign and shift every later entry onto the wrong input.
+          // Unreachable with the shipped script; if it answered fewer, report the target as not validated rather than shift later entries onto the wrong input.
           if (r === undefined) {
             const unanswered = readBatchTarget(targets[i]);
             const label = unanswered?.scenePath ?? unanswered?.scriptPath;
@@ -831,7 +697,6 @@ export async function handleValidate(
     }
   }
 
-  // Single mode — parse each optional field then enforce exactly-one rule
   const scriptPathResult = optionalString(args, 'scriptPath');
   if (!scriptPathResult.ok) return scriptPathResult;
   const sourceResult = optionalString(args, 'source');
@@ -917,12 +782,7 @@ export async function handleValidate(
       resolvedScenePath = scene.relPath;
     }
 
-    // A scenePath plus checks is one Godot process, not two. validate_batch
-    // with a single target does the parse validation and runs the checks
-    // against one instantiated scene; the plain scenePath spelling of the same
-    // call used to cost a second process that loaded the scene again. The
-    // response shape is unchanged: the batch payload is unwrapped back into
-    // { valid, errors } below.
+    // scenePath plus checks is one Godot process via a single-target batch; the batch payload is unwrapped to { valid, errors } below.
     const combined = hasChecks && resolvedScenePath !== undefined;
 
     let stdout: string;
@@ -932,9 +792,7 @@ export async function handleValidate(
       if (checkFailure) {
         return err(createErrorResponse(checkFailure.message, checkFailure.solutions));
       }
-      // Check items travel camelCase and untouched for the same reason the
-      // batch branch forwards them raw: the runner's convertCamelToSnakeCase
-      // rewrites nodePath and every nested hasProperty on the way out.
+      // Camel-case and untouched, as in the batch branch (see convertCamelToSnakeCase).
       ({ stdout, stderr } = await executeValidateOp(
         runner,
         'validate_batch',
@@ -952,7 +810,6 @@ export async function handleValidate(
       ));
     }
 
-    // Parse stdout for the base valid/invalid signal from GDScript
     let valid = false;
     let gdErrors: ValidationError[] = [];
     let checkErrors: CheckError[] = [];
@@ -996,9 +853,7 @@ export async function handleValidate(
       if (Array.isArray(target.errors) && target.errors.length > 0) gdErrors = target.errors;
       if (Array.isArray(target.checkErrors)) checkErrors = target.checkErrors;
     } else {
-      // No payload, or one that is not a JSON object, means nothing was
-      // validated. That is a failed call, never a verdict: the batch and
-      // combined branches answer the same condition the same way.
+      // No payload, or a non-object, means nothing was validated: a failed call, never a verdict.
       let parsed: { valid?: unknown; errors?: unknown } | null = null;
       try {
         const candidate: unknown = JSON.parse(extractOperationPayload(stdout) ?? '');
@@ -1019,23 +874,16 @@ export async function handleValidate(
       }
     }
 
-    // Parse stderr for detailed error messages from Godot's script compiler
     const stderrErrors = parseGodotErrors(stderr || '');
 
-    // Merge errors: prefer detailed stderr errors when available, otherwise keep gdErrors
     const allErrors: ValidationError[] = stderrErrors.length > 0 ? stderrErrors : gdErrors;
 
-    // The GDScript-side `valid` flag is unreliable for malformed scripts: load()
-    // returns a non-null placeholder Resource even when parsing fails, so
-    // resource != null is true. Fall back to the parsed stderr errors as the
-    // authoritative signal — matches the batch branch above.
+    // The GDScript `valid` flag is unreliable: load() returns a non-null placeholder Resource on a parse failure, so stderr errors decide.
     let result: { valid: boolean; errors: Array<ValidationError | CheckError> } = {
       valid: valid && allErrors.length === 0,
       errors: allErrors,
     };
 
-    // checks[]: structural / signal verification against the scene, merged
-    // into the same output shape with a `check` discriminator per error.
     if (checkErrors.length > 0) {
       result = {
         valid: false,
@@ -1043,8 +891,7 @@ export async function handleValidate(
       };
     }
 
-    // An invalid verdict always carries a reason, as it does in targets mode:
-    // valid:false with an empty errors array leaves the caller nothing to act on.
+    // An invalid verdict always carries a reason; valid:false with no errors leaves the caller nothing to act on.
     if (!result.valid && result.errors.length === 0) {
       result = { valid: false, errors: [{ message: UNEXPLAINED_FAILURE_MESSAGE }] };
     }
@@ -1066,20 +913,12 @@ export async function handleValidate(
 const SCHEMA_EXAMPLE_SOLUTION =
   'Example: { "type": "Node2D", "children": [{ "type": "CollisionShape2D", "hasProperty": "shape" }] }';
 
-/** A rejected checks[] array, before it is turned into a response. */
 interface CheckValidationFailure {
   message: string;
   solutions: string[];
 }
 
-/**
- * Validate one structure schema node and its children[] recursively, returning
- * the failure to surface or null when the node is well formed. The
- * GDScript side hedges too, but rejecting here keeps the diagnosis specific: a
- * bad nested entry otherwise surfaces as a generic "Scene checks failed" with
- * nothing naming the offending part. `path` is a caller-facing breadcrumb like
- * "schema.children[0]".
- */
+/** The GDScript side hedges too; rejecting here keeps the diagnosis specific instead of a generic "Scene checks failed". */
 function validateSchemaNode(schema: unknown, path: string): CheckValidationFailure | null {
   const solutions = [SCHEMA_EXAMPLE_SOLUTION];
   if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
@@ -1088,9 +927,7 @@ function validateSchemaNode(schema: unknown, path: string): CheckValidationFailu
       solutions,
     };
   }
-  // A key outside the documented set is a misspelling that would assert
-  // nothing: a schema node with one recognized key and one typo'd one used to
-  // pass, with the typo'd assertion never evaluated.
+  // A key outside the documented set is a misspelling whose assertion would never be evaluated.
   for (const key of Object.keys(schema)) {
     if (!SCHEMA_NODE_KEYS.includes(key)) {
       return {
@@ -1128,17 +965,7 @@ function validateSchemaNode(schema: unknown, path: string): CheckValidationFailu
   return null;
 }
 
-/**
- * Shape-check one checks[] array before it crosses into GDScript. Shared by
- * single mode and by every batch target that carries checks, so a malformed
- * check is rejected identically either way: the GDScript side reads a missing
- * `schema` as an empty Dictionary and appends no finding, which would report a
- * structure check that never ran as `valid: true`.
- *
- * Returns the failure to surface, or null when the array is well formed. The
- * caller decides what a failure costs - a whole error response in single mode,
- * one target's own result in batch mode.
- */
+/** The GDScript side reads a missing `schema` as empty and appends no finding, which would report a structure check that never ran as `valid: true`. */
 function validateCheckItems(checks: unknown): CheckValidationFailure | null {
   if (!Array.isArray(checks)) {
     return {

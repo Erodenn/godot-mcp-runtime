@@ -1,11 +1,4 @@
 #!/usr/bin/env node
-/**
- * Godot MCP Server
- *
- * This MCP server provides tools for interacting with the Godot game engine.
- * It enables AI assistants to launch the Godot editor, run Godot projects,
- * capture debug output, manipulate scenes and nodes, and more.
- */
 
 // Lower-level `Server` is deliberate; see CONTRIBUTING.md "MCP SDK: Server vs McpServer".
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -77,10 +70,6 @@ Key behaviors:
 
 Security gate (run_script / run_project / render_movie): a static-analysis scan classifies GDScript into three tiers - Tier 1 hard-blocks (OS.execute and similar), Tier 2 asks for confirmation via elicitation, Tier 3 just warns. run_script scans the script it is given; run_project (both modes) and render_movie scan the project's autoloads and the launched scene before starting. Three env vars change this: GODOT_MCP_STRICT promotes every Tier 2 finding to Tier 1 for unattended operation; GODOT_MCP_DISABLE_ELICITATION skips the launch confirmation and the Tier 2 run_script prompt and proceeds unprompted (for clients that cannot service elicitation); GODOT_MCP_DISABLE_SECURITY turns the whole gate off, Tier 1 included, and is a human-only decision - decline to set it on a user's behalf. See docs/security.md for the full rule catalogue.`;
 
-/**
- * Build the request-scoped context backed by a live MCP `Server`. Lives here
- * (not in `utils/mcp-context.ts`) so the SDK coupling stays in the bin entry.
- */
 function createContextFromServer(server: Server): McpContext {
   const elicitor = createElicitor({
     getClientCapabilities: () => server.getClientCapabilities(),
@@ -95,19 +84,12 @@ function createContextFromServer(server: Server): McpContext {
         : { action: result.action };
     },
   });
-  // A flag set to anything but the exact string "true" is off; say so, because
-  // a value like "1" otherwise leaves the operator believing it took effect.
+  // A flag set to anything but the exact string "true" is off; say so, or "1" leaves the operator believing it took effect.
   for (const line of describeIgnoredFlagValues(process.env)) console.error(line);
   const strictMode = process.env.GODOT_MCP_STRICT === 'true';
-  // Strict mode mandates explicit confirmation, so it overrides the
-  // disable-elicitation opt-out: when both are set, strict wins and disableElicitation
-  // resolves to false (the startup log surfaces the override).
+  // Strict mode overrides the disable-elicitation opt-out: when both are set, disableElicitation resolves to false.
   const disableElicitation = process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && !strictMode;
-  // Disable-security is the opposite precedence from disableElicitation above:
-  // it overrides strict mode rather than deferring to it (see
-  // McpContext.disableSecurity / resolveDisableSecurity). The startup lines are
-  // emitted here, switching on the resolution, so the precedence is decided and
-  // announced in one place instead of being recomputed by the caller.
+  // Opposite precedence: disable-security overrides strict mode (see McpContext.disableSecurity / resolveDisableSecurity); the startup lines are emitted here.
   const { disableSecurity, strictIgnored } = resolveDisableSecurity(
     process.env.GODOT_MCP_DISABLE_SECURITY,
     strictMode,
@@ -153,9 +135,7 @@ class GodotMcpServer {
     );
 
     this.ctx = createContextFromServer(this.server);
-    // The disable-security startup lines are emitted by createContextFromServer.
-    // Strict mode and the elicitation opt-out only describe a gate that still
-    // runs, so both stay silent once security is off.
+    // Strict mode and the elicitation opt-out describe a gate that still runs, so both stay silent once security is off.
     if (!this.ctx.disableSecurity) {
       if (this.ctx.strictMode) {
         console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
@@ -195,10 +175,7 @@ class GodotMcpServer {
 
       console.error(`[SERVER] Handling tool request: ${toolName}`);
 
-      // Heartbeat progress notifications for the lifetime of the call so
-      // clients that set `resetTimeoutOnProgress` (e.g. opencode) keep their
-      // request timeout alive across long tool executions (run_script sims,
-      // playtests) instead of failing at the SDK's 60s default.
+      // Heartbeat progress notifications keep clients that set `resetTimeoutOnProgress` alive past the SDK's 60 s default on long calls.
       const stopHeartbeat = startProgressHeartbeat(extra, request);
       try {
         return await dispatchToolCall(this.runner, toolName, args, this.ctx);
@@ -216,9 +193,7 @@ class GodotMcpServer {
       if (godotPath) {
         console.error(`[SERVER] Using Godot at: ${godotPath}`);
       }
-      // detectGodotPath() already emits a specific logError on failure (bad
-      // GODOT_PATH, no binary found, etc.). Don't duplicate with a generic
-      // warning here — the runner's message names the actual cause.
+      // detectGodotPath() already logs the specific failure; a generic warning here would hide the actual cause.
 
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
@@ -230,7 +205,6 @@ class GodotMcpServer {
   }
 }
 
-// Create and run the server
 const server = new GodotMcpServer();
 server.run().catch((error: unknown) => {
   console.error('Failed to run server:', getErrorMessage(error));

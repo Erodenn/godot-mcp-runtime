@@ -28,8 +28,6 @@ import { ok, err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 import { inPlaceSceneWrite, updateTouches } from '../utils/scene-loss-guard.js';
 
-// --- Tool definitions ---
-
 /** Result of connect_signal and disconnect_signal. `connected` is read back from the saved scene. */
 const SIGNAL_RESULT_SCHEMA = {
   type: 'object',
@@ -432,8 +430,6 @@ export const nodeToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Handlers ---
-
 export async function handleDeleteNodes(
   runner: GodotRunner,
   args: OperationParams,
@@ -580,8 +576,7 @@ export async function handleAttachScript(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      // A new script replaces what the node stores (the old script's exports
-      // go with it), so the whole node is the request.
+      // A new script replaces what the node stores (the old exports go with it), so the whole node is the request.
       sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { touchedNodes: [nodePath.value] }),
     },
   );

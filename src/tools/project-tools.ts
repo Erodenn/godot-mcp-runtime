@@ -28,9 +28,6 @@ function fileExtension(name: string): string {
   return dotIdx >= 0 ? name.slice(dotIdx + 1).toLowerCase() : '';
 }
 
-// --- Tool definitions ---
-
-/** One node of the get_project_files tree. Children repeat this shape. */
 const FILE_TREE_NODE_SCHEMA = {
   type: 'object',
   properties: {
@@ -317,28 +314,18 @@ export const projectToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Helpers ---
-
 const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules', '.svn', '.hg']);
 
-// --- Walk problems: what a directory walk could not read or did not follow ---
-
-/** A header line the scene scanner could not read but that was meant as a dependency. */
 const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
 
-/** Where Godot keeps the project's display name. */
 const APPLICATION_SECTION = 'application';
 const CONFIG_NAME_KEY = 'config/name';
 
-/** Matches `search_project` returns when `maxResults` is omitted. */
 const DEFAULT_SEARCH_MAX_RESULTS = 100;
-/** The smallest `maxResults` that returns anything. */
 const MIN_SEARCH_MAX_RESULTS = 1;
 
-/** The maxDepth value that lists every level. */
 const UNLIMITED_DEPTH = -1;
 
-/** Longest list of paths quoted in one walk warning; the rest is counted. */
 const MAX_WALK_PROBLEMS_SHOWN = 5;
 
 interface WalkProblems {
@@ -364,7 +351,6 @@ function listWithCap(items: string[]): string {
   return hidden > 0 ? `${shown} +${hidden} more` : shown;
 }
 
-/** One warning per kind of problem; empty when the walk covered everything it met. */
 function summarizeWalkProblems(problems: WalkProblems): string[] {
   const warnings: string[] = [];
   if (problems.unreadable.length > 0) {
@@ -476,8 +462,6 @@ function getProjectStructure(
   return structure;
 }
 
-// --- Project helper: filesystem tree ---
-
 interface FileTreeNode {
   name: string;
   type: 'file' | 'dir' | 'link';
@@ -489,7 +473,6 @@ interface FileTreeNode {
 
 interface TreeWalk {
   problems: WalkProblems;
-  /** True once a directory was left unopened because of maxDepth. */
   depthCut: boolean;
 }
 
@@ -543,8 +526,6 @@ function buildFilesystemTree(
   node.children = children;
   return node;
 }
-
-// --- Project helper: search in files ---
 
 interface SearchMatch {
   file: string;
@@ -600,8 +581,7 @@ function searchInFiles(
         for (const [i, line] of lines.entries()) {
           const haystack = caseSensitive ? line : line.toLowerCase();
           if (haystack.includes(needle)) {
-            // A match past the limit is what makes the result truncated, so a
-            // search with exactly maxResults matches is complete.
+            // A match past the limit is what makes the result truncated.
             if (matches.length === maxResults) {
               truncated = true;
               return;
@@ -616,8 +596,6 @@ function searchInFiles(
   searchDir(rootPath, '');
   return { matches, truncated, filesSearched, typedFiles };
 }
-
-// --- Handlers ---
 
 export async function handleListProjects(args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
@@ -702,23 +680,8 @@ function describeProjectSession(runner: GodotRunner, projectPath: string): Recor
   };
 }
 
-/**
- * Build the always-present `runtime` block for check_project. The top-level
- * fields describe the current session, in the same liveness order the runtime
- * tools gate on: a spawned process that has exited is not an active session,
- * whether or not the session fields survived it. `projectPath` names the
- * current project and `liveSessions` lists every live session; with an asked
- * project, `project` reports that project's own session. Only the current live
- * session is pinged, since the runner holds one bridge channel. The ping only
- * runs when that session is live, so the no-session path costs nothing extra
- * and a failed/timed-out ping never turns the call into an error - it only
- * downgrades bridgeResponsive and adds a diagnostic.
- *
- * With a live session, the status read and the ping run with the session queue
- * held, so the session reported is the one pinged. When the queue does not
- * come free in time the report is still given, read without the queue, with
- * bridgeResponsive null and a diagnostic naming what the ping waited behind.
- */
+// A failed or timed-out ping downgrades bridgeResponsive and adds a diagnostic; it never turns the call into an error.
+// A live session's status read and ping hold the session queue so the one reported is the one pinged; if the queue is not free in time, read without it with bridgeResponsive null.
 async function buildRuntimeReport(
   runner: GodotRunner,
   askedProjectPath: string | null,
@@ -736,10 +699,7 @@ async function buildRuntimeReport(
   }
 }
 
-/**
- * The runtime block. `pingSkipped` is null to ping a live current session, or
- * the reason no ping is sent, which is reported with bridgeResponsive null.
- */
+/** `pingSkipped` is null to ping a live current session, else the reason no ping is sent. */
 async function describeRuntime(
   runner: GodotRunner,
   askedProjectPath: string | null,
@@ -758,9 +718,7 @@ async function describeRuntime(
       diagnostics.push(pingSkipped);
     } else {
       try {
-        // ping is exempt from the attached-mode disconnect probe (see
-        // DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts), so a failed
-        // ping here reports bridgeResponsive:false without ending the session.
+        // A failed ping reports bridgeResponsive:false without ending the session: ping is exempt from the attached-mode disconnect probe (DISCONNECT_EXEMPT_BRIDGE_COMMANDS in godot-runner.ts).
         const { response } = await runner.sendCommandWithErrors('ping', {}, BRIDGE_PING_TIMEOUT_MS);
         let parsed: { status?: string } | undefined;
         try {
@@ -816,7 +774,6 @@ export async function handleCheckProject(
   try {
     const version = await runner.getVersion();
 
-    // If no project path, return just the Godot version plus runtime status.
     if (!args.projectPath) {
       return createStructuredResponse({
         godotVersion: version,
@@ -963,9 +920,7 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
       maxResults,
       problems,
     );
-    // "Exists under the project" is only known when the whole tree was read.
-    // With an unreadable path or a link that was not followed, the claim is
-    // limited to what the walk reached.
+    // "Exists under the project" is only known when the whole tree was read; with an unreadable path or unfollowed link the claim is limited to what the walk reached.
     const walkWasComplete = problems.unreadable.length === 0 && problems.links.length === 0;
     const searchedTypes = fileTypes.length > 0 ? fileTypes.join(', ') : '(none given)';
     const warnings =

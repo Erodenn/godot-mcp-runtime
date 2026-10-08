@@ -83,11 +83,9 @@ export const MAX_MOVIE_INLINE_FRAMES = 6;
 export const MOVIE_INLINE_MAX_WIDTH = DEFAULT_PREVIEW_MAX_WIDTH;
 export const MOVIE_INLINE_MAX_HEIGHT = DEFAULT_PREVIEW_MAX_HEIGHT;
 export const MOVIE_INLINE_MAX_BYTES = 512 * 1024;
-/** At most this many frames are decoded and measured per run, whatever the frame count. */
 export const MOVIE_MEASURED_FRAMES_MAX = 8;
 /** Leading frames skipped by the measure, which can be blank while the scene loads. */
 export const MOVIE_WARMUP_FRAMES = 5;
-/** Above this many frames, `frames` mode lists no per-frame paths. */
 export const MOVIE_FRAME_PATHS_LISTED_MAX = 60;
 export const MOVIE_TIMEOUT_BASE_MS = 30000;
 export const MOVIE_TIMEOUT_PER_FRAME_MS = 250;
@@ -96,11 +94,7 @@ const MOVIE_CLIENT_TIMEOUT_FRAMES =
   (CLIENT_REQUEST_TIMEOUT_MS - MOVIE_TIMEOUT_BASE_MS - MOVIE_KILL_GRACE_MS) /
   MOVIE_TIMEOUT_PER_FRAME_MS;
 const MOVIE_STDERR_TAIL_LINES = 20;
-/**
- * Cap on the warning lines taken from the run's stderr. Measurement and
- * launch-gate warnings are bounded by their own constants and are never cut,
- * so a project that floods stderr cannot push a scan finding out of the payload.
- */
+// Measurement and launch-gate warnings are never cut, so a stderr flood cannot push a scan finding out of the payload.
 export const MOVIE_RUNTIME_WARNINGS_MAX = 30;
 const MOVIE_CLEANUP_MAX_RETRIES = 3;
 const MOVIE_CLEANUP_RETRY_DELAY_MS = 100;
@@ -109,8 +103,6 @@ const MOVIE_PNG_EXTENSION = 'png' as const;
 const MOVIE_FRAME_FILE_PATTERN = new RegExp(`^${MOVIE_FRAME_BASENAME}(\\d+)\\.png$`);
 const STATS_NOTE =
   'Pixel stats, likelyBlank and motion are measured from PNG frames. Run mode "check" or "frames" to get them.';
-
-// --- Tool definition ---
 
 export const renderToolDefinitions = [
   {
@@ -301,18 +293,11 @@ export const renderToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Pure helpers ---
-
-/** The run is budgeted at a fixed base plus a per-frame allowance. */
 export function computeMovieTimeoutMs(frames: number): number {
   return MOVIE_TIMEOUT_BASE_MS + frames * MOVIE_TIMEOUT_PER_FRAME_MS;
 }
 
-/**
- * The full Godot argument list for one movie run. No `--headless` (the movie
- * writer does not render under it) and no `--resolution` (the run keeps the
- * project's own size, so the measured frame is the real frame).
- */
+/** No `--headless` (the movie writer does not render under it) and no `--resolution` (the measured frame is the real frame). */
 export function buildMovieArgs(o: {
   projectPath: string;
   outputPath: string;
@@ -337,10 +322,6 @@ export function buildMovieArgs(o: {
   return args;
 }
 
-/**
- * Up to `want` positions in 0..total-1, evenly spaced, always ending at the
- * last one. All positions when `want` covers them.
- */
 export function pickEvenly(total: number, want: number): number[] {
   if (total <= 0 || want <= 0) return [];
   if (want >= total) return Array.from({ length: total }, (_, i) => i);
@@ -352,18 +333,12 @@ export function pickEvenly(total: number, want: number): number[] {
   return [...picks];
 }
 
-/**
- * Frame indices (positions in the sorted frame list) the measure decodes. The
- * warm-up skip keeps load-time frames out of the motion measure; the last
- * written frame is always measured.
- */
+/** The warm-up skip keeps load-time frames out of the motion measure; the last written frame is always measured. */
 export function measuredFramePositions(frameCount: number): number[] {
   if (frameCount <= 0) return [];
   const start = Math.min(MOVIE_WARMUP_FRAMES, Math.floor((frameCount - 1) / 2));
   return pickEvenly(frameCount - start, MOVIE_MEASURED_FRAMES_MAX).map((p) => p + start);
 }
-
-// --- Argument parsing ---
 
 interface RenderOptions {
   scene: ResolvedProjectPath | undefined;
@@ -488,8 +463,6 @@ function parseRenderOptions(
   });
 }
 
-// --- Refusals ---
-
 function refuseNoDisplay(): ToolResponse {
   return createErrorResponse(
     'render_movie needs a display server: DISPLAY and WAYLAND_DISPLAY are both unset. The movie writer renders with the real renderer and does not work under --headless.',
@@ -530,7 +503,6 @@ function refuseStrandedBridge(registeredPath: string): ToolResponse {
   );
 }
 
-/** The registered path of a server-owned McpBridge autoload, or null. Never throws. */
 function findServerOwnedBridgeEntry(projectRoot: string): string | null {
   try {
     const entry = parseAutoloads(projectGodotPath(projectRoot)).find(
@@ -543,17 +515,7 @@ function findServerOwnedBridgeEntry(projectRoot: string): string | null {
   }
 }
 
-/**
- * The refusals that keep a movie run from loading the McpBridge autoload: a
- * live session on the project (this server's or another's), an owner registry
- * that cannot be read, or a server-owned entry no live session owns. Null
- * when the project is clear. It reads only: the owner registry is asked
- * without its upkeep (`BridgeManager.peekOtherLiveOwners`), so the owner file
- * of a session whose process is gone is left for the next pruning read. Both
- * calls, before the launch gate and after it, use this read: a movie run never
- * registers as an owner, so it has no use for a pruned registry, and a refusal
- * leaves the project exactly as it was.
- */
+// Reads only, via `BridgeManager.peekOtherLiveOwners` (no upkeep): a movie run never registers as an owner, and a refusal leaves the project exactly as it was.
 function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse | null {
   let live: LiveSessionOnProject | null;
   try {
@@ -578,8 +540,6 @@ function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse 
   return strandedPath !== null ? refuseStrandedBridge(strandedPath) : null;
 }
 
-// --- Run interpretation ---
-
 function stderrTail(stderr: string): string {
   const lines = condenseProcessTail(stderr.split('\n'), MOVIE_STDERR_TAIL_LINES);
   return lines.length === 0 ? '' : `\nLast stderr:\n${lines.join('\n')}`;
@@ -591,7 +551,6 @@ interface FrameFile {
   digits: number;
 }
 
-/** PNG frames in a run directory, sorted by the frame index parsed from the file name. */
 function discoverFrames(runDir: string): FrameFile[] {
   const found: FrameFile[] = [];
   for (const name of readdirSync(runDir)) {
@@ -601,10 +560,6 @@ function discoverFrames(runDir: string): FrameFile[] {
   return found.sort((a, b) => a.index - b.index);
 }
 
-/**
- * Total size of the files in a run directory, which is flat: frames, the
- * audio track, or one movie file. Null when it cannot be read.
- */
 function runDirBytes(runDir: string): number | null {
   try {
     let total = 0;
@@ -619,7 +574,6 @@ function runDirBytes(runDir: string): number | null {
 const BYTES_UNMEASURED_WARNING =
   'bytesWritten is null: the run directory could not be read to size the files this run wrote.';
 
-/** Remove a run directory. Returns the failure message, or null when it is gone. */
 function removeRunDir(runDir: string): string | null {
   try {
     rmSync(runDir, {
@@ -682,10 +636,7 @@ interface Measurement {
 const PAIR_UNMEASURED_REASON = 'a frame of the pair was not measured';
 const PAIR_SIZE_REASON = 'the frames differ in size';
 
-/**
- * Decode and measure the sampled frames in order, holding only the previous
- * decoded frame. In check mode the chosen positions also yield an inline image.
- */
+/** Holds only the previous decoded frame. */
 function measureFrames(runDir: string, frameFiles: FrameFile[], inlineWanted: number): Measurement {
   const positions = measuredFramePositions(frameFiles.length);
   const inlineAt = new Set(pickEvenly(positions.length, inlineWanted));
@@ -820,8 +771,6 @@ function measurementWarnings(
   return warnings;
 }
 
-// --- Handler ---
-
 export interface RenderMovieDeps {
   runProcess: RunMovieProcess;
   displayAvailable: () => boolean;
@@ -858,7 +807,6 @@ function runtimeErrorWarnings(runner: GodotRunner, stderr: string): string[] {
   return kept;
 }
 
-/** The error for a run that did not produce what the mode needs, or null. */
 async function findRunFailure(
   rc: RunContext,
   result: MovieProcessResult,
@@ -981,8 +929,7 @@ function buildPngResponse(
   warnings.push(...runtimeErrorWarnings(rc.runner, result.stderr));
   warnings.push(...rc.gateWarnings);
 
-  // A check run keeps nothing: remove the directory now, so a removal failure
-  // can still be reported in this response.
+  // A check run keeps nothing; remove now so a removal failure is reported in this response.
   if (isCheck) {
     const failure = removeRunDir(rc.runDir);
     if (failure !== null) {
@@ -1036,10 +983,6 @@ function buildPngResponse(
   return createStructuredResponse(payload);
 }
 
-/**
- * Build the `render_movie` handler around an injected process runner and
- * display probe, so tests exercise the whole handler without spawning Godot.
- */
 export function createRenderMovieHandler(
   deps: RenderMovieDeps,
 ): (runner: GodotRunner, args: OperationParams, ctx?: McpContext) => Promise<HandlerResult> {
@@ -1054,8 +997,7 @@ export function createRenderMovieHandler(
     if (!options.ok) return options;
     const { scene, mode, frames, fps, format } = options.value;
 
-    // Refusals come before anything that could prompt a human or touch disk:
-    // a launch that cannot happen must never ask for confirmation.
+    // Refusals precede anything that could prompt a human or touch disk.
     if (!deps.displayAvailable()) return err(refuseNoDisplay());
 
     const busy = refuseIfBridgeMayLoad(runner, root);
@@ -1101,12 +1043,8 @@ export function createRenderMovieHandler(
       gateWarnings: gate.value.warnings,
     };
 
-    // The last session check, the first disk write and the spawn are one step
-    // under the session queue, with the run registered on the runner before
-    // the spawn: a run_project on this project either ran before this step,
-    // and the check sees its session, or runs after it, and is refused while
-    // the movie child lives. The queue is held for that step only, never for
-    // the run. `started` is wrapped so the queue does not wait on the child.
+    // The last session check, the first disk write and the spawn are one step under the session queue, with the run registered before the spawn:
+    // a run_project either ran before it (and is seen) or is refused while the movie child lives. `started` is wrapped so the queue does not wait on the child.
     const launchGodotPath = godotPath;
     type Launch = HandlerResult | { started: Promise<MovieProcessResult> };
     let launched: Launch;
@@ -1118,9 +1056,7 @@ export function createRenderMovieHandler(
           worstCaseMs: rc.timeoutMs + MOVIE_KILL_GRACE_MS,
         });
         if (!charged.ok) return charged;
-        // The gate can hold a confirmation prompt open for as long as a human
-        // takes to answer it, and a session started on this project in that
-        // time has injected the bridge. Asked again, now that the wait is over.
+        // The gate can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
         const busyAfterGate = refuseIfBridgeMayLoad(runner, root);
         if (busyAfterGate !== null) return err(busyAfterGate);
         try {
@@ -1189,8 +1125,7 @@ export function createRenderMovieHandler(
       const failure = removeRunDir(runDir);
       if (failure !== null) {
         logDebug(`render_movie could not remove ${runDir} after an error: ${failure}`);
-        // Said in the response too: a silent leak would leave frames in the
-        // project that the caller was told nothing about.
+        // A silent leak would leave frames in the project the caller was told nothing about.
         response.error.content.push({
           type: 'text',
           text: `The run directory could not be removed and may still hold files from this run: ${runDir} (${failure})`,
