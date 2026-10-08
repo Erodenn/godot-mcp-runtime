@@ -95,7 +95,7 @@ That's it. No Godot addon, no project modifications.
 ### Configure Your MCP Client
 
 Add the following to your MCP client config. Works with Claude Code, Claude Desktop, Cursor, or any MCP-compatible client.
-Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
+Ask your AI assistant to call `check_project`. If it returns a Godot version string (e.g., `4.5.stable`), you're connected and working.
 
 **Zero-install via npx (recommended):**
 
@@ -193,9 +193,9 @@ The three security-gate flags below share one axis (see [`docs/security.md`](doc
 > **Windows path gotchas.** `GODOT_PATH` must point at the Godot executable itself, not its install folder. Backslashes in JSON must be escaped or replaced with forward slashes:
 >
 > ```json
-> "GODOT_PATH": "D:\\Godot\\Godot_v4.4-stable_win64.exe"
+> "GODOT_PATH": "D:\\Godot\\Godot_v4.5-stable_win64.exe"
 > // or equivalently
-> "GODOT_PATH": "D:/Godot/Godot_v4.4-stable_win64.exe"
+> "GODOT_PATH": "D:/Godot/Godot_v4.5-stable_win64.exe"
 > ```
 >
 > Setting the variable from a wrapper `.bat` does not propagate to the MCP server - the path must live in the client's `env` block above.

@@ -158,7 +158,7 @@ When Godot runs headlessly, it loads every registered autoload. The operation is
 
 ### `breakpoint` is a no-op
 
-`run_project` spawns Godot without `-d` so runtime errors don't pause the engine and stall the McpBridge. The trade-off is that the `breakpoint` keyword in user code does nothing - there's no debugger attached. Use `print()` and `get_debug_output` instead.
+`run_project` spawns Godot without `-d` so runtime errors don't pause the engine and stall the McpBridge. The trade-off is that the `breakpoint` keyword in user code does nothing - there's no debugger attached. With `profiling: true` the engine's remote debugger is attached, and the server answers every break with `continue`, so the keyword still does not pause the game. Use `print()` and `get_debug_output` instead.
 
 ## Questions
 
