@@ -1,41 +1,15 @@
-/**
- * Feature tests for inline Resource construction in property values.
- *
- * Context: `set_node_properties` / `add_node` coerce Vector2/3/Color dicts
- * but historically had no dict→Resource path: an agent wanting
- * `CollisionShape2D.shape = RectangleShape2D(size=...)` had to load a
- * pre-existing res:// resource or hand-edit the .tscn (agent libraries carried
- * a scene-file-edit permission exception solely for this gap).
- *
- * The feature: a typed-dict form `{"type": "<ResourceClassName>", ...props}`
- * constructs the Resource inline (ClassDB.instantiate + recursive property
- * assignment through the same validated `_prepare_property_value`
- * machinery). Scenes are persisted via PackedScene.pack() +
- * ResourceSaver, so an assigned inline Resource is serialized as a proper
- * sub_resource block automatically: one implementation covers both the
- * scene-edit and runtime contexts.
- *
- * Rules preserved (v3.2.4 error contract):
- * - `{"x","y"}` / `{"r","g","b"}` dicts remain Vector/Color (checked first)
- * - "type" must be an instantiable Resource subclass; otherwise the
- *   existing explicit error fires
- * - Inner property type violations produce explicit errors naming the
- *   inner property
- * - res:// strings still load saved resources; null still clears
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** Typed-dict form `{"type": "<ResourceClassName>", ...props}` constructs a Resource inline; `{x,y}` and `{r,g,b}` dicts stay Vector/Color (checked first), res:// strings still load, null still clears. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, readFileSync } from 'fs';
+import { cpSync, readFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -60,10 +34,8 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
 });
 
@@ -89,9 +61,8 @@ describe('inline Resource construction (typed-dict form)', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
 
-      // The scene text must now contain a persisted sub_resource block.
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toContain('[sub_resource type="RectangleShape2D"');
       expect(sceneText).toContain('size = Vector2(80, 16)');
@@ -166,7 +137,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/unknown class 'NotARealResourceClass'/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toMatch(/sub_resource/);
@@ -198,7 +169,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/is not a Resource/i);
     },
     60000,
@@ -229,7 +200,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/size/i);
       expect(stderrSeen).toMatch(/expected|type|incompatible/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -243,8 +214,7 @@ describe('inline Resource construction (typed-dict form)', () => {
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
-      // texture is a Texture2D-typed property on Sprite2D; assigning a
-      // correctly-typed-but-wrong-class Resource must error.
+      // texture is Texture2D-typed; a correctly-typed but wrong-class Resource must error.
       let stdoutSeen = '';
       let stderrSeen = '';
       try {
@@ -264,7 +234,7 @@ describe('inline Resource construction (typed-dict form)', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/expects|texture|RectangleShape2D/i);
     },
     60000,

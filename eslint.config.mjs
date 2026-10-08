@@ -26,7 +26,14 @@ import prettierConfig from 'eslint-config-prettier';
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', '.test-project/**', 'tests/fixtures/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'coverage/**',
+      '.test-project/**',
+      'tests/fixtures/**',
+      'plans/**',
+    ],
   },
   {
     files: ['**/*.ts'],

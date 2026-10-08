@@ -1,19 +1,9 @@
-/**
- * The bridge autoload lives under `.mcp/godot-runtime/bridge/`, inside a
- * directory carrying a `.gdignore`. That suppresses the resource importer for
- * the whole subtree, so this file exists to prove the autoload still loads:
- * Godot resolves autoloads through `load()`, not the importer, and no `.uid`
- * sidecar is generated for the script at the new location.
- *
- * Also covers the sibling artifact directories: a screenshot and a
- * run_script audit pair land under the namespace and survive `stopProject`,
- * which only removes `bridge/`.
- *
- * Requires GODOT_PATH.
- */
+// The bridge lives under a `.gdignore` directory, which suppresses the importer; Godot resolves autoloads through `load()` and generates no `.uid` for the script there.
+// Screenshot and run_script audit artifacts land under the namespace and survive `stopProject`, which removes only `bridge/`.
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { existsSync, readFileSync, readdirSync, cpSync, rmSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -36,10 +26,9 @@ const BRIDGE_WAIT_MS = 20000;
 const BRIDGE_COMMAND_TIMEOUT_MS = 15000;
 const CASE_TIMEOUT_MS = 60000;
 
-/** Directory Godot owns; never contains our artifacts and can be huge. */
+/** Godot's own directory: never holds our artifacts and can be huge. */
 const GODOT_CACHE_DIR = '.godot';
 
-/** Recursively collect files matching `name`, skipping Godot's own cache. */
 function findFilesNamed(root: string, name: string): string[] {
   const hits: string[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -66,15 +55,11 @@ describe('bridge artifact namespace', () => {
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
-      } catch {
-        // best-effort
-      }
+        removeTmpDir(tmpProject);
+      } catch {}
       tmpProject = null;
     }
   });
@@ -88,31 +73,23 @@ describe('bridge artifact namespace', () => {
 
       await runProjectOrSkip(runner, ctx, tmpProject, { waitMs: BRIDGE_WAIT_MS });
 
-      // 1. The script sits at the namespaced path, not the project root.
       expect(existsSync(bridgeScriptAbsPath(tmpProject))).toBe(true);
       expect(existsSync(join(tmpProject, 'mcp_bridge.gd'))).toBe(false);
 
-      // 2. project.godot registers exactly the namespaced res:// path.
       const projectGodotPath = join(tmpProject, 'project.godot');
       expect(readFileSync(projectGodotPath, 'utf8')).toContain(
         `McpBridge="*${BRIDGE_SCRIPT_RES_PATH}"`,
       );
 
-      // 3. The importer-suppression marker stays at the .mcp/ level.
       expect(existsSync(join(mcpDir(tmpProject), '.gdignore'))).toBe(true);
 
-      // 4. No .uid sidecar anywhere: .gdignore keeps the importer out.
       expect(findFilesNamed(tmpProject, 'mcp_bridge.gd.uid')).toEqual([]);
 
-      // 5. The autoload actually loaded and is answering. waitForBridge
-      //    implies this; asserting it explicitly makes a failure read as
-      //    "autoload did not load" rather than "timeout".
       const pong = JSON.parse(await runner.sendCommand('ping', {}, BRIDGE_COMMAND_TIMEOUT_MS)) as {
         status?: string;
       };
       expect(pong.status).toBe('pong');
 
-      // Sibling artifact dirs are written under the namespace.
       const shotResponse = JSON.parse(
         await runner.sendCommand('screenshot', {}, BRIDGE_COMMAND_TIMEOUT_MS),
       ) as { path?: string; error?: string };
@@ -129,7 +106,6 @@ describe('bridge artifact namespace', () => {
 
       await runner.stopProject();
 
-      // Session cleanup removes bridge/ and the autoload entry, nothing else.
       expect(existsSync(bridgeDir(tmpProject))).toBe(false);
       expect(readFileSync(projectGodotPath, 'utf8')).not.toContain('McpBridge=');
       expect(existsSync(join(mcpDir(tmpProject), '.gdignore'))).toBe(true);

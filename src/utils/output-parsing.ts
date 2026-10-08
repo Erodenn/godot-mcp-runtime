@@ -1,17 +1,10 @@
-import { normalize } from 'path';
+import { randomBytes } from 'crypto';
+import { normalize, resolve } from 'path';
 
-// A force-killed process can report its exit code as the unsigned 32-bit
-// representation of a negative signal-kill status (e.g. 4294967295 for -1).
-// Godot's own exits are small non-negative integers, so any observed code at
-// or above 2^31 is reinterpreted as its signed 32-bit equivalent.
+// A force-killed process can report a negative signal-kill status as unsigned 32-bit (4294967295 for -1); Godot's own exits are small, so codes at or above 2^31 are reinterpreted as signed.
 const INT32_SIGN_BOUNDARY = 2147483648; // 2^31
 const UINT32_MODULUS = 4294967296; // 2^32
 
-/**
- * Normalize a raw process exit code to a signed 32-bit value, so a
- * force-killed process (e.g. `4294967295`) reports as `-1` instead of an
- * unsigned value that reads like a real Godot exit status.
- */
 export function normalizeExitCode(code: number | null): number | null {
   if (code === null || code < INT32_SIGN_BOUNDARY) {
     return code;
@@ -19,75 +12,91 @@ export function normalizeExitCode(code: number | null): number | null {
   return code - UINT32_MODULUS;
 }
 
-/**
- * Normalize a path for cross-platform comparison.
- * Folds Windows backslashes to forward slashes and strips trailing slashes,
- * so Node's `path.normalize` output matches Godot's `globalize_path("res://")`.
- */
+/** Folds backslashes and trailing slashes so Node's `path.normalize` output matches Godot's `globalize_path("res://")`. */
 export function normalizeForCompare(p: string): string {
   return normalize(p).replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
-/**
- * Extract JSON from Godot output by finding the first { or [ and matching to the end.
- * This strips debug logs, version banners, and other noise.
- */
-export function extractJson(output: string): string {
-  // Find the first occurrence of { or [
-  const jsonStartBrace = output.indexOf('{');
-  const jsonStartBracket = output.indexOf('[');
+/** One key per project directory whichever way its path was spelled (absolute, separators, trailing slash and case folded); the session map and the bridge's orphan-repair cache both key on it. */
+export function projectPathKey(projectPath: string): string {
+  return normalizeForCompare(resolve(projectPath)).toLowerCase();
+}
 
-  let jsonStart = -1;
-  if (jsonStartBrace === -1 && jsonStartBracket === -1) {
-    return output; // No JSON found, return as-is
-  } else if (jsonStartBrace === -1) {
-    jsonStart = jsonStartBracket;
-  } else if (jsonStartBracket === -1) {
-    jsonStart = jsonStartBrace;
-  } else {
-    jsonStart = Math.min(jsonStartBrace, jsonStartBracket);
-  }
+/** Prefix of the one stdout line carrying a headless operation's JSON result; stdout is shared with the engine banner and project prints, so the payload is whatever follows it on its line.
+ * KEEP IN SYNC with OPERATION_RESULT_SENTINEL in src/scripts/godot_operations.gd. */
+export const OPERATION_RESULT_SENTINEL = 'MCP_OPERATION_RESULT:';
 
-  // Extract from JSON start to end
-  const jsonPart = output.substring(jsonStart);
+/** Environment variable carrying one run's result token to godot_operations.gd. KEEP IN SYNC with OPERATION_RESULT_TOKEN_ENV there. */
+export const OPERATION_RESULT_TOKEN_ENV = 'MCP_OPERATION_RESULT_TOKEN';
 
-  // Try to parse to validate, if it fails return original
-  try {
-    JSON.parse(jsonPart.trim());
-    return jsonPart.trim();
-  } catch {
-    // If the extracted part isn't valid JSON, try to find the last } or ]
-    const lastBrace = jsonPart.lastIndexOf('}');
-    const lastBracket = jsonPart.lastIndexOf(']');
-    const lastEnd = Math.max(lastBrace, lastBracket);
+/** Closes the token in a result line: sentinel, token, this, then the JSON.
+ * KEEP IN SYNC with OPERATION_RESULT_TOKEN_END in godot_operations.gd. */
+export const OPERATION_RESULT_TOKEN_END = ':';
 
-    if (lastEnd > 0) {
-      const extracted = jsonPart.substring(0, lastEnd + 1);
-      try {
-        JSON.parse(extracted);
-        return extracted;
-      } catch {
-        return output; // Return original if still can't parse
-      }
+const OPERATION_RESULT_TOKEN_BYTES = 16;
+
+/** A fresh result token per headless run: the sentinel is a constant any project script can print (an autoload's `_exit_tree` runs after the result), so its position says nothing about who wrote it; the per-run token does. */
+export function newOperationResultToken(): string {
+  return randomBytes(OPERATION_RESULT_TOKEN_BYTES).toString('hex');
+}
+
+/** Text after `marker` on the last line carrying it, or null; never falls back to scanning for brackets. The marker can occur more than once on that line (quoted inside the payload, or an unterminated `printraw` before it),
+ * so occurrences are tried left to right and the first followed by valid JSON wins: the last would start inside a string value. When none parses, the text after the first is returned so the failure is reported against what was emitted. */
+function payloadAfterMarker(output: string, marker: string): string | null {
+  const lines = output.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? '';
+    let at = line.indexOf(marker);
+    if (at === -1) continue;
+    const first = line.substring(at + marker.length).trim();
+    while (at !== -1) {
+      const candidate = line.substring(at + marker.length).trim();
+      if (isJsonText(candidate)) return candidate;
+      at = line.indexOf(marker, at + marker.length);
     }
-    return output;
+    return first;
+  }
+  return null;
+}
+
+/** The payload of the result line in `GodotRunner.executeOperation`'s stdout, null if none. Only for stdout already through `cleanStdout`, where forged result lines are told apart; raw stdout goes through `extractTokenFramedPayload`. */
+export function extractOperationPayload(output: string): string | null {
+  return payloadAfterMarker(output, OPERATION_RESULT_SENTINEL);
+}
+
+/** The payload of the line a run wrote to raw stdout framed with the sentinel and `resultToken`; a line with another token, or none, is not a result. */
+export function extractTokenFramedPayload(rawStdout: string, resultToken: string): string | null {
+  return payloadAfterMarker(
+    rawStdout,
+    OPERATION_RESULT_SENTINEL + resultToken + OPERATION_RESULT_TOKEN_END,
+  );
+}
+
+function isJsonText(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-/**
- * Strip Godot banner and debug lines from output, keeping only meaningful content.
- */
+export function stripOperationSentinel(output: string): string {
+  return output.split(OPERATION_RESULT_SENTINEL).join('');
+}
+
+/** An operation's payload from its stdout, or the input unchanged; production code that must tell 'no payload' apart uses `extractOperationPayload`. */
+export function extractJson(output: string): string {
+  return extractOperationPayload(output) ?? output;
+}
+
 export function cleanOutput(output: string): string {
   const lines = output.split('\n');
   const cleanedLines = lines.filter((line) => {
     const trimmed = line.trim();
-    // Skip empty lines
     if (!trimmed) return false;
-    // Skip Godot version banner
     if (trimmed.startsWith('Godot Engine v')) return false;
-    // Skip debug lines
     if (trimmed.startsWith('[DEBUG]')) return false;
-    // Skip info lines that are just status updates
     if (trimmed.startsWith('[INFO] Operation:')) return false;
     if (trimmed.startsWith('[INFO] Executing operation:')) return false;
     return true;
@@ -95,32 +104,20 @@ export function cleanOutput(output: string): string {
   return cleanedLines.join('\n');
 }
 
-export function cleanStdout(stdout: string): string {
-  if (stdout.includes('{') || stdout.includes('[')) {
-    return extractJson(stdout);
+/** Reduces a headless operation's raw stdout to what handlers need: a result line framed with `resultToken` survives alone behind the bare sentinel; otherwise banner and status lines are filtered and the rest passes with the sentinel text removed, so a project script's line carrying it is never read as a result downstream. */
+export function cleanStdout(stdout: string, resultToken: string): string {
+  const payload = extractTokenFramedPayload(stdout, resultToken);
+  if (payload !== null) {
+    return OPERATION_RESULT_SENTINEL + payload;
   }
-  return cleanOutput(stdout);
+  return stripOperationSentinel(cleanOutput(stdout));
 }
 
-/**
- * Renderer/device startup banner and engine URL — printed once per process
- * launch and carrying no diagnostic value on their own. Anchored on the
- * actual Godot banner shape (renderer name + version + " - " + the
- * "- Using Device #" marker) rather than a bare word prefix, so a genuine
- * runtime line like "OpenGL context lost" or "Vulkan device removed" is
- * never mistaken for the banner.
- */
+/** Renderer/device startup banner and engine URL, anchored on the banner shape (name + version + ' - ' + '- Using Device #') so a real line like 'OpenGL context lost' is never mistaken for it. */
 const PROCESS_TAIL_BANNER_NOISE =
   /^(https:\/\/godotengine\.org|(?:Metal|Vulkan|OpenGL)\s+[\d.]+\s+-\s+.*-\s+Using Device #\d+:)/i;
 
-/**
- * Condense a process's stdout/stderr tail to its diagnostically relevant
- * lines, capped to the last `maxLines`. Reuses `cleanOutput`'s blank-line /
- * version-banner / debug-log rules and additionally drops the
- * renderer/device banner and engine URL. If nothing survives filtering,
- * falls back to the last non-empty original line so the caller sees
- * something of the process tail rather than an unexplained empty array.
- */
+/** Condenses a stdout/stderr tail to its diagnostic lines, capped to the last `maxLines`; if nothing survives, the last non-empty original line is kept so the caller sees something rather than an empty array. */
 export function condenseProcessTail(lines: string[], maxLines: number): string[] {
   const cleaned = cleanOutput(lines.join('\n'));
   const bannerFiltered = (cleaned === '' ? [] : cleaned.split('\n')).filter(
@@ -139,47 +136,11 @@ export interface StderrDiagnostic {
   filePath?: string;
 }
 
-/**
- * How far past a parse/compile error to scan for the `Failed to load script`
- * echo that names the offending file. Wide enough to clear a full GDScript
- * backtrace between the two lines.
- */
+/** How far past a parse/compile error to scan for the `Failed to load script` echo naming the file: wide enough to clear a full GDScript backtrace. */
 const LOAD_FAILURE_LOOKAHEAD_LINES = 10;
 
-/**
- * Parse Godot script-compiler diagnostics from a raw stderr stream.
- *
- * Both the headless `validate` path and the live-bridge `run_script` path hit
- * the same underlying failure: GDScript compile errors are not returned by
- * the API call that triggers them (`load()` hands back a placeholder
- * resource; `GDScript.reload()` returns a bare error code) — the message,
- * line number, and location are printed to stderr in Godot's canonical
- * format:
- *
- *   SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.
- *             at: GDScript::reload (res://scripts/foo.gd:3)
- *
- * This is the single shared parser for that format. Behavior:
- *
- * - Recognizes `SCRIPT ERROR:` / `USER SCRIPT ERROR:` prefixes (the same
- *   marker set GodotRunner.SCRIPT_ERROR_PATTERNS gates on) plus bare
- *   `Parse Error: ... at line N` lines.
- * - Extracts the file + line from the `at:` line that follows, tolerating
- *   the `<method> (path:line)` and bare `path:line` forms. `gdscript://`
- *   URIs (runtime-compiled sources with no res:// identity) yield no
- *   filePath — the line number still applies to the submitted source.
- * - When a parse/compile error's `at:` line names no path at all, adopts the
- *   path (never the line) from a nearby `Failed to load script "res://..."`
- *   echo, so batch attribution in `validate` can still place the error. A
- *   `gdscript://` URI counts as a path, so a runtime-compiled source is never
- *   relabelled with an unrelated file from surrounding stderr.
- * - Captures bare `ERROR:` lines (non-script failures — notably scene file
- *   parse errors carrying an inline `[Resource file res://x:N]` location),
- *   while suppressing the redundant `Failed to load/load` echo lines whose
- *   `at:` lines point into Godot's engine source (e.g.
- *   gdscript_resource_format.cpp:46) and would surface as bogus line
- *   numbers for the user's file.
- */
+/** Parses Godot script-compiler diagnostics from stderr, the one parser for the headless `validate` and live-bridge `run_script` paths: compile errors are not returned by the triggering API (`load()` hands back a placeholder), only printed to stderr.
+ * Recognizes `SCRIPT ERROR:`/`USER SCRIPT ERROR:` (the set GodotRunner.SCRIPT_ERROR_PATTERNS gates on) and bare `Parse Error: ... at line N`; bare `ERROR:` lines are captured but `Failed to load` echoes suppressed, as their `at:` points into engine source. */
 export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
   const entries: StderrDiagnostic[] = [];
   if (!stderr) return entries;
@@ -191,7 +152,6 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
     const line = lines[i];
     if (line === undefined) continue;
 
-    // Pattern: "SCRIPT ERROR: Parse Error: MESSAGE" (or without "Parse Error:")
     const scriptErrorMatch = line.match(
       /(?:SCRIPT ERROR|USER SCRIPT ERROR):\s*(?:Parse Error:\s*)?(.+)/,
     );
@@ -200,15 +160,12 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       const message = rawMessage.trim();
       let lineNum: number | undefined;
       let filePath: string | undefined;
-      // Whether the `at:` line named a path of any scheme. A `gdscript://`
-      // URI counts: it has no res:// identity but it is still a definite one.
+      // Whether the `at:` line named a path of any scheme; a `gdscript://` URI counts, having no res:// identity but a definite one.
       let atNamedAPath = false;
 
-      // "Failed to load script" echoes are suppressed only for the rest of
-      // this block — the primary SCRIPT ERROR above them is the diagnostic.
+      // 'Failed to load script' echoes are suppressed only for the rest of this block; the primary SCRIPT ERROR above is the diagnostic.
       const next = lines[i + 1];
       if (next !== undefined) {
-        // "<method> (res://path:line)" and bare "res://path:line"
         const atMatch = next.match(
           /\s*at:\s*(?:[^()\n]*\()?\(?((?:res:|gdscript:|file:)?\/\/[^):"\s]+):(\d+)\)?/,
         );
@@ -221,14 +178,8 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
         }
       }
 
-      // The `at:` line of a parse/compile error names a synthetic
-      // `gdscript://` URI (runtime-compiled source) or points into Godot's
-      // own C++ source, leaving the entry with no res:// identity. Batch
-      // attribution in `validate` drops filePath-less entries, so recover the
-      // path from the `Failed to load script "res://..."` echo that follows
-      // within a full GDScript backtrace. Only the path is adopted -- the
-      // echo's own `at:` line points at engine source and would surface as a
-      // bogus line number in the user's file.
+      // The `at:` line names a synthetic `gdscript://` URI or Godot's C++ source, leaving no res:// identity, and `validate` drops filePath-less entries:
+      // adopt only the path from the following `Failed to load script` echo, never its line (it points at engine source).
       if (!filePath && !atNamedAPath && /Parse Error|Compile Error/i.test(line)) {
         const lookaheadLimit = Math.min(i + LOAD_FAILURE_LOOKAHEAD_LINES + 1, lines.length);
         for (let j = i + 1; j < lookaheadLimit; j++) {
@@ -244,9 +195,7 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
         }
       }
 
-      // De-duplicate: Godot re-emits the same parse error once per load
-      // attempt of the same script (e.g. `load()` in validate + the engine's
-      // own retry). Keep the first occurrence.
+      // Godot re-emits the same parse error once per load attempt of a script; keep the first.
       const key = `${filePath ?? ''}:${lineNum ?? 0}:${message}`;
       if (reportedFailures.has(key)) continue;
       reportedFailures.add(key);
@@ -258,7 +207,6 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       continue;
     }
 
-    // Pattern: "Parse Error: MESSAGE at line LINE" (older headless format)
     const parseErrorMatch = line.match(/Parse Error:\s*(.+?)\s+at line\s+(\d+)/);
     if (parseErrorMatch) {
       const [, parseMsg = '', parseLine = '0'] = parseErrorMatch;
@@ -270,19 +218,8 @@ export function parseScriptDiagnostics(stderr: string): StderrDiagnostic[] {
       continue;
     }
 
-    // Pattern: bare "ERROR: ..." lines — non-script failures, most importantly
-    // scene/resource file parse errors emitted during scene validation:
-    //   ERROR: Parse Error: Parse error. [Resource file res://main.tscn:4]
-    // These carry no SCRIPT ERROR prefix, so the blocks above miss them.
-    // Guard rails:
-    // - "Failed to load script/resource" echoes merely restate an error
-    //   already captured (with an engine-source at: line that would
-    //   masquerade as a line number in the user's file).
-    // - "Failed loading resource:" is the same echo class for scene loads.
-    // - The at: line below a bare ERROR points into Godot's C++ engine
-    //   source (e.g. resource_format_text.cpp:293), never into the user's
-    //   file, so line/location info is taken only from the inline
-    //   [Resource file res://x:N] suffix when present.
+    // Bare `ERROR:` lines: non-script failures, mainly scene parse errors with an inline `[Resource file res://x:N]` location, which the blocks above miss.
+    // `Failed to load script/resource` and `Failed loading resource:` echoes only restate a captured error with an engine-source `at:` line, so location comes only from the inline suffix.
     const bareErrorMatch = line.match(/^ERROR:\s*(.+)/);
     if (bareErrorMatch) {
       const [, rawMessage = ''] = bareErrorMatch;

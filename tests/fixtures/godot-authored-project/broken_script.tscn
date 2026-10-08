@@ -1,0 +1,9 @@
+[gd_scene load_steps=2 format=3 uid="uid://bmdiwsa6lkg7y"]
+
+[ext_resource type="Script" path="res://broken_script.gd" id="1_brk"]
+
+[node name="Broken" type="Node2D"]
+script = ExtResource("1_brk")
+speed = 9.0
+
+[node name="Kid" type="Node2D" parent="."]

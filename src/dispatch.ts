@@ -1,15 +1,4 @@
-/**
- * Tool dispatch table.
- *
- * Maps every MCP tool name to a handler that takes the runner + raw args and
- * returns the tool response. Extracted from index.ts so tests can exercise
- * dispatch as a pure data structure (no Server / stdio / lifecycle setup).
- *
- * Behavioral contract preserved from the original switch in index.ts:
- *  - Each name routes to the same handler it did before.
- *  - Unknown tool names throw McpError(MethodNotFound, ...) — see
- *    `dispatchToolCall`.
- */
+// Unknown tool names throw McpError(MethodNotFound) in `dispatchToolCall`.
 
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
@@ -21,8 +10,7 @@ import { isOk } from './utils/result.js';
 import {
   handleLaunchEditor,
   handleRunProject,
-  handleAttachProject,
-  handleDetachProject,
+  handleSwitchProject,
   handleGetDebugOutput,
   handleStopProject,
   handleTakeScreenshot,
@@ -74,14 +62,14 @@ import {
   handleStopProfiler,
 } from './tools/profiler-tools.js';
 
+import { handleRenderMovie } from './tools/render-tools.js';
+
 import { handleValidate } from './tools/validate-tools.js';
 
 export const toolDispatch = {
-  // Project tools
   launch_editor: handleLaunchEditor,
   run_project: handleRunProject,
-  attach_project: handleAttachProject,
-  detach_project: handleDetachProject,
+  switch_project: handleSwitchProject,
   get_debug_output: handleGetDebugOutput,
   stop_project: handleStopProject,
   list_projects: (_runner, args) => handleListProjects(args),
@@ -99,7 +87,8 @@ export const toolDispatch = {
   get_scene_dependencies: (_runner, args) => handleGetSceneDependencies(args),
   get_project_settings: (_runner, args) => handleGetProjectSettings(args),
 
-  // Scene tools
+  render_movie: handleRenderMovie,
+
   create_scene: handleCreateScene,
   add_node: handleAddNode,
   load_sprite: handleLoadSprite,
@@ -107,7 +96,6 @@ export const toolDispatch = {
   export_mesh_library: handleExportMeshLibrary,
   batch_scene_operations: handleBatchSceneOperations,
 
-  // Node tools
   delete_nodes: handleDeleteNodes,
   set_node_properties: handleSetNodeProperties,
   get_node_properties: handleGetNodeProperties,
@@ -118,12 +106,10 @@ export const toolDispatch = {
   connect_signal: handleConnectSignal,
   disconnect_signal: handleDisconnectSignal,
 
-  // Profiler tools
   profile_project: handleProfileProject,
   start_profiler: handleStartProfiler,
   stop_profiler: handleStopProfiler,
 
-  // Validate tools
   validate: handleValidate,
 } as const satisfies Record<ToolName, ToolHandler>;
 
@@ -133,14 +119,15 @@ export async function dispatchToolCall(
   args: OperationParams,
   ctx: McpContext = createNullContext(),
 ): Promise<ToolResponse> {
-  const handler = toolDispatch[toolName as ToolName] as ToolHandler | undefined;
+  // Own keys only: `constructor`, `toString` and `__proto__` resolve on the
+  // table through Object.prototype and would be called as handlers.
+  const handler = Object.hasOwn(toolDispatch, toolName)
+    ? (toolDispatch[toolName as ToolName] as ToolHandler)
+    : undefined;
   if (!handler) {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }
   const result = await handler(runner, args, ctx);
-  // Map Result → MCP wire shape. The error branch already carries
-  // `isError: true` from createErrorResponse; the success branch flows
-  // through verbatim. This is the only edge where the wire envelope is
-  // emitted — handlers and helpers stay Result-shaped end to end.
+  // The only edge where the wire envelope is emitted; handlers stay Result-shaped end to end.
   return isOk(result) ? result.value : result.error;
 }

@@ -1,19 +1,10 @@
-/**
- * End-to-end profiling against a real engine: `run_project({ profiling: true })`
- * has to bind the debugger port, survive Godot's own `--remote-debug` handshake,
- * and come back with the fixture's hot function ranked at the top.
- *
- * The frame layout the receiver parses is the engine's, not ours, so this is
- * the only test that can catch a layout change in a future Godot release.
- *
- * Requires GODOT_PATH and a display server. CI supplies both in the
- * godot-integration job (xvfb) and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** The frame layout the receiver parses is the engine's, so this is the only test that can catch a layout change in a future Godot release. */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import type { TestContext } from 'vitest';
 import { join } from 'path';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
@@ -26,9 +17,33 @@ import {
   handleStopProfiler,
 } from '../../src/tools/profiler-tools.js';
 import { hasError, unwrap } from '../helpers/assertions.js';
+import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 
 interface CaptureShape {
   frames: number;
+  fps: number | null;
+  monitors: {
+    samples: number;
+    nodes: { avg: number };
+    videoMemMiB: { avg: number };
+  } | null;
+  visual: {
+    frames: number;
+    framesReceived: number;
+    cpuMs: { avg: number; max: number };
+    areas: Array<{ path: string; group: boolean; cpuMs: { avg: number } }>;
+  } | null;
+  timeline: {
+    bucketMs: number;
+    trackError: string | null;
+    buckets: Array<{
+      t: number;
+      frames: number;
+      fps: number | null;
+      top: Array<{ kind: string; name: string }>;
+      track: Record<string, unknown> | null;
+    }>;
+  } | null;
   frame: Record<'frameMs' | 'processMs' | 'scriptMs', { avg: number; max: number }>;
   servers: Array<{ name: string; msPerFrame: number; functions: Array<{ name: string }> }>;
   worstFrame: { frame: number; frameMs: number; scriptMs: number };
@@ -54,15 +69,11 @@ describe('profiler smoke', () => {
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
-      } catch {
-        // best-effort
-      }
+        removeTmpDir(tmpProject);
+      } catch {}
       tmpProject = null;
     }
   });
@@ -83,6 +94,11 @@ describe('profiler smoke', () => {
 
       const result = await handleProfileProject(runner, { seconds: 2, top: 10 });
       expect(hasError(result)).toBe(false);
+      expectMatchesOutputSchema('profile_project', result);
+      expect(unwrap(result).structuredContent).toMatchObject({
+        projectPath: tmpProject,
+        complete: true,
+      });
 
       const capture = unwrap(result).structuredContent as unknown as CaptureShape;
       expect(capture.frames).toBeGreaterThan(0);
@@ -95,11 +111,9 @@ describe('profiler smoke', () => {
       expect(burn!.line).toBeGreaterThan(0);
       expect(burn!.calls).toBeGreaterThan(0);
       expect(burn!.selfMs).toBeGreaterThan(0);
-      // Own time dominates the frame, so the default ranking puts it first.
       expect(capture.rows[0]!.function).toBe('burn');
       expect(burn!.percentOfFrame).toBeGreaterThan(0);
 
-      // The editor's "Frame Time" category and its server rows.
       expect(capture.frame.frameMs.avg).toBeGreaterThan(0);
       expect(capture.frame.frameMs.max).toBeGreaterThanOrEqual(capture.frame.frameMs.avg);
       expect(capture.frame.scriptMs.avg).toBeGreaterThan(0);
@@ -109,6 +123,70 @@ describe('profiler smoke', () => {
         `no server categories in ${JSON.stringify(capture.servers)}`,
       ).toBeGreaterThan(0);
       expect(capture.servers[0]!.functions.length).toBeGreaterThan(0);
+      expect(capture.visual).toBeNull();
+    },
+    90000,
+  );
+
+  itGodot(
+    'profile_project with visual: true adds render stages, fps and engine monitors',
+    async (ctx) => {
+      await launchProfilingSession(ctx);
+
+      // Monitors arrive once a second, so the window has to span a few.
+      const result = await handleProfileProject(runner, { seconds: 3, top: 50, visual: true });
+      expect(hasError(result)).toBe(false);
+      expectMatchesOutputSchema('profile_project', result);
+      expect((unwrap(result).structuredContent as { complete: boolean }).complete).toBe(true);
+      const capture = unwrap(result).structuredContent as unknown as CaptureShape;
+
+      expect(capture.fps).toBeGreaterThan(0);
+      expect(capture.monitors, 'no monitor sample in a 3 s window').not.toBeNull();
+      expect(capture.monitors!.samples).toBeGreaterThan(0);
+      expect(capture.monitors!.nodes.avg).toBeGreaterThan(0);
+
+      const visual = capture.visual;
+      expect(visual).not.toBeNull();
+      expect(visual!.frames).toBeGreaterThan(0);
+      expect(visual!.frames).toBeLessThanOrEqual(visual!.framesReceived);
+      expect(visual!.cpuMs.avg).toBeGreaterThan(0);
+      const paths = visual!.areas.map((area) => area.path);
+      expect(paths, paths.join(', ')).toContain('Render Viewports');
+      expect(visual!.areas.find((area) => area.path === 'Render Viewports')!.group).toBe(true);
+    },
+    90000,
+  );
+
+  itGodot(
+    'a timeline with a track places what the game sampled on each interval',
+    async (ctx) => {
+      await launchProfilingSession(ctx);
+
+      const started = await handleStartProfiler(runner, {
+        seconds: 10,
+        timeline: true,
+        track: ['/root/Main:position'],
+      });
+      expect(hasError(started)).toBe(false);
+      expectMatchesOutputSchema('start_profiler', started);
+      await runner.sendCommand('get_ui_elements', {});
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      const stopped = await handleStopProfiler(runner, {});
+      expect(hasError(stopped)).toBe(false);
+      expectMatchesOutputSchema('stop_profiler', stopped);
+      const timeline = (unwrap(stopped).structuredContent as unknown as CaptureShape).timeline;
+      expect(timeline).not.toBeNull();
+      expect(timeline!.trackError).toBeNull();
+      expect(timeline!.bucketMs).toBe(500);
+      const buckets = timeline!.buckets;
+      expect(buckets.length).toBeGreaterThan(1);
+      expect(buckets[0]!.frames).toBeGreaterThan(0);
+      expect(buckets[0]!.fps).toBeGreaterThan(0);
+      expect(buckets[0]!.top.map((item) => item.name).join(', ')).toContain('burn');
+      const tracked = buckets.filter((bucket) => bucket.track !== null);
+      expect(tracked.length).toBeGreaterThan(0);
+      expect(tracked[0]!.track!['/root/Main:position']).toEqual({ x: 0, y: 0 });
     },
     90000,
   );
@@ -120,13 +198,14 @@ describe('profiler smoke', () => {
 
       const started = await handleStartProfiler(runner, { seconds: 10 });
       expect(hasError(started)).toBe(false);
+      expectMatchesOutputSchema('start_profiler', started);
       expect(unwrap(started).structuredContent).toMatchObject({ active: true });
 
-      // A capture must survive normal bridge traffic in the middle of it.
       await runner.sendCommand('get_ui_elements', {});
 
       const stopped = await handleStopProfiler(runner, { top: 5, sort: 'calls' });
       expect(hasError(stopped)).toBe(false);
+      expectMatchesOutputSchema('stop_profiler', stopped);
       const capture = unwrap(stopped).structuredContent as unknown as CaptureShape;
       expect(capture.frames).toBeGreaterThan(0);
       expect(capture.rows.map((row) => row.function)).toContain('burn');

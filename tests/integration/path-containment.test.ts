@@ -1,26 +1,15 @@
-/**
- * Regression tests: project-root containment for every path-taking operation.
- *
- * Godot resolves `res://../x` outward to a real file on disk, so a path that
- * escapes the project root is not merely invalid -- it reads and writes real
- * files outside the project. The Node-side validators (validateSubPath and
- * friends) cover the standalone handlers, but batch_scene_operations forwards
- * its operations to the GDScript layer raw, so containment has to hold there
- * too. normalize_scene_path is the single choke point every path funnels
- * through, and it rejects escaping paths by returning "".
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** Godot resolves `res://../x` outward to a real file, and batch_scene_operations forwards operations to GDScript raw, so containment must hold in normalize_scene_path (it returns "" for an escaping path). */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { OPERATION_RESULT_SENTINEL, extractJson } from '../../src/utils/output-parsing.js';
 
 const ESCAPE_MESSAGE = 'escapes the project root';
 
@@ -47,14 +36,18 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
 });
 
-/** Drop a file just outside the project root; returns its bare filename. */
+function parseUpdateResults(stdout: string): Array<{ success?: boolean; error?: string }> {
+  const payload = JSON.parse(extractJson(stdout)) as {
+    results: Array<{ success?: boolean; error?: string }>;
+  };
+  return payload.results;
+}
+
 function plantOutside(projectDir: string, name: string, body: string): string {
   writeFileSync(join(dirname(projectDir), name), body);
   return name;
@@ -64,9 +57,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
   itGodot(
     'batch load_sprite rejects a texturePath that escapes the project root',
     async () => {
-      // The batch path reaches _apply_load_sprite without passing through
-      // handleLoadSprite's validateSubPath call, so the guard must be
-      // engine-side.
+      // The batch path reaches _apply_load_sprite without handleLoadSprite's resolveProjectPath, so the guard must be engine-side.
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       const outside = plantOutside(tmpProject, 'outside.png', 'not-a-real-png');
 
@@ -102,7 +93,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       );
       const before = readFileSync(join(dirname(tmpProject), outside), 'utf-8');
 
-      await runner.executeOperation(
+      const { stdout } = await runner.executeOperation(
         'batch_scene_operations',
         {
           operations: [
@@ -118,7 +109,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      // The external scene must be neither read into nor written back out.
+      expect(stdout).toContain(ESCAPE_MESSAGE);
       expect(readFileSync(join(dirname(tmpProject), outside), 'utf-8')).toBe(before);
     },
     60000,
@@ -147,20 +138,17 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       plantOutside(tmpProject, 'outside.gd', 'extends Node\n');
 
-      let stdout = '';
-      try {
-        const result = await runner.executeOperation(
-          'attach_script',
-          { scenePath: 'main.tscn', nodePath: 'root', scriptPath: '../outside.gd' },
-          tmpProject,
-          30000,
-        );
-        stdout = result.stdout;
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
-      }
+      // A refused operation resolves with its output; a throw means the engine died or timed out.
+      const { stdout, stderr } = await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root', scriptPath: '../outside.gd' },
+        tmpProject,
+        30000,
+      );
 
-      expect(stdout).not.toContain('attached');
+      // Also red when the operation never ran: a misspelled operation name prints no such line.
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('outside.gd');
     },
     60000,
@@ -173,18 +161,123 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const target = join(dirname(tmpProject), 'escaped-save.tscn');
       rmSync(target, { force: true });
 
-      try {
-        await runner.executeOperation(
-          'save_scene',
-          { scenePath: 'main.tscn', newPath: '../escaped-save.tscn' },
-          tmpProject,
-          30000,
-        );
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
-      }
+      const { stdout, stderr } = await runner.executeOperation(
+        'save_scene',
+        { scenePath: 'main.tscn', newPath: '../escaped-save.tscn' },
+        tmpProject,
+        30000,
+      );
 
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(existsSync(target)).toBe(false);
+    },
+    60000,
+  );
+
+  // A property value is the one path that arrives with no Node-side validator, so the script is the only guard.
+  itGodot(
+    'set_node_properties rejects a res:// property value that escapes the project root',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(tmpProject, 'outside_value.gd', 'extends Node2D\n');
+      const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'root', property: 'script', value: 'res://../outside_value.gd' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const [entry] = parseUpdateResults(stdout);
+      expect(entry).not.toHaveProperty('success');
+      expect(String(entry?.error)).toContain(ESCAPE_MESSAGE);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
+    },
+    60000,
+  );
+
+  itGodot(
+    'batch rejects an escaping res:// path nested in an inline resource value',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(
+        tmpProject,
+        'outside_value.gdshader',
+        'shader_type canvas_item;\nvoid fragment() {}\n',
+      );
+
+      const { stdout } = await runner.executeOperation(
+        'batch_scene_operations',
+        {
+          operations: [
+            {
+              operation: 'set_node_properties',
+              scenePath: 'main.tscn',
+              updates: [
+                {
+                  nodePath: 'root/Sprite2D',
+                  property: 'material',
+                  value: { type: 'ShaderMaterial', shader: 'res://../outside_value.gdshader' },
+                },
+              ],
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain(ESCAPE_MESSAGE);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('outside_value');
+    },
+    60000,
+  );
+
+  itGodot(
+    'add_node rejects a nodeType that names a script outside the project root',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      plantOutside(tmpProject, 'outside_node.gd', 'extends Node2D\n');
+
+      const { stdout, stderr } = await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'res://../outside_node.gd', nodeName: 'Intruder' },
+        tmpProject,
+        30000,
+      );
+
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('Intruder');
+    },
+    60000,
+  );
+
+  itGodot(
+    'a res:// property value inside the project still loads, however it is spelled',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      writeFileSync(join(tmpProject, 'inside_value.gd'), 'extends Node2D\n');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: 'root', property: 'script', value: 'res://./inside_value.gd' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const [entry] = parseUpdateResults(stdout);
+      expect(entry).not.toHaveProperty('error');
+      expect(entry?.success).toBe(true);
+      expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toContain('inside_value.gd');
     },
     60000,
   );
@@ -194,7 +287,6 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
 
-      // Nested, dot-segmented, and res://-prefixed forms all normalize cleanly.
       const { stdout } = await runner.executeOperation(
         'add_node',
         { scenePath: './main.tscn', nodeType: 'Node2D', nodeName: 'Plain' },
@@ -202,7 +294,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      expect(stdout).toContain('added successfully');
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toContain('Plain');
     },
     60000,

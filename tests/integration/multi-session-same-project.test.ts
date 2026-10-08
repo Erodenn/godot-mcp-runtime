@@ -1,16 +1,8 @@
-/**
- * Two GodotRunner instances (two MCP server processes, in effect) sharing one
- * project. Exercises the on-disk owner registry end to end against a real
- * Godot process: the exact scenario issue #61 reported (a same-project
- * restart without an intervening stop losing the bridge autoload) and the
- * last-leaver cleanup rule.
- *
- * Requires GODOT_PATH; skipped when it is unset, same as every other file
- * under tests/integration/.
- */
+/** Two GodotRunner instances (two MCP servers) sharing one project, exercising the on-disk owner registry and the last-leaver cleanup rule. */
 
 import { describe, beforeEach, afterEach, expect } from 'vitest';
-import { cpSync, rmSync, existsSync, readdirSync, readFileSync } from 'fs';
+import { cpSync, existsSync, readdirSync, readFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -22,10 +14,7 @@ import { bridgeDir, bridgeOwnersDir } from '../../src/utils/artifact-paths.js';
 
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
 const BRIDGE_WAIT_MS = 20000;
-// Three sequential session launches, a headless op, three pings and two
-// stops. Vitest's 5 s default undercuts a single launch's own wait budget, so
-// a slow launch under full-suite load surfaced as a bare test timeout instead
-// of the bridge diagnostic. The case budget has to exceed the budgets inside it.
+// Vitest's 5 s default undercuts a single launch's own wait budget, so the case budget must exceed the budgets inside it.
 const CASE_TIMEOUT_MS = 120000;
 
 const tmpDirs: string[] = [];
@@ -62,7 +51,7 @@ afterEach(async () => {
   await runnerA.stopProject().catch(() => undefined);
   await runnerB.stopProject().catch(() => undefined);
   for (const dir of tmpDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 
@@ -70,27 +59,18 @@ describe('two GodotRunner sessions sharing one project', () => {
   itGodot(
     'A runs a session, restarts it without stopping, and B can act as a second concurrent session',
     async (ctx) => {
-      // 1. A runProject (background) + waitForBridge ready.
       await runProjectOrSkip(runnerA, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
 
-      // 2. B executeOperation (read-only) -> A's McpBridge entry survives.
       await runnerB.executeOperation('get_scene_tree', { scenePath: 'main.tscn' }, projectPath);
       expect(projectGodotEntry()).toContain('McpBridge=');
 
-      // 3. A runProject again WITHOUT stopping -> waitForBridge ready.
-      //    This is the exact #61 failure: a same-project restart used to skip
-      //    re-adding the autoload entry and die on a bridge timeout.
       await runProjectOrSkip(runnerA, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
 
-      // 4. B runProject too -> both ready; each answers ping.
       await runProjectOrSkip(runnerB, ctx, projectPath, {
-        background: true,
         waitMs: BRIDGE_WAIT_MS,
       });
       expect(ownerFileCount()).toBe(2);
@@ -100,11 +80,9 @@ describe('two GodotRunner sessions sharing one project', () => {
       expect(JSON.parse(pingA).status).toBe('pong');
       expect(JSON.parse(pingB).status).toBe('pong');
 
-      // Each session sees the other as a live, non-self owner.
       expect(runnerA.otherLiveSessionsOnProject(projectPath).length).toBe(1);
       expect(runnerB.otherLiveSessionsOnProject(projectPath).length).toBe(1);
 
-      // 5. B stopProject -> A still answers ping, the entry is still present.
       await runnerB.stopProject();
       const stillPingA = await runnerA.sendCommand('ping', {}, BRIDGE_CMD_TIMEOUT_MS);
       expect(JSON.parse(stillPingA).status).toBe('pong');
@@ -112,7 +90,6 @@ describe('two GodotRunner sessions sharing one project', () => {
       expect(ownerFileCount()).toBe(1);
       expect(runnerA.otherLiveSessionsOnProject(projectPath).length).toBe(0);
 
-      // 6. A stopProject -> entry gone, bridge/ dir gone.
       await runnerA.stopProject();
       expect(projectGodotEntry()).not.toContain('McpBridge=');
       expect(existsSync(bridgeDir(projectPath))).toBe(false);

@@ -1,22 +1,5 @@
-/**
- * Integration test for the progress-heartbeat fix.
- *
- * Context: MCP clients may impose a per-request timeout (SDK default 60s;
- * opencode uses 30s-60s) and honor `resetTimeoutOnProgress`: resetting the
- * timer each time the server sends a `notifications/progress` for the
- * request's progress token. Without server-side heartbeats, long-running
- * tools (run_script playtest simulations routinely run 60s+) die with
- * `MCP error -32001 Request timed out` even when the tool's own `timeout`
- * parameter would have allowed them to finish.
- *
- * This test wires the real lower-level `Server` with the production
- * CallToolRequest handler shape (heartbeat wrapper around dispatchToolCall)
- * to a real `Client` over an in-memory transport, and verifies:
- *  1. A tool slower than the client timeout completes when the client
- *     resets on progress (heartbeats arrive on the progress token).
- *  2. The heartbeat stops when the tool settles (no stray notifications).
- *  3. Requests without a progress token never send notifications.
- */
+// Clients may impose a per-request timeout and reset it on `notifications/progress`; without server heartbeats, long tools die with `MCP error -32001 Request timed out`.
+// Wires the real `Server` and the production CallToolRequest handler shape to a real `Client` over an in-memory transport.
 import { describe, it, expect, vi } from 'vitest';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -63,12 +46,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_script >60s)', () => {
   it('completes a tool slower than the client timeout when the client resets on progress', async () => {
     const server = makeServer(async () => {
-      // Simulated long tool: ~4 heartbeat intervals.
       await sleep(TICK * 4);
       return { content: [{ type: 'text', text: 'done' }] };
     });
     const client = await link(server);
-    // Silence the expected progress callbacks (they assert nothing).
     const onprogress = vi.fn();
 
     try {
@@ -90,10 +71,7 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
   });
 
   it('still times out when the client supplied no progress token (control case)', async () => {
-    // Control case for the reset mechanics: without an onprogress handler the
-    // SDK attaches no progress token, so no heartbeats are ever sent and the
-    // client's own timeout fires untouched: the pre-fix behavior for
-    // non-opting clients, preserved bit-for-bit.
+    // Control case: without onprogress the SDK attaches no progress token, so no heartbeats are sent and the client's own timeout fires untouched.
     const server = makeServer(async () => {
       await sleep(TICK * 6);
       return { content: [{ type: 'text', text: 'done' }] };
@@ -115,10 +93,7 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
       await sleep(TICK * 4);
       return { content: [{ type: 'text', text: 'done' }] };
     });
-    // No onprogress in the request options → the SDK attaches no progress
-    // token → the server must send zero progress notifications. A stray
-    // server notification would surface as a client onerror ("unknown
-    // token"), so assert both the callback silence and no errors.
+    // Without onprogress no token exists, so the server must send zero notifications; a stray one surfaces as a client onerror ("unknown token").
     const client = await link(server);
     const onprogress = vi.fn();
     const onError = vi.fn();
@@ -136,15 +111,13 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
   });
 
   it('heartbeat stopper is idempotent and inert without a token', async () => {
-    // Unit-level check of the stop-function contract: calling stop twice is
-    // safe, and a heartbeat that never started (no token) yields a no-op
-    // stopper.
+    // Calling stop twice is safe, and a heartbeat that never started (no token) yields a no-op stopper.
     const stopNoop = startProgressHeartbeat(fakeExtra(), {
       method: 'tools/call',
       params: { name: 'x', arguments: {} },
     } as Parameters<typeof startProgressHeartbeat>[1]);
     expect(() => stopNoop()).not.toThrow();
-    expect(() => stopNoop()).not.toThrow(); // idempotent
+    expect(() => stopNoop()).not.toThrow();
 
     const server = makeServer(async () => ({ content: [{ type: 'text', text: 'ok' }] }));
     const client = await link(server);
@@ -162,8 +135,6 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
   });
 });
 
-// Minimal RequestHandlerExtra stub for direct stopper tests: sendNotification
-// must never be reached here (throws if called).
 const fakeExtra = (): Parameters<typeof startProgressHeartbeat>[0] =>
   ({
     sendNotification: () => {

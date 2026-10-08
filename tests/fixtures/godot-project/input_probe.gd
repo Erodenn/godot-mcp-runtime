@@ -1,9 +1,5 @@
 extends Node
 
-# Fixture for the simulate_input integration tests. Every handler here exists
-# to produce exactly one observable effect a test can assert on. Keep it
-# minimal: it has to be readable by someone debugging a failing assertion.
-
 const MOVE_STEP := 8.0
 
 

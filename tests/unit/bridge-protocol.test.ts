@@ -1,8 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import * as net from 'net';
 import {
   ACTION_BOUNDARY_SENTINEL,
   MAX_FRAME_BYTES,
+  MAX_TIMER_DELAY_MS,
+  ParentWatchListener,
   bucketBySentinel,
+  clampTimerDelay,
   encodeFrame,
   findFreePort,
   parseActionBoundary,
@@ -123,14 +127,95 @@ describe('findFreePort', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Action-boundary sentinel parsing and bucketing
-//
-// These two helpers are the whole of the per-action error attribution used by
-// simulate_input: the bridge prints one sentinel per action on stderr and the
-// runner splits its stderr window on the recorded marks. Both are pure so the
-// attribution logic is testable without a Godot process.
-// ---------------------------------------------------------------------------
+describe('clampTimerDelay', () => {
+  const ORDINARY_TIMEOUT_MS = 30000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('leaves an ordinary timeout alone', () => {
+    expect(clampTimerDelay(ORDINARY_TIMEOUT_MS)).toBe(ORDINARY_TIMEOUT_MS);
+  });
+
+  it('caps a duration past the largest delay a timer honors', () => {
+    expect(MAX_TIMER_DELAY_MS).toBe(2 ** 31 - 1);
+    expect(clampTimerDelay(MAX_TIMER_DELAY_MS + 1)).toBe(MAX_TIMER_DELAY_MS);
+    expect(clampTimerDelay(Number.MAX_SAFE_INTEGER)).toBe(MAX_TIMER_DELAY_MS);
+    expect(clampTimerDelay(Number.POSITIVE_INFINITY)).toBe(MAX_TIMER_DELAY_MS);
+  });
+
+  it('never returns a delay below one millisecond, and takes a non-number for the maximum', () => {
+    expect(clampTimerDelay(0)).toBe(1);
+    expect(clampTimerDelay(-5)).toBe(1);
+    expect(clampTimerDelay(Number.NaN)).toBe(MAX_TIMER_DELAY_MS);
+  });
+
+  it('is what keeps an over-long timeout from firing at once', () => {
+    vi.useFakeTimers();
+    const fired = vi.fn();
+    setTimeout(fired, clampTimerDelay(MAX_TIMER_DELAY_MS * 4));
+
+    vi.advanceTimersByTime(ORDINARY_TIMEOUT_MS);
+
+    expect(fired).not.toHaveBeenCalled();
+  });
+});
+
+describe('ParentWatchListener', () => {
+  const HEARTBEAT = Buffer.from([0]);
+  let listener: ParentWatchListener | null = null;
+
+  afterEach(() => {
+    listener?.close();
+    listener = null;
+  });
+
+  function connect(port: number): Promise<net.Socket> {
+    return new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1');
+      socket.once('error', reject);
+      socket.once('connect', () => resolve(socket));
+    });
+  }
+
+  it('binds once and hands every caller the same port', async () => {
+    listener = new ParentWatchListener();
+    const [first, second] = await Promise.all([listener.port(), listener.port()]);
+    expect(first).toBe(second);
+    expect(await listener.port()).toBe(first);
+  });
+
+  it('accepts a connection and takes heartbeats without answering or closing', async () => {
+    listener = new ParentWatchListener();
+    const socket = await connect(await listener.port());
+    const received = vi.fn();
+    const closed = vi.fn();
+    socket.on('data', received);
+    socket.on('close', closed);
+
+    for (let beat = 0; beat < 3; beat += 1) {
+      await new Promise<void>((resolve) => socket.write(HEARTBEAT, () => resolve()));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(received).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
+    socket.destroy();
+  });
+
+  it('drops its connections when it goes away, which is the signal the game acts on', async () => {
+    listener = new ParentWatchListener();
+    const socket = await connect(await listener.port());
+    const ended = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+    socket.resume();
+
+    listener.close();
+
+    await ended;
+    expect(socket.destroyed).toBe(true);
+  });
+});
 
 describe('parseActionBoundary', () => {
   it('accepts a zero index', () => {

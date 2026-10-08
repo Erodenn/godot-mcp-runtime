@@ -1,0 +1,556 @@
+import { describe, it, expect } from 'vitest';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
+import { resolveProjectPath } from '../../src/utils/path-validation.js';
+import {
+  rejectNonSceneLaunchArg,
+  runLaunchGate,
+  MAX_SCAN_WARNINGS_SHOWN,
+} from '../../src/utils/launch-gate.js';
+import { ElicitationUnsupportedError } from '../../src/utils/mcp-context.js';
+import type { Elicitor, ElicitorResult } from '../../src/utils/mcp-context.js';
+import { makeContext } from '../helpers/runtime-fakes.js';
+import { useTmpDirs } from '../helpers/tmp.js';
+import { expectErrorMatching, unwrap } from '../helpers/assertions.js';
+
+const tmp = useTmpDirs();
+
+const TIER1_AUTOLOAD = 'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n';
+const TIER2_AUTOLOAD = 'extends Node\nfunc _ready():\n\tvar h = HTTPRequest.new()\n';
+const SCRIPTLESS_SCENE = '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n';
+const MAIN_SCENE_SETTING = 'run/main_scene="res://main.tscn"\n';
+
+function makeProjectWithAutoload(
+  prefix: string,
+  autoloadGd: string,
+  applicationLines = '',
+): string {
+  const dir = tmp.makeProject(
+    prefix,
+    `config_version=5\n\n[application]\n${applicationLines}[autoload]\nMyAuto="res://auto.gd"\n`,
+  );
+  writeFileSync(join(dir, 'auto.gd'), autoloadGd, 'utf8');
+  return dir;
+}
+
+/** An elicitor that records how often it was consulted and answers `answer`. */
+function countingElicitor(answer: ElicitorResult): { elicit: Elicitor; calls: () => number } {
+  let calls = 0;
+  return {
+    elicit: async () => {
+      calls++;
+      return answer;
+    },
+    calls: () => calls,
+  };
+}
+
+function warningsOf(result: Awaited<ReturnType<typeof runLaunchGate>>): string[] {
+  if (!result.ok) throw new Error(`expected an ok outcome, got: ${JSON.stringify(result.error)}`);
+  return result.value.warnings;
+}
+
+describe('runLaunchGate session confirmation', () => {
+  it.each<[string, ElicitorResult]>([
+    ['decline', { action: 'decline' }],
+    ['cancel', { action: 'cancel' }],
+    ['accept carrying confirm: false', { action: 'accept', content: { confirm: false } }],
+  ])('refuses on %s', async (_label, answer) => {
+    const dir = tmp.makeProject('launch-gate-refuse-');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ elicit: async () => answer }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('names the calling tool in the decline message', async () => {
+    const dir = tmp.makeProject('launch-gate-toolname-');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'render_movie' },
+      makeContext({ elicit: async () => ({ action: 'decline' }) }),
+    );
+    expectErrorMatching(result, /User declined render_movie/);
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).toMatch(
+      /do not call render_movie on this project again unless the user asks/,
+    );
+    expect(solutions).not.toMatch(/Retry|GODOT_MCP_DISABLE_ELICITATION/);
+  });
+
+  it('points a cancelled prompt, and only that, at the elicitation opt-out', async () => {
+    const dir = tmp.makeProject('launch-gate-cancel-');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ elicit: async () => ({ action: 'cancel' }) }),
+    );
+    expectErrorMatching(result, /cancelled without an explicit choice/);
+    const solutions = unwrap(result).content[1]?.text ?? '';
+    expect(solutions).toMatch(/GODOT_MCP_DISABLE_ELICITATION=true/);
+    expect(solutions).not.toMatch(/Retry/);
+  });
+
+  it('elicits once per project across repeated calls on one context', async () => {
+    const dir = tmp.makeProject('launch-gate-once-');
+    const counting = countingElicitor({ action: 'accept', content: { confirm: true } });
+    const ctx = makeContext({ elicit: counting.elicit });
+    const request = {
+      projectPath: dir,
+      confirm: true,
+      launchedByServer: true,
+      toolName: 'run_project',
+    };
+    expect((await runLaunchGate(request, ctx)).ok).toBe(true);
+    expect((await runLaunchGate(request, ctx)).ok).toBe(true);
+    expect(counting.calls()).toBe(1);
+  });
+
+  it('skips the confirmation when told to, while still scanning', async () => {
+    const dir = makeProjectWithAutoload('launch-gate-noconfirm-', TIER1_AUTOLOAD);
+    const counting = countingElicitor({ action: 'decline' });
+    const ctx = makeContext({ elicit: counting.elicit });
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
+      ctx,
+    );
+    expect(warningsOf(result).some((w) => /OS\.execute/.test(w))).toBe(true);
+    expect(counting.calls()).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+  });
+});
+
+describe('runLaunchGate pre-flight scan', () => {
+  it('returns a Tier 1 autoload finding as a warning outside strict mode', async () => {
+    const dir = makeProjectWithAutoload('launch-gate-tier1-', TIER1_AUTOLOAD);
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext(),
+    );
+    expect(warningsOf(result).some((w) => /OS\.execute/.test(w))).toBe(true);
+  });
+
+  it('warns on a Tier 2 autoload finding outside strict mode', async () => {
+    const dir = makeProjectWithAutoload('launch-gate-tier2-warn-', TIER2_AUTOLOAD);
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext(),
+    );
+    expect(warningsOf(result).some((w) => /HTTPRequest/.test(w))).toBe(true);
+  });
+
+  it('strict mode promotes a Tier 2 autoload finding to a refusal without eliciting', async () => {
+    const dir = makeProjectWithAutoload('launch-gate-tier2-strict-', TIER2_AUTOLOAD);
+    const counting = countingElicitor({ action: 'accept', content: { confirm: true } });
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ elicit: counting.elicit, strict: true }),
+    );
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+    expect(counting.calls()).toBe(0);
+  });
+
+  it('disableSecurity skips the scan and the confirmation, strict mode included', async () => {
+    const dir = makeProjectWithAutoload('launch-gate-disable-security-', TIER1_AUTOLOAD);
+    const counting = countingElicitor({ action: 'decline' });
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ elicit: counting.elicit, strict: true, disableSecurity: true }),
+    );
+    expect(warningsOf(result)).toEqual([]);
+    expect(counting.calls()).toBe(0);
+  });
+
+  it('caps the warnings and ends them with a count of the rest', async () => {
+    const findingCount = MAX_SCAN_WARNINGS_SHOWN + 2;
+    const autoload = 'extends Node\nfunc _ready():\n' + '\tOS.execute("x")\n'.repeat(findingCount);
+    const dir = makeProjectWithAutoload('launch-gate-cap-', autoload, MAIN_SCENE_SETTING);
+    writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
+      makeContext(),
+    );
+    const warnings = warningsOf(result);
+    expect(warnings).toHaveLength(MAX_SCAN_WARNINGS_SHOWN + 1);
+    expect(warnings[warnings.length - 1]).toBe('+2 more');
+  });
+
+  it('scans an explicit scene instead of run/main_scene', async () => {
+    const dir = tmp.makeProject(
+      'launch-gate-explicit-scene-',
+      `config_version=5\n\n[application]\n${MAIN_SCENE_SETTING}`,
+    );
+    writeFileSync(join(dir, 'main_only.gd'), 'extends Node\n\tOS.execute("x")\n', 'utf8');
+    writeFileSync(
+      join(dir, 'other_only.gd'),
+      'extends Node\nfunc _ready():\n\tvar h = HTTPRequest.new()\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main_only.gd" id="1"]\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'other.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://other_only.gd" id="1"]\n',
+      'utf8',
+    );
+    const result = await runLaunchGate(
+      {
+        projectPath: dir,
+        scene: resolveProjectPath(dir, 'other.tscn', 'read')!,
+        confirm: false,
+        launchedByServer: false,
+        toolName: 'run_project',
+      },
+      makeContext(),
+    );
+    const warnings = warningsOf(result).join('\n');
+    expect(warnings).toMatch(/other_only\.gd.*HTTPRequest/);
+    expect(warnings).not.toMatch(/OS\.execute/);
+  });
+
+  it('scans the scene named by an absolute scene argument', async () => {
+    const dir = tmp.makeProject(
+      'gate-abs-scene-',
+      `config_version=5\n\n[application]\n${MAIN_SCENE_SETTING}`,
+    );
+    writeFileSync(join(dir, 'main_only.gd'), 'extends Node\n\tOS.execute("x")\n', 'utf8');
+    writeFileSync(
+      join(dir, 'other_only.gd'),
+      'extends Node\nfunc _ready():\n\tvar h = HTTPRequest.new()\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main_only.gd" id="1"]\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'other.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://other_only.gd" id="1"]\n',
+      'utf8',
+    );
+    const result = await runLaunchGate(
+      {
+        projectPath: dir,
+        scene: resolveProjectPath(dir, join(dir, 'other.tscn'), 'read')!,
+        confirm: false,
+        launchedByServer: false,
+        toolName: 'run_project',
+      },
+      makeContext(),
+    );
+    const warnings = warningsOf(result).join('\n');
+    expect(warnings).toMatch(/other_only\.gd.*HTTPRequest/);
+    expect(warnings).not.toMatch(/OS\.execute/);
+  });
+});
+
+describe('runLaunchGate uid:// resolution', () => {
+  const SCENE_UID = 'uid://scenemain00001';
+  const SCRIPT_UID = 'uid://scriptauto0001';
+  const TIER1_SCRIPT = 'extends Node\nfunc _ready():\n\tOS.execute("x")\n';
+  const gate = (dir: string) =>
+    runLaunchGate(
+      { projectPath: dir, confirm: false, launchedByServer: false, toolName: 'run_project' },
+      makeContext(),
+    );
+
+  function writeUidScene(dir: string, name: string, uid: string, scriptName: string): void {
+    writeFileSync(
+      join(dir, name),
+      `[gd_scene load_steps=2 format=3 uid="${uid}"]\n\n[ext_resource type="Script" path="res://${scriptName}" id="1"]\n\n[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n`,
+      'utf8',
+    );
+  }
+
+  it('scans the scripts of a uid main scene and reports a Tier 1 primitive', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-main-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    writeUidScene(dir, 'menu.tscn', SCENE_UID, 'menu.gd');
+    writeFileSync(join(dir, 'menu.gd'), TIER1_SCRIPT, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/menu\.gd.*OS\.execute/);
+    expect(warnings).not.toMatch(/could not be resolved/);
+  });
+
+  it('warns that an unknown uid could not be resolved', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-unknown-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    const warnings = warningsOf(await gate(dir));
+    expect(warnings).toContainEqual(
+      expect.stringMatching(
+        new RegExp(
+          `Launch scene ${SCENE_UID} could not be resolved to a file \\(.*\\); scene-script scan skipped\\.`,
+        ),
+      ),
+    );
+  });
+
+  it('scans both files that carry one uid and notes it', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-twice-',
+      `config_version=5\n\n[application]\nrun/main_scene="${SCENE_UID}"\n`,
+    );
+    writeUidScene(dir, 'one.tscn', SCENE_UID, 'one.gd');
+    writeUidScene(dir, 'two.tscn', SCENE_UID, 'two.gd');
+    writeFileSync(join(dir, 'one.gd'), TIER1_SCRIPT, 'utf8');
+    writeFileSync(join(dir, 'two.gd'), TIER1_SCRIPT, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/one\.gd.*OS\.execute/);
+    expect(warnings).toMatch(/two\.gd.*OS\.execute/);
+    expect(warnings).toMatch(/2 files carry/);
+  });
+
+  it('resolves a uid autoload through its .gd.uid sidecar', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-autoload-',
+      `config_version=5\n\n[autoload]\nMyAuto="*${SCRIPT_UID}"\n`,
+    );
+    writeFileSync(join(dir, 'auto.gd'), TIER1_SCRIPT, 'utf8');
+    writeFileSync(join(dir, 'auto.gd.uid'), `${SCRIPT_UID}\n`, 'utf8');
+    const warnings = warningsOf(await gate(dir)).join('\n');
+    expect(warnings).toMatch(/auto\.gd.*OS\.execute/);
+  });
+
+  it('warns that a uid autoload nothing carries was not scanned', async () => {
+    const dir = tmp.makeProject(
+      'gate-uid-autoload-missing-',
+      `config_version=5\n\n[autoload]\nMyAuto="*${SCRIPT_UID}"\n`,
+    );
+    const warnings = warningsOf(await gate(dir));
+    expect(warnings).toContainEqual(
+      expect.stringMatching(/Autoload MyAuto \(uid:\/\/scriptauto0001\) was not scanned/),
+    );
+  });
+});
+
+describe('runLaunchGate strict mode and the launch scene', () => {
+  const REFUSAL =
+    /Strict mode: refusing to launch project because the scene to launch could not be found or resolved/;
+  const NO_SCENE_PROJECT = 'config_version=5\n';
+  const MISSING_SCENE_PROJECT =
+    'config_version=5\n\n[application]\nrun/main_scene="res://gone.tscn"\n';
+  const UNKNOWN_UID_PROJECT =
+    'config_version=5\n\n[application]\nrun/main_scene="uid://nothingcarriesthis"\n';
+
+  function request(dir: string, launchedByServer: boolean) {
+    return {
+      projectPath: dir,
+      confirm: launchedByServer,
+      launchedByServer,
+      toolName: 'run_project',
+    };
+  }
+
+  function acceptingCounter() {
+    return countingElicitor({ action: 'accept', content: { confirm: true } });
+  }
+
+  it.each([
+    ['a missing main-scene file', MISSING_SCENE_PROJECT, /Configured launch scene not found/],
+    ['no main scene', NO_SCENE_PROJECT, /No launchable scene found/],
+    ['an unresolved uid', UNKNOWN_UID_PROJECT, /could not be resolved to a file/],
+  ])('strict + spawn refuses %s without eliciting', async (_label, project, entry) => {
+    const dir = tmp.makeProject('gate-strict-scene-', project);
+    const counting = acceptingCounter();
+    const result = await runLaunchGate(
+      request(dir, true),
+      makeContext({ elicit: counting.elicit, strict: true }),
+    );
+    expectErrorMatching(result, REFUSAL);
+    expectErrorMatching(result, entry);
+    expect(counting.calls()).toBe(0);
+  });
+
+  it('strict + attach with no main scene warns and proceeds', async () => {
+    const dir = tmp.makeProject('gate-strict-attach-none-', NO_SCENE_PROJECT);
+    const result = await runLaunchGate(request(dir, false), makeContext({ strict: true }));
+    expect(warningsOf(result).some((w) => /No launchable scene found/.test(w))).toBe(true);
+  });
+
+  it.each([
+    ['a missing file', MISSING_SCENE_PROJECT],
+    ['an unresolved uid', UNKNOWN_UID_PROJECT],
+  ])('strict + attach with a configured scene that is %s refuses', async (_label, project) => {
+    const dir = tmp.makeProject('gate-strict-attach-configured-', project);
+    const result = await runLaunchGate(request(dir, false), makeContext({ strict: true }));
+    expectErrorMatching(result, REFUSAL);
+  });
+
+  it.each([
+    ['a missing main-scene file', MISSING_SCENE_PROJECT],
+    ['no main scene', NO_SCENE_PROJECT],
+    ['an unresolved uid', UNKNOWN_UID_PROJECT],
+  ])('outside strict mode %s is a warning in spawn and attach mode', async (_label, project) => {
+    const dir = tmp.makeProject('gate-nonstrict-scene-', project);
+    for (const launchedByServer of [true, false]) {
+      const result = await runLaunchGate(request(dir, launchedByServer), makeContext());
+      expect(warningsOf(result).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a Tier 1 finding is refused before the scene failure', async () => {
+    const dir = makeProjectWithAutoload('gate-strict-tier1-first-', TIER1_AUTOLOAD);
+    const result = await runLaunchGate(request(dir, true), makeContext({ strict: true }));
+    expectErrorMatching(result, /Tier 1 primitives/);
+  });
+});
+
+describe('runLaunchGate strict-mode refusals', () => {
+  const solutionsOf = (result: Awaited<ReturnType<typeof runLaunchGate>>): string =>
+    unwrap(result).content[1]?.text ?? '';
+  const strictRequest = (dir: string) => ({
+    projectPath: dir,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each<[string, () => string, Elicitor | undefined]>([
+    [
+      'a Tier 1 finding',
+      () => makeProjectWithAutoload('gate-strict-tier1-', TIER1_AUTOLOAD, MAIN_SCENE_SETTING),
+      undefined,
+    ],
+    ['no launch scene', () => tmp.makeProject('gate-strict-noscene-'), undefined],
+    [
+      'an autoload it could not resolve',
+      () =>
+        tmp.makeProject(
+          'gate-strict-unresolved-',
+          'config_version=5\n\n[autoload]\nOut="res://../x.gd"\n',
+        ),
+      undefined,
+    ],
+    [
+      'a client without elicitation',
+      () => {
+        const dir = tmp.makeProject(
+          'gate-strict-noelicit-',
+          `config_version=5\n\n[application]\n${MAIN_SCENE_SETTING}`,
+        );
+        writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+        return dir;
+      },
+      async () => {
+        throw new ElicitationUnsupportedError();
+      },
+    ],
+  ])('on %s, never advises turning strict mode off', async (_label, makeDir, elicit) => {
+    const dir = makeDir();
+    if (_label === 'a Tier 1 finding') {
+      writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    }
+    const result = await runLaunchGate(
+      strictRequest(dir),
+      makeContext(elicit ? { strict: true, elicit } : { strict: true }),
+    );
+    expect(result.ok).toBe(false);
+    const solutions = solutionsOf(result);
+    expect(solutions).toMatch(/operator setting: report this refusal to the user/);
+    expect(solutions).not.toMatch(/Unset GODOT_MCP_STRICT/i);
+  });
+});
+
+const solutionsText = (result: Awaited<ReturnType<typeof runLaunchGate>>): string =>
+  unwrap(result).content[1]?.text ?? '';
+
+describe('runLaunchGate confirmation that was not answered', () => {
+  const request = (dir: string) => ({
+    projectPath: dir,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each([false, true])(
+    'refuses when the prompt threw something other than "unsupported" (strict: %s) and records nothing',
+    async (strict) => {
+      const dir = tmp.makeProject(
+        'launch-gate-unanswered-',
+        `config_version=5
+
+[application]
+${MAIN_SCENE_SETTING}`,
+      );
+      writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+      let prompts = 0;
+      const ctx = makeContext({
+        strict,
+        elicit: async () => {
+          prompts++;
+          throw new Error('Request timed out');
+        },
+      });
+      const first = await runLaunchGate(request(dir), ctx);
+      expectErrorMatching(
+        first,
+        /run_project confirmation was not answered \(Request timed out\)\. The project was not launched\./,
+      );
+      expect(solutionsText(first)).toMatch(/GODOT_MCP_DISABLE_ELICITATION=true/);
+      expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+      // A second call asks again: the timeout confirmed nothing.
+      expect((await runLaunchGate(request(dir), ctx)).ok).toBe(false);
+      expect(prompts).toBe(2);
+    },
+  );
+
+  it('still launches with a warning when the client declared no elicitation', async () => {
+    const dir = tmp.makeProject('launch-gate-unsupported-');
+    const result = await runLaunchGate(
+      request(dir),
+      makeContext({
+        elicit: async () => {
+          throw new ElicitationUnsupportedError();
+        },
+      }),
+    );
+    expect(warningsOf(result).join('\n')).toMatch(
+      /Elicitation unavailable .*launching without explicit user confirmation/,
+    );
+  });
+});
+
+describe('runLaunchGate with a launch scene the scan does not read', () => {
+  const request = (dir: string, scene: string) => ({
+    projectPath: dir,
+    scene: resolveProjectPath(dir, scene, 'read')!,
+    confirm: false,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each(['level.tres', 'level.res', 'level.escn'])(
+    'launches %s with one Not scanned warning, and strict mode refuses it in its own words',
+    async (scene) => {
+      const dir = tmp.makeProject('launch-gate-unscanned-scene-');
+      writeFileSync(join(dir, scene), 'not read', 'utf8');
+      const warnings = warningsOf(await runLaunchGate(request(dir, scene), makeContext()));
+      expect(warnings.filter((w) => w.startsWith('Not scanned:'))).toEqual([
+        `Not scanned: ${scene}: the pre-flight scan reads a launch scene only when it is a .tscn file; a .tres, .res or .escn launch scene is not read`,
+      ]);
+
+      const strict = await runLaunchGate(request(dir, scene), makeContext({ strict: true }));
+      expectErrorMatching(strict, /the launch scene .* is not a \.tscn scene/);
+      expect(solutionsText(strict)).toMatch(/operator setting/);
+      expect(JSON.stringify(strict)).not.toMatch(/could not be found or resolved/);
+    },
+  );
+
+  it('rejectNonSceneLaunchArg names all five extensions and still refuses other names', () => {
+    for (const scene of ['a.tscn', 'a.scn', 'a.escn', 'a.tres', 'a.res']) {
+      expect(rejectNonSceneLaunchArg(scene)).toBeNull();
+    }
+    for (const scene of ['icon.svg', 'Main.TSCN', 'a.RES', 'level']) {
+      expect(JSON.stringify(rejectNonSceneLaunchArg(scene))).toMatch(
+        /does not end in \.tscn, \.scn, \.escn, \.tres, \.res/,
+      );
+    }
+  });
+});

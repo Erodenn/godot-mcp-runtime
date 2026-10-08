@@ -1,36 +1,16 @@
-/**
- * Integration test: promoted spatial params in batch_scene_operations.
- *
- * Regression: batch add_node silently dropped top-level `position` (and the
- * other promoted spatial params: rotation, scale, visible, modulate).
- * The standalone add_node handler merges those keys into `properties`
- * (handleAddNode), but the batch path forwards operations raw to the
- * GDScript layer, whose _apply_add_node only read `properties`: so
- * a batch like:
- *
- *   { operation: 'add_node', nodeType: 'StaticBody2D',
- *     nodeName: 'WallTop', position: { x: 480, y: -10 } }
- *
- * reported success while persisting the node at (0,0): a scene assembled
- * through batch ops came out with every positioned node at the origin, with
- * nothing in the response hinting at it.
- *
- * The fix folds promoted params into the properties map inside
- * _apply_add_node, with `properties` winning on key conflicts (matching
- * handleAddNode's documented precedence).
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** The standalone add_node handler merges promoted spatial params into `properties`, but the batch path forwards operations raw, so _apply_add_node must fold them in itself, with `properties` winning on conflict. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, readFileSync } from 'fs';
+import { cpSync, readFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { errorText, hasError } from '../helpers/assertions.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { handleAddNode } from '../../src/tools/scene-tools.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -55,10 +35,8 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
 });
 
@@ -118,6 +96,26 @@ describe('batch_scene_operations promoted spatial params', () => {
   );
 
   itGodot(
+    'standalone add_node: properties wins over a conflicting top-level position',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const result = await handleAddNode(runner, {
+        projectPath: tmpProject,
+        scenePath: 'main.tscn',
+        nodeType: 'StaticBody2D',
+        nodeName: 'StandaloneConflicted',
+        position: { x: 1, y: 2 },
+        properties: { position: { x: 300, y: 400 } },
+      });
+      expect(hasError(result), String(errorText(result))).toBe(false);
+      const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
+      expect(sceneText).toContain('position = Vector2(300, 400)');
+      expect(sceneText).not.toContain('position = Vector2(1, 2)');
+    },
+    60000,
+  );
+
+  itGodot(
     'batch add_node persists promoted rotation and scale',
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
@@ -168,8 +166,7 @@ describe('batch_scene_operations promoted spatial params', () => {
   itGodot(
     'promoted position on a 3D node lands as a Vector3 transform',
     async () => {
-      // There is no separate `position3d` param: `position` carries {x,y,z}
-      // for 3D nodes, which Godot stores on the node's transform.
+      // There is no `position3d` param: `position` carries {x,y,z} for 3D nodes, stored on the node's transform.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       await runner.executeOperation(
         'batch_scene_operations',

@@ -5,13 +5,8 @@ import { allToolDefinitions, serverInstructions } from '../../src/index.js';
 import { toolDispatch, dispatchToolCall } from '../../src/dispatch.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
 
-// Dummy runner: never invoked. Parity tests don't call handlers, and the
-// unknown-tool dispatch path throws before reaching any handler.
+// Never invoked: parity tests call no handler and unknown-tool dispatch throws first.
 const dummyRunner = {} as GodotRunner;
-
-// ---------------------------------------------------------------------------
-// 1. Tool ↔ handler parity
-// ---------------------------------------------------------------------------
 
 describe('tool definition ↔ dispatch parity', () => {
   const definedNames = allToolDefinitions.map((t) => t.name);
@@ -29,10 +24,6 @@ describe('tool definition ↔ dispatch parity', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// 2. Unknown tool
-// ---------------------------------------------------------------------------
-
 describe('unknown tool dispatch', () => {
   it('rejects with McpError(MethodNotFound) naming the offending tool', async () => {
     await expect(dispatchToolCall(dummyRunner, 'no_such_tool', {})).rejects.toMatchObject({
@@ -41,21 +32,22 @@ describe('unknown tool dispatch', () => {
     });
   });
 
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'rejects the Object.prototype name "%s" with MethodNotFound',
+    async (name) => {
+      await expect(dispatchToolCall(dummyRunner, name, {})).rejects.toMatchObject({
+        code: ErrorCode.MethodNotFound,
+        message: expect.stringContaining(name),
+      });
+    },
+  );
+
   it('throws an instance of McpError', async () => {
     await expect(dispatchToolCall(dummyRunner, 'no_such_tool', {})).rejects.toBeInstanceOf(
       McpError,
     );
   });
 });
-
-// ---------------------------------------------------------------------------
-// 3. serverInstructions category coverage
-//
-// For each category named in the docstring, assert that at least one
-// representative tool mentioned in that section also exists in toolDispatch.
-// This catches silent docstring rot: a category line removed from instructions
-// while the tools still live in the dispatch table.
-// ---------------------------------------------------------------------------
 
 describe('serverInstructions category coverage', () => {
   // Each tuple: [category label as it appears in instructions, representative tool]
@@ -64,6 +56,7 @@ describe('serverInstructions category coverage', () => {
     ['Scene editing', 'create_scene'],
     ['Node editing', 'delete_nodes'],
     ['Runtime', 'take_screenshot'],
+    ['Render check', 'render_movie'],
     ['Profiling', 'profile_project'],
     ['Project config', 'list_autoloads'],
     ['Validation', 'validate'],

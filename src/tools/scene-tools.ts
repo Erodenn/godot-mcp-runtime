@@ -1,9 +1,13 @@
-import { join } from 'path';
 import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath } from '../utils/path-validation.js';
+import {
+  isSceneFileNodeType,
+  resolveProjectPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
+} from '../utils/path-validation.js';
 import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -15,15 +19,17 @@ import {
   optionalBoolean,
   requireArray,
   optionalObject,
+  checkBatchOperationItems,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
+import { batchSceneWrites, inPlaceSceneWrite, loadSpriteTouch } from '../utils/scene-loss-guard.js';
 
 export const sceneToolDefinitions = [
   {
     name: 'create_scene',
     description:
-      'Create a new Godot scene file with a single root node. Writes a fresh .tscn at scenePath. Use when starting a new scene from scratch; for adding nodes to an existing scene, use add_node. rootNodeType defaults to Node2D - pass "Node3D" for 3D scenes or "Control" for UI. Saves automatically. Overwrites silently if the file already exists. Returns: success and the scenePath that was written. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Create a new scene file with a single root node, written to scenePath. Use to start a scene from scratch; to add nodes to an existing scene use add_node. rootNodeType defaults to Node2D: pass "Node3D" for 3D or "Control" for UI. Saves automatically and overwrites an existing file silently. Returns: the scenePath that was written. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -40,15 +46,19 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
-        success: { type: 'boolean' },
-        scenePath: { type: 'string' },
+        warnings: { type: 'array', items: { type: 'string' } },
+        scenePath: {
+          type: 'string',
+          description: 'Project-relative path of the scene file that was written.',
+        },
       },
+      required: ['scenePath'],
     },
   },
   {
     name: 'add_node',
     description:
-      "Add a node to a Godot scene. Saves automatically. position, rotation, scale, visible, modulate are top-level params; anything else goes in properties. Values are checked against the property's declared type and error instead of silently storing that type's zero value. Object-typed properties take a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node. Value coercion, Packed*Array/Array[T] element rules and error details: Property Values in docs/tools.md. Returns plain-text confirmation of the new node and type. Errors and adds nothing if nodeType is not a registered class, the parent is missing, or a property name or value is invalid. Errors while a Godot runtime session is active; stop_project or detach_project clears it.",
+      "Add a node to a scene, or instance another scene when nodeType is a scene path. Saves automatically. Values in properties are checked against each property's declared type; a mismatch errors (Property Values in docs/tools.md). Returns: nodeName, nodeType and nodePath, read back after the add; warnings leads when Godot renamed the node or a value will not be saved. Errors and adds nothing if the type, parent or a property is invalid. Errors while a runtime session is live on this project.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -71,19 +81,29 @@ export const sceneToolDefinitions = [
         position: {
           type: 'object',
           description:
-            'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node',
+            'Position: {"x": 100, "y": 200} on a 2D node, {"x": 0, "y": 1, "z": 0} on a 3D node. Shorthand for properties.position; properties wins on a conflict.',
           properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
-        rotation: { type: 'number', description: 'Rotation in radians' },
+        rotation: {
+          type: 'number',
+          description:
+            'Rotation in radians, for a 2D node. On a 3D node rotation is a vector: pass it as properties.rotation, {"x", "y", "z"} in radians. Shorthand for properties.rotation; properties wins on a conflict.',
+        },
         scale: {
           type: 'object',
-          description: 'Vector2 scale (e.g. {"x": 2, "y": 2})',
-          properties: { x: { type: 'number' }, y: { type: 'number' } },
+          description:
+            'Scale: {"x": 2, "y": 2} on a 2D node, {"x": 2, "y": 2, "z": 2} on a 3D node. Shorthand for properties.scale; properties wins on a conflict.',
+          properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
         },
-        visible: { type: 'boolean', description: 'Whether the node is visible' },
+        visible: {
+          type: 'boolean',
+          description:
+            'Whether the node is visible. Shorthand for properties.visible; properties wins on a conflict.',
+        },
         modulate: {
           type: 'object',
-          description: 'Color modulation (e.g. {"r": 1, "g": 0, "b": 0, "a": 1})',
+          description:
+            'Color modulation (e.g. {"r": 1, "g": 0, "b": 0, "a": 1}). Shorthand for properties.modulate; properties wins on a conflict.',
           properties: {
             r: { type: 'number' },
             g: { type: 'number' },
@@ -94,16 +114,36 @@ export const sceneToolDefinitions = [
         properties: {
           type: 'object',
           description:
-            'Additional property values as a JSON object. Top-level params (position, rotation, etc.) take precedence over keys in this dict.',
+            'Additional property values as a JSON object. A key here wins over the same top-level shorthand (position, rotation, scale, visible, modulate). An Object-typed property takes a res:// path, a {type: ClassName, ...props} dict that builds a Resource inline, or null; slash-suffixed keys like shader_parameter/<uniform> go inside that dict, not on the node; metadata/<name> and slash keys the node declares go straight into properties. Coercion and Packed*Array / Array[T] / Dictionary[K, V] element rules: Property Values in docs/tools.md.',
         },
       },
       required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        nodeName: {
+          type: 'string',
+          description:
+            'Name the node has after the add. Differs from the requested nodeName when Godot renamed it.',
+        },
+        nodeType: {
+          type: 'string',
+          description: 'Class of the added node, or of the root of an instanced scene.',
+        },
+        nodePath: {
+          type: 'string',
+          description: 'Path from the scene root in "root/..." form, usable as nodePath elsewhere.',
+        },
+      },
+      required: ['nodeName', 'nodeType', 'nodePath'],
     },
   },
   {
     name: 'load_sprite',
     description:
-      'Set the texture on an existing Sprite2D, Sprite3D, or TextureRect node. For new nodes, pass texture via add_node properties instead. Saves automatically. texturePath must be a real file under projectPath. Returns a plain-text confirmation message naming the loaded texture. Errors if the node is not one of those three classes, or the texture file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Set the texture on an existing Sprite2D, Sprite3D or TextureRect. For a new node, pass texture in add_node properties instead. Saves automatically. texturePath must be a file under projectPath. Returns: nodePath, nodeType and texturePath, read back from the node after the assignment. Errors if the node is not one of those three classes or the texture file does not exist. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -122,11 +162,24 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'nodePath', 'texturePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        nodePath: { type: 'string' },
+        nodeType: { type: 'string' },
+        texturePath: {
+          type: 'string',
+          description: 'Project-relative path of the texture the node holds after the assignment.',
+        },
+      },
+      required: ['nodePath', 'nodeType', 'texturePath'],
+    },
   },
   {
     name: 'save_scene',
     description:
-      'Re-pack and save a scene, optionally to a different path (save-as). Most mutations (add_node, set_node_properties, delete_nodes, etc.) auto-save - only use this for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. Returns a plain-text confirmation naming the save path. Errors if the scene file does not exist. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      'Re-pack and save a scene, optionally to another path (save-as). The mutation tools save by themselves: use this only for save-as via newPath, or to re-canonicalize a hand-edited .tscn. Overwrites silently. A newPath file gets no uid of its own. Returns: scenePath (loaded) and savedScenePath (written, confirmed on disk); warnings leads if the save dropped content. Errors while a runtime session is live on this project.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -141,11 +194,23 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        scenePath: { type: 'string', description: 'The scene that was loaded.' },
+        savedScenePath: {
+          type: 'string',
+          description: 'The file that was written. Equal to scenePath unless newPath was given.',
+        },
+      },
+      required: ['scenePath', 'savedScenePath'],
+    },
   },
   {
     name: 'export_mesh_library',
     description:
-      'Export a scene of MeshInstance3D nodes as a MeshLibrary .res file for use in GridMap. For grid-based 3D tile palettes only, not 2D scenes. Source scene must contain MeshInstance3D children. Pass meshItemNames for a subset, or omit for all. Saves to outputPath, overwriting silently. Returns a plain-text confirmation with the exported item count. Errors if the scene contains no valid meshes. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      "Export a scene's MeshInstance3D children as a MeshLibrary .res file for GridMap. For grid-based 3D tile palettes only, not 2D scenes. Pass meshItemNames for a subset, or omit it for all. Saves to outputPath, overwriting silently. Returns: outputPath, itemCount and itemNames, read from the saved library; warnings leads when a requested name was not exported. Errors if the scene holds no valid meshes. Errors while a runtime session is live on this project.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -164,11 +229,21 @@ export const sceneToolDefinitions = [
       },
       required: ['projectPath', 'scenePath', 'outputPath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        outputPath: { type: 'string' },
+        itemCount: { type: 'number' },
+        itemNames: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['outputPath', 'itemCount', 'itemNames'],
+    },
   },
   {
     name: 'batch_scene_operations',
     description:
-      'Use this instead of chaining add_node / load_sprite / save_scene calls when you have multiple mutations on the same or related scenes - runs in one Godot process (~3s startup avoided per call) and shares an in-memory scene cache, saving once at the end. Each item picks its own sub-operation (add_node, load_sprite, set_node_properties, save) and supplies its own params; add_node items accept the same promoted spatial params (position, rotation, scale, visible, modulate) as the standalone tool; set_node_properties items accept the same per-update params (nodePath, property, value) and per-operation scenePath and abortOnError as the standalone tool; abortOnError stops on first failure (default false continues). Returns: results[] in input order, each tagged with operation and scenePath plus success or error. Errors while a Godot runtime session is active on this project; stop_project (or detach_project) clears it.',
+      "Run several scene mutations in one process; every mutated scene is saved at the end. Use instead of chaining add_node, load_sprite, set_node_properties or save_scene. Each item sets operation (save stands for save_scene) and takes that tool's params. abortOnError stops at the first failure; later items return skipped: true. Returns: results[] in input order: operation, scenePath, success, error or skipped, plus the operation's own fields. Errors while a runtime session is live on this project.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -184,7 +259,7 @@ export const sceneToolDefinitions = [
               operation: {
                 type: 'string',
                 enum: ['add_node', 'load_sprite', 'set_node_properties', 'save'],
-                description: 'The sub-operation to perform',
+                description: 'Required. The sub-operation to perform',
               },
               scenePath: { type: 'string', description: 'Scene file path for this operation' },
               nodeType: { type: 'string', description: '[add_node] Node class to instantiate' },
@@ -221,11 +296,13 @@ export const sceneToolDefinitions = [
               },
               rotation: {
                 type: 'number',
-                description: '[add_node] Rotation in radians - shorthand for properties.rotation',
+                description:
+                  '[add_node] Rotation in radians on a 2D node - shorthand for properties.rotation. A 3D node takes {"x","y","z"} under properties.rotation',
               },
               scale: {
                 type: 'object',
-                description: '[add_node] Vector2 scale - shorthand for properties.scale',
+                description:
+                  '[add_node] Scale - {"x","y"} for 2D nodes, {"x","y","z"} for 3D. Shorthand for properties.scale',
               },
               visible: {
                 type: 'boolean',
@@ -258,6 +335,7 @@ export const sceneToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         results: {
           type: 'array',
           items: {
@@ -267,22 +345,53 @@ export const sceneToolDefinitions = [
               scenePath: { type: 'string' },
               success: { type: 'boolean' },
               error: { type: 'string' },
+              skipped: {
+                type: 'boolean',
+                description: 'True when abortOnError stopped the batch before this operation ran.',
+              },
+              nodeName: { type: 'string', description: '[add_node] Name after the add.' },
+              nodeType: { type: 'string', description: '[add_node, load_sprite]' },
+              nodePath: { type: 'string', description: '[add_node, load_sprite]' },
+              texturePath: { type: 'string', description: '[load_sprite]' },
+              savedScenePath: { type: 'string', description: '[save] The file written.' },
+              updates: {
+                type: 'array',
+                description: '[set_node_properties] One entry per update, in input order.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    nodePath: { type: 'string' },
+                    property: { type: 'string' },
+                    resolvedNodePath: {
+                      type: 'string',
+                      description:
+                        'Where nodePath led, in root/... form. Present when the node was found; differs from nodePath for a %Name path.',
+                    },
+                    success: { type: 'boolean' },
+                    error: { type: 'string' },
+                    skipped: {
+                      type: 'boolean',
+                      description:
+                        'True when abortOnError stopped this operation before this update.',
+                    },
+                  },
+                },
+              },
             },
           },
         },
       },
+      required: ['results'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
-
-// --- Handlers ---
 
 export async function handleCreateScene(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args, { requireExists: false });
+  const parsed = parseSceneArgs(args, 'write', { requireExists: false });
   if (!parsed.ok) return parsed;
   const rootNodeType = optionalString(args, 'rootNodeType');
   if (!rootNodeType.ok) return rootNodeType;
@@ -299,48 +408,36 @@ export async function handleCreateScene(
     'Failed to create scene',
     ['Check if the root node type is valid'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      // The new file replaces whatever the path held, so it is not compared; naming it lets the call say once the engine writing it is newer than the project.
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { replacesFile: true }),
+    },
   );
 }
 
-/**
- * Spatial properties `add_node` accepts as top-level params instead of under
- * `properties`. Mirrored by `_PROMOTED_SPATIAL_PARAMS` in
- * `src/scripts/godot_operations.gd`, which applies them on the batch path --
- * KEEP IN SYNC.
- */
+// KEEP IN SYNC: `_PROMOTED_SPATIAL_PARAMS` in src/scripts/godot_operations.gd applies these on the batch path.
 const PROMOTED_SPATIAL_PARAMS = ['position', 'rotation', 'scale', 'visible', 'modulate'] as const;
-
-/**
- * Scene-file suffixes `add_node` accepts in place of a Godot class name.
- * Mirrored by `_SCENE_SUFFIXES` in `src/scripts/godot_operations.gd` --
- * KEEP IN SYNC.
- */
-const SCENE_PATH_SUFFIXES = ['.tscn', '.scn'];
-
-function isScenePath(nodeType: string): boolean {
-  const lowered = nodeType.toLowerCase();
-  return SCENE_PATH_SUFFIXES.some((suffix) => lowered.endsWith(suffix));
-}
 
 export async function handleAddNode(
   runner: GodotRunner,
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodeType = requireString(args, 'nodeType');
   if (!nodeType.ok) return nodeType;
-  // A scene-path nodeType is a filesystem path, so it gets the same
-  // project-root containment check every other path input does -- Godot
-  // resolves `res://../x.tscn` to a real file outside the project.
-  if (isScenePath(nodeType.value) && !validateSubPath(parsed.value.projectPath, nodeType.value)) {
+  // A scene-path nodeType is a filesystem path and Godot resolves `res://../x.tscn` outside the project, so it gets the same containment check.
+  const nodeTypeScene = isSceneFileNodeType(nodeType.value)
+    ? resolveProjectPath(parsed.value.projectPath, nodeType.value, 'read')
+    : undefined;
+  if (nodeTypeScene === null) {
     return err(
-      createErrorResponse(`Scene path escapes the project root: ${nodeType.value}`, [
-        'Use a path relative to the project root (e.g. "scenes/enemy.tscn")',
-        'Remove any ".." segments from the path',
+      createErrorResponse(projectSubPathError('nodeType scene path', nodeType.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -350,17 +447,18 @@ export async function handleAddNode(
   const properties = optionalObject(args, 'properties');
   if (!properties.ok) return properties;
 
-  // Merge promoted top-level params into properties dict
-  const mergedProps: OperationParams = { ...(properties.value ?? {}) };
+  // `properties` wins over promoted top-level params, as on the batch path and in docs/tools.md.
+  const mergedProps: OperationParams = {};
   for (const key of PROMOTED_SPATIAL_PARAMS) {
     if (args[key] !== undefined) {
       mergedProps[key] = args[key];
     }
   }
+  Object.assign(mergedProps, properties.value ?? {});
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
-    nodeType: nodeType.value,
+    nodeType: nodeTypeScene ? nodeTypeScene.relPath : nodeType.value,
     nodeName: nodeName.value,
   };
   if (args.parentNodePath !== undefined) {
@@ -381,7 +479,11 @@ export async function handleAddNode(
       'If nodeType is a scene path, verify the file exists and loads (.tscn or .scn)',
     ],
     undefined,
-    { mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath),
+    },
   );
 }
 
@@ -390,7 +492,7 @@ export async function handleLoadSprite(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const nodePath = parseRequiredNodePath(args, 'nodePath');
@@ -398,15 +500,15 @@ export async function handleLoadSprite(
 
   const texturePath = requireString(args, 'texturePath');
   if (!texturePath.ok) return texturePath;
-  if (!validateSubPath(parsed.value.projectPath, texturePath.value)) {
+  const texture = resolveProjectPath(parsed.value.projectPath, texturePath.value, 'read');
+  if (!texture) {
     return err(
-      createErrorResponse('Valid texturePath is required', [
-        'Provide a relative texture path that stays inside the project directory',
+      createErrorResponse(projectSubPathError('texturePath', texturePath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
-  const textureFullPath = join(parsed.value.projectPath, texturePath.value);
-  if (!existsSync(textureFullPath)) {
+  if (!existsSync(texture.absPath)) {
     return err(
       createErrorResponse(`Texture file does not exist: ${texturePath.value}`, [
         'Ensure the texture path is correct',
@@ -417,7 +519,7 @@ export async function handleLoadSprite(
   const params = {
     scenePath: parsed.value.scenePath,
     nodePath: nodePath.value,
-    texturePath: texturePath.value,
+    texturePath: texture.relPath,
   };
   return executeSceneOp(
     runner,
@@ -427,7 +529,13 @@ export async function handleLoadSprite(
     'Failed to load sprite',
     ['Check if the node is a Sprite2D, Sprite3D, or TextureRect'],
     undefined,
-    { mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, {
+        touchedProperties: [loadSpriteTouch(nodePath.value)],
+      }),
+    },
   );
 }
 
@@ -436,21 +544,24 @@ export async function handleSaveScene(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  const parsed = parseSceneArgs(args, 'write');
   if (!parsed.ok) return parsed;
 
   const newPath = optionalString(args, 'newPath');
   if (!newPath.ok) return newPath;
-  if (newPath.value && !validateSubPath(parsed.value.projectPath, newPath.value)) {
+  const newScene = newPath.value
+    ? resolveProjectPath(parsed.value.projectPath, newPath.value, 'write')
+    : undefined;
+  if (newScene === null) {
     return err(
-      createErrorResponse('Invalid newPath', [
-        'Provide a valid relative path without ".." that stays inside the project directory',
+      createErrorResponse(projectSubPathError('newPath', newPath.value ?? ''), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
 
   const params: OperationParams = { scenePath: parsed.value.scenePath };
-  if (newPath.value) params.newPath = newPath.value;
+  if (newScene) params.newPath = newScene.relPath;
   return executeSceneOp(
     runner,
     'save_scene',
@@ -459,7 +570,18 @@ export async function handleSaveScene(
     'Failed to save scene',
     ['Check if the scene file is valid'],
     undefined,
-    { mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: [
+        {
+          source: parsed.value.scenePath,
+          target: newScene ? newScene.relPath : parsed.value.scenePath,
+          touchedNodes: [],
+          deletedNodes: [],
+        },
+      ],
+    },
   );
 }
 
@@ -468,15 +590,17 @@ export async function handleExportMeshLibrary(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args);
+  // The scene is only read; the library is the file this call writes.
+  const parsed = parseSceneArgs(args, 'read');
   if (!parsed.ok) return parsed;
 
   const outputPath = requireString(args, 'outputPath');
   if (!outputPath.ok) return outputPath;
-  if (!validateSubPath(parsed.value.projectPath, outputPath.value)) {
+  const output = resolveProjectPath(parsed.value.projectPath, outputPath.value, 'write');
+  if (!output) {
     return err(
-      createErrorResponse('Valid outputPath is required', [
-        'Provide an output path for the .res file that stays inside the project directory',
+      createErrorResponse(projectSubPathError('outputPath', outputPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -486,7 +610,7 @@ export async function handleExportMeshLibrary(
 
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
-    outputPath: outputPath.value,
+    outputPath: output.relPath,
   };
   if (meshItemNames.value) {
     params.meshItemNames = meshItemNames.value;
@@ -499,7 +623,8 @@ export async function handleExportMeshLibrary(
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
     undefined,
-    { mutatesSceneFile: true },
+    // Writes a .res and no scene file, so there are no sceneWrites to compare.
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
 
@@ -513,12 +638,16 @@ export async function handleBatchSceneOperations(
 
   const operations = requireArray(args, 'operations');
   if (!operations.ok) return operations;
+  // Every item path is resolved here by the single-call rules; the resolved operations go to both the script and the loss guard.
+  const checkedOperations = checkBatchOperationItems(operations.value, parsed.value.projectPath);
+  if (!checkedOperations.ok) return checkedOperations;
+  const resolvedOperations = checkedOperations.value;
 
   const abortOnError = optionalBoolean(args, 'abortOnError');
   if (!abortOnError.ok) return abortOnError;
 
   const params = {
-    operations: operations.value,
+    operations: resolvedOperations,
     abortOnError: abortOnError.value ?? false,
   };
   return executeSceneOp(
@@ -529,6 +658,12 @@ export async function handleBatchSceneOperations(
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
     undefined,
-    { parseStdoutAsJson: true, mutatesSceneFile: true },
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: batchSceneWrites(resolvedOperations, parsed.value.projectPath),
+      refineSceneWrites: (payload) =>
+        batchSceneWrites(resolvedOperations, parsed.value.projectPath, payload.results),
+    },
   );
 }

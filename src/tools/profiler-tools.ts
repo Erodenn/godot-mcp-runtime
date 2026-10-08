@@ -1,25 +1,69 @@
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
+import { takeNonFiniteWarning } from '../utils/bridge-protocol.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
-import { createStructuredResponse } from '../utils/structured-response.js';
-import { optionalNumber, optionalString } from '../utils/arg-parsing.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
+import {
+  optionalBoolean,
+  optionalNumber,
+  optionalString,
+  optionalStringArray,
+} from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import {
+  chargeQueueWait,
+  noLiveCurrentSessionError,
+  runSessionExclusive,
+  type NoSessionWording,
+} from '../utils/session-report.js';
+import {
   CAPTURE_LIMIT_MAX,
+  DEFAULT_TARGET_FPS,
+  MAX_TIMELINE_BUCKETS,
+  MONITOR_NAMES,
+  MS_PER_SECOND,
+  PROFILE_MAX_SECONDS,
   PROFILE_SORTS,
   PROFILE_TOP_MAX,
+  PROFILE_WINDOW_MAX_SECONDS,
+  PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
+  TARGET_FPS_MAX,
+  TIMELINE_MS_MAX,
+  TIMELINE_MS_MIN,
+  TIMESTAMP_OVERFLOW_FIX,
+  timelineBucketMs,
+  type CaptureOptions,
   type DebuggerProfiler,
+  type ProfilerErrorCode,
+  type ProfileResult,
   type ProfileSort,
+  type ProfileStartResult,
+  type TrackCollector,
+  type TrackSample,
 } from '../utils/profiler.js';
 
 const DEFAULT_WINDOW_SECONDS = 5;
 const DEFAULT_MAX_SECONDS = 30;
 const DEFAULT_TOP = 20;
 const DEFAULT_SORT: ProfileSort = 'selfMs';
+const DEFAULT_TIMELINE_MS = 500;
 
-// --- Tool definitions ---
+// KEEP IN SYNC: src/scripts/mcp_bridge.gd MAX_TRACK_ENTRIES and
+// MIN_TRACK_INTERVAL_MS, which the bridge enforces independently.
+export const TRACK_MAX_ENTRIES = 4;
+export const TRACK_MIN_INTERVAL_MS = 50;
+const TRACK_INTERVAL_MS = 250;
+const TRACK_GRACE_MS = 10000;
+// Shorter than the usual command timeout: profile_project sends one track command on each side of its window.
+const TRACK_COMMAND_TIMEOUT_MS = 4000;
+// Held under the 60 s after which a client with no progress token abandons the request; a later result or error is never read.
+export const PROFILE_PROJECT_WORST_CASE_MS =
+  PROFILE_WINDOW_WORST_CASE_MS + 2 * TRACK_COMMAND_TIMEOUT_MS;
+const TRACK_REPLY_PREVIEW_CHARS = 200;
+const TRACK_OWNER_NOT_CURRENT =
+  'The session that ran this capture is no longer the current one, so its track was not collected';
 
 const sortProperty = {
   type: 'string',
@@ -36,12 +80,130 @@ const captureLimitProperty = {
 
 const topProperty = {
   type: 'number',
-  description: 'How many functions to return, 1..100 (default: 20).',
+  description:
+    'How many functions to return, 1..100 (default: 20). Also caps visual.areas when the capture recorded render stages.',
+} as const;
+
+const visualProperty = {
+  type: 'boolean',
+  description:
+    "Also record the editor's Visual Profiler: CPU and GPU milliseconds per render stage (culling, shadows, opaque pass, canvas, ...) in `visual` (default: false). GPU times are null on GLES/web builds of the Compatibility renderer, which time no GPU work; `visual.gpuTimed` is false and a warning says so. A frame holds 256 render markers by default; a scene that needs more makes the engine log an error per lost marker, slowing the game, so the capture switches visual off and its warnings say how to raise the limit.",
+} as const;
+
+const timelineProperty = {
+  type: 'boolean',
+  description:
+    'Also record the capture over time in `timeline.buckets`: per interval the fps, frameMs avg/max, process/physics/script ms, slowFrames, draw calls, render CPU/GPU ms (with visual) and the 3 heaviest functions, server calls or render stages - where and when frames got slow (default: false). timelineMs and track turn it on by themselves; false beside either is rejected.',
+} as const;
+
+const timelineMsProperty = {
+  type: 'number',
+  description: `Timeline interval in milliseconds, ${TIMELINE_MS_MIN}..${TIMELINE_MS_MAX} (default: ${DEFAULT_TIMELINE_MS}). A timeline has about ${MAX_TIMELINE_BUCKETS} intervals, so a longer capture uses wider ones (${PROFILE_MAX_SECONDS} s: ${timelineBucketMs(TIMELINE_MS_MIN, PROFILE_MAX_SECONDS)} ms). Implies timeline.`,
+} as const;
+
+const targetFpsProperty = {
+  type: 'number',
+  description: `Frame rate to hold the game to (default: ${DEFAULT_TARGET_FPS}). slowFrames counts frames whose frameMs exceeds 1000/targetFps, over the capture and per timeline interval. Under vsync every frame lasts the refresh interval: disable vsync, or set targetFps a few percent below the refresh rate.`,
+} as const;
+
+const trackProperty = {
+  type: 'array',
+  items: { type: 'string' },
+  maxItems: TRACK_MAX_ENTRIES,
+  description: `Up to ${TRACK_MAX_ENTRIES} NodePath:property values the game samples during the capture (every ${TRACK_INTERVAL_MS} ms, or half the interval when shorter), placed on the timeline by frame number, e.g. "/root/Main/Player:global_position" - where the player was when frames got slow. Implies timeline. Uses the bridge: drive the game between start_profiler and stop_profiler, not in parallel with profile_project. Collected only while the session that started the capture is current.`,
 } as const;
 
 const statSchema = {
   type: 'object',
   properties: { avg: { type: 'number' }, max: { type: 'number' } },
+} as const;
+
+const nullableStatSchema = { ...statSchema, type: ['object', 'null'] } as const;
+const UNTIMED_GPU = 'Null when the renderer timed no GPU work (gpuTimed false).';
+const gpuStatSchema = { ...nullableStatSchema, description: UNTIMED_GPU } as const;
+const gpuMsSchema = { type: ['number', 'null'], description: UNTIMED_GPU } as const;
+
+const monitorStatSchema = {
+  type: 'object',
+  properties: { avg: { type: 'number' }, min: { type: 'number' }, max: { type: 'number' } },
+} as const;
+
+const monitorsSchema = {
+  type: ['object', 'null'],
+  properties: {
+    samples: { type: 'number' },
+    ...Object.fromEntries(
+      MONITOR_NAMES.map((name) => [name, { ...monitorStatSchema, type: ['object', 'null'] }]),
+    ),
+    pipelineCompilations: {
+      type: ['object', 'null'],
+      properties: { duringCapture: { type: ['number', 'null'] }, total: { type: 'number' } },
+    },
+    custom: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { name: { type: 'string' }, ...monitorStatSchema.properties },
+      },
+    },
+  },
+} as const;
+
+const visualSchema = {
+  type: ['object', 'null'],
+  properties: {
+    hardware: {
+      type: ['object', 'null'],
+      properties: { cpu: { type: 'string' }, gpu: { type: 'string' } },
+    },
+    framesReceived: { type: 'number' },
+    frames: { type: 'number' },
+    gpuTimed: { type: 'boolean' },
+    truncatedFrames: { type: 'number' },
+    stoppedAt: { type: ['number', 'null'] },
+    cpuMs: {
+      ...nullableStatSchema,
+      description: 'Null when no render frame was folded (frames is 0).',
+    },
+    gpuMs: {
+      ...nullableStatSchema,
+      description: 'Null when no render frame was folded, or the renderer timed no GPU work.',
+    },
+    areasReceived: { type: 'number' },
+    areas: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          name: { type: 'string' },
+          group: { type: 'boolean' },
+          frames: { type: 'number' },
+          cpuMs: statSchema,
+          gpuMs: gpuStatSchema,
+        },
+      },
+    },
+    worstFrame: {
+      type: ['object', 'null'],
+      properties: {
+        frame: { type: 'number' },
+        cpuMs: { type: 'number' },
+        gpuMs: gpuMsSchema,
+        areas: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              cpuMs: { type: 'number' },
+              gpuMs: gpuMsSchema,
+            },
+          },
+        },
+      },
+    },
+  },
 } as const;
 
 const frameTimingsSchema = {
@@ -70,7 +232,7 @@ const rowSchema = {
     selfMsPerFrame: { type: 'number' },
     totalMsPerFrame: { type: 'number' },
     msPerCall: { type: 'number' },
-    percentOfFrame: { type: 'number' },
+    percentOfFrame: { type: ['number', 'null'] },
     peak: {
       type: ['object', 'null'],
       properties: {
@@ -83,11 +245,60 @@ const rowSchema = {
   },
 } as const;
 
+const timelineSchema = {
+  type: ['object', 'null'],
+  properties: {
+    bucketMs: { type: 'number' },
+    track: { type: 'array', items: { type: 'string' } },
+    trackError: { type: ['string', 'null'] },
+    buckets: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          t: { type: 'number' },
+          frames: { type: 'number' },
+          fps: { type: ['number', 'null'] },
+          frameMs: { ...statSchema, type: ['object', 'null'] },
+          processMs: { type: ['number', 'null'] },
+          physicsMs: { type: ['number', 'null'] },
+          scriptMs: { type: ['number', 'null'] },
+          slowFrames: { type: 'number' },
+          render: {
+            type: ['object', 'null'],
+            properties: { cpuMs: { type: 'number' }, gpuMs: gpuMsSchema },
+          },
+          drawCalls: { type: ['number', 'null'] },
+          top: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', enum: ['script', 'server', 'render'] },
+                name: { type: 'string' },
+                ms: { type: 'number' },
+                maxMs: { type: 'number' },
+              },
+            },
+          },
+          track: { type: ['object', 'null'] },
+        },
+      },
+    },
+  },
+} as const;
+
 const captureResultSchema = {
   type: 'object',
   properties: {
+    warnings: { type: 'array', items: { type: 'string' } },
+    projectPath: { type: 'string' },
+    complete: { type: 'boolean' },
     seconds: { type: 'number' },
     frames: { type: 'number' },
+    fps: { type: ['number', 'null'] },
+    targetFps: { type: 'number' },
+    slowFrames: { type: 'number' },
     framesReceived: { type: 'number' },
     firstFrame: { type: ['number', 'null'] },
     lastFrame: { type: ['number', 'null'] },
@@ -118,25 +329,59 @@ const captureResultSchema = {
     },
     rows: { type: 'array', items: rowSchema },
     worstFrame: { type: ['object', 'null'] },
+    monitors: monitorsSchema,
+    visual: visualSchema,
+    timeline: timelineSchema,
   },
+  // A capture that folded no frame is an error, never a payload with fields left out.
+  required: [
+    'projectPath',
+    'complete',
+    'seconds',
+    'frames',
+    'fps',
+    'targetFps',
+    'slowFrames',
+    'framesReceived',
+    'firstFrame',
+    'lastFrame',
+    'frameGaps',
+    'undecodablePackets',
+    'captureLimit',
+    'limitReached',
+    'sort',
+    'functionsReceived',
+    'unresolvedFunctions',
+    'frame',
+    'servers',
+    'rows',
+    'worstFrame',
+    'monitors',
+    'visual',
+    'timeline',
+  ],
 } as const;
 
 export const profilerToolDefinitions = [
   {
     name: 'profile_project',
-    description:
-      "Capture a window of Godot's function profiler - the editor's Profiler tab numbers. Requires run_project with profiling: true. Blocks for `seconds` (default 5). Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: rows (function, file, line, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak), the frame budget, servers, worstFrame, plus frames/frameGaps/limitReached for capture quality. Errors if profiling was off at launch or a capture is already open.",
+    description: `Profile a window: GDScript function costs, fps, monitors; visual adds CPU/GPU ms per render stage, timeline both over time. Requires run_project with profiling: true. Blocks for \`seconds\` (default ${DEFAULT_WINDOW_SECONDS}, max ${PROFILE_WINDOW_MAX_SECONDS}; longer: start_profiler). Times are elapsed, not CPU; never sum totalMs (rows overlap). Returns: warnings first, projectPath, complete, fps, slowFrames, rows, frame, servers, worstFrame, monitors, visual, timeline. Errors if profiling is off, a capture is open or the game exits mid-window.`,
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
         seconds: {
           type: 'number',
-          description: 'Capture duration in seconds, greater than 0 and at most 60 (default: 5).',
+          description: `Capture duration in seconds, greater than 0 and at most ${PROFILE_WINDOW_MAX_SECONDS} (default: ${DEFAULT_WINDOW_SECONDS}). The call answers only when the window has closed, and with its waits can take up to ${PROFILE_PROJECT_WORST_CASE_MS / MS_PER_SECOND} s, which the limit keeps under a client's 60 s request timeout. Time spent waiting for the session queue counts against that: a call whose wait plus its worst case would pass 60 s is refused with nothing sent. For a longer capture use start_profiler (up to ${PROFILE_MAX_SECONDS} s) and stop_profiler.`,
         },
         top: topProperty,
         sort: sortProperty,
         captureLimit: captureLimitProperty,
+        visual: visualProperty,
+        timeline: timelineProperty,
+        timelineMs: timelineMsProperty,
+        targetFps: targetFpsProperty,
+        track: trackProperty,
       },
       required: [],
     },
@@ -144,35 +389,53 @@ export const profilerToolDefinitions = [
   },
   {
     name: 'start_profiler',
-    description:
-      'Start a profiler capture and return immediately, so simulate_input, run_script and screenshots can drive the game while it records. Requires run_project with profiling: true. Stops itself after `seconds` (default 30, max 60); call stop_profiler for the results. Returns: active, firstFrame, captureLimit, maxSeconds. Use profile_project instead for an unattended window. Errors if a capture is already running or profiling was not enabled at launch.',
+    description: `Start a profiler capture and return at once, so simulate_input, run_script and screenshots drive the game while it records; timeline and track show where frames drop. Requires run_project with profiling: true. Stops itself after \`seconds\` (default ${DEFAULT_MAX_SECONDS}, max ${PROFILE_MAX_SECONDS}); read it with stop_profiler. Unattended window: use profile_project. Returns: warnings if any, projectPath, active, visual, timeline, timelineMs, firstFrame, captureLimit, maxSeconds. Errors if a capture is running or profiling was off.`,
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
         seconds: {
           type: 'number',
-          description:
-            'Maximum capture duration before the automatic stop, greater than 0 and at most 60 (default: 30).',
+          description: `Maximum capture duration before the automatic stop, greater than 0 and at most ${PROFILE_MAX_SECONDS} (default: ${DEFAULT_MAX_SECONDS}).`,
         },
         captureLimit: captureLimitProperty,
+        visual: visualProperty,
+        timeline: timelineProperty,
+        timelineMs: timelineMsProperty,
+        targetFps: targetFpsProperty,
+        track: trackProperty,
       },
       required: [],
     },
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        projectPath: { type: 'string' },
         active: { type: 'boolean' },
+        visual: { type: 'boolean' },
+        timeline: { type: 'boolean' },
+        timelineMs: { type: ['number', 'null'] },
         maxSeconds: { type: 'number' },
         firstFrame: { type: ['number', 'null'] },
         captureLimit: { type: 'number' },
       },
+      required: [
+        'projectPath',
+        'active',
+        'visual',
+        'timeline',
+        'timelineMs',
+        'maxSeconds',
+        'firstFrame',
+        'captureLimit',
+      ],
     },
   },
   {
     name: 'stop_profiler',
     description:
-      'Stop the capture started by start_profiler and rank the recorded functions; a capture that already hit its time limit is read back as-is, and can be re-read with a different sort. Times are elapsed, not CPU; inclusive rows overlap - never sum totalMs. Returns: the same payload as profile_project - rows (file, line, function, calls, selfMs/totalMs, per-frame averages, percentOfFrame, peak frame), frame budget, servers, worstFrame, frames, frameGaps, limitReached. Errors if no capture was started.',
+      'Stop the start_profiler capture of the current session and rank what it recorded; one that hit its time limit is read back as-is, re-readable with another sort. Times are elapsed, not CPU; inclusive rows overlap, never sum totalMs. Returns: the profile_project payload: warnings first, projectPath, complete (false if cut short), fps, slowFrames, rows, frame, servers, worstFrame, monitors, plus visual and timeline when started with them. Errors if no capture was started.',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: 'object',
@@ -186,51 +449,44 @@ export const profilerToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Helpers ---
+const PROFILER_WORDING: NoSessionWording = {
+  action: 'capture a profile',
+  noneMessage: 'No active runtime session. A project must be running to profile it.',
+  noneSolutions: [
+    'Use run_project with profiling: true to start a Godot project first',
+    'Profiling cannot be added to a session that is already running',
+  ],
+  exitedSolutions: [
+    'Use get_debug_output to inspect the last captured logs',
+    'Call stop_project to clean up, then run_project with profiling: true again',
+  ],
+};
 
-/**
- * The profiler lives on the runner for as long as the spawned session does.
- * Its absence is always the same user-facing story: this session was not
- * launched with the debugger channel, so there is nothing to measure.
- */
-function requireProfiler(runner: GodotRunner): Result<DebuggerProfiler, ToolResponse> {
-  if (runner.activeProfiler === null) {
-    // "Nothing is running" and "running without profiling" have different
-    // fixes, and every sibling runtime tool already draws this line.
-    if (!runner.activeSessionMode || !runner.activeProjectPath) {
-      return err(
-        createErrorResponse('No active runtime session. A project must be running to profile it.', [
-          'Use run_project with profiling: true to start a Godot project first',
-          'Profiling cannot be added to a session that is already running',
-        ]),
-      );
-    }
+// Absence means this session was not launched with the debugger channel, so there is nothing to measure.
+function requireProfiler(
+  runner: GodotRunner,
+): Result<{ profiler: DebuggerProfiler; projectPath: string }, ToolResponse> {
+  const status = runner.getRuntimeSessionStatus();
+  const profiler = runner.activeProfiler;
+  if (status.current === null) return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
+  if (profiler === null) {
+    // "Nothing is running" and "running without profiling" have different fixes.
+    if (status.state !== 'live') return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
     return err(
       createErrorResponse('Profiling is not enabled for this session.', [
         'Call run_project with profiling: true - the debugger channel is set at launch and cannot be added later',
-        'Attached sessions cannot profile; use run_project instead of attach_project',
+        'Attached sessions cannot profile; call run_project without attach: true',
       ]),
     );
   }
-  const profiler = runner.activeProfiler;
-  // A finished capture outlives the engine: re-ranking folded data needs no
-  // process, and the capture taken just before a crash is the one worth having.
-  if (runner.activeProcess?.hasExited === true && !profiler.hasResult) {
-    return err(
-      createErrorResponse('The spawned Godot process has exited and cannot be profiled.', [
-        'Use get_debug_output to inspect the last captured logs',
-        'Call stop_project to clean up, then run_project with profiling: true again',
-      ]),
-    );
+  // A finished capture outlives the engine: re-ranking folded data needs no process.
+  if (status.state !== 'live' && !profiler.hasResult) {
+    return err(noLiveCurrentSessionError(status, PROFILER_WORDING));
   }
-  return ok(profiler);
+  return ok({ profiler, projectPath: status.current.projectPath });
 }
 
-/**
- * Range-check `top` here rather than leaving it to `stop()`. A capture window
- * runs for seconds before that check is reached, so a bad value would cost the
- * whole window before erroring.
- */
+/** Checked here, not in `stop()`: the capture window runs for seconds first, so a bad value would cost the whole window. */
 function parseTop(args: OperationParams): Result<number, ToolResponse> {
   const raw = optionalNumber(args, 'top');
   if (!raw.ok) return raw;
@@ -261,7 +517,358 @@ function parseSort(args: OperationParams): Result<ProfileSort, ToolResponse> {
   return ok(raw.value as ProfileSort);
 }
 
-function profilerFailure(error: unknown): ToolResponse {
+interface ParsedCaptureOptions {
+  options: CaptureOptions & { track: string[] };
+  requestedTimelineMs: number | undefined;
+}
+
+/** Checked here for the same reason as `top`. `timelineMs` or a `track` imply a timeline. */
+function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions, ToolResponse> {
+  const visual = optionalBoolean(args, 'visual');
+  if (!visual.ok) return visual;
+  const timeline = optionalBoolean(args, 'timeline');
+  if (!timeline.ok) return timeline;
+  const timelineMs = optionalNumber(args, 'timelineMs');
+  if (!timelineMs.ok) return timelineMs;
+  const targetFps = optionalNumber(args, 'targetFps');
+  if (!targetFps.ok) return targetFps;
+  const track = optionalStringArray(args, 'track');
+  if (!track.ok) return track;
+
+  if (
+    timelineMs.value !== undefined &&
+    (!Number.isInteger(timelineMs.value) ||
+      timelineMs.value < TIMELINE_MS_MIN ||
+      timelineMs.value > TIMELINE_MS_MAX)
+  ) {
+    return err(
+      createErrorResponse(
+        `Invalid timelineMs: must be an integer in [${TIMELINE_MS_MIN}, ${TIMELINE_MS_MAX}] (got: ${timelineMs.value})`,
+        [`Omit timelineMs for ${DEFAULT_TIMELINE_MS} ms intervals`],
+      ),
+    );
+  }
+  if (targetFps.value !== undefined && (targetFps.value <= 0 || targetFps.value > TARGET_FPS_MAX)) {
+    return err(
+      createErrorResponse(
+        `Invalid targetFps: must be greater than 0 and at most ${TARGET_FPS_MAX} (got: ${targetFps.value})`,
+        [`Omit targetFps to count frames slower than ${DEFAULT_TARGET_FPS} fps`],
+      ),
+    );
+  }
+  const specs = track.value ?? [];
+  if (specs.length > TRACK_MAX_ENTRIES) {
+    return err(
+      createErrorResponse(
+        `Invalid track: at most ${TRACK_MAX_ENTRIES} entries (got: ${specs.length})`,
+        ['Track only the node that moves, usually the player'],
+      ),
+    );
+  }
+  const malformed = specs.find((spec) => {
+    const separator = spec.indexOf(':');
+    return separator <= 0 || separator >= spec.length - 1;
+  });
+  if (malformed !== undefined) {
+    return err(
+      createErrorResponse(`Invalid track entry: expected NodePath:property (got: ${malformed})`, [
+        'Use an absolute node path and a property, e.g. "/root/Main/Player:global_position"',
+      ]),
+    );
+  }
+
+  // An explicit timeline: false beside timelineMs or track contradicts it; picking a side would ignore half the request.
+  const implied = [
+    ...(timelineMs.value !== undefined ? ['timelineMs'] : []),
+    ...(specs.length > 0 ? ['track'] : []),
+  ];
+  if (timeline.value === false && implied.length > 0) {
+    return err(
+      createErrorResponse(
+        `Invalid timeline: false cannot be combined with ${implied.join(' or ')}, which record onto the timeline`,
+        [`Omit timeline, or drop ${implied.join(' and ')} to capture without one`],
+      ),
+    );
+  }
+
+  const wantsTimeline =
+    timeline.value === true || timelineMs.value !== undefined || specs.length > 0;
+  return ok({
+    options: {
+      visual: visual.value === true,
+      timelineMs: wantsTimeline ? (timelineMs.value ?? DEFAULT_TIMELINE_MS) : null,
+      targetFps: targetFps.value ?? DEFAULT_TARGET_FPS,
+      track: specs,
+    },
+    requestedTimelineMs: timelineMs.value,
+  });
+}
+
+/** track_start replaces any running track, so a refused call would take the running capture's track down with it. */
+function checkCanStart(
+  profiler: DebuggerProfiler,
+  seconds: number,
+  captureLimit: number,
+  options: CaptureOptions,
+  maxSeconds: number,
+): Result<void, ToolResponse> {
+  try {
+    profiler.assertCanStart(seconds, captureLimit, options, maxSeconds);
+    return ok(undefined);
+  } catch (error: unknown) {
+    const tooLong = seconds > maxSeconds && maxSeconds < PROFILE_MAX_SECONDS;
+    return err(
+      profilerFailure(
+        error,
+        tooLong
+          ? [
+              `profile_project blocks for its whole window, so it stops at ${maxSeconds} s: use start_profiler (up to ${PROFILE_MAX_SECONDS} s) and stop_profiler for a longer capture`,
+            ]
+          : [],
+      ),
+    );
+  }
+}
+
+/** The bridge samples on its own clock, so it keeps sampling while another command holds the bridge, and stops by itself if nobody collects. */
+async function startTrack(
+  runner: GodotRunner,
+  track: string[],
+  seconds: number,
+  timelineMs: number,
+): Promise<Result<void, ToolResponse>> {
+  if (track.length === 0) return ok(undefined);
+  const intervalMs = Math.max(
+    TRACK_MIN_INTERVAL_MS,
+    Math.min(TRACK_INTERVAL_MS, Math.floor(timelineBucketMs(timelineMs, seconds) / 2)),
+  );
+  try {
+    const raw = await runner.sendCommand(
+      'track_start',
+      {
+        watch: track,
+        interval_ms: intervalMs,
+        max_ms: Math.ceil(seconds * MS_PER_SECOND) + TRACK_GRACE_MS,
+      },
+      TRACK_COMMAND_TIMEOUT_MS,
+    );
+    const reply = JSON.parse(raw) as { status?: unknown; error?: unknown };
+    if (reply.status === 'tracking') return ok(undefined);
+    // Treating an unrecognized reply as success would profile with a track nobody runs.
+    const reason =
+      typeof reply.error === 'string'
+        ? reply.error
+        : `unexpected bridge reply ${raw.slice(0, TRACK_REPLY_PREVIEW_CHARS)}`;
+    return err(
+      createErrorResponse(`Could not start the track: ${reason}`, [
+        'Check each entry is NodePath:property',
+      ]),
+    );
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    const unreadable = error instanceof SyntaxError;
+    return err(
+      createErrorResponse(`Could not start the track: ${message}`, [
+        unreadable
+          ? 'The game bridge answered with something that is not JSON - check get_debug_output'
+          : 'The game bridge did not answer - check get_debug_output',
+        'Retry without track to profile without positions',
+      ]),
+    );
+  }
+}
+
+function isTrackSample(value: unknown): value is TrackSample {
+  if (value === null || typeof value !== 'object') return false;
+  const sample = value as { frame?: unknown; values?: unknown };
+  return (
+    typeof sample.frame === 'number' &&
+    Number.isFinite(sample.frame) &&
+    sample.values !== null &&
+    typeof sample.values === 'object' &&
+    !Array.isArray(sample.values)
+  );
+}
+
+type TrackOutcome = Awaited<ReturnType<TrackCollector>> & {
+  nonFiniteWarning?: string | null;
+};
+
+// Held here, not in the profiler's result, so the result's shape does not change.
+const trackNonFiniteWarnings = new WeakMap<DebuggerProfiler, string | null>();
+
+async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promise<TrackOutcome> {
+  // sendCommand addresses the current session; a track_stop sent to another session would take another game's samples.
+  if (runner.activeProfiler !== owner) return { samples: null, error: TRACK_OWNER_NOT_CURRENT };
+  // Once the game has exited the session has no bridge port left; say so in the capture's terms.
+  if (!runner.hasActiveRuntimeSession()) {
+    return { samples: null, error: 'The game exited before its track was collected' };
+  }
+  try {
+    const raw = await runner.sendCommand('track_stop', {}, TRACK_COMMAND_TIMEOUT_MS);
+    const reply = JSON.parse(raw) as { samples?: unknown; error?: unknown };
+    const nonFiniteWarning = takeNonFiniteWarning(reply);
+    trackNonFiniteWarnings.set(owner, nonFiniteWarning);
+    if (typeof reply.error === 'string') return { samples: null, error: reply.error };
+    if (!Array.isArray(reply.samples)) {
+      return { samples: null, error: 'The bridge returned no track samples' };
+    }
+    // A malformed sample means the two sides disagree; dropping it quietly would thin the track with nothing saying why.
+    const malformed = reply.samples.filter((sample) => !isTrackSample(sample)).length;
+    if (malformed > 0) {
+      return {
+        samples: null,
+        error: `The bridge returned ${malformed} of ${reply.samples.length} track samples in an unrecognized shape`,
+      };
+    }
+    return {
+      samples: reply.samples as TrackSample[],
+      error: null,
+      ...(nonFiniteWarning === null ? {} : { nonFiniteWarning }),
+    };
+  } catch (error: unknown) {
+    return { samples: null, error: getErrorMessage(error) };
+  }
+}
+
+function trackCollector(runner: GodotRunner, owner: DebuggerProfiler): TrackCollector {
+  return () => collectTrack(runner, owner);
+}
+
+// The bridge gives its samples up once, so a stop that re-reads the capture is handed them from here; a new capture drops the entry.
+const tracksHeldForReRead = new WeakMap<DebuggerProfiler, TrackOutcome>();
+
+const STOP_REACHED_NO_CAPTURE: ReadonlySet<ProfilerErrorCode> = new Set([
+  'bad_args',
+  'profile_not_started',
+]);
+
+function stopReachedACapture(error: unknown): boolean {
+  return !(error instanceof ProfilerError && STOP_REACHED_NO_CAPTURE.has(error.code));
+}
+
+// Said in the result, where the agent is looking; the parameter descriptions were read once, at the handshake.
+function captureWarnings(result: ProfileResult, nonFiniteWarning: string | null): string[] {
+  const warnings: string[] = nonFiniteWarning === null ? [] : [nonFiniteWarning];
+  const visual = result.visual ?? null;
+  if (visual !== null && visual.frames === 0) {
+    warnings.push(
+      `visual: true recorded no usable render frames (${visual.framesReceived} received; the first few after the enable and any without a "Frame Begin" marker are skipped), so visual.cpuMs and visual.gpuMs are null and areas is empty: nothing was measured, which does not mean rendering is free. Capture for longer, and check the window is visible and not minimized.`,
+    );
+  }
+  if (visual !== null && visual.truncatedFrames > 0) {
+    const effect =
+      visual.stoppedAt === null
+        ? 'Those frames can show up in frameMs.max, worstFrame and slowFrames, and lower fps.'
+        : `It kept happening, so visual profiling was switched off ${visual.stoppedAt} s into the capture: the render stages only cover the frames before that, and the slowed frames around that point inflate frameMs.max, worstFrame and slowFrames, lower fps a little, and show in the timeline interval they fall in.`;
+    warnings.push(
+      `${visual.truncatedFrames} of ${visual.frames} rendered frames ran out of render timestamp slots: their later render stages are missing, and the engine logged an error for every lost marker, which made those frames several times slower. ${effect} Those errors in get_debug_output come from this capture, not from the game, and they can push earlier lines out of it. ${TIMESTAMP_OVERFLOW_FIX}`,
+    );
+  }
+  warnings.push(...trackWarnings(result.timeline ?? null));
+  warnings.push(...unmeasuredWarnings(result));
+  return warnings;
+}
+
+// `timeline.trackError` sits at the end of a long payload, so a truncating client would miss it; an all-null track is as empty as a failed one.
+function trackWarnings(timeline: ProfileResult['timeline']): string[] {
+  if (timeline === null || timeline.track.length === 0) return [];
+  if (timeline.trackError !== null) {
+    return [`The tracked values are missing: ${timeline.trackError}.`];
+  }
+  const placed = timeline.buckets
+    .map((bucket) => bucket.track)
+    .filter((values): values is Record<string, unknown> => values !== null);
+  if (placed.length === 0) {
+    return [
+      'No track sample landed on a timeline interval, so every interval has track: null. Capture for longer than one sampling interval.',
+    ];
+  }
+  const unresolved = timeline.track.filter((spec) =>
+    placed.every((values) => values[spec] === null || values[spec] === undefined),
+  );
+  if (unresolved.length === 0) return [];
+  return [
+    `Track entries null in every interval: ${unresolved.join(', ')}. The node path or property probably does not resolve - use an absolute path from /root, e.g. "/root/Main/Player:global_position".`,
+  ];
+}
+
+// A timeline interval's other nulls are per interval by design and would bury everything else; `drawCalls` is the exception.
+function unmeasuredWarnings(result: ProfileResult): string[] {
+  const warnings: string[] = [];
+  if (result.fps === null) {
+    warnings.push(
+      'fps is null: the folded frames span no measurable time (fewer than two of them, or all of them arriving at once), so there is no rate to compute. Capture for longer.',
+    );
+  }
+  if (result.monitors === null) {
+    warnings.push(
+      'monitors is null: no monitor sample arrived while the capture was open. The engine sends one a second, so capture for two seconds or more.',
+    );
+  } else {
+    const monitors = result.monitors;
+    const missing = MONITOR_NAMES.filter((name) => monitors[name] === null);
+    if (missing.length > 0) {
+      warnings.push(`Monitors with no finite sample, reported as null: ${missing.join(', ')}.`);
+    }
+    if (monitors.pipelineCompilations === null) {
+      warnings.push(
+        'monitors.pipelineCompilations is null: no sample carried the pipeline compilation monitors, which Godot sends from 4.4 on. Nothing was measured, not zero compilations.',
+      );
+    } else if (monitors.pipelineCompilations.duringCapture === null) {
+      warnings.push(
+        'monitors.pipelineCompilations.duringCapture is null: a single monitor sample with none before it leaves nothing to count the growth from, so only the running total is known. Capture for two seconds or more.',
+      );
+    }
+  }
+  // A capture with no usable render frame already says nothing was measured.
+  if (result.visual !== null && result.visual.frames > 0 && result.visual.gpuTimed === false) {
+    warnings.push(
+      'GPU times are null (visual.gpuMs, every areas[].gpuMs, worstFrame.gpuMs and timeline render.gpuMs): every GPU timestamp the renderer sent was 0, which is what a renderer that does not time GPU work sends (GLES and web builds of the Compatibility renderer). GPU cost was not measured, which does not mean it is zero. The CPU times are measured.',
+    );
+  }
+  if (result.visual !== null && result.visual.frames > 0 && result.visual.hardware === null) {
+    warnings.push(
+      'visual.hardware is null: the engine sent no CPU/GPU description for this session, so it is unknown, not absent.',
+    );
+  }
+  const timeline = result.timeline;
+  if (timeline !== null) {
+    const noSample = timeline.buckets.filter((bucket) => bucket.drawCalls === null).length;
+    if (noSample > 0) {
+      warnings.push(
+        `timeline drawCalls is null in ${noSample} of ${timeline.buckets.length} intervals: the engine samples its monitors once a second, so an interval shorter than that can hold none. It is not carried over from the interval before, because a draw call count is one frame's value. Use timelineMs of 1000 or more, or read monitors.drawCallsInFrame for the whole capture.`,
+      );
+    }
+  }
+  return warnings;
+}
+
+function widenedTimelineWarning(
+  requestedMs: number | undefined,
+  actualMs: number | null | undefined,
+  seconds: number,
+): string[] {
+  if (requestedMs === undefined || actualMs === null || actualMs === undefined) return [];
+  if (actualMs <= requestedMs) return [];
+  return [
+    `The timeline uses ${actualMs} ms intervals, not the requested ${requestedMs} ms: it holds about ${MAX_TIMELINE_BUCKETS} intervals, and ${seconds} s needs wider ones. Capture fewer seconds for finer intervals.`,
+  ];
+}
+
+// `leadWithWarnings` puts the list ahead of everything else so a client that cuts a long result short still shows it.
+function profilerResponse(
+  projectPath: string,
+  payload: ProfileResult | ProfileStartResult,
+  handlerWarnings: string[],
+): HandlerResult {
+  const own = 'warnings' in payload ? (payload.warnings ?? []) : [];
+  return createStructuredResponse(
+    leadWithWarnings({ projectPath, ...payload, warnings: [...own, ...handlerWarnings] }),
+  );
+}
+
+function profilerFailure(error: unknown, extraSolutions: string[] = []): ToolResponse {
   const message = getErrorMessage(error);
   if (!(error instanceof ProfilerError)) {
     return createErrorResponse(`Profiling failed: ${message}`, [
@@ -271,7 +878,10 @@ function profilerFailure(error: unknown): ToolResponse {
   const solutions: Record<ProfilerError['code'], string[]> = {
     bad_args: ['Pass values inside the documented ranges'],
     profile_busy: ['Call stop_profiler to close the running capture first'],
-    profile_not_started: ['Call start_profiler first, or profile_project for a one-shot capture'],
+    profile_not_started: [
+      'Call start_profiler first, or profile_project for a one-shot capture',
+      'A capture started on another project is read while that project is current: switch_project back to it, then call stop_profiler',
+    ],
     profile_timeout: [
       'Godot only emits profiler frames while it renders - make sure the window is not minimized or paused',
       'Check get_debug_output for runtime errors',
@@ -289,10 +899,8 @@ function profilerFailure(error: unknown): ToolResponse {
       'Report the Godot version - check_project returns it',
     ],
   };
-  return createErrorResponse(message, solutions[error.code]);
+  return createErrorResponse(message, [...extraSolutions, ...solutions[error.code]]);
 }
-
-// --- Handlers ---
 
 export async function handleProfileProject(
   runner: GodotRunner,
@@ -308,21 +916,75 @@ export async function handleProfileProject(
   if (!top.ok) return top;
   const sort = parseSort(args);
   if (!sort.ok) return sort;
+  const options = parseCaptureOptions(args);
+  if (!options.ok) return options;
 
-  const profiler = requireProfiler(runner);
-  if (!profiler.ok) return profiler;
+  // The session the gate read is the one every command below reaches.
+  return runSessionExclusive(runner, 'profile_project', async () => {
+    const profiler = requireProfiler(runner);
+    if (!profiler.ok) return profiler;
+    const { profiler: receiver, projectPath } = profiler.value;
 
-  try {
-    const result = await profiler.value.captureWindow(
-      seconds.value ?? DEFAULT_WINDOW_SECONDS,
-      top.value,
-      sort.value,
-      captureLimit.value ?? CAPTURE_LIMIT_MAX,
+    const windowSeconds = seconds.value ?? DEFAULT_WINDOW_SECONDS;
+    const limit = captureLimit.value ?? CAPTURE_LIMIT_MAX;
+    const { options: capture, requestedTimelineMs } = options.value;
+    const startable = checkCanStart(
+      receiver,
+      windowSeconds,
+      limit,
+      capture,
+      PROFILE_WINDOW_MAX_SECONDS,
     );
-    return createStructuredResponse({ ...result });
-  } catch (error: unknown) {
-    return err(profilerFailure(error));
-  }
+    if (!startable.ok) return startable;
+    // The worst case of this window: the receiver's waits, the window itself and the track commands either side.
+    const unusedWindowMs = (PROFILE_WINDOW_MAX_SECONDS - windowSeconds) * MS_PER_SECOND;
+    const charged = chargeQueueWait(runner, 'profile_project', {
+      kind: 'fixed',
+      worstCaseMs: PROFILE_PROJECT_WORST_CASE_MS - unusedWindowMs,
+    });
+    if (!charged.ok) return charged;
+    tracksHeldForReRead.delete(receiver);
+    trackNonFiniteWarnings.delete(receiver);
+    const tracking = await startTrack(
+      runner,
+      capture.track,
+      windowSeconds,
+      capture.timelineMs ?? DEFAULT_TIMELINE_MS,
+    );
+    if (!tracking.ok) return tracking;
+
+    try {
+      const result = await receiver.captureWindow(
+        windowSeconds,
+        top.value,
+        sort.value,
+        limit,
+        capture,
+        trackCollector(runner, receiver),
+      );
+      return profilerResponse(projectPath, result, [
+        ...captureWarnings(result, trackNonFiniteWarnings.get(receiver) ?? null),
+        ...widenedTimelineWarning(requestedTimelineMs, result.timeline?.bucketMs, windowSeconds),
+      ]);
+    } catch (error: unknown) {
+      if (capture.track.length > 0) await collectTrack(runner, receiver);
+      // The window closed the capture out when the connection dropped; the folded frames are still there.
+      const partial =
+        error instanceof ProfilerError &&
+        error.code === 'profile_disconnected' &&
+        receiver.hasFrames;
+      return err(
+        profilerFailure(
+          error,
+          partial
+            ? [
+                'The frames folded before the exit are kept: call stop_profiler to read them as an incomplete capture (complete: false)',
+              ]
+            : [],
+        ),
+      );
+    }
+  });
 }
 
 export async function handleStartProfiler(
@@ -335,19 +997,42 @@ export async function handleStartProfiler(
   if (!seconds.ok) return seconds;
   const captureLimit = optionalNumber(args, 'captureLimit');
   if (!captureLimit.ok) return captureLimit;
+  const options = parseCaptureOptions(args);
+  if (!options.ok) return options;
 
-  const profiler = requireProfiler(runner);
-  if (!profiler.ok) return profiler;
+  // The session the gate read is the one every command below reaches.
+  return runSessionExclusive(runner, 'start_profiler', async () => {
+    const profiler = requireProfiler(runner);
+    if (!profiler.ok) return profiler;
+    const { profiler: receiver, projectPath } = profiler.value;
 
-  try {
-    const result = await profiler.value.start(
-      seconds.value ?? DEFAULT_MAX_SECONDS,
-      captureLimit.value ?? CAPTURE_LIMIT_MAX,
+    const maxSeconds = seconds.value ?? DEFAULT_MAX_SECONDS;
+    const limit = captureLimit.value ?? CAPTURE_LIMIT_MAX;
+    const { options: capture, requestedTimelineMs } = options.value;
+    const startable = checkCanStart(receiver, maxSeconds, limit, capture, PROFILE_MAX_SECONDS);
+    if (!startable.ok) return startable;
+    tracksHeldForReRead.delete(receiver);
+    trackNonFiniteWarnings.delete(receiver);
+    const tracking = await startTrack(
+      runner,
+      capture.track,
+      maxSeconds,
+      capture.timelineMs ?? DEFAULT_TIMELINE_MS,
     );
-    return createStructuredResponse({ ...result });
-  } catch (error: unknown) {
-    return err(profilerFailure(error));
-  }
+    if (!tracking.ok) return tracking;
+
+    try {
+      const result = await receiver.start(maxSeconds, limit, capture);
+      return profilerResponse(
+        projectPath,
+        result,
+        widenedTimelineWarning(requestedTimelineMs, result.timelineMs, maxSeconds),
+      );
+    } catch (error: unknown) {
+      if (capture.track.length > 0) await collectTrack(runner, receiver);
+      return err(profilerFailure(error));
+    }
+  });
 }
 
 export async function handleStopProfiler(
@@ -361,13 +1046,40 @@ export async function handleStopProfiler(
   const sort = parseSort(args);
   if (!sort.ok) return sort;
 
-  const profiler = requireProfiler(runner);
-  if (!profiler.ok) return profiler;
+  // The session the gate read is the one every command below reaches.
+  return runSessionExclusive(runner, 'stop_profiler', async () => {
+    const profiler = requireProfiler(runner);
+    if (!profiler.ok) return profiler;
+    const { profiler: receiver, projectPath } = profiler.value;
 
-  try {
-    const result = await profiler.value.stop(top.value, sort.value);
-    return createStructuredResponse({ ...result });
-  } catch (error: unknown) {
-    return err(profilerFailure(error));
-  }
+    // One track_stop per call at most; a track an earlier failed stop took is handed over, not asked for again.
+    const held = tracksHeldForReRead.get(receiver);
+    let collecting: Promise<TrackOutcome> | null = null;
+    const collect: TrackCollector = () =>
+      (collecting ??=
+        held === undefined ? collectTrack(runner, receiver) : Promise.resolve(held)).then(
+        (outcome) => {
+          trackNonFiniteWarnings.set(receiver, outcome.nonFiniteWarning ?? null);
+          return outcome;
+        },
+      );
+
+    try {
+      const result = await receiver.stop(top.value, sort.value, collect);
+      tracksHeldForReRead.delete(receiver);
+      return profilerResponse(
+        projectPath,
+        result,
+        captureWarnings(result, trackNonFiniteWarnings.get(receiver) ?? null),
+      );
+    } catch (error: unknown) {
+      // A failed stop must not leave the bridge sampling a track nobody reads; the answer is kept for the stop that re-reads the capture.
+      // A session no longer current is left sampling: its track is still there for a later stop.
+      if (stopReachedACapture(error)) {
+        const outcome = await collect();
+        if (outcome.error !== TRACK_OWNER_NOT_CURRENT) tracksHeldForReRead.set(receiver, outcome);
+      }
+      return err(profilerFailure(error));
+    }
+  });
 }

@@ -1,29 +1,27 @@
-/**
- * Shared paths to the committed Godot fixture project.
- *
- * Tests should import these instead of redoing the
- * fileURLToPath/dirname/join dance in every spec file.
- */
-
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Absolute path to tests/fixtures/godot-project. */
 export const fixtureProjectPath = join(here, '..', 'fixtures', 'godot-project');
 
-/** Absolute path to tests/fixtures/godot-profiling-project (hot _process loop). */
+/** Files shaped the way the Godot editor writes them; copy it before mutating. */
+export const authoredFixtureProjectPath = join(here, '..', 'fixtures', 'godot-authored-project');
+
 export const profilingFixtureProjectPath = join(here, '..', 'fixtures', 'godot-profiling-project');
 
-/** Scene path *relative to the project root*: matches the MCP tool contract. */
 export const fixtureScenePath = 'main.tscn';
 
-/** Absolute path to the fixture's main.tscn. */
 export const fixtureSceneAbsPath = join(fixtureProjectPath, fixtureScenePath);
 
-/** Probe scene for the simulate_input integration tests (sibling of main.tscn). */
 export const inputProbeScenePath = 'input_probe.tscn';
 
-/** Absolute path to the fixture's input_probe.tscn. */
 export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePath);
+
+export const blankScenePath = 'blank.tscn';
+
+export const blankSceneAbsPath = join(fixtureProjectPath, blankScenePath);
+
+export const motionAnimatedScenePath = 'motion_animated.tscn';
+
+export const motionStaticScenePath = 'motion_static.tscn';

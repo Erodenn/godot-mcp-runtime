@@ -9,7 +9,7 @@ npm install
 npm run build
 ```
 
-Set `GODOT_PATH` to your Godot 4.x executable for runtime tests and manual exercises. Optionally set `GODOT_MONO_PATH` to a Godot .NET build to also run the opt-in C# attach-script test (see `tests/README.md`).
+Set `GODOT_PATH` to your Godot 4.5 or later executable for runtime tests and manual exercises. Optionally set `GODOT_MONO_PATH` to a Godot .NET build to also run the opt-in C# attach-script test (see `tests/README.md`).
 
 ### Local MCP client wiring
 
@@ -62,6 +62,23 @@ Run `npm run install-hooks` once per clone. The pre-commit hook formats staged f
 
 See `tests/README.md` for the test layout, the rubric on when/what/how to test, and the coverage map. `npm run verify` is the single entrypoint - it runs the suite plus typecheck, lint, format, and build in the same order CI does, applying formatting rather than checking it. Set `GODOT_PATH` (e.g. `GODOT_PATH=/path/to/godot npm run verify`) to also run the Godot integration tests; without it those tests skip cleanly.
 
+The integration suite hides game windows by default. Set `GODOT_MCP_TEST_SHOW_WINDOWS=1` to watch them.
+
+On Windows the suite compiles a small helper from `tests/helpers/private-desktop-launcher.cs` on first run (cached under `node_modules/.cache`) and starts every Godot process on a private desktop, so test runs do not take keyboard focus. `GODOT_MCP_TEST_SHOW_WINDOWS=1` turns this off. When the compiler is unavailable the suite falls back to hidden windows, which can still take focus. Anything a game pops up (a dialog, a crash box) appears on the private desktop where it cannot be seen, so a test that hangs under the launcher should be re-run with the opt-out. Details are in `tests/README.md`.
+
+## Comments
+
+The default is no comment. Names, types and structure carry the meaning, and a comment earns its place only by stating what the code cannot: a hazard (ordering, lifetime, timing, a platform difference, units), an external contract (a Godot, Node or MCP SDK quirk, a wire format), or a reason whose absence invites a wrong fix. This applies to TypeScript and GDScript under `src/` and `tests/` alike.
+
+- **One line.** A second line needs a real footgun. Anything longer belongs in `docs/architecture.md`, with at most a one-line pointer in the code. No comment run is longer than two lines.
+- **Never write:** narration of what the code or a name already says, walkthroughs of branches, file-header essays, section banners, history or provenance ("was", "previously", "now that", an issue or PR number as the whole reason), lists of callers, readers or writers, or planning labels of any kind.
+- **JSDoc** on an exported symbol is one line unless the contract carries a hazard. A declaration is not a reason to comment it.
+- **Keep:** `KEEP IN SYNC` markers (one line on each side, naming the other side), the one-line reason on an `eslint-disable`, and in a test the one-line derivation of a hand-computed expected value.
+- **Not comments:** tool `description` strings and per-property descriptions are product text, and this section does not apply to them.
+- **Stale comments:** when you edit near one, delete it rather than rewriting it.
+
+The pre-commit hook runs `scripts/comment-share.js` over the staged diff and prints a warning when a file adds a comment run longer than two lines, or when comments are more than 30% of the lines it adds (with at least four comment lines). It only warns and never blocks the commit.
+
 ## Architectural invariants
 
 These rules are not all encodable in the linter, but they hold across the codebase. Changes that violate them should be flagged in review.
@@ -78,13 +95,13 @@ ESLint enforces this via `no-console` with `["error", "warn"]` allowed.
 
 ### Mutation operations auto-save
 
-Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_properties`, `delete_nodes`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too - `batch_scene_operations` auto-saves any unsaved scenes at the end of the loop.
+Every operation that mutates a scene (`add_node`, `load_sprite`, `set_node_properties`, `delete_nodes`, `attach_script`, etc.) saves the scene before returning. The `save_scene` operation exists only for save-as (`newPath`) or re-canonicalization. This applies to batch operations too - after the loop, `batch_scene_operations` saves each scene an operation succeeded on and no `save` item has written since. A scene nothing changed is not rewritten.
 
 Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `parseProjectArgs` / `parseSceneArgs` / `parseNodePath` from `src/utils/arg-parsing.ts`, each returning `Result<T, ToolResponse>`. `parseProjectArgs` rejects `..` and verifies `project.godot` exists. `parseSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`, and always requires `scenePath` to be present (pass `{ requireExists: false }` to opt out of the on-disk existence check, e.g. for `create_scene`). For scene-tree node paths (e.g. `root/Player`), use `parseNodePath` / `parseRequiredNodePath` / `parseOptionalNodePath` - they allow the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` - route through these parsers so the rules stay centralized.
+All handlers validate paths through `parseProjectArgs` / `parseSceneArgs` / `parseNodePath` from `src/utils/arg-parsing.ts`, each returning `Result<T, ToolResponse>`. `parseProjectArgs` rejects a `..` segment in the project directory and verifies `project.godot` exists. `parseSceneArgs` additionally resolves `scenePath` through `resolveProjectPath` and returns the resolved path alongside the project-relative one, and always requires `scenePath` to be present (pass `{ requireExists: false }` to opt out of the on-disk existence check, e.g. for `create_scene`). For scene-tree node paths (e.g. `root/Player`), use `parseNodePath` / `parseRequiredNodePath` / `parseOptionalNodePath` - they allow the relative-path style that `resolveProjectPath` rejects. Any other project sub-path a tool accepts goes through `resolveProjectPath` (`src/utils/path-validation.ts`), which takes a required `'read'` or `'write'` intent (a call site that cannot say which is a write) and returns `relPath` for GDScript, `absPath` for fs calls and `resPath` for `project.godot` and the Godot command line. Inside a project, containment is decided by resolving the path, not by its shape: a `..` that stays inside is accepted, and a path that resolves outside, has a name ending in a dot or a space or a Windows device name (`NUL`, `con.txt`), or carries a colon past the drive prefix is refused. A `'write'` path whose real location leaves the project through a symlink or junction is refused too, while a `'read'` path follows the link, so a project can link in shared assets. Every path field of a `batch_scene_operations` item goes through it. Refusals use the shared wording `projectSubPathError` and `PROJECT_SUB_PATH_SOLUTIONS`. Don't construct paths ad hoc with `path.join` - route through these parsers so the rules stay centralized.
 
 ### Error responses use `Result<HandlerResult, ToolResponse>`
 
@@ -100,13 +117,13 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 
 The gate emits a three-tier decision:
 
-- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
-- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
+- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`/`create_instance`), native libraries (`GDExtensionManager.load_extension`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `GDScript.new`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). A reflective call with a literal method name is judged as the call it makes, after its escapes are decoded and any dispatch it names is followed, so `OS.call("execute", ...)` and `OS.call("call", "\u0065xecute")` are blocked like `OS.execute(...)`. Server rejects without forwarding.
+- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`), a guarded singleton used as a value (`var o = OS`), `source_code`, `instance_from_id`, `JavaScriptBridge.eval`, and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
 - **Tier 3: warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
 
 `GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch - MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
 
-`GODOT_MCP_DISABLE_ELICITATION=true` is the opposite escape hatch, for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds fail-open: `run_project`'s launch gate is bypassed and Tier 2 `run_script` findings run with a warning (audited as `elicit_bypassed`). Tier 1 hard blocks are unaffected. When both flags are set, strict mode wins and `GODOT_MCP_DISABLE_ELICITATION` is ignored.
+`GODOT_MCP_DISABLE_ELICITATION=true` is the opposite escape hatch, for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds fail-open: the launch gate shared by `run_project` and `render_movie` is bypassed and Tier 2 `run_script` findings run with a warning (audited as `elicit_bypassed`). Tier 1 hard blocks are unaffected. When both flags are set, strict mode wins and `GODOT_MCP_DISABLE_ELICITATION` is ignored.
 
 `GODOT_MCP_DISABLE_SECURITY=true` turns the whole gate off: no scan, no tier decision, no elicitation, no warnings, no sidecar, for both handlers. Tier 1 is included, unlike the elicitation opt-out. It outranks both flags above, which is the reverse of the strict/disable-elicitation precedence - a flag whose purpose is turning the gate off would be useless if a stricter flag outranked it. Enabling it is an operator's decision, not an agent's.
 
@@ -116,9 +133,9 @@ When adding a new tool that forwards GDScript to the bridge, route it through th
 
 ### MCP SDK: `Server` vs `McpServer`
 
-`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our ~30 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" - that's us.
+`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our 39 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" - that's us.
 
-The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is planned post-v3.
+The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is not scheduled.
 
 ## Adding a new tool
 
@@ -129,7 +146,7 @@ The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a
    - Call the runner
    - Return `ok(...)` on success or `err(createErrorResponse(...))` on failure (`src/utils/result.ts`)
 3. Export the handler and add an entry mapping the tool name to the handler in the `toolDispatch` table in `src/dispatch.ts`.
-4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_init()`.
+4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_run_from_cmdline()`.
 5. Add a unit test for any pure helper logic; add an integration test if the tool touches scene files.
 
 ## Modifying an existing tool
@@ -138,22 +155,23 @@ Tool descriptions ship on every handshake - they are the entire UI an agent sees
 
 ## Release process
 
-1. Bump version in `package.json` and `src/index.ts`
+1. Bump version in `package.json`, `src/index.ts` and `server.json` (both its top-level `version` and `packages[].version`)
 2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
-3. Commit and push to `main`
-4. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
+3. Write `.github/release-notes/vX.Y.Z.md` when the release has something a human should read (new tools, changed behavior, a migration). The publish job prepends it above the generated notes.
+4. Commit and push to `main`
+5. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
 Docker CI runs automatically on push and PR to `main`.
 
 ## Known limitations
 
-### Headless mode initializes all autoloads
+### Headless mode loads all autoloads
 
-When Godot runs headlessly, it initializes every registered autoload. A broken autoload (syntax error, missing resource, display-dependent code) crashes the headless process before the operation runs. The runner detects this and surfaces a descriptive error pointing at `list_autoloads` / `remove_autoload`. Use the dedicated autoload tools - they edit `project.godot` directly and need no Godot process.
+When Godot runs headlessly, it loads every registered autoload. The operation is dispatched before any autoload's `_ready`, so an autoload that only errors or quits in `_ready` does not affect it. One that stops the engine before dispatch (a `quit()` in `_init`, for example) fails every headless operation. The runner detects this and surfaces a descriptive error pointing at `list_autoloads` / `remove_autoload`. Use the dedicated autoload tools - they edit `project.godot` directly and need no Godot process.
 
 ### `breakpoint` is a no-op
 
-`run_project` spawns Godot without `-d` so runtime errors don't pause the engine and stall the McpBridge. The trade-off is that the `breakpoint` keyword in user code does nothing - there's no debugger attached. Use `print()` and `get_debug_output` instead.
+`run_project` spawns Godot without `-d` so runtime errors don't pause the engine and stall the McpBridge. The trade-off is that the `breakpoint` keyword in user code does nothing - there's no debugger attached. With `profiling: true` the engine's remote debugger is attached, and the server answers every break with `continue`, so the keyword still does not pause the game. Use `print()` and `get_debug_output` instead.
 
 ## Questions
 

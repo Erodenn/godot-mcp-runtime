@@ -6,6 +6,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     globals: true,
+    // Windows only: starts every Godot process on a private desktop so a test
+    // run cannot take keyboard focus. See tests/helpers/private-desktop.ts.
+    globalSetup: ['tests/helpers/private-desktop-global-setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

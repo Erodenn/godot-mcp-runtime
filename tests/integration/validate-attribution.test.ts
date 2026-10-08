@@ -1,0 +1,142 @@
+/** Godot reports a script's parse error against its simplified res:// path, so a target written another way ("./a.gd", a backslash, a directory with a space) matched no diagnostic. */
+
+import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
+import { cpSync, mkdirSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { randomBytes } from 'crypto';
+import { itGodot } from '../helpers/godot-skip.js';
+import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { handleValidate } from '../../src/tools/validate-tools.js';
+
+const CASE_TIMEOUT_MS = 120000;
+
+const BROKEN_SCRIPT = 'extends Node\nfunc broken(\n\t# unclosed parameter list\n';
+const ABSTRACT_SCRIPT = '@abstract\nclass_name AttributionAbstractProbe\nextends Node\n';
+const ABSTRACT_BROKEN_SCRIPT =
+  '@abstract\nclass_name AttributionAbstractBroken\nextends Node\nfunc broken(\n\t# unclosed parameter list\n';
+
+interface BatchEntry {
+  target: string;
+  valid: boolean;
+  errors: Array<{ message: string; line?: number }>;
+}
+
+let runner: GodotRunner;
+let projectPath: string;
+const tmpDirs: string[] = [];
+
+beforeAll(async () => {
+  runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
+  await runner.detectGodotPath();
+});
+
+beforeEach(() => {
+  projectPath = join(tmpdir(), `godot-mcp-validate-${randomBytes(6).toString('hex')}`);
+  cpSync(fixtureProjectPath, projectPath, { recursive: true });
+  tmpDirs.push(projectPath);
+});
+
+afterAll(() => {
+  for (const dir of tmpDirs) {
+    try {
+      removeTmpDir(dir);
+    } catch {}
+  }
+});
+
+async function validateScriptTarget(scriptPath: string): Promise<BatchEntry> {
+  const result = await handleValidate(runner, {
+    projectPath,
+    targets: [{ scriptPath }],
+  });
+  const payload = expectMatchesOutputSchema('validate', result);
+  const results = payload.results as BatchEntry[];
+  expect(results).toHaveLength(1);
+  return results[0]!;
+}
+
+describe('validate batch attribution against a real engine', () => {
+  itGodot(
+    'a script with a parse error is invalid when its path is written ./name.gd',
+    async () => {
+      writeFileSync(join(projectPath, 'broken.gd'), BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('./broken.gd');
+      expect(entry.target).toBe('./broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'the same script is invalid when its path is written with a backslash',
+    async () => {
+      mkdirSync(join(projectPath, 'sub'), { recursive: true });
+      writeFileSync(join(projectPath, 'sub', 'broken.gd'), BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('sub\\broken.gd');
+      expect(entry.target).toBe('sub\\broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'the same script under a directory with a space is invalid',
+    async () => {
+      mkdirSync(join(projectPath, 'my scripts'), { recursive: true });
+      writeFileSync(join(projectPath, 'my scripts', 'broken.gd'), BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('my scripts/broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'an @abstract script without errors is valid',
+    async () => {
+      writeFileSync(join(projectPath, 'abstract_probe.gd'), ABSTRACT_SCRIPT);
+      const entry = await validateScriptTarget('abstract_probe.gd');
+      expect(entry.valid).toBe(true);
+      expect(entry.errors).toEqual([]);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // The verdict for an abstract script does not rest on whether this engine version lets one be instantiated.
+  itGodot(
+    'an @abstract script with a parse error is invalid',
+    async () => {
+      writeFileSync(join(projectPath, 'abstract_broken.gd'), ABSTRACT_BROKEN_SCRIPT);
+      const entry = await validateScriptTarget('abstract_broken.gd');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors.length).toBeGreaterThan(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // A scriptPath that loads as something other than a GDScript is checked by nothing; "it loaded" is not valid: true.
+  itGodot(
+    'a scriptPath that does not load as a GDScript is not reported valid, in a batch or alone',
+    async () => {
+      const entry = await validateScriptTarget('main.tscn');
+      expect(entry.valid).toBe(false);
+      expect(entry.errors).toHaveLength(1);
+      expect(entry.errors[0]?.message).toMatch(/^Not validated: main\.tscn loaded as PackedScene/);
+
+      const single = expectMatchesOutputSchema(
+        'validate',
+        await handleValidate(runner, { projectPath, scriptPath: 'main.tscn' }),
+      );
+      expect(single.valid).toBe(false);
+      const singleErrors = single.errors as Array<{ message: string }>;
+      expect(singleErrors[0]?.message).toMatch(/^Not validated: main\.tscn loaded as PackedScene/);
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
