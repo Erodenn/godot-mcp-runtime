@@ -222,12 +222,12 @@ export async function runLaunchGate(
     scanWarnings.push(message);
     launchSceneFailures.push({ message, noSceneConfigured });
   };
-  // The launch scene is a file kind the scan never reads (.escn, .tres, .res).
+  // A .escn, .tres or .res launch scene is not read, though a .tres or .escn a scene references is.
   // The launch goes ahead with the notice; strict mode refuses it in its own words.
   const unscannedLaunchScenes: string[] = [];
   const failUnscannedLaunchScene = (relPath: string): void => {
     scanWarnings.push(
-      `Not scanned: ${relPath}: the pre-flight scan reads only .tscn scenes; a .tres, .res or .escn launch scene is not read`,
+      `Not scanned: ${relPath}: the pre-flight scan reads a launch scene only when it is a .tscn file; a .tres, .res or .escn launch scene is not read`,
     );
     unscannedLaunchScenes.push(relPath);
   };
@@ -289,7 +289,6 @@ export async function runLaunchGate(
     const scenes: string[] = [];
     if (request.scene) {
       if (isUnscannedLaunchScenePath(request.scene.relPath)) {
-        // The engine runs these as a scene; the scan reads only .tscn files.
         failUnscannedLaunchScene(request.scene.relPath);
         return;
       }
@@ -452,7 +451,7 @@ export async function runLaunchGate(
   if (ctx.strictMode && unscannedLaunchScenes.length > 0) {
     return err(
       createErrorResponse(
-        `Strict mode: refusing to launch project because the launch scene ${unscannedLaunchScenes[0]} is not a .tscn scene, and the pre-flight scan does not read .tres, .res or .escn files, so its scripts were not checked.`,
+        `Strict mode: refusing to launch project because the launch scene ${unscannedLaunchScenes[0]} is not a .tscn scene, and the pre-flight scan does not read a .tres, .res or .escn launch scene, so its scripts were not checked.`,
         ['Launch a .tscn scene instead', STRICT_MODE_IS_OPERATOR_SETTING],
       ),
     );

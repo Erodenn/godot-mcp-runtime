@@ -9,7 +9,7 @@
  * not and cannot defend against an adversary who reads this file (it's open
  * source) and constructs a script the rules don't happen to match. See
  * `docs/security.md` "What this does NOT do" for the specific structural
- * gaps (identifier aliasing/dataflow, inline sub_resource scripts, etc.).
+ * gaps (identifier aliasing/dataflow, scripts in binary resources, etc.).
  *
  * Three tiers:
  *  - Tier 1 (hard_block): server refuses; bridge never sees the script.
@@ -1147,7 +1147,7 @@ export const policyRules: readonly PolicyRule[] = [
       'A non-literal .call on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
     solutions: [
       'Call the method directly by name',
-      'If the receiver is OS/Engine/ClassDB/ProjectSettings/Object, that dedicated rule already governs this call',
+      `If the receiver is ${TIER1_DISPATCH_RECEIVERS.join('/')}, that dedicated rule already governs this call`,
     ],
   },
   {

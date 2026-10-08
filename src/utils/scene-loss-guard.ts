@@ -69,7 +69,7 @@ const SINGLE_EXT_REF_REGEX = /^ExtResource\(\s*"([^"]*)"\s*\)$/;
 const LINE_BREAK_REGEX = /\r\n?/g;
 const WHITESPACE_RUN_REGEX = /\s+/g;
 const QUOTED_ITEM_REGEX = /"((?:[^"\\]|\\.)*)"/g;
-/** The engine's line for a script it could not compile (E11 in the plan this guard came from). */
+/** The engine's line for a script it could not compile. */
 const FAILED_SCRIPT_REGEX = /Failed to load script "([^"]+)"/g;
 
 /** A property of one node, named the way a tool call names it. */

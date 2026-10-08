@@ -105,7 +105,6 @@ describe('resolveLaunchScene', () => {
       kind: 'scenes',
       absPaths: [join(dir, 'main.tscn')],
       notes: [],
-      complete: true,
     });
   });
 
@@ -248,7 +247,6 @@ describe('resolveLaunchScene with a uid:// main scene', () => {
       kind: 'scenes',
       absPaths: [join(dir, 'menu.tscn')],
       notes: [],
-      complete: true,
     });
   });
 
@@ -287,7 +285,6 @@ describe('a uid search that was cut short', () => {
     expect(result).toMatchObject({
       kind: 'scenes',
       absPaths: [join(dir, 'a.tscn')],
-      complete: false,
     });
     const notes = result.kind === 'scenes' ? result.notes.join('\n') : '';
     expect(notes).toMatch(/was cut short/);
@@ -303,13 +300,16 @@ describe('a uid search that was cut short', () => {
     expect(resolveLaunchScene(dir, FILE_CAP)).toMatchObject({
       kind: 'unresolved',
       value: UID_A,
-      searchIncomplete: true,
+      reason: expect.stringMatching(/^the search was cut short .* before a file carrying/),
     });
   });
 
   it('a search that read every file is complete', () => {
     const dir = tmp.makeProject('launch-uid-complete-', mainSceneUid(UID_A));
-    expect(resolveLaunchScene(dir)).toMatchObject({ kind: 'unresolved', searchIncomplete: false });
+    expect(resolveLaunchScene(dir)).toMatchObject({
+      kind: 'unresolved',
+      reason: `no scene or .uid file in the project carries ${UID_A}`,
+    });
   });
 });
 

@@ -9,7 +9,6 @@ import { join } from 'path';
 import {
   collectSceneScripts,
   extractSceneScripts,
-  collectSceneScriptsRecursive,
   scanTscn,
 } from '../../src/utils/scene-parsing.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -66,7 +65,7 @@ describe('extractSceneScripts', () => {
   });
 });
 
-describe('collectSceneScriptsRecursive', () => {
+describe('collectSceneScripts script paths', () => {
   it("collects a child scene's script transitively through a PackedScene reference", () => {
     const dir = tmp.makeProject('subscene-', 'config_version=5\n');
     mkdirSync(join(dir, 'scripts'), { recursive: true });
@@ -100,7 +99,7 @@ describe('collectSceneScriptsRecursive', () => {
       ].join('\n'),
     );
 
-    const result = collectSceneScriptsRecursive(parentScenePath, dir);
+    const result = collectSceneScripts(parentScenePath, dir).scripts;
     expect(result).toContain(join(dir, 'scripts/parent.gd'));
     expect(result).toContain(join(dir, 'scripts/child.gd'));
     expect(result).toHaveLength(2);
@@ -140,7 +139,7 @@ describe('collectSceneScriptsRecursive', () => {
       ].join('\n'),
     );
 
-    const result = collectSceneScriptsRecursive(sceneAPath, dir);
+    const result = collectSceneScripts(sceneAPath, dir).scripts;
     expect(result.sort()).toEqual([join(dir, 'scripts/a.gd'), join(dir, 'scripts/b.gd')].sort());
   });
 
@@ -163,15 +162,15 @@ describe('collectSceneScriptsRecursive', () => {
       ].join('\n'),
     );
 
-    expect(() => collectSceneScriptsRecursive(parentScenePath, dir)).not.toThrow();
-    expect(collectSceneScriptsRecursive(parentScenePath, dir)).toEqual([
+    expect(() => collectSceneScripts(parentScenePath, dir).scripts).not.toThrow();
+    expect(collectSceneScripts(parentScenePath, dir).scripts).toEqual([
       join(dir, 'scripts/parent.gd'),
     ]);
   });
 
   it('returns [] when the root scene file is missing', () => {
     const dir = tmp.makeProject('subscene-root-missing-', 'config_version=5\n');
-    expect(collectSceneScriptsRecursive(join(dir, 'missing.tscn'), dir)).toEqual([]);
+    expect(collectSceneScripts(join(dir, 'missing.tscn'), dir).scripts).toEqual([]);
   });
 });
 
@@ -585,7 +584,7 @@ describe('collectSceneScripts on a scene with malformed statements', () => {
   });
 });
 
-describe('collectSceneScriptsRecursive across multi-line values', () => {
+describe('collectSceneScripts across multi-line values', () => {
   it('finds a script declared after a dictionary that spans lines', () => {
     const dir = tmp.makeProject('scene-scripts-', 'config_version=5\n');
     const scenePath = join(dir, 'main.tscn');
@@ -605,6 +604,6 @@ describe('collectSceneScriptsRecursive across multi-line values', () => {
         '',
       ].join('\n'),
     );
-    expect(collectSceneScriptsRecursive(scenePath, dir)).toEqual([join(dir, 'late.gd')]);
+    expect(collectSceneScripts(scenePath, dir).scripts).toEqual([join(dir, 'late.gd')]);
   });
 });

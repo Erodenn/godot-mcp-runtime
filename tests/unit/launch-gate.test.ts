@@ -540,7 +540,7 @@ describe('runLaunchGate with a launch scene the scan does not read', () => {
       writeFileSync(join(dir, scene), 'not read', 'utf8');
       const warnings = warningsOf(await runLaunchGate(request(dir, scene), makeContext()));
       expect(warnings.filter((w) => w.startsWith('Not scanned:'))).toEqual([
-        `Not scanned: ${scene}: the pre-flight scan reads only .tscn scenes; a .tres, .res or .escn launch scene is not read`,
+        `Not scanned: ${scene}: the pre-flight scan reads a launch scene only when it is a .tscn file; a .tres, .res or .escn launch scene is not read`,
       ]);
 
       const strict = await runLaunchGate(request(dir, scene), makeContext({ strict: true }));

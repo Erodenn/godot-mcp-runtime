@@ -571,7 +571,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // String-name literal: `^"..."`, an opaque string. A `^` followed by
+    // NodePath literal: `^"..."`, an opaque string. A `^` followed by
     // anything else is the XOR operator, and what follows it is ordinary code
     // (`1^OS.execute(...)` must still reach the identifier branch).
     if (ch === '^') {
@@ -622,9 +622,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Identifier or member chain. Build the chain by reading identifier
-    // segments separated by `.` (with no whitespace between identifier and
-    // dot — `foo .bar` is two tokens, but GDScript style is `foo.bar`).
+    // Identifier or member chain: `foo .bar` is one chain, see `readChainTail`.
     if (isIdentStart(ch)) {
       const startLine = line;
       const startCol = colOf(i);

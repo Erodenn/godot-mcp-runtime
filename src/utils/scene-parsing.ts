@@ -725,8 +725,6 @@ export interface InlineSceneScript {
   /** The sub-resource id, or `resource` for the file's own resource. */
   id: string;
   source: string;
-  /** Line of the sub-resource header in the scene file. */
-  line: number;
 }
 
 /** Something the walk met and could not read. */
@@ -849,7 +847,7 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
     const collectInlineScript = (header: TscnHeader, id: string): void => {
       const source = header.stringProps.get(INLINE_SCRIPT_SOURCE_KEY);
       if (source !== undefined) {
-        inlineScripts.push({ scenePath: absScenePath, id, source, line: header.line });
+        inlineScripts.push({ scenePath: absScenePath, id, source });
       } else if (header.rawProps.has(INLINE_SCRIPT_SOURCE_KEY)) {
         // The engine converts any value to source text (`&"..."`), so it compiles what was not read.
         unscanned.push({
@@ -934,9 +932,4 @@ export function extractSceneScripts(scenePath: string, projectDir: string): stri
     result.push(resReferenceToAbs(projectDir, path));
   }
   return result;
-}
-
-/** The `string[]` view of `collectSceneScripts`: every `.gd` path the walk reaches. */
-export function collectSceneScriptsRecursive(scenePath: string, projectDir: string): string[] {
-  return collectSceneScripts(scenePath, projectDir).scripts;
 }

@@ -186,17 +186,17 @@ export const UID_SEARCH_CUT_SHORT_CAUSE = `a limit of ${UID_SCAN_MAX_FILES} file
  * What a launch with no explicit `scene` argument runs. `none`: the project
  * configures no main scene. `unresolved`: it configures one that cannot be
  * turned into a file (a `uid://` nothing in the project carries, or a value
- * that is not a path inside the project); `searchIncomplete` is true when a
- * uid search ended before every file was read, so the scene may exist and was
- * not found. `scenes`: the files to scan, with notes for the caller to
- * surface; more than one file when several carry the same uid, since the
- * engine may load any of them. `complete` is false when the uid search that
- * found them was cut short, so another carrier may exist that is not listed.
+ * that is not a path inside the project); `reason` says when a uid search
+ * ended before every file was read, so the scene may exist and was not found.
+ * `scenes`: the files to scan, with notes for the caller to surface; more
+ * than one file when several carry the same uid, since the engine may load
+ * any of them. A note says when the uid search that found them was cut short,
+ * so another carrier may exist that is not listed.
  */
 export type LaunchScene =
-  | { kind: 'scenes'; absPaths: string[]; notes: string[]; complete: boolean }
+  | { kind: 'scenes'; absPaths: string[]; notes: string[] }
   | { kind: 'none' }
-  | { kind: 'unresolved'; value: string; reason: string; searchIncomplete: boolean };
+  | { kind: 'unresolved'; value: string; reason: string };
 
 /**
  * The scene a launch with no explicit `scene` argument runs: `run/main_scene`
@@ -222,7 +222,7 @@ export function resolveLaunchScene(
       const reason = complete
         ? `no scene or .uid file in the project carries ${main}`
         : `the search was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}) before a file carrying ${main} was found`;
-      return { kind: 'unresolved', value: main, reason, searchIncomplete: !complete };
+      return { kind: 'unresolved', value: main, reason };
     }
     const notes: string[] = [];
     if (paths.length > 1) {
@@ -237,7 +237,7 @@ export function resolveLaunchScene(
         `The search for ${main} was cut short (${UID_SEARCH_CUT_SHORT_CAUSE}): another file may carry it, and was not scanned`,
       );
     }
-    return { kind: 'scenes', absPaths: paths, notes, complete };
+    return { kind: 'scenes', absPaths: paths, notes };
   }
 
   const resolved = resolveProjectPath(projectDir, main, 'read');
@@ -246,8 +246,7 @@ export function resolveLaunchScene(
       kind: 'unresolved',
       value: main,
       reason: 'the value could not be resolved to a file inside the project',
-      searchIncomplete: false,
     };
   }
-  return { kind: 'scenes', absPaths: [resolved.absPath], notes: [], complete: true };
+  return { kind: 'scenes', absPaths: [resolved.absPath], notes: [] };
 }
