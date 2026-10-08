@@ -206,14 +206,14 @@ describe('handleGetSceneDependencies', () => {
     expect(parsed.dependencies).toEqual([]);
   });
 
-  it('reads a scene named with res:// or an absolute path and echoes the caller spelling', async () => {
+  it('reads a scene named with res:// or an absolute path and reports it project-relative', async () => {
     for (const spelling of ['res://main.tscn', join(fixtureProjectPath, 'main.tscn')]) {
       const result = await handleGetSceneDependencies({
         projectPath: fixtureProjectPath,
         scenePath: spelling,
       });
       expect(hasError(result)).toBe(false);
-      expect(parseText<{ scenePath: string }>(result).scenePath).toBe(spelling);
+      expect(parseText<{ scenePath: string }>(result).scenePath).toBe('main.tscn');
     }
   });
 

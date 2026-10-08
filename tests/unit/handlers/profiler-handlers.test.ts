@@ -662,6 +662,78 @@ describe('handleStartProfiler', () => {
 });
 
 describe('handleStopProfiler', () => {
+  it('stops the bridge track when the stop fails', async () => {
+    const fake = createProfilerFake({
+      throws: new ProfilerError('profile_timeout', 'Godot sent no profiler totals'),
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    expectErrorMatching(result, /no profiler totals/);
+    expect(fake.bridge.map((b) => b.command)).toEqual(['track_stop']);
+  });
+
+  // Breaks if the cleanup runs for every failed stop: a stop that found no
+  // capture has no track to end.
+  it('sends no track_stop when the stop found no capture', async () => {
+    const fake = createProfilerFake({
+      throws: new ProfilerError('profile_not_started', 'Start a capture first'),
+    });
+    const result = await handleStopProfiler(fake.asRunner, {});
+
+    expectErrorMatching(result, /Start a capture first/);
+    expect(fake.bridge).toHaveLength(0);
+  });
+
+  // Breaks if the failed stop discards what its track_stop returned, or if
+  // the re-read asks the bridge again: the bridge gives its samples up once.
+  it('hands the track a failed stop took to the stop that re-reads the capture', async () => {
+    const samples = [{ frame: 3, values: { '/root/Main:position': 1 } }];
+    const fake = createProfilerFake({ replies: { track_stop: JSON.stringify({ samples }) } });
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    const handed: unknown[] = [];
+    let attempts = 0;
+    profiler.stop = async (...args: unknown[]) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ProfilerError('profile_timeout', 'Godot sent no profiler totals');
+      }
+      handed.push(await (args[2] as TrackCollector)());
+      return captureResult;
+    };
+
+    expectErrorMatching(await handleStopProfiler(fake.asRunner, {}), /no profiler totals/);
+    unwrap(await handleStopProfiler(fake.asRunner, {}));
+
+    expect(handed).toEqual([{ samples, error: null }]);
+    expect(fake.bridge.map((b) => b.command)).toEqual(['track_stop']);
+  });
+
+  // Breaks if a held track outlives its capture: the next capture on the same
+  // profiler would be handed another capture's samples.
+  it('does not hand a held track to a capture started afterwards', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+    };
+    let attempts = 0;
+    profiler.stop = async (...args: unknown[]) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ProfilerError('profile_timeout', 'Godot sent no profiler totals');
+      }
+      await (args[2] as TrackCollector)();
+      return captureResult;
+    };
+
+    expectErrorMatching(await handleStopProfiler(fake.asRunner, {}), /no profiler totals/);
+    unwrap(await handleStartProfiler(fake.asRunner, { track: ['/root/Main:position'] }));
+    unwrap(await handleStopProfiler(fake.asRunner, {}));
+
+    expect(fake.bridge.map((b) => b.command)).toEqual(['track_stop', 'track_start', 'track_stop']);
+  });
+
   it('returns the top 20 by own time by default', async () => {
     const fake = createProfilerFake();
     const result = await handleStopProfiler(fake.asRunner, {});

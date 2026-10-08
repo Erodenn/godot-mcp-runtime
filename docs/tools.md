@@ -563,7 +563,7 @@ A `checks` array (alongside `scenePath`, or inside a `targets[]` item) adds stru
 
 A parse error carries a `line` only when Godot's stderr includes one, which is not always. A call whose process emitted no result is an error response, not `valid: false`, in every mode.
 
-`targets` cannot be combined with a top-level `scriptPath`, `source`, `scenePath` or `checks`: only the targets would be validated, so the call is an error naming the extra parameter. Put `checks` on the target it belongs to. A target's keys may be written `scriptPath` or `script_path`, `scenePath` or `scene_path`. A target that is not an object, that names none of the three, or whose path is not a string is that target's own `valid: false` with an error naming its index, and the other targets still report.
+A `targets` that is not an array is an error. `targets` cannot be combined with a top-level `scriptPath`, `source`, `scenePath` or `checks`: only the targets would be validated, so the call is an error naming the extra parameter. Put `checks` on the target it belongs to. A target's keys may be written `scriptPath` or `script_path`, `scenePath` or `scene_path`. A target that is not an object, that names none of the three, or whose path is not a string is that target's own `valid: false` with an error naming its index, and the other targets still report.
 
 `scriptPath` checks GDScript. A file that loads as something else (a scene, a resource, a shader, a C# script) is not checked by anything here, so it is reported `valid: false` with one error that starts `Not validated:` and names what it loaded as, never `valid: true`.
 

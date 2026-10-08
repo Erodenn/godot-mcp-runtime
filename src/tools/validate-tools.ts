@@ -21,7 +21,7 @@ import { err } from '../utils/result.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import { VALIDATE_RES_DIR, validateTempDir } from '../utils/artifact-paths.js';
 import { findLiveSessionOnProject, stderrRequestsImport } from '../utils/headless-op.js';
-import { BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
+import { BridgeManager, BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
 
 /**
  * Item schema for the checks[] array. Referenced by both the top-level
@@ -227,16 +227,16 @@ function parseGodotErrors(stderr: string): ValidationError[] {
  * that the runner consumes plus the absolute path the caller cleans up.
  *
  * The file is deleted per call at the two unlinkSync sites below; there is no
- * orphan sweep. It needs no .gdignore of its own — it is handed to Godot as an
- * explicit script_path on a headless run and never resolved through the
- * importer, and .mcp/.gdignore (owned by BridgeManager) covers the subtree
- * whenever this server has run the project.
+ * orphan sweep. `ensureArtifactRoot` runs first, so `.mcp/.gdignore` and the
+ * `.gitignore` entry exist before any `.gd` file lands under `.mcp/`, even in
+ * a project this server has never run a game on.
  */
 function writeTempGdScript(
   projectPath: string,
   source: string,
   prefix: 'validate_temp' | 'validate_batch',
 ): { resPath: string; absPath: string } {
+  BridgeManager.ensureArtifactRoot(projectPath);
   const tempDir = validateTempDir(projectPath);
   mkdirSync(tempDir, { recursive: true });
   const name = `${prefix}_${randomUUID()}.gd`;
@@ -432,8 +432,19 @@ export async function handleValidate(
     );
   }
 
+  // A `targets` that is not an array would fall through to single mode, which
+  // never reads it: the call would validate less than it was asked to.
+  if (args.targets !== undefined && !Array.isArray(args.targets)) {
+    return err(
+      createErrorResponse('targets must be an array of { scriptPath | source | scenePath } items', [
+        'Pass targets as an array, e.g. targets: [{ "scenePath": "main.tscn" }]',
+        'Or remove targets and pass one of scriptPath, source or scenePath',
+      ]),
+    );
+  }
+
   // Batch mode: targets array
-  if (args.targets && Array.isArray(args.targets)) {
+  if (Array.isArray(args.targets)) {
     // The batch branch reads `targets` and nothing else. A single-target
     // parameter passed beside it used to be dropped without a word, so a
     // top-level `checks` came back as targets reported valid with the checks

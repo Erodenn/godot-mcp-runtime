@@ -34,6 +34,7 @@ import {
   timelineBucketMs,
   type CaptureOptions,
   type DebuggerProfiler,
+  type ProfilerErrorCode,
   type ProfileResult,
   type ProfileSort,
   type ProfileStartResult,
@@ -737,11 +738,10 @@ function isTrackSample(value: unknown): value is TrackSample {
   );
 }
 
+type TrackOutcome = Awaited<ReturnType<TrackCollector>>;
+
 /** Stop the bridge's track and hand over what it sampled, or why there is nothing. */
-async function collectTrack(
-  runner: GodotRunner,
-  owner: DebuggerProfiler,
-): Promise<{ samples: TrackSample[] | null; error: string | null }> {
+async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promise<TrackOutcome> {
   // A capture belongs to one session, and sendCommand addresses whichever
   // session is current. Each session has its own profiler, so its identity
   // says whether the current session is still the one that ran this capture.
@@ -781,6 +781,24 @@ async function collectTrack(
  */
 function trackCollector(runner: GodotRunner, owner: DebuggerProfiler): TrackCollector {
   return () => collectTrack(runner, owner);
+}
+
+/**
+ * What a failed stop_profiler took from the bridge when it ended the track,
+ * per profiler. The bridge gives its samples up once, so the stop that
+ * re-reads the capture is handed them from here. A new capture on the same
+ * profiler drops the entry.
+ */
+const tracksHeldForReRead = new WeakMap<DebuggerProfiler, TrackOutcome>();
+
+/** Stop failures raised before any capture was reached, so no track is theirs to end. */
+const STOP_REACHED_NO_CAPTURE: ReadonlySet<ProfilerErrorCode> = new Set([
+  'bad_args',
+  'profile_not_started',
+]);
+
+function stopReachedACapture(error: unknown): boolean {
+  return !(error instanceof ProfilerError && STOP_REACHED_NO_CAPTURE.has(error.code));
 }
 
 /**
@@ -995,6 +1013,7 @@ export async function handleProfileProject(
       PROFILE_WINDOW_MAX_SECONDS,
     );
     if (!startable.ok) return startable;
+    tracksHeldForReRead.delete(receiver);
     const tracking = await startTrack(
       runner,
       capture.track,
@@ -1064,6 +1083,7 @@ export async function handleStartProfiler(
     const { options: capture, requestedTimelineMs } = options.value;
     const startable = checkCanStart(receiver, maxSeconds, limit, capture, PROFILE_MAX_SECONDS);
     if (!startable.ok) return startable;
+    tracksHeldForReRead.delete(receiver);
     const tracking = await startTrack(
       runner,
       capture.track,
@@ -1104,10 +1124,29 @@ export async function handleStopProfiler(
     if (!profiler.ok) return profiler;
     const { profiler: receiver, projectPath } = profiler.value;
 
+    // One track_stop per call at most: the capture's own collection and the
+    // cleanup below share it, and a track an earlier failed stop already took
+    // is handed over instead of asked for again.
+    const held = tracksHeldForReRead.get(receiver);
+    let collecting: Promise<TrackOutcome> | null = null;
+    const collect: TrackCollector = () =>
+      (collecting ??= held === undefined ? collectTrack(runner, receiver) : Promise.resolve(held));
+
     try {
-      const result = await receiver.stop(top.value, sort.value, trackCollector(runner, receiver));
+      const result = await receiver.stop(top.value, sort.value, collect);
+      tracksHeldForReRead.delete(receiver);
       return profilerResponse(projectPath, result, captureWarnings(result));
     } catch (error: unknown) {
+      // A stop that failed on a capture must not leave the bridge sampling a
+      // track nobody reads. The handler cannot see whether that capture asked
+      // for one, so it ends whatever its own session's bridge is sampling and
+      // keeps the answer for the stop that re-reads the capture. A stop that
+      // found no capture ends nothing, and a session that is no longer current
+      // is left sampling: its track is still there for a later stop to read.
+      if (stopReachedACapture(error)) {
+        const outcome = await collect();
+        if (outcome.error !== TRACK_OWNER_NOT_CURRENT) tracksHeldForReRead.set(receiver, outcome);
+      }
       return err(profilerFailure(error));
     }
   });

@@ -11,11 +11,12 @@
  * godot-integration job and runs them on Godot 4.5.1 and 4.6.2.
  */
 
-import { describe, beforeAll, expect } from 'vitest';
+import { describe, beforeAll, afterAll, expect } from 'vitest';
 import { resolve } from 'path';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { unwrap } from '../helpers/assertions.js';
+import { copyProjectToTmp, removeTmpDir } from '../helpers/tmp.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
@@ -27,6 +28,14 @@ describe('GodotRunner.executeOperation', () => {
   beforeAll(async () => {
     runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
     await runner.detectGodotPath();
+  });
+
+  const tmpProjects: string[] = [];
+
+  afterAll(() => {
+    for (const dir of tmpProjects.splice(0)) {
+      removeTmpDir(dir);
+    }
   });
 
   describe('validate operation', () => {
@@ -56,8 +65,12 @@ describe('GodotRunner.executeOperation', () => {
         // Godot 4.x reports parse errors to stderr ("SCRIPT ERROR: Parse Error: ...").
         // Depending on whether load() returns non-null, `valid` may be true in some
         // Godot versions: but the errors must always be surfaced in the errors array.
+        // An inline source is written under the project's .mcp/, so this runs
+        // on a copy and the committed fixture stays as it is.
+        const projectPath = copyProjectToTmp(fixtureProjectPath, 'mcp-validate-source-');
+        tmpProjects.push(projectPath);
         const result = await handleValidate(runner, {
-          projectPath: fixtureProjectPath,
+          projectPath,
           source: 'extends Node\nfunc broken(\n  # unclosed paren\n',
         });
 

@@ -143,3 +143,19 @@ describe('tool definitions: snake_case spellings', () => {
     expect(unmapped).toEqual([]);
   });
 });
+
+describe('simulate_input actions property description', () => {
+  const actions = (
+    runtimeToolDefinitions.find((t) => t.name === 'simulate_input')!.inputSchema
+      .properties as Record<string, { description: string }>
+  ).actions.description;
+
+  it('names the action cap and the reduced tail entries', () => {
+    expect(actions).toMatch(/10000 actions/);
+    expect(actions).toMatch(/details_dropped/);
+  });
+
+  it(`stays within ${DESCRIPTION_MAX_CHARS} characters`, () => {
+    expect(actions.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS);
+  });
+});

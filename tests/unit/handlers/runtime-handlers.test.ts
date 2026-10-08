@@ -41,6 +41,7 @@ import {
   BridgeRegistryUnreadableError,
 } from '../../../src/utils/bridge-manager.js';
 import {
+  BridgeDisconnectedError,
   SessionStoppedError,
   StartBudgetExhaustedError,
   type AttachedProbeOutcome,
@@ -543,6 +544,53 @@ describe('handleRunProject validation', () => {
     expectErrorMatching(result, /Could not find a valid Godot executable path/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/GODOT_PATH/);
+  });
+
+  it('never asks for confirmation when no Godot executable can be resolved', async () => {
+    const fake = createRuntimeFake();
+    let prompts = 0;
+    const countingElicitor: Elicitor = async () => {
+      prompts++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const ctx = makeContext({ elicit: countingElicitor });
+    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath }, ctx);
+    expectErrorMatching(result, /Could not find a valid Godot executable path/);
+    expect(prompts).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+  });
+
+  it('never asks for confirmation when no display is available', async () => {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    let prompts = 0;
+    const countingElicitor: Elicitor = async () => {
+      prompts++;
+      return { action: 'accept', content: { confirm: true } };
+    };
+    const ctx = makeContext({ elicit: countingElicitor });
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const { DISPLAY, WAYLAND_DISPLAY } = process.env;
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    delete process.env.DISPLAY;
+    delete process.env.WAYLAND_DISPLAY;
+    try {
+      const result = await handleRunProject(
+        fake.asRunner,
+        { projectPath: fixtureProjectPath },
+        ctx,
+      );
+      expectErrorMatching(result, /No display server available/);
+      const solutionsText = unwrap(result).content[1]?.text ?? '';
+      expect(solutionsText).toMatch(/attach: true/);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      if (DISPLAY !== undefined) process.env.DISPLAY = DISPLAY;
+      if (WAYLAND_DISPLAY !== undefined) process.env.WAYLAND_DISPLAY = WAYLAND_DISPLAY;
+    }
+    expect(prompts).toBe(0);
+    expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+    expect(fake.runProjectCalls()).toBe(0);
   });
 
   it('returns display-unavailable error suggesting attach mode', async () => {
@@ -2403,6 +2451,38 @@ describe('handleRunScript security policy', () => {
     expect(parsed.decision).toBe('warn');
     expect(parsed.tier).toBe(3);
     expect(parsed.findings).toHaveLength(1);
+  });
+
+  it('rewrites the record as not_sent when the send fails before the frame was written', async () => {
+    const dir = tmp.makeProject('run-script-notsent-');
+    const fake = activeFake(dir);
+    fake.setBridgeHook(() => {
+      throw new BridgeDisconnectedError('connection refused', false);
+    });
+    const result = await handleRunScript(fake.asRunner, { script: TIER3_SCRIPT });
+    expect(hasError(result)).toBe(true);
+    const scriptsDir = auditScriptsDir(dir);
+    const sidecars = readdirSync(scriptsDir).filter((f) => f.endsWith('.policy.json'));
+    expect(sidecars).toHaveLength(1);
+    const parsed = JSON.parse(readFileSync(join(scriptsDir, sidecars[0]), 'utf8'));
+    expect(parsed.decision).toBe('not_sent');
+    expect(parsed.admitted_as).toBe('warn');
+  });
+
+  it('keeps the admitted record when the frame was written before the disconnect', async () => {
+    const dir = tmp.makeProject('run-script-written-');
+    const fake = activeFake(dir);
+    fake.setBridgeHook(() => {
+      throw new BridgeDisconnectedError('connection lost', true);
+    });
+    const result = await handleRunScript(fake.asRunner, { script: TIER3_SCRIPT });
+    expect(hasError(result)).toBe(true);
+    const scriptsDir = auditScriptsDir(dir);
+    const sidecars = readdirSync(scriptsDir).filter((f) => f.endsWith('.policy.json'));
+    expect(sidecars).toHaveLength(1);
+    const parsed = JSON.parse(readFileSync(join(scriptsDir, sidecars[0]), 'utf8'));
+    expect(parsed.decision).toBe('warn');
+    expect(parsed.admitted_as).toBeUndefined();
   });
 });
 

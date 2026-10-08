@@ -17,6 +17,7 @@ import {
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import {
+  checkDisplayAvailable,
   resolveProjectPath,
   isUnderDir,
   projectSubPathError,
@@ -69,7 +70,7 @@ import {
   runtimeToolWording,
   type NoSessionWording,
 } from '../utils/session-report.js';
-import { sessionKey } from '../utils/godot-runner.js';
+import { commandWasNotSent, sessionKey } from '../utils/godot-runner.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -459,7 +460,7 @@ export const runtimeToolDefinitions = [
       properties: {
         actions: {
           type: 'array',
-          description: `Array of input actions to execute sequentially. Each object must have a "type" field. A batch whose time budget (its waits and holds, plus every frame it spends counted at 10fps) exceeds ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s is rejected before anything is injected: split it across calls.`,
+          description: `Array of input actions to execute sequentially. Each object must have a "type" field. A batch whose time budget (its waits and holds, plus every frame it spends counted at 10fps) exceeds ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s is rejected before anything is injected: split it across calls. At most 10000 actions per call. When results outgrow one reply (about 4 MiB), later entries keep only index, type, ok, frame, elapsed_ms and error, with details_dropped: true; the action still ran.`,
           items: {
             type: 'object',
             properties: {
@@ -848,7 +849,9 @@ const ELICITATION_OPT_OUT_SOLUTION =
  *
  * `not_sent` is a script the policy admitted that never reached the bridge:
  * the session ended or changed, or the call gave up waiting for its turn,
- * between the policy decision and the send. `admitted_as` then holds what the
+ * between the policy decision and the send, or the send itself failed before
+ * its frame was written (the admitted record is then rewritten in place).
+ * `admitted_as` then holds what the
  * decision would have been (`ok`, `warn`, `elicit_accepted`,
  * `elicit_bypassed`), so a confirmation a person gave is still on record.
  */
@@ -890,7 +893,9 @@ function writeAuditSidecar(
   policy: PolicyDecision,
   strictMode: boolean,
   admittedAs?: AdmittedAuditDecision,
-): void {
+  /** Overwrite this sidecar (and keep its script file) instead of writing a new pair. */
+  rewriteSidecarFile?: string,
+): string | null {
   try {
     const projectRoot = resolve(projectPath);
     const scriptsDir = resolve(auditScriptsDir(projectRoot));
@@ -898,12 +903,12 @@ function writeAuditSidecar(
       logDebug(
         `Sidecar write skipped: resolved script dir ${scriptsDir} escapes projectRoot ${projectRoot}`,
       );
-      return;
+      return null;
     }
     mkdirSync(scriptsDir, { recursive: true });
     const baseName = `${Date.now()}-${randomUUID()}`;
     const scriptFile = join(scriptsDir, `${baseName}.gd`);
-    writeFileSync(scriptFile, script, 'utf8');
+    if (rewriteSidecarFile === undefined) writeFileSync(scriptFile, script, 'utf8');
 
     const sidecar: AuditSidecar = {
       decision,
@@ -919,11 +924,13 @@ function writeAuditSidecar(
       })),
       timestamp: new Date().toISOString(),
     };
-    const sidecarFile = join(scriptsDir, `${baseName}.policy.json`);
+    const sidecarFile = rewriteSidecarFile ?? join(scriptsDir, `${baseName}.policy.json`);
     writeFileSync(sidecarFile, JSON.stringify(sidecar, null, 2), 'utf8');
-    logDebug(`Saved script + policy sidecar to ${scriptFile}`);
+    logDebug(`Saved script + policy sidecar to ${sidecarFile}`);
+    return sidecarFile;
   } catch (error) {
     logDebug(`Failed to write audit sidecar: ${error}`);
+    return null;
   }
 }
 
@@ -1172,9 +1179,7 @@ async function startSpawnedSession(
     resolvedScene = resolved;
   }
 
-  // Every argument is read before the gate: a launch that cannot happen must
-  // never ask a human to confirm it, and must not record the project as
-  // confirmed.
+  // Every argument is read before the gate (see below).
   const bridgePort = parseBridgePortArg(args);
   if (!bridgePort.ok) return bridgePort;
 
@@ -1185,6 +1190,35 @@ async function startSpawnedSession(
   const profiling = optionalBoolean(args, 'profiling');
   if (!profiling.ok) return profiling;
   const isProfiling = profiling.value === true;
+
+  // Everything that can already say no comes before the gate, which asks a
+  // human to confirm: a launch that cannot happen must never ask, and must not
+  // record the project as confirmed.
+  if (!runner.getGodotPath()) {
+    await runner.detectGodotPath();
+    if (!runner.getGodotPath()) {
+      return err(
+        createErrorResponse('Could not find a valid Godot executable path', [
+          'Set GODOT_PATH in your MCP client config to your Godot 4.x executable',
+          'Ensure the path points at the Godot binary, not its installation folder',
+          'On Windows, escape backslashes in JSON (e.g. "D:\\\\Godot\\\\Godot.exe")',
+        ]),
+      );
+    }
+  }
+
+  if (!checkDisplayAvailable()) {
+    return err(
+      createErrorResponse(
+        'Failed to run Godot project: No display server available (DISPLAY and WAYLAND_DISPLAY are both unset). Godot requires a display to run a project window.',
+        [
+          'Use run_project with attach: true and launch Godot yourself',
+          'Set DISPLAY or WAYLAND_DISPLAY environment variables',
+          'Run from a graphical shell session',
+        ],
+      ),
+    );
+  }
 
   const gate = await runLaunchGate(
     {
@@ -1198,19 +1232,6 @@ async function startSpawnedSession(
   );
   if (!gate.ok) return gate;
   const { warnings } = gate.value;
-
-  if (!runner.getGodotPath()) {
-    await runner.detectGodotPath();
-    if (!runner.getGodotPath()) {
-      return err(
-        createErrorResponse('Could not find a valid Godot executable path', [
-          'Set GODOT_PATH in your MCP client config to your Godot 4.x executable',
-          'Ensure the path points at the Godot binary, not its installation folder',
-          'On Windows, escape backslashes in JSON (e.g. "D:\\\\Godot\\\\Godot.exe")',
-        ]),
-      );
-    }
-  }
 
   // The start, the wait for its bridge and the teardown of a start that did
   // not come up are one operation: no other runtime call runs in between, and
@@ -2702,11 +2723,12 @@ export async function handleRunScript(
   // admitted decision when it is about to be sent, `not_sent` when the call
   // ended before that. Written once; nothing when the gate is disabled.
   let audited = false;
+  let admittedSidecarFile: string | null = null;
   const auditAdmitted = (sent: boolean): void => {
     if (admitted === null || audited || !sessionProjectPath) return;
     audited = true;
     if (sent) {
-      writeAuditSidecar(
+      admittedSidecarFile = writeAuditSidecar(
         sessionProjectPath,
         script,
         admitted.decision,
@@ -2723,6 +2745,22 @@ export async function handleRunScript(
         admitted.decision,
       );
     }
+  };
+
+  // The record is written before the send. A send that fails with the frame
+  // never written means the script did not run, so the same record is
+  // rewritten as `not_sent`.
+  const markNotSent = (): void => {
+    if (admitted === null || admittedSidecarFile === null || !sessionProjectPath) return;
+    writeAuditSidecar(
+      sessionProjectPath,
+      script,
+      'not_sent',
+      admitted.policy,
+      ctx.strictMode,
+      admitted.decision,
+      admittedSidecarFile,
+    );
   };
 
   const result = await runSessionExclusive(runner, 'run_script', async () => {
@@ -2756,6 +2794,7 @@ export async function handleRunScript(
       tip,
       warningsFromPolicy,
       wording,
+      markNotSent,
     });
   });
   // Reached without a record only when the script was never sent: the turn
@@ -2775,10 +2814,20 @@ async function executeAdmittedScript(
     tip: string;
     warningsFromPolicy: string[];
     wording: NoSessionWording;
+    /** Called when the send rejected and its frame never reached the bridge. */
+    markNotSent: () => void;
   },
 ): Promise<HandlerResult> {
-  const { script, timeout, sessionProjectPath, sessionMode, tip, warningsFromPolicy, wording } =
-    admitted;
+  const {
+    script,
+    timeout,
+    sessionProjectPath,
+    sessionMode,
+    tip,
+    warningsFromPolicy,
+    wording,
+    markNotSent,
+  } = admitted;
   try {
     const {
       response: responseStr,
@@ -2896,6 +2945,7 @@ async function executeAdmittedScript(
 
     return createStructuredResponse(leadWithWarnings(payload));
   } catch (error: unknown) {
+    if (commandWasNotSent(error)) markNotSent();
     return err(
       runtimeCommandFailure(
         runner,

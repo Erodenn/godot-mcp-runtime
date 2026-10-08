@@ -1035,7 +1035,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
         ? [`${unreadLines} ext_resource line(s) could not be read and are not listed`]
         : [];
     return createStructuredResponse(
-      leadWithWarnings({ warnings, scenePath: scene.input, dependencies }),
+      leadWithWarnings({ warnings, scenePath: scene.relPath, dependencies }),
     );
   } catch (error: unknown) {
     return err(

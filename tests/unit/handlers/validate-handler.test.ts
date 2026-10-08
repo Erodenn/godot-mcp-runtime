@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
@@ -6,8 +6,13 @@ import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-path
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { useTmpDirs } from '../../helpers/tmp.js';
+import { copyProjectToTmp, removeTmpDir, useTmpDirs } from '../../helpers/tmp.js';
 import { validateTempDir } from '../../../src/utils/artifact-paths.js';
+
+// An inline `source` makes validate write under `.mcp/` and add a `.gitignore`
+// entry in the project it is given, so every call here runs on a copy.
+const projectCopyPath = copyProjectToTmp(fixtureProjectPath, 'mcp-validate-handler-');
+afterAll(() => removeTmpDir(projectCopyPath));
 
 // ---------------------------------------------------------------------------
 // handleValidate: single-target mode
@@ -40,14 +45,14 @@ describe('handleValidate', () => {
 
   it('rejects when none of scriptPath, source, scenePath, or targets is provided', async () => {
     const fake = createFakeRunner();
-    const result = await handleValidate(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleValidate(fake.asRunner, { projectPath: projectCopyPath });
     expectErrorMatching(result, /One of scriptPath, source, or scenePath is required/);
   });
 
   it('rejects when more than one of scriptPath, source, scenePath is provided', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'extends Node',
       scenePath: fixtureScenePath,
     });
@@ -57,7 +62,7 @@ describe('handleValidate', () => {
   it('rejects scriptPath containing ..', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scriptPath: '../outside.gd',
     });
     expectErrorMatching(result, /Invalid scriptPath/);
@@ -66,7 +71,7 @@ describe('handleValidate', () => {
   it('rejects nonexistent scriptPath', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scriptPath: 'nonexistent.gd',
     });
     expectErrorMatching(result, /Script file does not exist/);
@@ -75,7 +80,7 @@ describe('handleValidate', () => {
   it('rejects scenePath containing ..', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: '../outside.tscn',
     });
     expectErrorMatching(result, /Invalid scenePath/);
@@ -84,7 +89,7 @@ describe('handleValidate', () => {
   it('rejects nonexistent scenePath', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: 'ghost.tscn',
     });
     expectErrorMatching(result, /Scene file does not exist/);
@@ -93,7 +98,7 @@ describe('handleValidate', () => {
   it('includes the thrown message in the error response', async () => {
     const fake = createFakeRunner({ throws: new Error('disk full') });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'extends Node',
     });
     const text = unwrap(result).content[0].text;
@@ -103,7 +108,7 @@ describe('handleValidate', () => {
   it('returns a result (not isError) when runner succeeds with valid JSON stdout', async () => {
     const fake = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'extends Node',
     });
     expect(hasError(result)).toBe(false);
@@ -113,7 +118,7 @@ describe('handleValidate', () => {
   it('rejects an unknown top-level key by name and starts no process', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenepath: fixtureScenePath,
     });
     expectErrorMatching(result, /Unknown parameter "scenepath"/);
@@ -123,7 +128,7 @@ describe('handleValidate', () => {
   it('single mode never returns an invalid verdict with no errors', async () => {
     const fake = createFakeRunner({ stdout: JSON.stringify({ valid: false, errors: [] }) });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'extends Node',
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -139,7 +144,7 @@ describe('handleValidate', () => {
       stderr: '[ERROR] validate_resource requires script_path or scene_path',
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'extends Node',
     });
     expectErrorMatching(result, /no result was emitted.*requires script_path or scene_path/);
@@ -156,7 +161,7 @@ describe('handleValidate', () => {
         'SCRIPT ERROR: Parse Error: Unexpected token: Identifier:foo\n   at: res://.mcp/validate_temp_x.gd:3',
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'func bad( :',
     });
     expect(hasError(result)).toBe(false);
@@ -182,7 +187,7 @@ describe('handleValidate', () => {
       ].join('\n'),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'func probe() -> int:\n\treturn GameState.score\n',
     });
     expect(hasError(result)).toBe(false);
@@ -208,7 +213,7 @@ describe('handleValidate', () => {
       ].join('\n'),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       source: 'var x',
     });
     const parsed = JSON.parse(unwrap(result).content[0].text);
@@ -231,7 +236,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
     expect(hasError(result)).toBe(false);
@@ -251,7 +256,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       ...extra,
       targets: [{ scenePath: fixtureScenePath }],
     });
@@ -264,7 +269,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
       checks: [{ type: 'structure', schema: { type: 'Node3D' } }],
     });
@@ -278,7 +283,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
       checks: [],
     });
@@ -290,7 +295,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scene_path: fixtureScenePath }, { script_path: 'placeholder.gd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -305,7 +310,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }, {}, 7],
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -330,7 +335,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [
         { scenePath: fixtureScenePath },
         { scenePath: fixtureScenePath, check: [{ type: 'signals' }] },
@@ -355,7 +360,7 @@ describe('handleValidate batch mode', () => {
   it('reports a path of the wrong type as that target, not as a failed batch', async () => {
     const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 5 }],
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -373,7 +378,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'main.tscn', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }, { scriptPath: 'placeholder.gd' }],
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -396,7 +401,7 @@ describe('handleValidate batch mode', () => {
       stderr: '[ERROR] Failed to parse JSON parameters',
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
     expectErrorMatching(result, /Batch validate failed: no result was emitted/);
@@ -407,7 +412,7 @@ describe('handleValidate batch mode', () => {
   it('treats empty Godot output as a failed operation in batch mode', async () => {
     const fake = createFakeRunner({ stdout: '' });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
     expectErrorMatching(result, /Batch validate failed/);
@@ -416,7 +421,7 @@ describe('handleValidate batch mode', () => {
   it('surfaces runner exceptions as a structured MCP error response in batch mode', async () => {
     const fake = createFakeRunner({ throws: new Error('boom') });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath }],
     });
     expectErrorMatching(result, /Batch validation failed.*boom/);
@@ -428,7 +433,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [],
     });
     // Handler runs batch mode; with an empty results list this is not an error
@@ -441,7 +446,7 @@ describe('handleValidate batch mode', () => {
       stdout: JSON.stringify({ results: [{ target: 'placeholder.gd', valid: true, errors: [] }] }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 'placeholder.gd' }],
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -475,7 +480,7 @@ describe('handleValidate batch mode', () => {
     // path and bypass the documented path-traversal protection.
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: '../escape.gd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -490,7 +495,7 @@ describe('handleValidate batch mode', () => {
   it('short-circuits and reports per-target failure when batch scenePath is absolute and escapes root', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: '/etc/passwd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -514,7 +519,7 @@ describe('handleValidate batch mode', () => {
       }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 'ok.gd' }, { scriptPath: '../escape.gd' }, { scenePath: 'ok.tscn' }],
     });
     expect(hasError(result)).toBe(false);
@@ -564,7 +569,7 @@ describe('handleValidate batch mode', () => {
     });
 
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: '_e2e_test/broken.gd' }, { scriptPath: '_e2e_test/ok.gd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -620,6 +625,36 @@ describe('handleValidate inline-source temp files', () => {
     expect(batchPath).toMatch(/^\.mcp\/godot-runtime\/validate\/validate_batch_/);
     expect(existsSync(join(projectPath, batchPath))).toBe(false);
   });
+
+  it('marks .mcp/ as ignored by the importer before the first temp script lands', async () => {
+    const projectPath = tmp.makeProject('mcp-validate-gdignore-');
+    expect(existsSync(join(projectPath, '.mcp'))).toBe(false);
+    const fake = createFakeRunner({ stdout: '' });
+
+    await handleValidate(fake.asRunner, { projectPath, source: 'extends Node\n' });
+
+    expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
+  });
+});
+
+describe('handleValidate targets shape', () => {
+  it.each([
+    ['an object', { scenePath: 'broken.tscn' }],
+    ['a string', 'broken.tscn'],
+  ])('refuses targets given as %s instead of ignoring it', async (_label, targets) => {
+    const projectPath = projectCopyPath;
+    const withScript = await handleValidate(createFakeRunner({ stdout: '' }).asRunner, {
+      projectPath,
+      scriptPath: 'ok.gd',
+      targets,
+    });
+    expectErrorMatching(withScript, /targets must be an array/);
+    const alone = await handleValidate(createFakeRunner({ stdout: '' }).asRunner, {
+      projectPath,
+      targets,
+    });
+    expectErrorMatching(alone, /targets must be an array/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -655,7 +690,7 @@ describe('handleValidate batch attribution', () => {
       stderr: BROKEN_SCRIPT_STDERR,
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: './broken.gd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -676,7 +711,7 @@ describe('handleValidate batch attribution', () => {
       stderr: '',
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 'odd.gd' }],
     });
     expect(hasError(result)).toBe(false);
@@ -713,7 +748,7 @@ describe('handleValidate batch attribution', () => {
       ].join('\n'),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 'my scripts/broken.gd' }],
     });
     const payload = expectMatchesOutputSchema('validate', result);
@@ -741,7 +776,7 @@ describe('handleValidate batch attribution', () => {
       ].join('\n'),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: 'main.tscn' }],
     });
     expect(hasError(result)).toBe(false);
@@ -768,7 +803,7 @@ describe('handleValidate batch attribution', () => {
       stderr,
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scriptPath: 'ok.gd' }],
     });
     const warnings = batchPayload(result).warnings ?? [];
@@ -786,7 +821,7 @@ describe('handleValidate check shapes', () => {
   it("a batch target whose checks is an object is that target's error", async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [{ scenePath: fixtureScenePath, checks: { type: 'signals' } }],
     });
     expect(hasError(result)).toBe(false);
@@ -799,7 +834,7 @@ describe('handleValidate check shapes', () => {
   it('an unknown key in a structure schema is rejected', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: fixtureScenePath,
       checks: [{ type: 'structure', schema: { type: 'Node2D', hasPropery: 'shape' } }],
     });
@@ -810,7 +845,7 @@ describe('handleValidate check shapes', () => {
   it('an unknown key in a nested schema node is rejected with its breadcrumb', async () => {
     const fake = createFakeRunner();
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [
         {
           scenePath: fixtureScenePath,
@@ -836,7 +871,7 @@ describe('handleValidate check shapes', () => {
       }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: 'main.tscn',
       checks: [
         {
@@ -852,13 +887,13 @@ describe('handleValidate check shapes', () => {
   it('an unknown key on a check item is rejected', async () => {
     const fake = createFakeRunner();
     const signals = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: fixtureScenePath,
       checks: [{ type: 'signals', nodepath: 'root/HUD' }],
     });
     expectErrorMatching(signals, /unknown key "nodepath" on a signals check/);
     const structure = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: fixtureScenePath,
       checks: [{ type: 'structure', schema: { type: 'Node2D' }, nodePath: 'root' }],
     });
@@ -872,7 +907,7 @@ describe('handleValidate check shapes', () => {
 // ---------------------------------------------------------------------------
 
 describe('validate accepts every project path spelling', () => {
-  const absolute = (p: string) => join(fixtureProjectPath, p);
+  const absolute = (p: string) => join(projectCopyPath, p);
 
   it.each([
     ['res://', (p: string) => `res://${p}`],
@@ -880,14 +915,14 @@ describe('validate accepts every project path spelling', () => {
   ] as const)('single scriptPath and scenePath as %s are forwarded relative', async (_l, spell) => {
     const script = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
     await handleValidate(script.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scriptPath: spell('placeholder.gd'),
     });
     expect(script.calls[0]?.params).toEqual({ scriptPath: 'placeholder.gd' });
 
     const scene = createFakeRunner({ stdout: JSON.stringify({ valid: true, errors: [] }) });
     await handleValidate(scene.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       scenePath: spell(fixtureScenePath),
     });
     expect(scene.calls[0]?.params).toEqual({ scenePath: fixtureScenePath });
@@ -896,7 +931,7 @@ describe('validate accepts every project path spelling', () => {
   it('batch targets are forwarded relative, whatever the caller spelling', async () => {
     const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
     await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [
         { scriptPath: 'res://placeholder.gd' },
         { scriptPath: '.\\placeholder.gd' },
@@ -922,7 +957,7 @@ describe('validate accepts every project path spelling', () => {
       }),
     });
     const result = await handleValidate(fake.asRunner, {
-      projectPath: fixtureProjectPath,
+      projectPath: projectCopyPath,
       targets: [
         { scriptPath: 'res://placeholder.gd' },
         { scriptPath: absolute('placeholder.gd') },

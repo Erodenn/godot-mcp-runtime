@@ -8,7 +8,7 @@
  */
 
 import { afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -43,6 +43,19 @@ export function removeTmpDir(dir: string): void {
       sleepSync(REMOVE_RETRY_DELAY_MS);
     }
   }
+}
+
+/**
+ * Copy a committed fixture project into a fresh temp directory and return the
+ * copy's path. A handler that writes into the project it is given (the
+ * `.mcp/` namespace, a `.gitignore` entry, a scene) is never pointed at the
+ * committed directory: the caller removes the copy with `removeTmpDir`, or
+ * passes it to `useTmpDirs().track`.
+ */
+export function copyProjectToTmp(fixtureDir: string, prefix = 'mcp-fixture-copy-'): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  cpSync(fixtureDir, dir, { recursive: true });
+  return dir;
 }
 
 export interface TmpDirHandle {
