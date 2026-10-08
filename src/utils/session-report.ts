@@ -14,11 +14,8 @@ import { SessionQueueTimeoutError } from './session-queue.js';
 export const SWITCH_PROJECT_SOLUTION =
   'Call switch_project with one of the listed project paths to point the runtime tools at that session';
 
-/** How one tool words the error for "no live current session". */
 export interface NoSessionWording {
-  /** Completes "... cannot <action>." */
   action: string;
-  /** Whole message when nothing is current and no other session is live. */
   noneMessage: string;
   noneSolutions: string[];
   exitedSolutions: string[];
@@ -39,7 +36,6 @@ export function runtimeToolWording(action: string): NoSessionWording {
   };
 }
 
-/** The current pointer names a spawned session whose process is gone. */
 export function isExitedCurrent(status: RuntimeSessionStatus): boolean {
   const current = status.current;
   return (
@@ -49,17 +45,13 @@ export function isExitedCurrent(status: RuntimeSessionStatus): boolean {
   );
 }
 
-/** '' when no other session is live; otherwise a sentence with a leading space. */
 export function otherLiveSessionsClause(status: RuntimeSessionStatus): string {
   const paths = status.otherLiveSessions.map((info) => info.projectPath);
   if (paths.length === 0) return '';
   return ` Live sessions on other projects, none of which is picked automatically: ${paths.join(', ')}.`;
 }
 
-/**
- * The error for a runtime tool that has no live current session. Never picks
- * another session: it lists them and points at switch_project.
- */
+/** The error for a runtime tool with no live current session; never picks another, lists them and points at switch_project. */
 export function noLiveCurrentSessionError(
   status: RuntimeSessionStatus,
   wording: NoSessionWording,
@@ -75,10 +67,7 @@ export function noLiveCurrentSessionError(
   }
   if (others === '') return createErrorResponse(wording.noneMessage, wording.noneSolutions);
   if (status.current !== null) {
-    // Current is set but holds neither a live game nor an exited process:
-    // what is left of an ended session (a finished profiler capture kept
-    // readable after stop_project). "Not pointed at any project" would be
-    // false here, and check_project names this project as the current one.
+    // Current holds neither a live game nor an exited process (e.g. a finished profiler capture kept after stop_project).
     return createErrorResponse(
       `The current session (project ${status.current.projectPath}) has ended, so this call cannot ${wording.action}.${others}`,
       [...switchSolution, ...wording.noneSolutions],
@@ -90,11 +79,7 @@ export function noLiveCurrentSessionError(
   );
 }
 
-/**
- * The error for a call that gave up waiting for its turn in the session
- * queue. Nothing was sent for it, so the only thing to do is try again once
- * the call it names has returned.
- */
+/** The error for a call that gave up waiting for its turn; nothing was sent, so retry once the named call returns. */
 export function sessionBusyError(error: SessionQueueTimeoutError): ToolResponse {
   return createErrorResponse(error.message, [
     `Wait for ${error.behind} to return, then retry this call`,
@@ -102,13 +87,7 @@ export function sessionBusyError(error: SessionQueueTimeoutError): ToolResponse 
   ]);
 }
 
-/**
- * Run a handler's session work with the session queue held, so its gate and
- * its command, or its start, wait and teardown, are one step that no other
- * runtime call can interleave with. `toolName` is what a call made to wait
- * behind this one is told. A call that could not get its turn in time comes
- * back as a structured error.
- */
+/** Run a handler's session work with the session queue held, so its gate and command (or start, wait and teardown) are one step; `toolName` is what waiters are told. A turn that did not come in time becomes a structured error. */
 export async function runSessionExclusive(
   runner: GodotRunner,
   toolName: string,
@@ -122,38 +101,17 @@ export async function runSessionExclusive(
   }
 }
 
-/** The longest `timeout` a runtime tool accepts, and the ceiling of one input batch's budget. */
 export const MAX_RUNTIME_TIMEOUT_MS = 600000;
 
-/**
- * The least a command may be left with once the queue wait has been taken off
- * its `timeout`. Under it the command could not finish what it was asked for,
- * so it is refused with nothing sent.
- */
+/** The least a command may keep after the queue wait comes off its `timeout`; under it, it is refused with nothing sent. */
 export const QUEUE_CHARGED_COMMAND_FLOOR_MS = 2000;
 
-/**
- * What a command needs from the time it has left after the queue wait.
- * `shorten`: the caller's `timeout` is the budget and the wait comes off it.
- * `fixed`: the command takes up to `worstCaseMs` whatever it is given, so the
- * wait is charged against the client's request timeout instead.
- */
+/** `shorten`: the caller's `timeout` is the budget and the wait comes off it. `fixed`: the command takes up to `worstCaseMs` regardless, so the wait is charged against the client's request timeout. */
 export type QueueChargeNeed =
   | { kind: 'shorten'; budgetMs: number }
   | { kind: 'fixed'; worstCaseMs: number };
 
-/**
- * Charge the time the caller spent waiting for its turn in the session queue
- * against its command, and return the milliseconds the command may use. Call
- * it inside the `runSessionExclusive` callback, after the session gate and
- * before the send. A refusal sends nothing.
- *
- * `shorten`: the budget less the wait, refused when that is under
- * `QUEUE_CHARGED_COMMAND_FLOOR_MS`. `fixed`: refused when the worst case fits
- * the client's request timeout alone but not after the wait; a command whose
- * worst case is over it already was never promised an answer in time, and is
- * not refused for waiting.
- */
+/** Charge the queue wait against a command and return the milliseconds it may use; call inside `runSessionExclusive` after the gate and before the send. `shorten` refuses under `QUEUE_CHARGED_COMMAND_FLOOR_MS`; `fixed` refuses when the worst case fits the client timeout alone but not after the wait (a worst case already over it is not refused for waiting). */
 export function chargeQueueWait(
   runner: GodotRunner,
   toolName: string,
@@ -195,7 +153,6 @@ export function chargeQueueWait(
   return ok(need.worstCaseMs);
 }
 
-/** The one gate the runtime and profiling handlers share. */
 export function requireRuntimeSession(
   runner: GodotRunner,
   wording: NoSessionWording,
@@ -205,10 +162,7 @@ export function requireRuntimeSession(
   return err(noLiveCurrentSessionError(status, wording));
 }
 
-/**
- * Error for a bridge command that threw. When the session ended while the
- * command was in flight, the message says so and lists the sessions still live.
- */
+/** Error for a bridge command that threw; if the session ended meanwhile, says so and lists the live ones. */
 export function runtimeCommandFailure(
   runner: GodotRunner,
   error: unknown,
@@ -219,13 +173,10 @@ export function runtimeCommandFailure(
   if (error instanceof NoLiveCurrentSessionError) {
     return noLiveCurrentSessionError(error.status, wording);
   }
-  // The command never left the queue, so nothing about the session is to
-  // blame and the caller's own solutions do not apply.
+  // The command never left the queue: the session is not to blame and the caller's solutions do not apply.
   if (error instanceof SessionQueueTimeoutError) return sessionBusyError(error);
   const status = runner.getRuntimeSessionStatus();
-  // A stop ended the session under this call, or before its turn came. The
-  // bridge did not fail, so the caller's own solutions (check the logs, retry)
-  // do not apply, and neither does anything that says the game crashed.
+  // A stop ended the session; the bridge did not fail, so the caller's solutions and any "game crashed" wording do not apply.
   if (error instanceof SessionStoppedError)
     return sessionStoppedError(error, failurePrefix, status);
   const message = `${failurePrefix}: ${getErrorMessage(error)}`;
@@ -238,22 +189,14 @@ export function runtimeCommandFailure(
       [...solutions, ...switchSolution],
     );
   }
-  // Nothing is left of the session: a spawned one that exits keeps its record,
-  // so this is an attached session whose bridge went away, or one that was
-  // stopped while the command was in flight. The caller's own solutions speak
-  // of stop_project and get_debug_output, and both would only report that
-  // there is no session.
+  // Nothing left: an attached session whose bridge went away, or one stopped mid-call. The caller's stop_project and get_debug_output solutions would only report no session.
   return createErrorResponse(
     `${message}\nThe session ended during this call and no session is current now.${others}`,
     [...SESSION_GONE_SOLUTIONS, ...switchSolution],
   );
 }
 
-/**
- * The error for a runtime call that a stop cut off, or that reached a session
- * a stop had already ended. `error.cutOff` says which: a call that was cut
- * off may have done part of its work in the game, and that part stays done.
- */
+/** The error for a call a stop cut off or that reached an already-ended session; a cut-off call may have done part of its work, which stays done. */
 export function sessionStoppedError(
   error: SessionStoppedError,
   failurePrefix: string,
@@ -275,10 +218,7 @@ const SESSION_GONE_SOLUTIONS = [
   'Otherwise call run_project to start a new session',
 ];
 
-/**
- * How to stop this server's own live session on a project, which may not be
- * the current one. `retryWhat` completes "then retry <retryWhat>".
- */
+/** How to stop this server's live session on a project, which may not be the current one; `retryWhat` completes "then retry <retryWhat>". */
 export function liveSessionRemedy(
   runner: GodotRunner,
   projectPath: string,

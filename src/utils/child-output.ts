@@ -1,32 +1,17 @@
-/**
- * Turning a child process's stdout or stderr bytes into text and lines.
- *
- * A pipe delivers bytes in chunks whose boundaries fall anywhere, including
- * inside a multi-byte UTF-8 sequence and inside a line. Decoding each chunk by
- * itself turns a split sequence into two U+FFFD characters, and classifying a
- * chunk's last segment as a line reads half a line as a whole one.
- */
+// Chunk boundaries fall anywhere, including inside a UTF-8 sequence (decoded alone it becomes two U+FFFD) and inside a line.
 
 import { StringDecoder } from 'string_decoder';
 
 const TRAILING_CARRIAGE_RETURN = /\r$/;
 
-/**
- * Longest line held while waiting for its newline. A stream that never sends
- * one (a progress bar, binary noise) would otherwise grow the pending text
- * without limit. Past this the line is emitted cut, with a marker, and the
- * rest of it is dropped up to the next newline.
- */
+/** Longest line held awaiting its newline; past it the line is emitted cut, with a marker, and the rest dropped up to the next newline. */
 export const MAX_PENDING_LINE_CHARS = 65536;
 
 export function truncatedLineMarker(limit: number): string {
   return ` <truncated: line exceeded ${limit} characters>`;
 }
 
-/**
- * Decodes one child stream as UTF-8 across chunk boundaries. `write` returns
- * the text that is complete so far; `end` returns what the stream closed on.
- */
+/** Decodes one child stream as UTF-8 across chunk boundaries. */
 export class Utf8StreamDecoder {
   private readonly decoder = new StringDecoder('utf8');
 
@@ -39,20 +24,13 @@ export class Utf8StreamDecoder {
   }
 }
 
-/**
- * Splits decoded text into complete lines. Only text followed by a newline is
- * a line: the tail of a chunk is held until the chunk that finishes it, or
- * until `end`. A line carries no terminator (the `\r` Windows writes before
- * the `\n` goes with it).
- */
+/** Splits decoded text into complete lines; the tail of a chunk is held until finished or `end`. A line has no terminator (a Windows `\r` goes with it). */
 export class LineAssembler {
   private pending = '';
-  /** True while the rest of an over-long line is being dropped. */
   private discarding = false;
 
   constructor(private readonly maxPendingChars: number = MAX_PENDING_LINE_CHARS) {}
 
-  /** Complete lines made available by `text`, in order. */
   push(text: string): string[] {
     if (text === '') return [];
     const lines: string[] = [];
@@ -82,10 +60,7 @@ export class LineAssembler {
     return lines;
   }
 
-  /**
-   * The line the stream ended on without a newline, or null when there was
-   * none. Resets the assembler.
-   */
+  /** The line the stream ended on without a newline, or null; resets the assembler. */
   end(): string | null {
     const tail = this.pending.replace(TRAILING_CARRIAGE_RETURN, '');
     this.pending = '';
@@ -93,7 +68,6 @@ export class LineAssembler {
     return tail === '' ? null : tail;
   }
 
-  /** Text held for a line that has not ended yet. */
   get pendingText(): string {
     return this.pending;
   }

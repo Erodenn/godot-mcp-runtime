@@ -1,83 +1,33 @@
-/**
- * Wire format shared between the Node-side `GodotRunner.sendCommand` and the
- * GDScript-side `McpBridge` autoload.
- *
- * KEEP IN SYNC: src/scripts/mcp_bridge.gd implements the same framing on the
- * Godot side. Any change here MUST be mirrored there (and vice versa).
- *
- * Frame: 4-byte big-endian length prefix + UTF-8 JSON payload.
- * Max frame size is 16 MiB; oversize frames are rejected on receive.
- *
- * Request frame contract (additive): every request JSON payload is
- * `{ command: string, token?: string, ...params }`. `sendCommand` in
- * `godot-runner.ts` attaches the per-session auth token; the bridge rejects
- * any frame whose `token` doesn't match its configured session token (see
- * `_dispatch_command` in `mcp_bridge.gd`). This is a best-effort accident
- * guard against unauthenticated local processes finding the bridge port, not
- * a hard security boundary — see `docs/security.md`.
- */
+// Wire format shared with the McpBridge autoload: 4-byte big-endian length prefix + UTF-8 JSON payload, max 16 MiB.
+// KEEP IN SYNC: src/scripts/mcp_bridge.gd implements the same framing; the session token is an accident guard, not a security boundary (docs/security.md).
 
 import * as net from 'net';
 
 export const DEFAULT_BRIDGE_PORT = 9900;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const FRAME_HEADER_BYTES = 4;
-/**
- * Ceiling on how long a spawned Godot process is given to bring the bridge
- * up before `run_project` reports a timeout. `pollBridge` returns on the
- * first accepted pong, so raising this costs nothing in the healthy case -
- * it only bounds how long a genuinely broken launch takes to be reported.
- * Safe to raise furthest of the readiness budgets because `shouldAbort` in
- * `waitForBridge` aborts the moment the child process exits, so a crashed
- * launch is still reported early regardless of this ceiling.
- * `tests/helpers/run-project-or-skip.ts` already overrides this at 20000 for
- * every integration test, which is the evidence the previous 8000 was too
- * tight for the fixture project on CI hardware.
- */
+/** Ceiling on how long a spawned Godot is given to bring the bridge up; `waitForBridge` aborts as soon as the child exits, so raising it only bounds a broken launch. */
 export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 30000;
 
-/**
- * Key the bridge sets to `true` on the error it sends in place of a reply too
- * large to frame. The command had already run by then, which is what tells
- * this error apart from a refusal: a handler that reads any `error` as "the
- * command did nothing" would tell the caller to repeat work that landed.
- *
- * KEEP IN SYNC: `OVERSIZE_RESPONSE_FIELD` in src/scripts/mcp_bridge.gd.
- */
+// Key the bridge sets true on the error it sends in place of a reply too large to frame; the command already ran, unlike a refusal.
+// KEEP IN SYNC: `OVERSIZE_RESPONSE_FIELD` in src/scripts/mcp_bridge.gd.
 export const OVERSIZE_RESPONSE_FIELD = 'response_too_large';
 
-/**
- * The `error` the bridge answers with when a frame carries no token or the
- * wrong one. Read by the readiness wait: a listener that answers a ping this
- * way is a bridge, and not this session's.
- *
- * KEEP IN SYNC: `UNAUTHORIZED_ERROR` in src/scripts/mcp_bridge.gd.
- */
+// The `error` the bridge answers with for a missing or wrong token; the readiness wait reads it to tell a bridge from another session's.
+// KEEP IN SYNC: `UNAUTHORIZED_ERROR` in src/scripts/mcp_bridge.gd.
 export const BRIDGE_UNAUTHORIZED_ERROR = 'Unauthorized: invalid or missing session token';
 
-/**
- * Key the bridge sets on a reply that carried non-finite numbers (INF, NAN) as
- * null, holding how many. Absent when there were none. The reader strips it and
- * leads its payload with `nonFiniteWarning`.
- *
- * KEEP IN SYNC: `NON_FINITE_COUNT_FIELD` in src/scripts/mcp_bridge.gd.
- */
+// Key the bridge sets on a reply that sent INF/NAN as null, holding how many; the reader strips it.
+// KEEP IN SYNC: `NON_FINITE_COUNT_FIELD` in src/scripts/mcp_bridge.gd.
 export const NON_FINITE_COUNT_FIELD = 'non_finite_count';
 
-/**
- * The warning for a reply whose numbers were not all finite, or null when they
- * were. Takes the count the bridge sent; anything that is not a positive whole
- * number counts as none.
- */
+/** The warning for a reply whose numbers were not all finite, or null; a count that is not a positive whole number counts as none. */
 export function nonFiniteWarning(count: unknown): string | null {
   if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) return null;
   return `${count} non-finite numbers (INF, NAN) were returned as null`;
 }
 
-/**
- * Remove the non-finite count from a parsed bridge reply and return the
- * warning for it, or null. The field is internal and never reaches a payload.
- */
+/** Remove the non-finite count from a parsed reply and return its warning, or null; the field never reaches a payload. */
 export function takeNonFiniteWarning(reply: object): string | null {
   const record = reply as Record<string, unknown>;
   const warning = nonFiniteWarning(record[NON_FINITE_COUNT_FIELD]);
@@ -85,66 +35,31 @@ export function takeNonFiniteWarning(reply: object): string | null {
   return warning;
 }
 
-/**
- * Largest delay `setTimeout` honors. A larger value overflows its 32-bit
- * signed field and the timer fires after 1 ms instead, so a caller-supplied
- * timeout of a few months would expire at once while the work it bounds is
- * still running.
- */
+/** Largest delay `setTimeout` honors; a larger value overflows and fires after 1 ms. */
 export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MIN_TIMER_DELAY_MS = 1;
 
-/**
- * A duration that is safe to hand to `setTimeout`. The one place a
- * caller-supplied timeout is bounded: every bridge command and every headless
- * child goes through it. A value that is not a number becomes the maximum,
- * which is the longest wait a timer can express.
- */
+/** A duration safe for `setTimeout`, the one bound on caller-supplied timeouts; a non-number becomes the maximum. */
 export function clampTimerDelay(ms: number): number {
   if (typeof ms !== 'number' || Number.isNaN(ms)) return MAX_TIMER_DELAY_MS;
   return Math.min(MAX_TIMER_DELAY_MS, Math.max(MIN_TIMER_DELAY_MS, Math.floor(ms)));
 }
 
-/**
- * Environment variable that gives a spawned game the port of this server's
- * parent-watch listener. Set next to `MCP_SESSION_TOKEN` and `MCP_BRIDGE_PORT`
- * for spawned sessions only: an attached Godot is the user's process and is
- * never given one.
- *
- * KEEP IN SYNC: `PARENT_WATCH_PORT_ENV` in src/scripts/mcp_bridge.gd.
- */
+// Gives a spawned game the port of this server's parent-watch listener; never set for an attached Godot, which is the user's process.
+// KEEP IN SYNC: `PARENT_WATCH_PORT_ENV` in src/scripts/mcp_bridge.gd.
 export const PARENT_WATCH_PORT_ENV = 'MCP_PARENT_WATCH_PORT';
 
-/**
- * The listener a spawned game's bridge keeps one connection open to, so the
- * game can tell when this server process is gone.
- *
- * Nothing watches a parent process for a child. A server that is killed
- * outright (TerminateProcess, SIGKILL, a client that force-kills it) runs no
- * exit hook, and the game it spawned keeps running; in background mode that
- * game is hidden and cannot be focused. The operating system does close every
- * socket of a dead process, though, however it died, so a connection to the
- * server is the one signal that needs no cooperation from it. The bridge
- * writes a byte down that connection on a timer and quits the game when the
- * write fails or the connection reports closed.
- *
- * The listener only accepts and discards. It is unref'd, so it never keeps
- * the server alive, and it is never closed: it ends with the process, which
- * is the event it exists to signal.
- */
+/** Listener a spawned game's bridge holds a connection to, so the game can tell its server died without running an exit hook (the OS closes a dead process's sockets). It accepts and discards, is unref'd, and is never closed. */
 export class ParentWatchListener {
   private server: net.Server | null = null;
   private listening: Promise<number> | null = null;
-  /** Open connections, kept only so `close` can end them. */
   private readonly connections = new Set<net.Socket>();
 
-  /** Port of the listener, binding it on first use. */
   port(): Promise<number> {
     if (this.listening !== null) return this.listening;
     const pending = new Promise<number>((resolve, reject) => {
       const server = net.createServer((socket) => {
-        // Heartbeat bytes are read and dropped, so the game's writes never
-        // fill the socket buffer. An error here is the game going away.
+        // Heartbeat bytes are dropped so the game's writes never fill the buffer; an error is the game going away.
         socket.on('error', () => {});
         socket.on('close', () => this.connections.delete(socket));
         this.connections.add(socket);
@@ -172,10 +87,7 @@ export class ParentWatchListener {
     return pending;
   }
 
-  /**
-   * Stop listening and drop every connection, which is what a game sees when
-   * the server process dies. For tests; the server process never calls it.
-   */
+  /** Stop listening and drop every connection. For tests only. */
   close(): void {
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
@@ -185,34 +97,19 @@ export class ParentWatchListener {
   }
 }
 
-/**
- * Marker the bridge prints on stderr after each simulated input action settles,
- * as `<sentinel> <action index>`. stderr is a single ordered fd, so every
- * runtime-error line an input handler wrote during an action lands before that
- * action's marker and can be attributed to it.
- *
- * KEEP IN SYNC: `ACTION_BOUNDARY_SENTINEL` in src/scripts/mcp_bridge.gd is the
- * twin of this constant. Any change here MUST be mirrored there (and vice
- * versa) or error attribution silently degrades to unattributed lines.
- */
+// Marker the bridge prints on stderr after each input action settles, as `<sentinel> <action index>`; one ordered fd lets error lines be attributed to the action before the marker.
+// KEEP IN SYNC: `ACTION_BOUNDARY_SENTINEL` in src/scripts/mcp_bridge.gd; a mismatch silently degrades attribution.
 export const ACTION_BOUNDARY_SENTINEL = 'MCP_ACTION_BOUNDARY';
 
 const ACTION_BOUNDARY_PATTERN = new RegExp(`^${ACTION_BOUNDARY_SENTINEL} (\\d+)$`);
 
-/**
- * One recorded sentinel. `seq` is the number of retained stderr lines that
- * preceded it, which is why a mark stays meaningful after the stderr ring
- * buffer drops older lines.
- */
+/** One recorded sentinel; `seq` is the retained stderr lines before it, so it survives the ring trim. */
 export interface ActionBoundaryMark {
   index: number;
   seq: number;
 }
 
-/**
- * Recognize an action-boundary line and return its action index, or null for
- * any other stderr line.
- */
+/** The action index of an action-boundary line, or null for any other stderr line. */
 export function parseActionBoundary(line: string): number | null {
   const match = ACTION_BOUNDARY_PATTERN.exec(line.trim());
   const digits = match?.[1];
@@ -221,13 +118,9 @@ export function parseActionBoundary(line: string): number | null {
 }
 
 export interface BucketBySentinelInput {
-  /** Contiguous stderr lines, oldest first. */
   lines: string[];
-  /** Sequence number of `lines[0]`. */
   startSeq: number;
-  /** Marks recorded during the same window, in arrival order. */
   boundaries: ActionBoundaryMark[];
-  /** Number of actions that actually ran, which is the bucket count. */
   executedCount: number;
 }
 
@@ -236,20 +129,7 @@ export interface BucketBySentinelResult {
   trailing: string[];
 }
 
-/**
- * Split a stderr window into one bucket per executed action.
- *
- * A mark closes its action, so the bucket for `index` gets the lines between
- * the previous mark and this one. A mark whose index falls outside
- * `[0, executedCount)` is ignored. Lines at or after the last mark, and every
- * line when no mark arrived, become `trailing` for the caller to attach to the
- * last executed action. No filtering happens here: the caller applies
- * `extractRuntimeErrors` to each bucket.
- *
- * When an action's mark is missing (a partial stderr drain), its bucket stays
- * empty and its lines fall into the next mark's bucket - the two are genuinely
- * indistinguishable without the marker.
- */
+/** Split a stderr window into one bucket per executed action: a mark closes its action. Out-of-range marks are ignored; lines after the last mark (or all, with no marks) are `trailing`. A missing mark leaves its bucket empty and its lines fall into the next mark's. No filtering here. */
 export function bucketBySentinel({
   lines,
   startSeq,
@@ -275,12 +155,7 @@ export function bucketBySentinel({
   return { buckets, trailing: sliceBySeq(prevSeq, endSeq) };
 }
 
-/**
- * Find an available TCP port by binding to port 0 (OS-assigned ephemeral port),
- * reading the assigned port, and closing the listener. The brief TOCTOU window
- * between close and the consumer's listen is acceptable — if a collision occurs,
- * the bridge readiness check will surface the failure.
- */
+/** Find a free TCP port by binding port 0 and closing; a collision in the window before the consumer listens surfaces as a bridge readiness failure. */
 export function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -294,24 +169,12 @@ export function findFreePort(): Promise<number> {
       const port = addr.port;
       srv.close(() => resolve(port));
     });
-    // One-shot: only fires before listen() succeeds. If listen succeeded,
-    // we proceed to srv.close() in the listening callback — a later error
-    // is not possible from this server, so the listener stays safely dormant.
+    // One-shot: fires only before listen() succeeds; no later error is possible from this server.
     srv.on('error', reject);
   });
 }
 
-/**
- * Send one frame to a bridge on a connection of its own and resolve with the
- * first frame it answers. The connection is closed either way. Rejects when
- * nothing listens, the peer closes first, the reply cannot be framed, or
- * `timeoutMs` passes.
- *
- * For teardown. The runner's command socket carries one command at a time and
- * may be in the middle of one when a session has to be stopped; a `shutdown`
- * sent this way neither waits for that command nor disturbs it. The bridge
- * serves each connection by itself.
- */
+/** Send one frame on a connection of its own and resolve with the first reply frame, for teardown: a `shutdown` neither waits for the runner's command socket nor disturbs it. Rejects on no listener, early close, unframeable reply or timeout. */
 export function requestOnce(port: number, payload: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');
@@ -322,8 +185,7 @@ export function requestOnce(port: number, payload: string, timeoutMs: number): P
       settled = true;
       clearTimeout(timer);
       socket.removeAllListeners();
-      // An 'error' with no listener is thrown; a late one on a socket nobody
-      // waits on any more must not take the server down.
+      // An 'error' with no listener is thrown; a late one must not take the server down.
       socket.on('error', () => {});
       socket.destroy();
       finish();
@@ -351,9 +213,6 @@ export function requestOnce(port: number, payload: string, timeoutMs: number): P
   });
 }
 
-/**
- * Encode a JSON string as a length-prefixed frame.
- */
 export function encodeFrame(payload: string): Buffer {
   const body = Buffer.from(payload, 'utf8');
   if (body.length > MAX_FRAME_BYTES) {
@@ -370,13 +229,7 @@ export interface ParseFramesResult {
   remainder: Buffer;
 }
 
-/**
- * Pull as many complete frames as possible from a streaming buffer. Any
- * partial frame at the tail is returned as `remainder` for the next call.
- *
- * Throws if a header advertises a payload larger than {@link MAX_FRAME_BYTES} —
- * the caller should treat this as a fatal protocol error and close the socket.
- */
+/** Pull complete frames from a streaming buffer, returning the partial tail as `remainder`. Throws if a header advertises more than {@link MAX_FRAME_BYTES}; the caller closes the socket. */
 export function parseFrames(buffer: Buffer): ParseFramesResult {
   const frames: Buffer[] = [];
   let offset = 0;
