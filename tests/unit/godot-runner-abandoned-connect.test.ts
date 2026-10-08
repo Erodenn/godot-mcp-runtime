@@ -14,7 +14,10 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
+import { resolve } from 'path';
+import type { ChildProcess } from 'child_process';
 import type * as netModule from 'net';
+import type { GodotProcess } from '../../src/utils/godot-runner.js';
 import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
 import { installSession } from '../helpers/session-install.js';
 
@@ -140,5 +143,138 @@ describe('a bridge connect abandoned by its command', () => {
 
     await expect(pending).resolves.toBe(PONG);
     expect(writtenFrames(liveSock)).toEqual([{ command: 'get_ui_elements', token: TOKEN_B }]);
+  });
+});
+
+describe('a bridge connect still pending when a probe ping gives up', () => {
+  const ATTACHED_PROJECT = resolve('/pending-connect/attached-project');
+  const SPAWNED_PROJECT = resolve('/pending-connect/spawned-project');
+  const PORT_RERUN = 19983;
+  /** How long after the attach began the pending connect settles: past the 1 s probe ping. */
+  const LATE_CONNECT_OUTCOME_MS = 1500;
+  const CASE_TIMEOUT_MS = 10000;
+
+  let runner: Runner;
+  let firstSock: FakeSocket;
+  let secondSock: FakeSocket;
+  let injectCalls: string[];
+  let cleanupCalls: string[];
+
+  beforeEach(() => {
+    connectMock.mockReset();
+    firstSock = makeFakeSocket();
+    secondSock = makeFakeSocket();
+    connectMock.mockReturnValueOnce(firstSock).mockReturnValueOnce(secondSock);
+    runner = new GodotRunner({ godotPath: 'godot' });
+    injectCalls = [];
+    cleanupCalls = [];
+    (runner as unknown as { bridge: unknown }).bridge = {
+      precheckInject: () => '',
+      inject: (projectPath: string) => {
+        injectCalls.push(projectPath);
+      },
+      cleanup: (projectPath: string): string[] => {
+        cleanupCalls.push(projectPath);
+        return [];
+      },
+    };
+  });
+
+  afterEach(() => {
+    runner.closeConnection();
+  });
+
+  function installAttached(current: boolean): void {
+    installSession(runner, {
+      mode: 'attached',
+      projectPath: ATTACHED_PROJECT,
+      bridgePort: PORT_B,
+      token: TOKEN_B,
+      current,
+    });
+  }
+
+  function settleLater(action: () => void): void {
+    setTimeout(action, LATE_CONNECT_OUTCOME_MS);
+  }
+
+  it(
+    'attaches afresh when the connect is refused only after the ping timed out',
+    async () => {
+      installAttached(true);
+      settleLater(() => firstSock.emit('error', new Error('connect ECONNREFUSED 127.0.0.1')));
+
+      const result = await runner.attachProject(ATTACHED_PROJECT, PORT_RERUN);
+
+      // Nothing listens there: the session is replaced, not kept as "busy".
+      expect(result.alreadyAttached).toBe(false);
+      expect(injectCalls).toEqual([ATTACHED_PROJECT]);
+      expect(runner.getSessionInfo(ATTACHED_PROJECT)).toMatchObject({ bridgePort: PORT_RERUN });
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps the session when that connect succeeds late: a peer is there and was only slow',
+    async () => {
+      installAttached(true);
+      settleLater(() => firstSock.emit('connect'));
+
+      const result = await runner.attachProject(ATTACHED_PROJECT, PORT_RERUN);
+
+      expect(result).toMatchObject({ alreadyAttached: true, existingBridge: 'silent' });
+      expect(injectCalls).toEqual([]);
+      // The late socket belongs to no command and is not kept.
+      expect(firstSock.destroy).toHaveBeenCalledTimes(1);
+      expect(firstSock.write).not.toHaveBeenCalled();
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  it("an exit of a game whose own command timed out leaves another session's probe alone", async () => {
+    installAttached(false);
+    const game: GodotProcess = {
+      process: new EventEmitter() as unknown as ChildProcess,
+      output: [],
+      errors: [],
+      totalErrorsWritten: 0,
+      exitCode: null,
+      hasExited: false,
+      sessionToken: TOKEN_A,
+    };
+    const spawned = installSession(runner, {
+      mode: 'spawned',
+      projectPath: SPAWNED_PROJECT,
+      bridgePort: PORT_A,
+      token: TOKEN_A,
+      process: game,
+    });
+
+    // A command to the game connects and then times out unanswered.
+    const timedOut = runner
+      .sendCommand('run_script', {}, ABANDONED_COMMAND_TIMEOUT_MS)
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(1));
+    firstSock.emit('connect');
+    expect(await timedOut).toMatchObject({ message: expect.stringMatching(/timed out/) });
+
+    // The attach probes the other project's session; its connect is pending
+    // when the game exits.
+    const attach = runner.attachProject(ATTACHED_PROJECT, PORT_RERUN);
+    await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(2));
+    (
+      runner as unknown as {
+        handleSpawnedProcessExit(s: unknown, p: GodotProcess, epoch: number, code: number): void;
+      }
+    ).handleSpawnedProcessExit(spawned, game, spawned.epoch, 0);
+    secondSock.emit('connect');
+    secondSock.emit('data', encodeFrame(PONG));
+
+    await expect(attach).resolves.toMatchObject({
+      alreadyAttached: true,
+      existingBridge: 'answered',
+    });
+    expect(injectCalls).toEqual([]);
+    expect(cleanupCalls).toEqual([SPAWNED_PROJECT]);
   });
 });

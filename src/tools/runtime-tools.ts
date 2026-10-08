@@ -232,7 +232,7 @@ export const runtimeToolDefinitions = [
           minimum: BRIDGE_PORT_MIN,
           maximum: BRIDGE_PORT_MAX,
           description:
-            'TCP port for the MCP bridge. Omit to auto-select a free port (recommended). Spawned sessions receive it through an environment variable; attach mode bakes it into the injected bridge script, so the Godot you launch listens on exactly this port.',
+            'TCP port for the MCP bridge. Omit to auto-select a free port (recommended). Spawned sessions receive it through an environment variable; attach mode bakes it into the injected bridge script, so the Godot you launch listens on exactly this port. A port held by a live session on another project is refused.',
         },
         profiling: {
           type: 'boolean',

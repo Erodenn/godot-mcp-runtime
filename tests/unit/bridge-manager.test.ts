@@ -15,8 +15,9 @@ import {
   BridgeAutoloadCollisionError,
   BridgeManager,
   BridgeRegistryUnreadableError,
+  foreignHostOwnerRemedy,
 } from '../../src/utils/bridge-manager.js';
-import type { BridgeManagerOptions } from '../../src/utils/bridge-manager.js';
+import type { BridgeManagerOptions, BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 import {
   BRIDGE_SCRIPT_RES_PATH,
   LEGACY_BRIDGE_SCRIPT_FILENAME,
@@ -1854,5 +1855,150 @@ describe('BridgeManager removal racing a sibling inject', () => {
     expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
     expect(existsSync(bridgeDir(projectPath))).toBe(false);
     expect(projectGodotOf(projectPath)).not.toContain('McpBridge=');
+  });
+});
+
+describe('BridgeManager.repairOrphaned beside a live owner', () => {
+  it('repairs a bridge whose owner died after an earlier check had found it alive', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const ownerPid = 434343;
+    let ownerAlive = true;
+    const owner = new BridgeManager(bridgeSourcePath, {
+      pid: () => ownerPid,
+      isProcessAlive: () => true,
+      processStartIdentity: NO_START_IDENTITY,
+    });
+    owner.inject(projectPath, TEST_PORT);
+    const other = new BridgeManager(bridgeSourcePath, {
+      isProcessAlive: (pid) => pid !== ownerPid || ownerAlive,
+      processStartIdentity: NO_START_IDENTITY,
+    });
+
+    other.repairOrphaned(projectPath);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('McpBridge=');
+
+    // The owner is hard-killed: its owner file, script and entry all stay.
+    ownerAlive = false;
+    other.repairOrphaned(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(ownerFileNames(projectPath)).toEqual([]);
+  });
+});
+
+describe('BridgeManager.cleanup when its own owner file cannot be removed', () => {
+  const LOCKED = 'EBUSY: resource busy or locked';
+
+  /** A manager whose unlink fails for the one path the test names after inject. */
+  function setupWithLockedOwnerFile(): {
+    projectPath: string;
+    manager: BridgeManager;
+    bridgeSourcePath: string;
+    ownerFile: string;
+  } {
+    const locked: { path: string | null } = { path: null };
+    const setup = setupProject({
+      managerOptions: {
+        unlink: (filePath) => {
+          if (filePath === locked.path) throw new Error(LOCKED);
+          unlinkSync(filePath);
+        },
+      },
+    });
+    setup.manager.inject(setup.projectPath, TEST_PORT);
+    const [fileName] = ownerFileNames(setup.projectPath);
+    const ownerFile = join(bridgeOwnersDir(setup.projectPath), fileName!);
+    locked.path = ownerFile;
+    return { ...setup, ownerFile };
+  }
+
+  it('still removes the script and the entry, and names the owner file it left', () => {
+    const { projectPath, manager, ownerFile } = setupWithLockedOwnerFile();
+
+    const problems = manager.cleanup(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+    expect(existsSync(ownerFile)).toBe(true);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain(ownerFile);
+    expect(problems[0]).toContain(LOCKED);
+  });
+
+  it("leaves the script and the entry to another live session, whatever became of this one's file", () => {
+    const { projectPath, manager, bridgeSourcePath } = setupWithLockedOwnerFile();
+    const sibling = new BridgeManager(bridgeSourcePath, {
+      processStartIdentity: NO_START_IDENTITY,
+    });
+    sibling.inject(projectPath, TEST_PORT);
+
+    manager.cleanup(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('McpBridge=');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+  });
+});
+
+describe('BridgeManager with an owner from another platform on this hostname', () => {
+  const OWNER_PID = 454545;
+  const LINUX_IDENTITY = 'linux:0f0e0d0c-boot:12345';
+
+  /** An owner as a server under WSL writes it: this hostname, a Linux start identity. */
+  function registerLinuxOwner(projectPath: string, bridgeSourcePath: string): void {
+    const owner = new BridgeManager(bridgeSourcePath, {
+      pid: () => OWNER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity: () => LINUX_IDENTITY,
+      platform: 'linux',
+    });
+    owner.inject(projectPath, TEST_PORT);
+  }
+
+  it('counts it as live and never prunes it, though its pid is not in this pid table', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerLinuxOwner(projectPath, bridgeSourcePath);
+    const windowsServer = new BridgeManager(bridgeSourcePath, {
+      isProcessAlive: () => false,
+      processStartIdentity: () => 'win32:133500000000000000',
+      platform: 'win32',
+    });
+
+    const owners = windowsServer.listOtherLiveOwners(projectPath);
+    windowsServer.repairOrphaned(projectPath);
+
+    expect(owners.map((info) => info.pid)).toEqual([OWNER_PID]);
+    expect(ownerFileNames(projectPath)).toHaveLength(1);
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(true);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('McpBridge=');
+  });
+
+  it('still prunes a dead owner that recorded an identity on this platform', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerLinuxOwner(projectPath, bridgeSourcePath);
+    const linuxServer = new BridgeManager(bridgeSourcePath, {
+      isProcessAlive: () => false,
+      processStartIdentity: NO_START_IDENTITY,
+      platform: 'linux',
+    });
+
+    expect(linuxServer.listOtherLiveOwners(projectPath)).toEqual([]);
+    expect(ownerFileNames(projectPath)).toEqual([]);
+  });
+
+  it('tells a blocked caller why the owner cannot be checked and which file to delete', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    registerLinuxOwner(projectPath, bridgeSourcePath);
+    const [fileName] = ownerFileNames(projectPath);
+    const info = JSON.parse(
+      readFileSync(join(bridgeOwnersDir(projectPath), fileName!), 'utf8'),
+    ) as BridgeOwnerInfo;
+
+    const remedy = foreignHostOwnerRemedy(info, projectPath, info.hostname, 'win32');
+
+    expect(remedy?.note).toContain('"linux"');
+    expect(remedy?.note).toContain('"win32"');
+    expect(remedy?.solution).toContain(join(bridgeOwnersDir(projectPath), fileName!));
+    expect(foreignHostOwnerRemedy(info, projectPath, info.hostname, 'linux')).toBeNull();
   });
 });

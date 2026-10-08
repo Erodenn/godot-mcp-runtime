@@ -54,9 +54,31 @@ import { SessionQueue } from './session-queue.js';
  * "session ended" from generic transport errors.
  */
 export class BridgeDisconnectedError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** False when the command's frame was never written to the bridge. */
+    readonly frameWritten: boolean = true,
+  ) {
     super(message);
     this.name = 'BridgeDisconnectedError';
+  }
+}
+
+/** How a bridge connect that outlived its command ended. */
+export type PendingConnectOutcome = 'connected' | 'failed';
+
+/**
+ * Thrown when a command timed out while its TCP connect was still pending.
+ * Not a `BridgeDisconnectedError` and not proof of a live peer either: nothing
+ * was reached yet. `connectOutcome` settles with what that connect did next.
+ */
+export class BridgeConnectPendingError extends Error {
+  constructor(
+    message: string,
+    readonly connectOutcome: Promise<PendingConnectOutcome>,
+  ) {
+    super(message);
+    this.name = 'BridgeConnectPendingError';
   }
 }
 
@@ -183,7 +205,15 @@ const HEADLESS_KILL_CONFIRM_TIMEOUT_MS = 3000;
 const STREAM_END_WAIT_TIMEOUT_MS = 500;
 /** Timeout of a headless child when the caller names none (the version probe). */
 const HEADLESS_DEFAULT_TIMEOUT_MS = 10000;
+/** Timeout of a headless operation when the caller names none. */
+const HEADLESS_OPERATION_TIMEOUT_MS = 30000;
+/** Timeout of a bridge command when the caller names none. */
+const BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS = 10000;
+/** How many trailing stderr lines a caller gets when it names no count. */
+const RECENT_ERROR_LINES_DEFAULT = 20;
 const BRIDGE_RECONNECT_DELAY_MS = 1000;
+// Windows can take about 2 s to refuse a connect to a closed loopback port.
+const BRIDGE_CONNECT_OUTCOME_WAIT_MS = 3000;
 
 /**
  * The MCP SDK's default per-request client timeout. A client that attached no
@@ -589,6 +619,10 @@ interface InFlightCommand {
   command: string;
   /** The session the command was sent to. */
   target: RuntimeSession | null;
+  /** True once the frame was handed to the socket. */
+  frameWritten: boolean;
+  /** The outcome of the connect this command started, while that connect is pending. */
+  pendingConnect: Promise<PendingConnectOutcome> | null;
   resolve: (value: string) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
@@ -633,6 +667,18 @@ function asSpawnError(error: unknown): (Error & { stdout: string; stderr: string
 }
 
 /**
+ * True when `err` proves the bridge command it came from never reached the
+ * game: the session was stopped or absent before the send, or the channel
+ * failed before the frame was written.
+ */
+export function commandWasNotSent(err: unknown): boolean {
+  if (err instanceof SessionStoppedError) return !err.cutOff;
+  if (err instanceof NoLiveCurrentSessionError) return true;
+  if (err instanceof BridgeDisconnectedError) return !err.frameWritten;
+  return err instanceof BridgeConnectPendingError;
+}
+
+/**
  * Wait for `promise` up to `timeoutMs`. True when it settled in time. Never
  * rejects: a rejection counts as settled.
  */
@@ -645,6 +691,18 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
     };
     promise.then(done, done);
   });
+}
+
+/** A retry's disconnect, restated for a command whose first attempt was written. */
+function asSentDisconnect(err: BridgeDisconnectedError): BridgeDisconnectedError {
+  return err.frameWritten ? err : new BridgeDisconnectedError(err.message, true);
+}
+
+/** A retry's failure for a command whose first attempt was written: never "not sent". */
+function asSentFailure(err: unknown): unknown {
+  if (err instanceof BridgeDisconnectedError) return asSentDisconnect(err);
+  if (err instanceof BridgeConnectPendingError) return new Error(err.message);
+  return err;
 }
 
 /** Resolves when a child stream has ended; at once for a stream that was never opened. */
@@ -716,6 +774,11 @@ export class GodotRunner {
    * the server; the exit hook kills what is left here.
    */
   private readonly headlessChildren = new Set<ChildProcess>();
+  /**
+   * Spawned games that have not reported `exit`. A game whose kill was not
+   * confirmed leaves the session map, so the exit hook kills from here too.
+   */
+  private readonly spawnedGames = new Set<ChildProcess>();
   /**
    * Set by `stopAllSessions`, which runs once, as the server shuts down. A
    * start checks it after each await that comes before its record exists: in
@@ -1051,7 +1114,7 @@ export class GodotRunner {
     operation: string,
     params: OperationParams,
     projectPath: string,
-    timeoutMs: number = 30000,
+    timeoutMs: number = HEADLESS_OPERATION_TIMEOUT_MS,
   ): Promise<OperationResult> {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
@@ -1246,6 +1309,7 @@ export class GodotRunner {
           'Godot requires a display to run a project window.',
       );
     }
+    this.assertBridgePortNotHeld(bridgePort, key);
     const port = bridgePort ?? (await findFreePort());
     const parentWatchPort = await this.parentWatchPort();
     let profiler: DebuggerProfiler | null = null;
@@ -1267,6 +1331,7 @@ export class GodotRunner {
     if (previous !== null) {
       this.beginSessionTransition(previous);
       this.closeProfiler(previous);
+      this.releaseSocketOf(previous);
       if (previous.mode === 'spawned' && previous.process) {
         logDebug('Stopping the existing Godot process before starting a new one');
         // Waited for, and escalated: the old game holds its bridge port until
@@ -1300,7 +1365,7 @@ export class GodotRunner {
       }
       // No bridge cleanup for the same path: the replacement re-injects over
       // the same owner file.
-      this.cleanupRespelledProject(previous, projectPath);
+      startWarnings.push(...this.cleanupRespelledProject(previous, projectPath));
     }
 
     if (this.shuttingDown) {
@@ -1364,6 +1429,7 @@ export class GodotRunner {
       }
       const proc = spawn(godotPath, cmdArgs, spawnOptions);
       processSpawned = true;
+      this.spawnedGames.add(proc);
       const output: string[] = [];
       const errors: string[] = [];
 
@@ -1400,6 +1466,7 @@ export class GodotRunner {
       });
 
       proc.on('exit', (code: number | null) => {
+        this.spawnedGames.delete(proc);
         this.handleSpawnedProcessExit(session, godotProcess, epoch, code);
       });
 
@@ -1411,6 +1478,8 @@ export class GodotRunner {
         // One uncounted push shifts every later window by a line.
         this.ingestStderrChunk(godotProcess, `Process error: ${err.message}\n`);
         godotProcess.hasExited = true;
+        // No pid: the spawn itself failed, so there is nothing to kill later.
+        if (proc.pid === undefined) this.spawnedGames.delete(proc);
         // The engine will never dial back, so nothing can arrive on the debugger
         // listener. Holding the port open until the next run_project is pointless.
         this.closeProfiler(session);
@@ -1442,6 +1511,22 @@ export class GodotRunner {
     throw new Error(
       `The server is shutting down, so the session on ${projectPath} was not started; nothing was launched.`,
     );
+  }
+
+  /**
+   * Refuse an explicit bridge port that a live session on another project
+   * holds: the new game could not bind it, and its bridge wait would only
+   * reach the other session's bridge. A session on this same project is
+   * exempt, because the start stops it first.
+   */
+  private assertBridgePortNotHeld(bridgePort: number | undefined, key: string): void {
+    if (bridgePort === undefined) return;
+    for (const other of this.sessions.values()) {
+      if (other.key === key || other.bridgePort !== bridgePort || !isSessionLive(other)) continue;
+      throw new Error(
+        `Bridge port ${bridgePort} is already held by this server's live session on ${other.projectPath}. Nothing was stopped or launched: pass a different bridgePort, omit it to get a free port, or stop that session first.`,
+      );
+    }
   }
 
   /**
@@ -1584,14 +1669,15 @@ export class GodotRunner {
   }
 
   /**
-   * Point `current` at a session, or at nothing. The bridge socket follows:
-   * a socket dialed for any other session is closed here, and the next
-   * command lazy-connects to the new current session's port with its token.
+   * Point `current` at a session, or at nothing. Only the socket of the
+   * session losing the pointer is closed: a command in flight to any other
+   * session (an attach probe, a start's bridge wait) keeps its channel.
    */
   private setCurrent(session: RuntimeSession | null): void {
     if (this.current === session) return;
-    if (this.socketSession !== session) this.closeConnection();
+    const losing = this.current;
     this.current = session;
+    if (losing !== null) this.releaseSocketOf(losing);
   }
 
   /**
@@ -1601,6 +1687,7 @@ export class GodotRunner {
   private forgetSession(session: RuntimeSession): void {
     if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
     if (this.current === session) this.setCurrent(null);
+    this.releaseSocketOf(session);
   }
 
   private closeProfiler(session: RuntimeSession): void {
@@ -1651,14 +1738,24 @@ export class GodotRunner {
    * case-sensitive filesystem they can be two directories, and the replaced
    * one would otherwise keep its bridge artifacts with no record left to
    * remove them.
+   *
+   * Returns what that cleanup could not confirm, as sentences for the new
+   * session's `startWarnings`: the replaced record is gone, so no later stop
+   * can report it.
    */
-  private cleanupRespelledProject(previous: RuntimeSession, projectPath: string): void {
-    if (previous.projectPath === projectPath) return;
+  private cleanupRespelledProject(previous: RuntimeSession, projectPath: string): string[] {
+    if (previous.projectPath === projectPath) return [];
+    let problems: string[];
     try {
-      this.bridge.cleanup(previous.projectPath);
+      problems = this.bridge.cleanup(previous.projectPath);
     } catch (err) {
-      logDebug(`Bridge cleanup for a replaced session failed (ignored): ${err}`);
+      logDebug(`Bridge cleanup for a replaced session failed: ${err}`);
+      problems = [`bridge cleanup failed outright (${String(err)})`];
     }
+    if (problems.length === 0) return [];
+    return [
+      `Bridge cleanup for the session this start replaced (${previous.projectPath}) was incomplete: ${problems.join('; ')}`,
+    ];
   }
 
   private describeSession(session: RuntimeSession): RuntimeSessionInfo {
@@ -1714,12 +1811,9 @@ export class GodotRunner {
     session.mode = null;
     session.bridgePort = null;
     session.token = null;
-    // The socket to a dead peer is garbage. Only when it is this session's:
-    // an exit on another project must not cut the current session's channel.
-    // Idempotent, and the rejection it issues on an in-flight command is a
-    // BridgeDisconnectedError the spawned branch of sendCommandWithReconnect
-    // already ignores.
-    if (this.socketSession === session) this.closeConnection();
+    // The socket to a dead peer is garbage. Only this session's: an exit on
+    // another project must not cut the channel of the command in flight.
+    this.releaseSocketOf(session);
     // Nobody is waiting on this exit, so what the cleanup could not confirm is
     // kept on the record for the stop_project that reads it later.
     try {
@@ -1743,7 +1837,7 @@ export class GodotRunner {
    * on the error it is about to throw.
    */
   private clearAttachedSession(session: RuntimeSession): string[] {
-    if (this.socketSession === session) this.closeConnection();
+    this.releaseSocketOf(session);
     let problems: string[];
     try {
       problems = this.bridge.cleanup(session.projectPath);
@@ -1794,8 +1888,9 @@ export class GodotRunner {
    * the `process.on('exit')` handler. A graceful shutdown has already stopped
    * every session by then; this is for the exits that skip it (a stop that
    * threw, an uncaught error), where the games would otherwise outlive the
-   * server with nothing left to stop them. Attached sessions are not this
-   * server's processes and are left running. The bridge `shutdown` command is
+   * server with nothing left to stop them, and for a game whose stop sent a
+   * kill that was never confirmed. Attached sessions are not this server's
+   * processes and are left running. The bridge `shutdown` command is
    * not sent: there is no event loop left to send it on.
    *
    * Headless children still running are killed here as well. Outside Windows
@@ -1803,11 +1898,16 @@ export class GodotRunner {
    * the server does not reach them.
    */
   killSpawnedProcessesSync(): void {
-    for (const session of [...this.sessions.values()]) {
+    const games = new Set<ChildProcess>();
+    for (const session of this.sessions.values()) {
       const tracked = session.process;
       if (session.mode !== 'spawned' || tracked === null || tracked.hasExited) continue;
+      games.add(tracked.process);
+    }
+    for (const game of this.spawnedGames) games.add(game);
+    for (const game of games) {
       try {
-        this.forceKillProcessTree(tracked.process);
+        this.forceKillProcessTree(game);
       } catch {
         // Exit handlers must not throw; there is nowhere left to report to.
       }
@@ -1858,6 +1958,7 @@ export class GodotRunner {
     }
 
     // Phase 1: preconditions. Nothing is stopped or written here.
+    this.assertBridgePortNotHeld(bridgePort, key);
     const port = bridgePort ?? (await findFreePort());
     this.assertNotShuttingDown(projectPath);
     this.bridge.precheckInject(projectPath, true);
@@ -1867,6 +1968,7 @@ export class GodotRunner {
     // project; a session on another project, spawned or attached, is left as
     // it is.
     const previous = await this.previousAfterPendingStop(key);
+    const startWarnings: string[] = [];
     if (previous !== null) {
       if (previous.mode === 'spawned' && previous.process) {
         await this.stopSession(previous);
@@ -1881,13 +1983,14 @@ export class GodotRunner {
         this.beginSessionTransition(previous);
         this.closeProfiler(previous);
         this.forgetSession(previous);
-        this.cleanupRespelledProject(previous, projectPath);
+        startWarnings.push(...this.cleanupRespelledProject(previous, projectPath));
       }
     }
     this.assertNotShuttingDown(projectPath);
 
     // Phase 3: the new record and its bridge.
     const session = this.createSession(projectPath, 'attached');
+    session.startWarnings = startWarnings;
     const previousCurrent = this.current;
     this.sessions.set(key, session);
     this.setCurrent(session);
@@ -1921,12 +2024,11 @@ export class GodotRunner {
    * One ping to an attached session's bridge, to decide whether a repeated
    * attach keeps the session. Never throws.
    *
-   * Only a `BridgeDisconnectedError` is `gone`: nothing listens on the port,
-   * or the peer closed. That is the rule `sendCommandWithReconnect` applies
-   * before it clears an attached session, and for the same reason. A ping
-   * that times out is a game that is alive and busy for a second (loading,
-   * paused in a long frame), and replacing its session would bake a token it
-   * never reads and then remove its bridge.
+   * `gone` means nothing listens on the port, or the peer closed (see
+   * `probeFailureMeansGone`, the rule `sendCommandWithReconnect` shares). A
+   * ping that a connected peer left unanswered is a game that is alive and
+   * busy for a second (loading, paused in a long frame), and replacing its
+   * session would bake a token it never reads and then remove its bridge.
    */
   private async probeAttachedBridge(
     session: RuntimeSession,
@@ -1935,7 +2037,7 @@ export class GodotRunner {
     try {
       reply = await this.sendCommandTo(session, 'ping', {}, BRIDGE_PING_TIMEOUT_MS);
     } catch (err) {
-      return err instanceof BridgeDisconnectedError ? 'gone' : 'silent';
+      return (await this.probeFailureMeansGone(err)) ? 'gone' : 'silent';
     }
     try {
       const parsed: unknown = JSON.parse(reply);
@@ -1947,6 +2049,26 @@ export class GodotRunner {
     } catch {
       return 'unexpected-reply';
     }
+  }
+
+  /**
+   * Whether a failed probe ping shows the bridge to be gone. A disconnect
+   * does. A ping that timed out with its connect still pending shows nothing
+   * yet, so that connect's own outcome is waited for, up to
+   * BRIDGE_CONNECT_OUTCOME_WAIT_MS: refused is gone, connected or still
+   * pending is a peer that may be alive. Never throws.
+   */
+  private async probeFailureMeansGone(err: unknown): Promise<boolean> {
+    if (err instanceof BridgeDisconnectedError) return true;
+    if (!(err instanceof BridgeConnectPendingError)) return false;
+    const outcome = await new Promise<PendingConnectOutcome | null>((resolveOutcome) => {
+      const timer = setTimeout(() => resolveOutcome(null), BRIDGE_CONNECT_OUTCOME_WAIT_MS);
+      void err.connectOutcome.then((settled) => {
+        clearTimeout(timer);
+        resolveOutcome(settled);
+      });
+    });
+    return outcome === 'failed';
   }
 
   /**
@@ -1991,7 +2113,7 @@ export class GodotRunner {
   }
 
   /** `getRecentErrors` for the record a reference names. */
-  recentErrorsFor(ref: SessionRef, count: number = 20): string[] {
+  recentErrorsFor(ref: SessionRef, count: number = RECENT_ERROR_LINES_DEFAULT): string[] {
     return recentErrorLines(this.recordOf(ref).process, count);
   }
 
@@ -2041,7 +2163,7 @@ export class GodotRunner {
   private shutdownAttachedBridge(session: RuntimeSession): Promise<boolean> {
     // The command socket to this session, if it is open, goes first: the
     // session is ending and nothing more is sent over it.
-    this.releaseSocketOf(session, new BridgeDisconnectedError('Bridge session ended'));
+    this.releaseSocketOf(session);
     return this.requestBridgeShutdown(
       session.bridgePort,
       session.token,
@@ -2051,13 +2173,20 @@ export class GodotRunner {
 
   /**
    * Close the command socket when it belongs to `session`, rejecting the
-   * command in flight to that session with `reason`. A socket or a command
-   * that belongs to another session is left alone.
+   * command in flight to that session with `reason` (a disconnect when
+   * omitted). A socket or a command that belongs to another session is left
+   * alone.
    */
-  private releaseSocketOf(session: RuntimeSession, reason: Error): void {
+  private releaseSocketOf(session: RuntimeSession, reason?: Error): void {
     if (this.socketSession === session || this.inFlight?.target === session) {
       this.closeConnection(reason);
     }
+  }
+
+  /** Forget the command socket. `socket` and `socketSession` only ever change together. */
+  private dropSocketReference(): void {
+    this.socket = null;
+    this.socketSession = null;
   }
 
   /**
@@ -2387,7 +2516,7 @@ export class GodotRunner {
   sendCommand(
     command: string,
     params: Record<string, unknown> = {},
-    timeoutMs: number = 10000,
+    timeoutMs: number = BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS,
   ): Promise<string> {
     return this.queue.run(`bridge command '${command}'`, () =>
       this.sendCommandTo(this.current, command, params, timeoutMs),
@@ -2437,6 +2566,7 @@ export class GodotRunner {
         reject(
           new BridgeDisconnectedError(
             `Command '${command}' not sent: the session has no bridge port to connect to`,
+            false,
           ),
         );
         return;
@@ -2461,12 +2591,25 @@ export class GodotRunner {
         // sendCommand lazy-reconnects.
         if (this.socket) this.discardSocket(this.socket);
         this.resetRxBuffer();
+        const message = `Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`;
+        // A connect still pending is not a peer that failed to answer.
+        const pendingConnect = flight.pendingConnect;
         settle(
-          new Error(`Command '${command}' timed out after ${timeoutMs}ms. Is the game running?`),
+          pendingConnect !== null
+            ? new BridgeConnectPendingError(message, pendingConnect)
+            : new Error(message),
         );
       }, clampTimerDelay(timeoutMs));
 
-      const flight: InFlightCommand = { command, target, resolve, reject, timer };
+      const flight: InFlightCommand = {
+        command,
+        target,
+        frameWritten: false,
+        pendingConnect: null,
+        resolve,
+        reject,
+        timer,
+      };
       this.inFlight = flight;
 
       const ensureSocket = (cb: (err?: Error) => void): void => {
@@ -2475,6 +2618,10 @@ export class GodotRunner {
           return;
         }
         const sock = net.connect(port, '127.0.0.1');
+        let reportOutcome: (outcome: PendingConnectOutcome) => void = () => {};
+        flight.pendingConnect = new Promise<PendingConnectOutcome>((settleOutcome) => {
+          reportOutcome = settleOutcome;
+        });
         // A connect can outlive the command that started it: the command timed
         // out, or closeConnection rejected it, while the connect was still
         // pending. Its late outcome then belongs to nobody. Installing that
@@ -2485,10 +2632,12 @@ export class GodotRunner {
         // in flight.
         const onConnect = (): void => {
           sock.removeListener('error', onConnectError);
+          reportOutcome('connected');
           if (this.inFlight !== flight) {
             sock.destroy();
             return;
           }
+          flight.pendingConnect = null;
           sock.setNoDelay(true);
           this.socket = sock;
           this.socketSession = target;
@@ -2541,7 +2690,7 @@ export class GodotRunner {
           });
 
           const onClose = (): void => {
-            this.socket = null;
+            if (this.socket === sock) this.dropSocketReference();
             settle(
               new BridgeDisconnectedError(
                 `Bridge connection closed before '${command}' response was received`,
@@ -2550,7 +2699,7 @@ export class GodotRunner {
           };
           sock.once('close', onClose);
           sock.on('error', (sockErr: Error) => {
-            this.socket = null;
+            if (this.socket === sock) this.dropSocketReference();
             settle(
               new BridgeDisconnectedError(
                 `Bridge socket error during '${command}': ${sockErr.message}`,
@@ -2562,7 +2711,9 @@ export class GodotRunner {
         };
         const onConnectError = (connErr: Error): void => {
           sock.destroy();
+          reportOutcome('failed');
           if (this.inFlight !== flight) return;
+          flight.pendingConnect = null;
           cb(connErr);
         };
         sock.once('connect', onConnect);
@@ -2574,12 +2725,13 @@ export class GodotRunner {
           settle(
             new BridgeDisconnectedError(
               `Failed to connect to bridge for '${command}': ${err.message}`,
+              false,
             ),
           );
           return;
         }
         if (!this.socket) {
-          settle(new BridgeDisconnectedError(`Bridge socket unavailable for '${command}'`));
+          settle(new BridgeDisconnectedError(`Bridge socket unavailable for '${command}'`, false));
           return;
         }
         try {
@@ -2589,6 +2741,7 @@ export class GodotRunner {
             ...params,
           });
           this.socket.write(encodeFrame(payload));
+          flight.frameWritten = true;
         } catch (writeErr) {
           const message = writeErr instanceof Error ? writeErr.message : String(writeErr);
           settle(new Error(`Failed to send command '${command}': ${message}`));
@@ -2603,20 +2756,21 @@ export class GodotRunner {
    * callers that drop a socket to reconnect mean; a stop passes
    * `SessionStoppedError`.
    */
-  closeConnection(reason: Error = new BridgeDisconnectedError('Bridge session ended')): void {
+  closeConnection(reason?: Error): void {
     if (this.inFlight) {
       const flight = this.inFlight;
       this.inFlight = null;
       clearTimeout(flight.timer);
-      flight.reject(reason);
+      flight.reject(
+        reason ?? new BridgeDisconnectedError('Bridge session ended', flight.frameWritten),
+      );
     }
-    if (this.socket) {
-      const sock = this.socket;
-      this.socket = null;
+    const sock = this.socket;
+    this.dropSocketReference();
+    if (sock) {
       sock.removeAllListeners();
       sock.destroy();
     }
-    this.socketSession = null;
     this.resetRxBuffer();
   }
 
@@ -2630,7 +2784,7 @@ export class GodotRunner {
    * reference to the socket that replaced this one.
    */
   private discardSocket(sock: net.Socket): void {
-    if (this.socket === sock) this.socket = null;
+    if (this.socket === sock) this.dropSocketReference();
     sock.removeAllListeners();
     // An 'error' with no listener is thrown; one arriving on a socket nobody
     // is waiting on any more must not take the server down.
@@ -2855,9 +3009,9 @@ export class GodotRunner {
    * `SessionStoppedError`: a session that was stopped is not retried, probed
    * or cleared a second time. The chain below narrows that set: spawned
    * sessions keep today's behavior (the exit handler owns them), `ping` is
-   * exempt, a retryable command spends its one retry first, and every
-   * survivor must still fail a live `ping` with a `BridgeDisconnectedError`
-   * of its own before anything is cleared.
+   * exempt, a retryable command spends its one retry first, and for every
+   * survivor a probe `ping` must still show the bridge gone
+   * (`probeFailureMeansGone`) before anything is cleared.
    */
   private async sendCommandWithReconnect(
     // The session this command belongs to. The first send, the retry and the
@@ -2867,9 +3021,9 @@ export class GodotRunner {
     session: RuntimeSession | null,
     command: string,
     params: Record<string, unknown> = {},
-    timeoutMs: number = 10000,
+    timeoutMs: number = BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS,
   ): Promise<string> {
-    let failure: Error;
+    let failure: BridgeDisconnectedError;
     try {
       return await this.sendCommandTo(session, command, params, timeoutMs);
     } catch (err) {
@@ -2882,9 +3036,13 @@ export class GodotRunner {
     if (session === null || session.mode !== 'attached') {
       // Spawned (or already-cleared) session: unchanged behavior.
       if (session?.mode && retryable) {
-        this.closeConnection();
+        this.releaseSocketOf(session);
         await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
-        return this.sendCommandTo(session, command, params, timeoutMs);
+        try {
+          return await this.sendCommandTo(session, command, params, timeoutMs);
+        } catch (retryErr) {
+          throw failure.frameWritten ? asSentFailure(retryErr) : retryErr;
+        }
       }
       throw failure;
     }
@@ -2892,26 +3050,31 @@ export class GodotRunner {
     if (GodotRunner.DISCONNECT_EXEMPT_BRIDGE_COMMANDS.has(command)) throw failure;
 
     if (retryable) {
-      this.closeConnection();
+      this.releaseSocketOf(session);
       await new Promise((r) => setTimeout(r, BRIDGE_RECONNECT_DELAY_MS));
       try {
         return await this.sendCommandTo(session, command, params, timeoutMs);
       } catch (retryErr) {
-        if (!(retryErr instanceof BridgeDisconnectedError)) throw retryErr;
-        failure = retryErr;
+        const sentBefore = failure.frameWritten;
+        if (!(retryErr instanceof BridgeDisconnectedError)) {
+          throw sentBefore ? asSentFailure(retryErr) : retryErr;
+        }
+        failure = sentBefore ? asSentDisconnect(retryErr) : retryErr;
       }
     }
 
     // Exactly one probe, on the existing ping timeout. A pong means the
     // command failed but the session did not. The session ends here only when
-    // the probe itself fails as a disconnect: nothing listening, or the peer
-    // closing. A probe that times out is a game that is alive and not
-    // answering, which is the case a timeout must never be taken for.
-    this.closeConnection();
+    // the probe shows the bridge gone: nothing listening, or the peer closing.
+    // A connected peer that leaves the ping unanswered is a game that is alive
+    // and not answering, which is the case a timeout must never be taken for.
+    this.releaseSocketOf(session);
     try {
       await this.sendCommandTo(session, 'ping', {}, BRIDGE_PING_TIMEOUT_MS);
     } catch (probeErr) {
-      if (probeErr instanceof BridgeDisconnectedError) {
+      const gone = await this.probeFailureMeansGone(probeErr);
+      // A stop does not wait for this command and may have taken the record.
+      if (gone && !session.stopped && this.sessions.get(session.key) === session) {
         this.appendCleanupProblems(failure, this.clearAttachedSession(session));
       }
     }
@@ -2931,7 +3094,7 @@ export class GodotRunner {
   sendCommandWithErrors(
     command: string,
     params: Record<string, unknown> = {},
-    timeoutMs: number = 10000,
+    timeoutMs: number = BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS,
   ): Promise<{ response: string; runtimeErrors: string[]; stderrWindow: string[] }> {
     return this.queue.run(`bridge command '${command}'`, async () => {
       // No current session: reject before any socket is dialed, with the live
@@ -3177,14 +3340,14 @@ export class GodotRunner {
           parsed.status === 'pong' && parsed.session_token === expectedToken,
         shouldAbort: () => ({
           aborted: proc.hasExited,
-          tail: recentErrorLines(proc, 20),
+          tail: recentErrorLines(proc, RECENT_ERROR_LINES_DEFAULT),
         }),
         deadlineAt,
       });
     });
   }
 
-  getRecentErrors(count: number = 20): string[] {
+  getRecentErrors(count: number = RECENT_ERROR_LINES_DEFAULT): string[] {
     return recentErrorLines(this.activeProcess, count);
   }
 }

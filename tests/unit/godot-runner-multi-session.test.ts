@@ -38,6 +38,7 @@ const {
   SessionStoppedError,
   StartBudgetExhaustedError,
   START_RESPONSE_BUDGET_MS,
+  commandWasNotSent,
   sessionKey,
 } = await import('../../src/utils/godot-runner.js');
 const { BridgeAttachConflictError, BridgeAutoloadCollisionError, BridgeRegistryUnreadableError } =
@@ -136,6 +137,8 @@ interface BridgeRecorder {
   precheckError: Error | null;
   /** Projects whose cleanup throws, after being recorded. */
   cleanupThrowsFor: Set<string>;
+  /** What cleanup reports as unconfirmed, per project. Absent: nothing. */
+  cleanupProblemsFor: Map<string, string[]>;
 }
 
 /** Swap the runner's BridgeManager for a recorder. Touches no filesystem. */
@@ -146,6 +149,7 @@ function stubBridge(runner: Runner): BridgeRecorder {
     injectCalls: [],
     precheckError: null,
     cleanupThrowsFor: new Set(),
+    cleanupProblemsFor: new Map(),
   };
   (runner as unknown as { bridge: unknown }).bridge = {
     precheckInject: () => {
@@ -158,11 +162,11 @@ function stubBridge(runner: Runner): BridgeRecorder {
       rec.injectCalls.push(projectPath);
     },
     // Returns what BridgeManager.cleanup returns: the steps it could not
-    // confirm, none here.
+    // confirm, none unless the test names some.
     cleanup: (projectPath: string): string[] => {
       rec.cleanupCalls.push(projectPath);
       if (rec.cleanupThrowsFor.has(projectPath)) throw new Error('cleanup failed');
-      return [];
+      return rec.cleanupProblemsFor.get(projectPath) ?? [];
     },
     cleanupAtExit: (projectPath: string): string[] => {
       rec.exitCleanupCalls.push(projectPath);
@@ -182,6 +186,8 @@ interface RecordingBridge {
   frames: Array<Record<string, unknown>>;
   /** Connections accepted so far. */
   connectionCount(): number;
+  /** Answer every command held back so far (see `held`). */
+  releaseHeld(): void;
   shutdown(): Promise<void>;
 }
 
@@ -189,6 +195,8 @@ interface RecordingBridgeOptions {
   dropFirstFrame?: boolean;
   /** Commands that are recorded and never answered, the way a game busy inside one looks. */
   unanswered?: string[];
+  /** Commands that are recorded and answered only when the test calls `releaseHeld`. */
+  held?: string[];
 }
 
 /**
@@ -200,6 +208,8 @@ async function startRecordingBridge(opts: RecordingBridgeOptions = {}): Promise<
   const frames: Array<Record<string, unknown>> = [];
   const peers = new Set<net.Socket>();
   const unanswered = new Set(opts.unanswered ?? []);
+  const held = new Set(opts.held ?? []);
+  const heldPeers: net.Socket[] = [];
   let connections = 0;
   let dropPending = opts.dropFirstFrame === true;
   const server = net.createServer((socket) => {
@@ -214,6 +224,10 @@ async function startRecordingBridge(opts: RecordingBridgeOptions = {}): Promise<
         const received = JSON.parse(frame.toString('utf8')) as Record<string, unknown>;
         frames.push(received);
         if (unanswered.has(String(received.command))) continue;
+        if (held.has(String(received.command))) {
+          heldPeers.push(socket);
+          continue;
+        }
         if (dropPending) {
           dropPending = false;
           socket.destroy();
@@ -232,6 +246,9 @@ async function startRecordingBridge(opts: RecordingBridgeOptions = {}): Promise<
     port: (server.address() as AddressInfo).port,
     frames,
     connectionCount: () => connections,
+    releaseHeld() {
+      for (const peer of heldPeers.splice(0)) peer.write(encodeFrame(PONG));
+    },
     shutdown() {
       return new Promise((done) => {
         for (const peer of peers) peer.destroy();
@@ -837,6 +854,48 @@ describe('multi-project runtime sessions', () => {
   );
 
   it(
+    'a game whose kill was never confirmed is still killed when the server exits',
+    async () => {
+      const kills = fakeWindowsTreeKill();
+      const child = await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+
+      const result = await runner.stopProject();
+
+      expect(result).toMatchObject({ killUnconfirmed: true, pid: FAKE_GAME_PID });
+      // No record is left to find the game through.
+      expect(runner.listSessions()).toEqual([]);
+      kills.taskkillPids.length = 0;
+
+      runner.killSpawnedProcessesSync();
+      expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID)]);
+
+      // Once the game has reported its exit there is nothing left to kill.
+      child.emit('exit', null);
+      kills.taskkillPids.length = 0;
+      runner.killSpawnedProcessesSync();
+      expect(kills.taskkillPids).toEqual([]);
+    },
+    STOP_CASE_TIMEOUT_MS,
+  );
+
+  it(
+    'a game replaced by a restart whose kill was never confirmed is killed when the server exits',
+    async () => {
+      const kills = fakeWindowsTreeKill();
+      await startProjectWithPid(projectA, PORT_A, FAKE_GAME_PID);
+      await startProjectWithPid(projectA, PORT_A_RERUN, FAKE_OTHER_GAME_PID);
+      kills.taskkillPids.length = 0;
+
+      runner.killSpawnedProcessesSync();
+
+      expect([...kills.taskkillPids].sort()).toEqual(
+        [String(FAKE_GAME_PID), String(FAKE_OTHER_GAME_PID)].sort(),
+      );
+    },
+    STOP_CASE_TIMEOUT_MS,
+  );
+
+  it(
     'a stop whose kill is never confirmed reports killUnconfirmed with the pid',
     async () => {
       const kills = fakeWindowsTreeKill();
@@ -1210,9 +1269,127 @@ describe('multi-project runtime sessions', () => {
     STOP_CASE_TIMEOUT_MS,
   );
 
+  it("stopping one session does not cut off a probe in flight to another project's attached session", async () => {
+    const loopback = await startLoopback({ held: ['ping'] });
+    installSession(runner, {
+      mode: 'attached',
+      projectPath: projectB,
+      bridgePort: loopback.port,
+      token: TOKEN_B,
+      current: false,
+    });
+    // The current session: a game that exited, kept for its logs.
+    installSession(runner, { mode: null, projectPath: projectA, process: exitedProcess(0) });
+
+    const attach = runner.attachProject(projectB, PORT_B);
+    await vi.waitFor(() => expect(loopback.frames).toHaveLength(1));
+    // A stop does not wait in the queue: it lands while B's probe is in flight.
+    await runner.stopProject();
+    loopback.releaseHeld();
+
+    await expect(attach).resolves.toMatchObject({
+      alreadyAttached: true,
+      existingBridge: 'answered',
+    });
+    expect(bridge.injectCalls).toEqual([]);
+    expect(bridge.cleanupCalls).toEqual([]);
+  });
+
   // -------------------------------------------------------------------------
   // Paths and ports a command may reach
   // -------------------------------------------------------------------------
+
+  it('a start on an explicit bridge port another live session holds is refused before anything is launched', async () => {
+    const childA = await startProject(projectA, PORT_A);
+    spawnMock.mockClear();
+
+    const spawned = await runner
+      .runProject(projectB, undefined, false, PORT_A)
+      .catch((error: unknown) => error);
+    const attached = await runner.attachProject(projectB, PORT_A).catch((error: unknown) => error);
+
+    for (const refusal of [spawned, attached]) {
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(String(PORT_A));
+      expect((refusal as Error).message).toContain(projectA);
+    }
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(childA.kill).not.toHaveBeenCalled();
+    expect(bridge.injectCalls).toEqual([projectA]);
+    expect(sessionPaths()).toEqual([projectA]);
+    expect(runner.activeProjectPath).toBe(projectA);
+  });
+
+  it('a restart may keep the explicit bridge port its own project holds', async () => {
+    await startProject(projectA, PORT_A);
+
+    await startProject(projectA, PORT_A);
+
+    expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
+  });
+
+  it('a start reports what the cleanup of a differently spelled replaced project could not confirm', async () => {
+    await startProject(projectA, PORT_A);
+    const respelled = projectA.toUpperCase();
+    bridge.cleanupProblemsFor.set(projectA, ['the bridge script could not be removed (EBUSY)']);
+
+    await startProject(respelled, PORT_A_RERUN);
+
+    const warnings = runner.getSessionInfo(respelled)?.startWarnings ?? [];
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(projectA);
+    expect(warnings[0]).toContain('the bridge script could not be removed (EBUSY)');
+  });
+
+  it('commandWasNotSent is true only for a command that provably never reached the game', async () => {
+    const send = (): Promise<unknown> =>
+      runner.sendCommandWithErrors('run_script', {}).catch((error: unknown) => error);
+
+    // No current session at all.
+    const noSession = await send();
+    expect(noSession).toBeInstanceOf(NoLiveCurrentSessionError);
+    expect(commandWasNotSent(noSession)).toBe(true);
+
+    // A session with no port: the channel fails before any frame exists.
+    const record = installSession(runner, { mode: 'spawned', projectPath: projectA });
+    const noPort = await send();
+    expect((noPort as Error).name).toBe('BridgeDisconnectedError');
+    expect(commandWasNotSent(noPort)).toBe(true);
+
+    // A record a stop has ended.
+    record.stopped = true;
+    const stopped = await send();
+    expect(stopped).toBeInstanceOf(SessionStoppedError);
+    expect(commandWasNotSent(stopped)).toBe(true);
+
+    // A frame that was written and then lost its connection may have run.
+    const dropping = await startLoopback({ dropFirstFrame: true });
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: projectB,
+      bridgePort: dropping.port,
+      token: TOKEN_B,
+    });
+    const dropped = await send();
+    expect(dropping.frames).toHaveLength(1);
+    expect((dropped as Error).name).toBe('BridgeDisconnectedError');
+    expect(commandWasNotSent(dropped)).toBe(false);
+
+    // A command a stop cut off was in flight.
+    const wedged = await startLoopback({ unanswered: ['run_script'] });
+    installSession(runner, {
+      mode: 'attached',
+      projectPath: projectC,
+      bridgePort: wedged.port,
+      token: TOKEN_A,
+    });
+    const cut = send();
+    await vi.waitFor(() => expect(wedged.frames).toHaveLength(1));
+    await runner.stopProject();
+    expect(commandWasNotSent(await cut)).toBe(false);
+
+    expect(commandWasNotSent(new Error("Command 'run_script' timed out"))).toBe(false);
+  });
 
   it("replacing a session through a differently spelled path removes the replaced spelling's bridge artifacts", async () => {
     const first = await startProject(projectA, PORT_A, { exitOnKill: false });

@@ -63,6 +63,15 @@ export const defaultProcessStartIdentityDeps: ProcessStartIdentityDeps = {
   },
 };
 
+/** The platforms a start identity can be read on; each prefixes its identity with its name. */
+const START_IDENTITY_PLATFORMS: readonly NodeJS.Platform[] = ['linux', 'win32', 'darwin'];
+
+/** The platform a start identity was read on, or null when it names none. */
+export function startIdentityPlatform(identity: string | undefined): NodeJS.Platform | null {
+  if (identity === undefined) return null;
+  return START_IDENTITY_PLATFORMS.find((name) => identity.startsWith(`${name}:`)) ?? null;
+}
+
 /** Whether reading a start identity on this platform runs a helper program. */
 export function startIdentityQuerySpawns(platform: NodeJS.Platform): boolean {
   return platform !== 'linux';

@@ -13,7 +13,11 @@ import { randomBytes } from 'crypto';
 import { logDebug } from './logger.js';
 import { writeFileAtomicSync } from './atomic-write.js';
 import { projectPathKey } from './output-parsing.js';
-import { readProcessStartIdentity, startIdentityQuerySpawns } from './process-start-time.js';
+import {
+  readProcessStartIdentity,
+  startIdentityPlatform,
+  startIdentityQuerySpawns,
+} from './process-start-time.js';
 import {
   addAutoloadEntry,
   normalizeAutoloadPath,
@@ -180,21 +184,45 @@ export function bridgeOwnerFileName(info: Pick<BridgeOwnerInfo, 'pid' | 'instanc
 }
 
 /**
+ * True when an owner recorded its start identity on another platform than
+ * `thisPlatform`. Such an owner runs under another pid table even when the
+ * hostname is this host's (WSL takes the Windows computer name), so its pid
+ * means nothing here. False when no identity was recorded.
+ */
+export function ownerPlatformDiffers(
+  info: Pick<BridgeOwnerInfo, 'processStart'>,
+  thisPlatform: NodeJS.Platform = process.platform,
+): boolean {
+  const recorded = startIdentityPlatform(info.processStart);
+  return recorded !== null && recorded !== thisPlatform;
+}
+
+/**
  * What to tell a caller blocked by an owner registered from another host, or
  * null when the owner is on this host. A foreign-host owner cannot be probed,
  * so it counts as live for as long as its file exists (see `isOwnerLive`): a
  * file left behind by a project copied or synced from another machine, or by
  * a host that was renamed, blocks forever, and deleting that file is the only
  * way out. The refusal therefore has to name the host and the file.
- * `thisHostname` is a parameter so a test can stand in for the host.
+ * An owner on this hostname under another platform (`ownerPlatformDiffers`)
+ * is unprobeable in the same way and gets the same kind of answer.
+ * `thisHostname` and `thisPlatform` are parameters so a test can stand in for
+ * the host.
  */
 export function foreignHostOwnerRemedy(
   info: BridgeOwnerInfo,
   projectPath: string,
   thisHostname: string = osHostname(),
+  thisPlatform: NodeJS.Platform = process.platform,
 ): { note: string; solution: string } | null {
-  if (info.hostname === thisHostname) return null;
   const ownerFile = join(bridgeOwnersDir(projectPath), bridgeOwnerFileName(info));
+  if (info.hostname === thisHostname) {
+    if (!ownerPlatformDiffers(info, thisPlatform)) return null;
+    return {
+      note: ` That session was registered on this hostname from another operating-system environment ("${startIdentityPlatform(info.processStart)}"; this server runs on "${thisPlatform}"), such as WSL or a container sharing the project directory, so this server cannot check whether it is still running and treats it as live.`,
+      solution: `If that session is known to be gone, delete its owner file ${ownerFile} and retry`,
+    };
+  }
   return {
     note: ` That session was registered from another host ("${info.hostname}"; this host is "${thisHostname}"), so this server cannot check whether it is still running and treats it as live.`,
     solution: `If that session is known to be gone (the project was copied or synced from another machine, or this host was renamed), delete its owner file ${ownerFile} and retry`,
@@ -231,6 +259,10 @@ export interface BridgeManagerOptions {
   cacheProcessStartIdentity?: boolean;
   /** Clock for the owner-identity cache. Default: `Date.now`. */
   now?: () => number;
+  /** Stands in for `unlinkSync`, so a test can make one removal fail. */
+  unlink?: (filePath: string) => void;
+  /** The platform this server runs on. Default: `process.platform`. */
+  platform?: NodeJS.Platform;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -284,8 +316,9 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
  * shared script and autoload entry are created on the first live session's
  * inject and removed only by the last live session's cleanup, tracked via one
  * owner file per live session (see `BridgeOwnerInfo`). An owner is "live"
- * when its hostname doesn't match this host (unknowable, so treated
- * conservatively as live), or when its pid answers a liveness probe and the
+ * when its hostname doesn't match this host or it recorded its identity on
+ * another platform (unknowable, so treated conservatively as live), or when
+ * its pid answers a liveness probe and the
  * process holding that pid is not known to be a different one
  * (see `pidStillBelongsToOwner`); dead owner files are pruned
  * opportunistically on every registry read.
@@ -319,6 +352,8 @@ export class BridgeManager {
   private readonly usesDefaultIdentityReader: boolean;
   private readonly cacheProcessStartIdentity: boolean;
   private readonly nowFn: () => number;
+  private readonly unlinkFn: (filePath: string) => void;
+  private readonly platform: NodeJS.Platform;
   /**
    * Answers to "does this pid still belong to the owner that recorded this
    * identity", keyed by both, with when each lapses. Keyed by the recorded
@@ -350,6 +385,8 @@ export class BridgeManager {
     this.cacheProcessStartIdentity =
       options.cacheProcessStartIdentity ?? startIdentityQuerySpawns(process.platform);
     this.nowFn = options.now ?? (() => Date.now());
+    this.unlinkFn = options.unlink ?? unlinkSync;
+    this.platform = options.platform ?? process.platform;
   }
 
   /**
@@ -412,7 +449,12 @@ export class BridgeManager {
         .filter((e) => !this.isSelfOwnerFile(e.fileName))
         .find((e) => e.info.mode === 'attached')?.info;
       if (conflicting) {
-        const foreign = foreignHostOwnerRemedy(conflicting, projectPath, this.hostnameFn());
+        const foreign = foreignHostOwnerRemedy(
+          conflicting,
+          projectPath,
+          this.hostnameFn(),
+          this.platform,
+        );
         throw new BridgeAttachConflictError(
           `Another MCP session (server pid ${conflicting.pid}, attached mode) is already ` +
             `attached to this project. Only one attach session per project is supported, ` +
@@ -565,17 +607,20 @@ export class BridgeManager {
    */
   cleanup(projectPath: string): string[] {
     const problems: string[] = [];
-    const ownerFileFailure = this.unlinkQuietly(this.ownerFilePath(projectPath));
+    const ownerFile = this.ownerFilePath(projectPath);
+    const ownerFileFailure = this.unlinkQuietly(ownerFile);
     if (ownerFileFailure !== null) {
       problems.push(
-        `this session's bridge owner file could not be removed (${ownerFileFailure}), so the project still lists this session as running until this server process exits`,
+        `this session's bridge owner file ${ownerFile} could not be removed (${ownerFileFailure}), so the project still lists this session as running until this server process exits or the file is deleted`,
       );
     }
     this.repairedProjects.delete(projectPathKey(projectPath));
 
     let liveOwners: OwnerFileEntry[];
     try {
-      liveOwners = this.readLiveOwners(projectPath);
+      // This session is leaving: its own file, when it could not be removed,
+      // is not a claim on the shared artifacts.
+      liveOwners = this.readOtherLiveOwners(projectPath);
     } catch (err) {
       // Unknown is not empty: another session may still be relying on the
       // shared script and autoload entry, so they stay where they are.
@@ -602,7 +647,7 @@ export class BridgeManager {
       return problems;
     }
 
-    problems.push(...this.removeUnclaimedArtifacts(projectPath));
+    problems.push(...this.removeUnclaimedArtifacts(projectPath, 'self-is-leaving'));
     return problems;
   }
 
@@ -638,8 +683,9 @@ export class BridgeManager {
    * delete is narrowed by `removeBridgeArtifacts`, which never touches an
    * autoload path this server does not own.
    *
-   * Cached per project: once a path has been checked clean, skip the file
-   * reads on subsequent ops in the same session. `inject`/`cleanup` clear the
+   * Cached per project, for the clean verdict only: once a path has no owner
+   * and nothing stranded, the file reads are skipped on later ops. A project
+   * with a live owner is read again every time. `inject`/`cleanup` clear the
    * cache for a project they touch, so a later check re-reads the disk.
    *
    * Accepted gap: an older server version running concurrently on this
@@ -657,11 +703,8 @@ export class BridgeManager {
     const projectFile = join(projectPath, 'project.godot');
     if (!existsSync(projectFile)) return;
     try {
-      const liveOwners = this.readLiveOwners(projectPath);
-      if (liveOwners.length > 0) {
-        this.repairedProjects.add(cacheKey);
-        return;
-      }
+      // Not cached: a live owner can die and strand the bridge at any time.
+      if (this.readLiveOwners(projectPath).length > 0) return;
 
       const scriptPresent =
         existsSync(bridgeScriptAbsPath(projectPath)) ||
@@ -672,7 +715,7 @@ export class BridgeManager {
       const entryPresent = this.readBridgeAssignments(projectFile).length > 0;
       const stranded = entryPresent || scriptPresent;
       if (stranded) {
-        const problems = this.removeUnclaimedArtifacts(projectPath);
+        const problems = this.removeUnclaimedArtifacts(projectPath, 'any-owner');
         if (problems.length > 0) {
           // Not cached as clean: the next headless operation tries again,
           // which is the retry `cleanup` promises a caller it reported to.
@@ -785,6 +828,8 @@ export class BridgeManager {
     // A foreign host can't be probed at all, so it is conservatively treated
     // as live rather than pruned.
     if (info.hostname !== this.hostnameFn()) return true;
+    // Same hostname, another pid table (WSL beside Windows): as unprobeable.
+    if (!isSelf && ownerPlatformDiffers(info, this.platform)) return true;
     if (!this.isProcessAliveFn(info.pid)) return false;
     // This instance's own file was written by the code that is running now.
     if (isSelf) return true;
@@ -909,6 +954,11 @@ export class BridgeManager {
     return live;
   }
 
+  /** `readLiveOwners` without this instance's own owner file. */
+  private readOtherLiveOwners(projectPath: string): OwnerFileEntry[] {
+    return this.readLiveOwners(projectPath).filter((e) => !this.isSelfOwnerFile(e.fileName));
+  }
+
   /**
    * The live attach-mode owner on this project, or undefined. `excludeSelf`
    * is true for the conflict check in `inject` (self has not written its own
@@ -937,13 +987,22 @@ export class BridgeManager {
    * the artifacts already gone and writes them, or this finds the new owner
    * and puts them back.
    *
+   * With `'self-is-leaving'` (a cleanup), this instance's own owner file is
+   * not a claim: it is only still there because it could not be removed.
+   *
    * Synchronous and non-throwing, as `cleanup` requires.
    */
-  private removeUnclaimedArtifacts(projectPath: string): string[] {
+  private removeUnclaimedArtifacts(
+    projectPath: string,
+    claimants: 'any-owner' | 'self-is-leaving',
+  ): string[] {
     const problems = this.removeBridgeArtifacts(projectPath);
     let claimedBy: OwnerFileEntry[];
     try {
-      claimedBy = this.readLiveOwners(projectPath);
+      claimedBy =
+        claimants === 'self-is-leaving'
+          ? this.readOtherLiveOwners(projectPath)
+          : this.readLiveOwners(projectPath);
     } catch (err) {
       logDebug(`Non-fatal: could not re-read the owner registry after removal: ${err}`);
       return problems;
@@ -1141,7 +1200,7 @@ export class BridgeManager {
   private unlinkQuietly(filePath: string): string | null {
     try {
       if (existsSync(filePath)) {
-        unlinkSync(filePath);
+        this.unlinkFn(filePath);
         logDebug(`Removed ${filePath}`);
       }
       return null;
