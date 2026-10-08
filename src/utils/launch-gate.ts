@@ -18,6 +18,7 @@ import { parseAutoloadSection } from './autoload-ini.js';
 import { BRIDGE_AUTOLOAD_NAME } from './bridge-manager.js';
 import { createErrorResponse, getErrorMessage } from './error-response.js';
 import {
+  ElicitationUnsupportedError,
   isElicitAccepted,
   normalizeProjectKey,
   type ElicitorResult,
@@ -26,7 +27,9 @@ import {
 import {
   isLaunchScenePath,
   isUnderDir,
+  isUnscannedLaunchScenePath,
   LAUNCH_SCENE_EXTENSIONS,
+  UNSCANNED_LAUNCH_SCENE_EXTENSIONS,
   projectGodotPath,
   resolveProjectPath,
   type ResolvedProjectPath,
@@ -52,6 +55,7 @@ export const MAX_SCAN_WARNINGS_SHOWN = 10;
 export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
+const TEXT_RESOURCE_EXTENSION = '.tres';
 /** Why a reference the engine would still try to load was not scanned. */
 const UNRESOLVED_PATH_CAUSE = 'the path could not be resolved to a file inside the project';
 /** What a `project.godot` with lines Godot did not write means for the scan. */
@@ -78,7 +82,7 @@ const ELICITATION_OPT_OUT_SOLUTION =
 export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
   if (isLaunchScenePath(scene)) return null;
   return createErrorResponse(
-    `Invalid scene: "${scene}" does not end in ${LAUNCH_SCENE_EXTENSIONS.join(' or ')} (lower case). Godot runs a command-line scene only when it carries a scene file extension; anything else is ignored and the project's main scene runs instead.`,
+    `Invalid scene: "${scene}" does not end in ${[...LAUNCH_SCENE_EXTENSIONS, ...UNSCANNED_LAUNCH_SCENE_EXTENSIONS].join(', ')} (lower case). Godot runs a command-line scene only when it carries a scene or resource file extension; any other argument is ignored and the project's main scene runs instead.`,
     [
       'Pass the scene file with its extension, e.g. "scenes/main.tscn"',
       "Omit scene to launch the project's main scene",
@@ -218,6 +222,15 @@ export async function runLaunchGate(
     scanWarnings.push(message);
     launchSceneFailures.push({ message, noSceneConfigured });
   };
+  // The launch scene is a file kind the scan never reads (.escn, .tres, .res).
+  // The launch goes ahead with the notice; strict mode refuses it in its own words.
+  const unscannedLaunchScenes: string[] = [];
+  const failUnscannedLaunchScene = (relPath: string): void => {
+    scanWarnings.push(
+      `Not scanned: ${relPath}: the pre-flight scan reads only .tscn scenes; a .tres, .res or .escn launch scene is not read`,
+    );
+    unscannedLaunchScenes.push(relPath);
+  };
   const failScanRead = (message: string): void => {
     scanWarnings.push(message);
     scanReadFailures.push(message);
@@ -251,10 +264,14 @@ export async function runLaunchGate(
     for (const item of collected.unscanned) {
       const notice = `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`;
       scanWarnings.push(notice);
-      // A text scene is one the scan reads. A file of another extension that
-      // could not be read is a binary scene at best, which it does not.
+      // A text scene or text resource is one the scan reads. A file of another
+      // extension that could not be read is a binary scene at best, which it
+      // does not.
+      const loweredItemPath = item.scenePath.toLowerCase();
       const sceneReadFailed =
-        item.readFailed === true && item.scenePath.toLowerCase().endsWith(SCENE_EXTENSION);
+        item.readFailed === true &&
+        (loweredItemPath.endsWith(SCENE_EXTENSION) ||
+          loweredItemPath.endsWith(TEXT_RESOURCE_EXTENSION));
       // An unresolved reference is one the engine would still try to load, so
       // it is a file the scan set out to read and did not.
       // A malformed statement was read in part: the engine may load from it
@@ -271,6 +288,11 @@ export async function runLaunchGate(
   const scanLaunchScene = (): void => {
     const scenes: string[] = [];
     if (request.scene) {
+      if (isUnscannedLaunchScenePath(request.scene.relPath)) {
+        // The engine runs these as a scene; the scan reads only .tscn files.
+        failUnscannedLaunchScene(request.scene.relPath);
+        return;
+      }
       scenes.push(request.scene.absPath);
     } else {
       const launch = resolveLaunchScene(absProjectPath);
@@ -425,6 +447,15 @@ export async function runLaunchGate(
     );
   }
 
+  if (ctx.strictMode && unscannedLaunchScenes.length > 0) {
+    return err(
+      createErrorResponse(
+        `Strict mode: refusing to launch project because the launch scene ${unscannedLaunchScenes[0]} is not a .tscn scene, and the pre-flight scan does not read .tres, .res or .escn files, so its scripts were not checked.`,
+        ['Launch a .tscn scene instead', STRICT_MODE_IS_OPERATOR_SETTING],
+      ),
+    );
+  }
+
   // Strict mode is the setting for a launch nobody is watching, so it does not
   // launch on a scan that failed on files it reads: their Tier 1 findings, if
   // any, are exactly what was not found.
@@ -479,6 +510,16 @@ export async function runLaunchGate(
           },
         });
       } catch (error) {
+        if (!(error instanceof ElicitationUnsupportedError)) {
+          // The client can prompt and the prompt went unanswered (the request
+          // timed out) or failed: nobody confirmed, so nothing launches.
+          return err(
+            createErrorResponse(
+              `${request.toolName} confirmation was not answered (${getErrorMessage(error)}). The project was not launched.`,
+              [ELICITATION_OPT_OUT_SOLUTION],
+            ),
+          );
+        }
         const elicitMsg = `Elicitation unavailable (${getErrorMessage(error)})`;
         if (ctx.strictMode) {
           return err(

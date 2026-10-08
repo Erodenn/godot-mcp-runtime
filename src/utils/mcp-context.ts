@@ -31,9 +31,24 @@ export interface ElicitorRequest {
 }
 
 /**
+ * Thrown by an elicitor when the client did not declare the elicitation
+ * capability, so no prompt could be shown. It is the only error the launch gate
+ * reads as "the client cannot be asked"; any other throw (an unanswered prompt
+ * that timed out, a transport failure) means a prompt may have been shown and
+ * nobody confirmed.
+ */
+export class ElicitationUnsupportedError extends Error {
+  constructor(message = 'the client does not support elicitation') {
+    super(message);
+    this.name = 'ElicitationUnsupportedError';
+  }
+}
+
+/**
  * Async function that prompts the user via the MCP elicitation channel.
- * Throws when the client does not support elicitation; callers should treat
- * a thrown error as a denial.
+ * Throws `ElicitationUnsupportedError` when the client does not declare the
+ * capability; any other throw is a prompt that went unanswered. Callers treat
+ * neither as a confirmation.
  */
 export type Elicitor = (request: ElicitorRequest) => Promise<ElicitorResult>;
 

@@ -202,12 +202,18 @@ export function resolveProjectPath(
  * `render_movie`) may end in. Godot treats a positional argument as the scene
  * to run only when it ends in a scene or resource extension, compared case
  * sensitively; any other argument is ignored and the project's main scene runs
- * instead. So a `scene` outside this list would have the launch gate scan one
- * file while the engine runs another. Only the two scene formats are accepted:
- * the gate reads `.tscn`, reports `.scn` as not scanned, and has nothing to
- * say about a scene held in a `.res` or `.tres` file.
+ * instead. So a `scene` outside these lists would have the launch gate scan one
+ * file while the engine runs another. The gate reads `.tscn` and reports `.scn`
+ * as not scanned.
  */
 export const LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
+
+/**
+ * Extensions the engine also runs as a command-line scene but the launch gate
+ * does not read: it launches with a `Not scanned` warning, and strict mode
+ * refuses it.
+ */
+export const UNSCANNED_LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.escn', '.tres', '.res'];
 
 /**
  * Scene-file suffixes `add_node` accepts as a `nodeType` in place of a Godot
@@ -224,7 +230,15 @@ export function isSceneFileNodeType(nodeType: string): boolean {
 
 /** True when `scene` ends, case-sensitively, in an extension a launch accepts. */
 export function isLaunchScenePath(scene: string): boolean {
-  return LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
+  return (
+    LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension)) ||
+    isUnscannedLaunchScenePath(scene)
+  );
+}
+
+/** True when `scene` ends, case-sensitively, in an extension the launch gate does not read. */
+export function isUnscannedLaunchScenePath(scene: string): boolean {
+  return UNSCANNED_LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
 }
 
 /**

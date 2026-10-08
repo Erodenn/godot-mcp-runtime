@@ -1296,6 +1296,23 @@ function methodNameOf(argument: readonly Token[]): string | null {
   return name !== null && METHOD_NAME_REGEX.test(name) ? name : null;
 }
 
+/** True when an argument is one string literal that decodes (it has no undefined escape). */
+function isPlainTextArgument(argument: readonly Token[]): boolean {
+  return (
+    argument.length === 1 &&
+    argument[0]!.kind === 'string' &&
+    decodeStringLiteral(argument[0]!) !== null
+  );
+}
+
+/**
+ * True when the call's receiver is one the Tier 1 dispatch rules cover. Those
+ * rules match on the head of the chain (`OS.call`), so the head is tested.
+ */
+function isTier1DispatchReceiver(chain: readonly string[]): boolean {
+  return chain.length >= 2 && TIER1_DISPATCH_RECEIVERS.includes(chain[0]!);
+}
+
 /**
  * The elements of an argument that is exactly one array literal, or null when
  * it is anything else (a variable, `[a] + b`, no argument at all). The literal
@@ -1360,7 +1377,17 @@ function resolveReflectiveCall(
   const names: string[] = [];
   for (let depth = 0; depth < MAX_DISPATCH_DEPTH; depth++) {
     const method = methodNameOf(args[0] ?? []);
-    if (method === null) return OPAQUE_DISPATCH;
+    if (method === null) {
+      // The first argument is a text that is not a method name (`cb.call("Level
+      // complete!")`): an ordinary call with a string argument, not dispatch.
+      // A Tier 1 receiver keeps its decision, since the dispatch rules for it
+      // judge any name the policy cannot read. Only the first name is judged
+      // this way; after a nested dispatch the text is a forwarded argument.
+      if (depth === 0 && isPlainTextArgument(args[0] ?? []) && !isTier1DispatchReceiver(chain)) {
+        return null;
+      }
+      return OPAQUE_DISPATCH;
+    }
     names.push(method);
     // callv forwards the elements of its array argument; the others forward
     // what follows the name.

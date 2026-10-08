@@ -9,7 +9,12 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { resolveProjectPath } from '../../src/utils/path-validation.js';
-import { runLaunchGate, MAX_SCAN_WARNINGS_SHOWN } from '../../src/utils/launch-gate.js';
+import {
+  rejectNonSceneLaunchArg,
+  runLaunchGate,
+  MAX_SCAN_WARNINGS_SHOWN,
+} from '../../src/utils/launch-gate.js';
+import { ElicitationUnsupportedError } from '../../src/utils/mcp-context.js';
 import type { Elicitor, ElicitorResult } from '../../src/utils/mcp-context.js';
 import { makeContext } from '../helpers/runtime-fakes.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -441,7 +446,7 @@ describe('runLaunchGate strict-mode refusals', () => {
         return dir;
       },
       async () => {
-        throw new Error('elicitation not supported');
+        throw new ElicitationUnsupportedError();
       },
     ],
   ])('on %s, never advises turning strict mode off', async (_label, makeDir, elicit) => {
@@ -457,5 +462,102 @@ describe('runLaunchGate strict-mode refusals', () => {
     const solutions = solutionsOf(result);
     expect(solutions).toMatch(/operator setting: report this refusal to the user/);
     expect(solutions).not.toMatch(/Unset GODOT_MCP_STRICT/i);
+  });
+});
+
+const solutionsText = (result: Awaited<ReturnType<typeof runLaunchGate>>): string =>
+  unwrap(result).content[1]?.text ?? '';
+
+describe('runLaunchGate confirmation that was not answered', () => {
+  const request = (dir: string) => ({
+    projectPath: dir,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each([false, true])(
+    'refuses when the prompt threw something other than "unsupported" (strict: %s) and records nothing',
+    async (strict) => {
+      const dir = tmp.makeProject(
+        'launch-gate-unanswered-',
+        `config_version=5
+
+[application]
+${MAIN_SCENE_SETTING}`,
+      );
+      writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+      let prompts = 0;
+      const ctx = makeContext({
+        strict,
+        elicit: async () => {
+          prompts++;
+          throw new Error('Request timed out');
+        },
+      });
+      const first = await runLaunchGate(request(dir), ctx);
+      expectErrorMatching(
+        first,
+        /run_project confirmation was not answered \(Request timed out\)\. The project was not launched\./,
+      );
+      expect(solutionsText(first)).toMatch(/GODOT_MCP_DISABLE_ELICITATION=true/);
+      expect(ctx.sessionState.runProjectConfirmed.size).toBe(0);
+      // A second call asks again: the timeout confirmed nothing.
+      expect((await runLaunchGate(request(dir), ctx)).ok).toBe(false);
+      expect(prompts).toBe(2);
+    },
+  );
+
+  it('still launches with a warning when the client declared no elicitation', async () => {
+    const dir = tmp.makeProject('launch-gate-unsupported-');
+    const result = await runLaunchGate(
+      request(dir),
+      makeContext({
+        elicit: async () => {
+          throw new ElicitationUnsupportedError();
+        },
+      }),
+    );
+    expect(warningsOf(result).join('\n')).toMatch(
+      /Elicitation unavailable .*launching without explicit user confirmation/,
+    );
+  });
+});
+
+describe('runLaunchGate with a launch scene the scan does not read', () => {
+  const request = (dir: string, scene: string) => ({
+    projectPath: dir,
+    scene: resolveProjectPath(dir, scene, 'read')!,
+    confirm: false,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it.each(['level.tres', 'level.res', 'level.escn'])(
+    'launches %s with one Not scanned warning, and strict mode refuses it in its own words',
+    async (scene) => {
+      const dir = tmp.makeProject('launch-gate-unscanned-scene-');
+      writeFileSync(join(dir, scene), 'not read', 'utf8');
+      const warnings = warningsOf(await runLaunchGate(request(dir, scene), makeContext()));
+      expect(warnings.filter((w) => w.startsWith('Not scanned:'))).toEqual([
+        `Not scanned: ${scene}: the pre-flight scan reads only .tscn scenes; a .tres, .res or .escn launch scene is not read`,
+      ]);
+
+      const strict = await runLaunchGate(request(dir, scene), makeContext({ strict: true }));
+      expectErrorMatching(strict, /the launch scene .* is not a \.tscn scene/);
+      expect(solutionsText(strict)).toMatch(/operator setting/);
+      expect(JSON.stringify(strict)).not.toMatch(/could not be found or resolved/);
+    },
+  );
+
+  it('rejectNonSceneLaunchArg names all five extensions and still refuses other names', () => {
+    for (const scene of ['a.tscn', 'a.scn', 'a.escn', 'a.tres', 'a.res']) {
+      expect(rejectNonSceneLaunchArg(scene)).toBeNull();
+    }
+    for (const scene of ['icon.svg', 'Main.TSCN', 'a.RES', 'level']) {
+      expect(JSON.stringify(rejectNonSceneLaunchArg(scene))).toMatch(
+        /does not end in \.tscn, \.scn, \.escn, \.tres, \.res/,
+      );
+    }
   });
 });

@@ -23,7 +23,7 @@
  *    statement laid out in a way Godot's writer does not produce.
  *
  * Not read (documented limitation, see `docs/security.md`): scripts carried by
- * non-scene resources a scene references (`.tres` / `.res`), binary `.scn`
+ * binary resources a scene references (`.res`), binary `.scn`
  * scenes, and references by `uid://` alone. Each of these that the walk meets
  * is reported, not dropped. One limit is not reported: an `ext_resource` that
  * carries both a `uid` and a `path` is read by its `path`, while the engine
@@ -38,10 +38,15 @@ import { resolveProjectPath } from './path-validation.js';
 const TSCN_RAW_SNIPPET_MAX = 200;
 const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
-/** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says. */
-const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
-/** Path extensions of resource files, which can carry a script the scan does not read. */
-const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.tres', '.res'];
+/**
+ * Path extensions an `ext_resource` is walked as a scene for, whatever its
+ * `type` says. A `.tres` is a text resource with the same statement grammar
+ * (`gd_resource`), so its scripts, inline GDScript and further references are
+ * collected like a scene's. A binary `.scn` is walked and reported as not text.
+ */
+const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.tres'];
+/** Path extensions of binary resource files, which can carry a script the scan cannot read. */
+const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.res'];
 /**
  * `type` values that say an `ext_resource` is a script. Godot's loaders take
  * the base class or the concrete one, so a hand-edited `type="GDScript"` loads
@@ -765,9 +770,9 @@ function resPathOf(attrs: Map<string, string>): string | null {
  * An `ext_resource` is classified by its path as well as by its `type`
  * attribute. The engine loads the file the path names, and `type` is a hint a
  * hand-edited scene can set to anything: a `.gd` path is scanned and a `.tscn`
- * or `.scn` path is walked whatever the hint says. A reference the walk does
+ * or `.scn` path is walked whatever the hint says, and so is a `.tres`. A reference the walk does
  * not follow and that can still bring a script in (a script that is not
- * GDScript, a `.tres` or `.res` resource, a reference with no `res://` path)
+ * GDScript, a binary `.res` resource, a reference with no `res://` path)
  * is listed in `unscanned`, never dropped.
  *
  * Cycle-safe: scene graphs can reference each other, so a scene already walked
@@ -848,7 +853,7 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
         } else if (RESOURCE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
           if (!reportedResources.has(lowered)) {
             reportedResources.add(lowered);
-            skip(`resource ${path} is not scanned (a .tres or .res file can carry a script)`);
+            skip(`resource ${path} is not scanned (a binary .res file can carry a script)`);
           }
         }
       } else if (header.tag === 'sub_resource' && header.attrs.get('type') === 'GDScript') {

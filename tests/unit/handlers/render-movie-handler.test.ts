@@ -449,7 +449,6 @@ describe('render_movie refuses a scene argument the engine would not run as a sc
     ['a file that is not a scene', 'icon.svg'],
     ['a scene path with its extension forgotten', 'level'],
     ['an upper-case extension', 'Level.TSCN'],
-    ['a resource file', 'level.tres'],
   ])('%s', async (_label, scene) => {
     const { dir, runner, stub, handler } = setup();
     writeFileSync(join(dir, scene), 'present on disk');
@@ -466,7 +465,7 @@ describe('render_movie refuses a scene argument the engine would not run as a sc
       }),
     );
 
-    expectErrorMatching(result, /does not end in \.tscn or \.scn/);
+    expectErrorMatching(result, /does not end in \.tscn, \.scn, \.escn, \.tres, \.res/);
     expect(elicitCalls).toBe(0);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
@@ -725,6 +724,30 @@ describe('render_movie launch gate', () => {
     );
     expect(payload.warnings?.some((w) => w.includes('evil.gd'))).toBe(true);
   });
+
+  it.each(['level.tres', 'level.res', 'level.escn'])(
+    'renders %s as scene with a Not scanned warning, and strict mode refuses it',
+    async (scene) => {
+      const { dir, runner, stub, handler } = setup();
+      writeFileSync(join(dir, scene), 'not read');
+      const payload = payloadOf(
+        await handler(runner, { projectPath: dir, scene, frames: TEST_FRAMES }, makeContext()),
+      );
+      expect(payload.warnings?.join('\n')).toContain(`Not scanned: ${scene}:`);
+      const callsBefore = stub.calls.length;
+
+      const strict = await handler(
+        runner,
+        { projectPath: dir, scene, frames: TEST_FRAMES },
+        makeContext({ strict: true }),
+      );
+      expectErrorMatching(
+        strict,
+        /Strict mode: refusing to launch project because the launch scene/,
+      );
+      expect(stub.calls.length).toBe(callsBefore);
+    },
+  );
 
   it('gate findings survive a flood of runtime error lines', async () => {
     const floodLines = MOVIE_RUNTIME_WARNINGS_MAX + RUNTIME_ERROR_FLOOD_EXTRA;

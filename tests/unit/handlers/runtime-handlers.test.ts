@@ -58,6 +58,7 @@ import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
+import { ElicitationUnsupportedError } from '../../../src/utils/mcp-context.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
 // handleRunProject checks for a display before the launch gate. Nothing real is
@@ -116,6 +117,14 @@ const confirmFalseElicitor: Elicitor = async () => ({
 });
 const throwingElicitor: Elicitor = async () => {
   throw new Error('Method not found');
+};
+/** A client that did not declare the elicitation capability. */
+const unsupportedElicitor: Elicitor = async () => {
+  throw new ElicitationUnsupportedError();
+};
+/** A client that can prompt and never answered: the request timed out. */
+const unansweredElicitor: Elicitor = async () => {
+  throw new Error('Request timed out');
 };
 
 // ---------------------------------------------------------------------------
@@ -2740,7 +2749,7 @@ describe('handleRunProject security pre-flight', () => {
     expectErrorMatching(result, /User declined run_project/);
   });
 
-  it('strict mode refuses launch when elicitor throws (no silent fallback)', async () => {
+  it('strict mode refuses launch when the client lacks elicitation (no silent fallback)', async () => {
     const dir = tmp.makeProject(
       'run-project-strict-elicitor-throw-',
       'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
@@ -2755,13 +2764,13 @@ describe('handleRunProject security pre-flight', () => {
     const result = await handleRunProject(
       fake.asRunner,
       { projectPath: dir },
-      makeContext({ elicit: throwingElicitor, strict: true }),
+      makeContext({ elicit: unsupportedElicitor, strict: true }),
     );
     expectErrorMatching(result, /Elicitation unavailable/);
     expectErrorMatching(result, /strict mode refuses to launch/);
   });
 
-  it('non-strict mode auto-accepts and launches when elicitor throws, warning in the response', async () => {
+  it('non-strict mode launches with a warning when the client lacks elicitation', async () => {
     const dir = tmp.makeProject('run-project-nonstrict-elicitor-throw-', 'config_version=5\n');
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -2769,13 +2778,48 @@ describe('handleRunProject security pre-flight', () => {
     const result = await handleRunProject(
       fake.asRunner,
       { projectPath: dir },
-      makeContext({ elicit: throwingElicitor, strict: false }),
+      makeContext({ elicit: unsupportedElicitor, strict: false }),
     );
     expect(hasError(result)).toBe(false);
     const warnings = (runProjectPayload(result).warnings ?? []).join('\n');
     expect(warnings).toMatch(/Elicitation unavailable/);
     expect(warnings).toMatch(/launching without explicit user confirmation/);
   });
+
+  it.each([false, true])(
+    'refuses the launch when the prompt went unanswered (strict: %s), and prompts again on the next call',
+    async (strict) => {
+      const dir = tmp.makeProject(
+        'run-project-elicitor-timeout-',
+        'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+      );
+      writeFileSync(
+        join(dir, 'main.tscn'),
+        '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+      );
+      const fake = createRuntimeFake();
+      fake.setGodotPath('/usr/bin/godot');
+      fake.setBridgeReady(true);
+      let prompts = 0;
+      const ctx = makeContext({
+        strict,
+        elicit: async () => {
+          prompts++;
+          return unansweredElicitor({
+            message: '',
+            requestedSchema: { type: 'object', properties: {} },
+          });
+        },
+      });
+      const first = await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+      expectErrorMatching(first, /run_project confirmation was not answered \(Request timed out\)/);
+      expectErrorMatching(first, /The project was not launched/);
+      expect(fake.runProjectCalls()).toBe(0);
+      const second = await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+      expect(hasError(second)).toBe(true);
+      expect(prompts).toBe(2);
+    },
+  );
 
   it('scans the launched scene resolved from run/main_scene', async () => {
     const dir = tmp.makeProject(
@@ -2869,7 +2913,6 @@ describe('handleRunProject security pre-flight', () => {
     ['a file that is not a scene', 'icon.svg'],
     ['a scene path with its extension forgotten', 'scenes/level'],
     ['an upper-case extension, which the engine does not match', 'Other.TSCN'],
-    ['a resource file', 'other.tres'],
   ])('refuses %s as scene before the scan, the prompt and the launch', async (_label, scene) => {
     const dir = tmp.makeProject(
       'run-project-not-a-scene-',
@@ -2896,11 +2939,44 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: counting, strict: true }),
     );
 
-    expectErrorMatching(result, /does not end in \.tscn or \.scn/);
+    expectErrorMatching(result, /does not end in \.tscn, \.scn, \.escn, \.tres, \.res/);
     expectErrorMatching(result, /main scene runs instead/);
     expect(elicitCalls).toBe(0);
     expect(fake.runProjectCalls()).toBe(0);
   });
+
+  // The engine runs these as a scene; the pre-flight scan reads only .tscn.
+  it.each(['other.tres', 'other.res', 'other.escn'])(
+    'launches %s as scene with a Not scanned warning, and strict mode refuses it',
+    async (scene) => {
+      const dir = tmp.makeProject('run-project-unscanned-scene-', 'config_version=5\n');
+      writeFileSync(join(dir, scene), 'not read');
+      const fake = createRuntimeFake();
+      fake.setGodotPath('/usr/bin/godot');
+      fake.setBridgeReady(true);
+
+      const launched = await handleRunProject(
+        fake.asRunner,
+        { projectPath: dir, scene },
+        acceptingContext(),
+      );
+      expect(hasError(launched)).toBe(false);
+      expect((runProjectPayload(launched).warnings ?? []).join('\n')).toContain(
+        `Not scanned: ${scene}: the pre-flight scan reads only .tscn scenes`,
+      );
+
+      const strict = await handleRunProject(
+        fake.asRunner,
+        { projectPath: dir, scene },
+        makeContext({ strict: true }),
+      );
+      expectErrorMatching(
+        strict,
+        /Strict mode: refusing to launch project because the launch scene/,
+      );
+      expect(fake.runProjectCalls()).toBe(1);
+    },
+  );
 
   it('accepts a .scn scene argument and reports that a binary scene is not scanned', async () => {
     const dir = tmp.makeProject('run-project-scn-scene-', 'config_version=5\n');

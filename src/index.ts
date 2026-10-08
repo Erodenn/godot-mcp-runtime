@@ -23,6 +23,7 @@ import { MS_PER_SECOND } from './utils/profiler.js';
 import { dispatchToolCall } from './dispatch.js';
 import {
   describeIgnoredFlagValues,
+  ElicitationUnsupportedError,
   resolveDisableSecurity,
   type Elicitor,
   type McpContext,
@@ -83,6 +84,9 @@ Security gate (run_script / run_project / render_movie): a static-analysis scan 
  */
 function createContextFromServer(server: Server): McpContext {
   const elicitor: Elicitor = async (request) => {
+    if (server.getClientCapabilities()?.elicitation === undefined) {
+      throw new ElicitationUnsupportedError();
+    }
     // The SDK's elicitInput param type is a strict zod-inferred shape; we
     // build the request with an `object`-shaped requestedSchema that matches
     // the protocol at runtime, so cast to satisfy the narrower TS check.

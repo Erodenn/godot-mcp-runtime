@@ -122,7 +122,7 @@ export const renderToolDefinitions = [
         scene: {
           type: 'string',
           description:
-            'Scene to render (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene.',
+            'Scene to render (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Must end in .tscn, .scn, .escn, .tres or .res; only .tscn is scanned.',
         },
         mode: {
           type: 'string',

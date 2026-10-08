@@ -5,18 +5,19 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type * as launchSceneModule from '../../src/utils/launch-scene.js';
 
 const FILE_CAP = 2;
+const DIRECTORY_CAP = 3;
 
 vi.mock('../../src/utils/launch-scene.js', async (importOriginal) => {
   const actual = await importOriginal<typeof launchSceneModule>();
   return {
     ...actual,
     findFilesByUid: (projectDir: string, uid: string) =>
-      actual.findFilesByUid(projectDir, uid, FILE_CAP),
+      actual.findFilesByUid(projectDir, uid, FILE_CAP, DIRECTORY_CAP),
     resolveLaunchScene: (projectDir: string) => actual.resolveLaunchScene(projectDir, FILE_CAP),
   };
 });
@@ -124,5 +125,42 @@ describe('a uid found before the search was cut short', () => {
     const text = (await warningsOf(dir)).join('\n');
     expect(text).toMatch(/The search for uid:\/\/mainscene0000001 was cut short/);
     expect(text).not.toMatch(/all of them were scanned/);
+  });
+});
+
+describe('a uid autoload the search did not reach because of the folder limit', () => {
+  /** More empty folders than the limit allows, sorted before the script that carries the uid. */
+  function project(): string {
+    const dir = tmp.makeProject(
+      'gate-uid-autoload-dirs-',
+      `config_version=5
+
+[autoload]
+Boot="*${AUTOLOAD_UID}"
+`,
+    );
+    for (let i = 0; i < DIRECTORY_CAP + 1; i++) mkdirSync(join(dir, `a_empty_${i}`));
+    writeFileSync(join(dir, 'z_boot.gd'), TIER1_BODY, 'utf8');
+    writeFileSync(
+      join(dir, 'z_boot.gd.uid'),
+      `${AUTOLOAD_UID}
+`,
+      'utf8',
+    );
+    return dir;
+  }
+
+  it('is reported as not scanned because the search was cut short', async () => {
+    const warnings = await warningsOf(project());
+    expect(warnings).toContainEqual(
+      expect.stringMatching(
+        /was not scanned: the uid search was cut short .*folders.* before a file/,
+      ),
+    );
+  });
+
+  it('makes strict mode refuse the launch', async () => {
+    const result = await gate(project(), true);
+    expectErrorMatching(result, /Autoload Boot .* the uid search was cut short/);
   });
 });

@@ -1007,12 +1007,36 @@ describe('evaluateScript: a reflective call with a literal method name is the ca
     expect(evalLine('print("OS.callv(\\"execute\\", [])")').decision).toBe('ok');
   });
 
-  it('a string that cannot be a method name is dispatch by an unreadable name', () => {
-    expect(evalLine('some_node.call("not a method name")').matches.map((m) => m.ruleId)).toEqual([
+  // A text that is not a method name is an ordinary call with a string argument
+  // on a receiver that is not a Tier 1 singleton: nothing is dispatched by it.
+  it.each([
+    'cb.call("Level complete!")',
+    'cb.call("res://a.tscn")',
+    'x.callv("two words", args)',
+    'call("two words")',
+  ])('%s is an ordinary call with a text argument', (line) => {
+    expect(evalLine(line).decision).toBe('ok');
+    expect(evaluateScript(VALID_PREFIX + line + '\n', true).decision).toBe('ok');
+  });
+
+  // The decision a null resolution leaves: the bare call token is judged as
+  // written, and its literal first argument fires no non-literal rule.
+  it('a literal text argument leaves no generic call rule firing', () => {
+    expect(evalLine('cb.call("Level complete!")').matches).toEqual([]);
+  });
+
+  it('a text that cannot be a method name keeps its decision on a Tier 1 receiver', () => {
+    expect(evalLine('OS.call("exe cute")').matches.map((m) => m.ruleId)).toEqual([
+      'tier1.indirect.OS.call.nonliteral',
+    ]);
+  });
+
+  it('an undefined escape, or a name held in a variable, stays dispatch by an unreadable name', () => {
+    expect(evalLine('cb.call("\\q")').matches.map((m) => m.ruleId)).toEqual([
       'tier2.generic.call.nonliteral',
     ]);
-    expect(evalLine('OS.call("not a method name")').matches.map((m) => m.ruleId)).toEqual([
-      'tier1.indirect.OS.call.nonliteral',
+    expect(evalLine('cb.call(name_var)').matches.map((m) => m.ruleId)).toEqual([
+      'tier2.generic.call.nonliteral',
     ]);
   });
 });

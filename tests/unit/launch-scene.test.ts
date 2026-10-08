@@ -313,6 +313,26 @@ describe('a uid search that was cut short', () => {
   });
 });
 
+describe('findFilesByUid folder limit', () => {
+  const DIRECTORY_CAP = 3;
+  const NO_FILE_CAP = 100;
+
+  it('is incomplete after more folders than the limit, though none holds a scene file', () => {
+    const dir = tmp.makeProject('launch-uid-dirs-over-', 'config_version=5\n');
+    for (let i = 0; i < DIRECTORY_CAP + 1; i++) mkdirSync(join(dir, `d${i}`));
+    expect(findFilesByUid(dir, UID_A, NO_FILE_CAP, DIRECTORY_CAP)).toEqual({
+      paths: [],
+      complete: false,
+    });
+  });
+
+  it('is complete when the folders, the project root counted, are exactly at the limit', () => {
+    const dir = tmp.makeProject('launch-uid-dirs-at-', 'config_version=5\n');
+    for (let i = 0; i < DIRECTORY_CAP - 1; i++) mkdirSync(join(dir, `d${i}`));
+    expect(findFilesByUid(dir, UID_A, NO_FILE_CAP, DIRECTORY_CAP).complete).toBe(true);
+  });
+});
+
 describe('the main scene is the setting application/run/main_scene, however it is spelled', () => {
   it('reads it from an [application/run] section', () => {
     const dir = tmp.makeProject(

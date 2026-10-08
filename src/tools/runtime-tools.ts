@@ -221,7 +221,7 @@ export const runtimeToolDefinitions = [
         scene: {
           type: 'string',
           description:
-            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Not valid with attach: true.',
+            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Not valid with attach: true. Must end in .tscn, .scn, .escn, .tres or .res; only .tscn is scanned.',
         },
         background: {
           type: 'boolean',

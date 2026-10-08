@@ -29,6 +29,12 @@ const LINE_FEED = '\n';
 
 /** Files `findFilesByUid` opens before it gives up and reports an incomplete search. */
 export const UID_SCAN_MAX_FILES = 5000;
+/**
+ * Directories `findFilesByUid` enters before it gives up and reports an
+ * incomplete search. Counted apart from the files: a tree of empty folders
+ * opens no file and would otherwise be walked without a bound.
+ */
+export const UID_SCAN_MAX_DIRECTORIES = 5000;
 /** Bytes read from the start of a `.tscn`: the first line carries the scene's `uid`. */
 export const UID_HEADER_READ_BYTES = 1024;
 
@@ -84,8 +90,9 @@ function readFirstLine(absPath: string): string | null {
  * import to have run. Dot-directories (`.godot`, `.mcp`) are not entered.
  * Linked directories are entered (the launch scan follows links out of the
  * project), once per real path so a link cycle ends; a link that cannot be
- * resolved makes the search incomplete. After `maxFiles` opens it stops and
- * says the search is incomplete; a directory, scene header or sidecar that
+ * resolved makes the search incomplete. After `maxFiles` opens, or on entering
+ * more than `maxDirectories` directories, it stops and says the search is
+ * incomplete; a directory, scene header or sidecar that
  * could not be read makes it incomplete too, since any of them may carry the
  * uid.
  */
@@ -93,6 +100,7 @@ export function findFilesByUid(
   projectDir: string,
   uid: string,
   maxFiles: number = UID_SCAN_MAX_FILES,
+  maxDirectories: number = UID_SCAN_MAX_DIRECTORIES,
 ): { paths: string[]; complete: boolean } {
   const paths: string[] = [];
   let opened = 0;
@@ -106,6 +114,11 @@ export function findFilesByUid(
       const realDir = realpathSync.native(dir);
       if (walkedRealPaths.has(realDir)) return;
       walkedRealPaths.add(realDir);
+      if (walkedRealPaths.size > maxDirectories) {
+        capped = true;
+        complete = false;
+        return;
+      }
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       complete = false;
@@ -167,7 +180,7 @@ export function findFilesByUid(
 }
 
 /** Why a uid search can end before every file was read; worded to follow "the search was cut short". */
-export const UID_SEARCH_CUT_SHORT_CAUSE = `a limit of ${UID_SCAN_MAX_FILES} files, or a folder or file that could not be read`;
+export const UID_SEARCH_CUT_SHORT_CAUSE = `a limit of ${UID_SCAN_MAX_FILES} files or ${UID_SCAN_MAX_DIRECTORIES} folders, or a folder or file that could not be read`;
 
 /**
  * What a launch with no explicit `scene` argument runs. `none`: the project

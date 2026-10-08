@@ -114,8 +114,8 @@ describe('launch scan: references are classified by path, not only by type', () 
     ]);
   });
 
-  it('a resource file is reported once, however many scenes name it', async () => {
-    const themeLine = '[ext_resource type="Theme" path="res://ui.tres" id="1"]';
+  it('a binary resource file is reported once, however many scenes name it', async () => {
+    const themeLine = '[ext_resource type="Theme" path="res://ui.res" id="1"]';
     const dir = projectWithMainScene(
       'scan-resource-file-',
       sceneWith(themeLine, '[ext_resource type="PackedScene" path="res://child.tscn" id="2"]'),
@@ -124,11 +124,11 @@ describe('launch scan: references are classified by path, not only by type', () 
 
     const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
     expect(collected.unscanned.map((u) => u.reason)).toEqual([
-      'resource res://ui.tres is not scanned (a .tres or .res file can carry a script)',
+      'resource res://ui.res is not scanned (a binary .res file can carry a script)',
     ]);
 
     const warnings = await gateWarnings(dir);
-    expect(warnings.join('\n')).toMatch(/Not scanned: main\.tscn: resource res:\/\/ui\.tres/);
+    expect(warnings.join('\n')).toMatch(/Not scanned: main\.tscn: resource res:\/\/ui\.res/);
   });
 
   it('an imported asset that cannot carry a script is not reported', () => {
@@ -276,7 +276,7 @@ describe('launch scan: what strict mode refuses on besides a Tier 1 finding', ()
   it.each([
     ['a C# script', sceneWith('[ext_resource type="Script" path="res://a.cs" id="1"]')],
     ['a binary scene', BINARY_SCENE_BYTES],
-    ['a resource file', sceneWith('[ext_resource type="Theme" path="res://ui.tres" id="1"]')],
+    ['a binary resource file', sceneWith('[ext_resource type="Theme" path="res://ui.res" id="1"]')],
   ])('it still launches when the scene brings in %s', async (_label, sceneText) => {
     const dir = projectWithMainScene('scan-strict-by-kind-', sceneText);
 
@@ -294,5 +294,80 @@ describe('launch scan: what strict mode refuses on besides a Tier 1 finding', ()
     const warnings = await gateWarnings(dir, true);
 
     expect(warnings.some((w) => /gone\.gd \(file not found\)/.test(w))).toBe(true);
+  });
+});
+
+describe('launch scan: a .tres a scene references is read like a scene', () => {
+  const resourceWith = (...lines: string[]): string =>
+    `[gd_resource type="Resource" format=3]
+
+${lines.join('\n')}
+`;
+  const scriptRef = (path: string): string => `[ext_resource type="Script" path="${path}" id="1"]`;
+  const tresRef = (path: string): string => `[ext_resource type="Resource" path="${path}" id="2"]`;
+
+  it('reports a Tier 1 script attached to a .tres the scene references', async () => {
+    const dir = projectWithMainScene('scan-tres-script-', sceneWith(tresRef('res://data.tres')));
+    writeFileSync(join(dir, 'data.tres'), resourceWith(scriptRef('res://evil.gd')), 'utf8');
+    writeFileSync(join(dir, 'evil.gd'), TIER1_BODY, 'utf8');
+
+    const warnings = await gateWarnings(dir);
+
+    expect(warnings.join('\n')).toMatch(/evil\.gd:3 OS\.execute/);
+    expectErrorMatching(await strictGate(dir), /evil\.gd:3 OS\.execute/);
+  });
+
+  it('follows a chain of .tres files two deep', async () => {
+    const dir = projectWithMainScene('scan-tres-chain-', sceneWith(tresRef('res://a.tres')));
+    writeFileSync(join(dir, 'a.tres'), resourceWith(tresRef('res://b.tres')), 'utf8');
+    writeFileSync(join(dir, 'b.tres'), resourceWith(scriptRef('res://deep.gd')), 'utf8');
+    writeFileSync(join(dir, 'deep.gd'), TIER1_BODY, 'utf8');
+
+    expect((await gateWarnings(dir)).join('\n')).toMatch(/deep\.gd:3 OS\.execute/);
+  });
+
+  it('reads the source of an inline GDScript inside a .tres', async () => {
+    const dir = projectWithMainScene('scan-tres-inline-', sceneWith(tresRef('res://a.tres')));
+    writeFileSync(
+      join(dir, 'a.tres'),
+      resourceWith(
+        '[sub_resource type="GDScript" id="1"]',
+        'script/source = "extends Node\\nfunc _ready():\\n\\tOS.execute(\\"x\\")\\n"',
+      ),
+      'utf8',
+    );
+
+    expect((await gateWarnings(dir)).join('\n')).toMatch(/a\.tres\[GDScript 1\]:3 OS\.execute/);
+  });
+
+  it('ends on a .tres cycle', () => {
+    const dir = projectWithMainScene('scan-tres-cycle-', sceneWith(tresRef('res://a.tres')));
+    writeFileSync(join(dir, 'a.tres'), resourceWith(tresRef('res://b.tres')), 'utf8');
+    writeFileSync(join(dir, 'b.tres'), resourceWith(tresRef('res://a.tres')), 'utf8');
+
+    const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
+
+    expect(collected.unscanned).toEqual([]);
+  });
+
+  it('a .tres that cannot be read is a read failure, so strict mode refuses', async () => {
+    const dir = projectWithMainScene('scan-tres-unreadable-', sceneWith(tresRef('res://a.tres')));
+    plantUnreadable(dir, 'a.tres');
+
+    expect((await gateWarnings(dir)).some((w) => /scene file could not be read/.test(w))).toBe(
+      true,
+    );
+    expectErrorMatching(await strictGate(dir), /pre-flight scan could not read/);
+  });
+
+  it('a .res is still only a Not scanned notice, which strict mode does not refuse', async () => {
+    const dir = projectWithMainScene(
+      'scan-res-notice-',
+      sceneWith('[ext_resource type="Resource" path="res://a.res" id="1"]'),
+    );
+
+    const warnings = await gateWarnings(dir, true);
+
+    expect(warnings.join('\n')).toMatch(/resource res:\/\/a\.res is not scanned/);
   });
 });
