@@ -7,32 +7,8 @@ import {
   type ProjectStatement,
 } from './project-godot.js';
 
-/**
- * Parsing and editing primitives for the autoloads of project.godot.
- *
- * Used by:
- *  - tools/autoload-tools.ts — list/add/remove/update_autoload handlers
- *  - utils/bridge-manager.ts — McpBridge inject/cleanup/repair
- *
- * Pure functions: each takes the absolute path to project.godot and returns
- * either parsed data or a boolean indicating whether the file was mutated.
- *
- * An autoload is the setting `autoload/<Name>`, however the file spells it:
- * `Name=` under `[autoload]`, or a top-level `autoload/Name=` line. The
- * statements are found with the one project.godot reader (`scanProjectFile` in
- * `project-godot.ts`) and matched by setting path, so a header or entry
- * followed by a `; comment`, a second `[autoload]` section and a top-level
- * spelling are all found. A name assigned more than once has one entry, the
- * last assignment, which is the one the engine keeps.
- *
- * An entry is a statement in the form Godot writes whose value is exactly one
- * quoted string. Anything else that assigns an autoload is reported as
- * unparsed and is never read, rewritten or removed as an entry: what the
- * engine loads from such a line is not known here.
- *
- * The writers edit whole lines and leave every line they do not touch byte for
- * byte as it was, line ending included.
- */
+/** Parsing and editing primitives for project.godot autoloads. An autoload is the setting `autoload/<Name>` under any spelling, found via `scanProjectFile` and matched by setting path; a name assigned more than once has one entry, the last, which the engine keeps.
+ * An entry is a canonical statement whose value is exactly one quoted string; anything else that assigns an autoload is `unparsed` and never read, rewritten or removed, as what the engine loads from it is unknown. Writers edit whole lines and leave every other line byte for byte. */
 
 export interface AutoloadEntry {
   name: string;
@@ -40,7 +16,6 @@ export interface AutoloadEntry {
   singleton: boolean;
 }
 
-/** What `parseAutoloadSection` read. */
 export interface ParsedAutoloads {
   /** One entry per name, in the order the engine initialises them. */
   entries: AutoloadEntry[];
@@ -48,20 +23,11 @@ export interface ParsedAutoloads {
   unparsed: string[];
   /** Assignments a later line overrides, worded for a warning. They are not in `entries`. */
   shadowed: string[];
-  /**
-   * Set when any line of the file, in any section, is not in the form Godot
-   * writes: the sentence that names those lines. The engine may register an
-   * autoload from such a line that `entries` does not hold, so a caller that
-   * lists or scans autoloads must pass it on.
-   */
+  /** Set when any line of the file is not in the form Godot writes: the sentence naming them. The engine may register an autoload from such a line that `entries` does not hold, so callers listing or scanning autoloads must pass it on. */
   nonCanonical: string | null;
 }
 
-/**
- * The name rule the parser applies to an entry's key. Enforced on write paths
- * to prevent a name with newlines or INI section delimiters from corrupting
- * project.godot.
- */
+/** The name rule applied to an entry's key; enforced on writes so a name with newlines or INI delimiters cannot corrupt project.godot. */
 export const VALID_AUTOLOAD_NAME_REGEX = /^\w+$/;
 
 const AUTOLOAD_SECTION = 'autoload';
@@ -85,10 +51,7 @@ function assertValidName(name: string): void {
   }
 }
 
-/**
- * A quote or line break in a path would end the quoted value early or split the
- * entry across lines, so it can never be written.
- */
+/** A quote or line break in a path would end the quoted value early or split the entry, so it can never be written. */
 export const AUTOLOAD_PATH_FORBIDDEN_REGEX = /["\r\n]/;
 
 function assertValidAutoloadPath(path: string): void {
@@ -101,26 +64,20 @@ export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
 
-/** The setting path of the autoload called `name`. */
 function autoloadSettingPath(name: string): string {
   return AUTOLOAD_PATH_PREFIX + name;
 }
 
-/** A statement that assigns an `autoload/...` setting, under any spelling. */
 function isAutoloadStatement(statement: ProjectStatement): boolean {
   return statement.path.startsWith(AUTOLOAD_PATH_PREFIX);
 }
 
-/** Every statement that assigns the autoload called `name`, in file order. */
 function statementsForName(scan: ProjectFileScan, name: string): ProjectStatement[] {
   const path = autoloadSettingPath(name);
   return scan.statements.filter((statement) => statement.path === path);
 }
 
-/**
- * An autoload statement that reads as an entry: a valid name, written in the
- * form Godot writes, with a value that is exactly one quoted string.
- */
+/** An autoload statement that reads as an entry: valid name, canonical form, exactly one quoted string value. */
 type EntryStatement = ProjectStatement & { value: string };
 
 function isEntryStatement(statement: ProjectStatement): statement is EntryStatement {
@@ -146,11 +103,7 @@ function eolOf(content: string): string {
   return content.includes(CRLF) ? CRLF : LF;
 }
 
-/**
- * The file as lines that each keep their own line ending. Element `i` is line
- * `i` of the scan (`startLine`, `endLine`, `headerLine`); joining the elements
- * unchanged gives the file back byte for byte.
- */
+/** The file as lines that each keep their own ending; element `i` is scan line `i`, and joining them gives the file back byte for byte. */
 function splitKeepingEndings(content: string): string[] {
   return content.match(LINE_WITH_ENDING_REGEX) ?? [];
 }
@@ -174,10 +127,7 @@ function formatEntryLine(key: string, singleton: boolean, writtenPath: string): 
   return `${key}="${singleton ? SINGLETON_MARKER : ''}${writtenPath}"`;
 }
 
-/**
- * Escape a value read out of the file so that writing it back inside quotes
- * reads to the same value, on one line.
- */
+/** Escapes a value so writing it back inside quotes reads to the same value on one line. */
 function escapeQuotedValue(value: string): string {
   return value
     .replace(/\\/g, '\\\\')
@@ -186,27 +136,12 @@ function escapeQuotedValue(value: string): string {
     .replace(/\r/g, '\\r');
 }
 
-/** The first source line of a statement, trimmed, for a message. */
 function sourceLineOf(lines: readonly string[], statement: ProjectStatement): string {
   return (lines[statement.startLine] ?? '').trim();
 }
 
-/**
- * Read the project's autoloads. `entries` holds one entry per name: the last
- * assignment of `autoload/<Name>` in the file, listed at the position of the
- * first, which is the value and the order the engine uses. An earlier
- * assignment of the same name is in `shadowed`, never in `entries`, so a
- * caller cannot pick the wrong one.
- *
- * A line in `unparsed` is registered in the file but absent from `entries`, so
- * a caller that lists or scans autoloads must say so rather than present
- * `entries` as everything. An entry is a statement whose name is valid and
- * whose value is exactly one quoted string with nothing after it: a bare
- * value, a `&"..."` StringName and a line that carries a second statement are
- * all unparsed. `unparsed` holds the trimmed source line, the first one for a
- * statement that spans several. `nonCanonical` covers the whole file, since a
- * line outside `[autoload]` that Godot did not write may still register one.
- */
+/** Reads the project's autoloads. `entries` holds the last assignment of each name at the position of the first (the value and order the engine uses); earlier ones go to `shadowed` so a caller cannot pick the wrong one.
+ * An `unparsed` line is registered in the file but absent from `entries` (bare value, `&"..."` StringName, second statement on the line), so callers must say so rather than present `entries` as everything; `nonCanonical` covers the whole file, as a line outside `[autoload]` may still register one. */
 export function parseAutoloadSection(
   projectFilePath: string,
   existingContent?: string,
@@ -250,16 +185,11 @@ export function parseAutoloadSection(
   };
 }
 
-/** The project's autoloads, one entry per name; see `parseAutoloadSection`. */
 export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
   return parseAutoloadSection(projectFilePath, existingContent).entries;
 }
 
-/**
- * Add an entry to the last `[autoload]` section, directly after its last
- * statement (or after the header when it has none). With no such section, one
- * is created at the end of the file, after one blank line.
- */
+/** Adds an entry after the last statement of the last `[autoload]` section (or its header); with no such section, creates one at the end of the file after one blank line. */
 export function addAutoloadEntry(
   projectFilePath: string,
   name: string,
@@ -298,28 +228,14 @@ export function addAutoloadEntry(
   writeFileAtomicSync(projectFilePath, lines.join(''));
 }
 
-/**
- * Every assignment of this autoload that reads as an entry, overridden ones
- * included, in file order. `parseAutoloads` gives the one the engine keeps;
- * this is for a caller that must look at the others too before removing some.
- */
+/** Every assignment of this autoload that reads as an entry, overridden ones included, for a caller that must see the others before removing some. */
 export function parseAutoloadAssignments(projectFilePath: string, name: string): AutoloadEntry[] {
   const scan = scanProjectFile(readFileSync(projectFilePath, 'utf8'));
   return statementsForName(scan, name).filter(isEntryStatement).map(toEntry);
 }
 
-/**
- * Remove every assignment of this autoload, under every spelling and in every
- * `[autoload]` section, so no earlier line takes over once the last is gone.
- * With `shouldRemove`, only the assignments that read as an entry whose path
- * satisfies it are removed: an assignment it rejects, or one that does not
- * read as an entry, stays, and the last one left is what the engine then
- * loads. An `[autoload]` section left with no statements and nothing but blank
- * lines is dropped with its header, unless the header carries a comment; when
- * that section ended the file, the blank lines that separated it from what
- * precedes go with it. Every other line is kept as it was. Returns true when
- * the file was mutated.
- */
+/** Removes every assignment of this autoload under every spelling and `[autoload]` section, so no earlier line takes over. With `shouldRemove`, only entry-reading assignments whose path satisfies it go; the last one left is what the engine then loads.
+ * An `[autoload]` section left empty is dropped with its header unless the header carries a comment; at end of file the blank lines before it go too. Returns true when the file was mutated. */
 export function removeAutoloadEntry(
   projectFilePath: string,
   name: string,
@@ -358,16 +274,8 @@ export function removeAutoloadEntry(
   return true;
 }
 
-/**
- * Rewrite the assignment the engine keeps for this autoload (the last one) as
- * a single line, where it is and under the key it is written with, replacing
- * the lines the statement covered and keeping the line ending of its last
- * line. An omitted `newPath` or `singleton` keeps what the entry had. A
- * comment that followed the entry on its line is dropped. Earlier assignments
- * of the same name are overridden already and are left as they are. Returns
- * false, with the file untouched, when the name has no assignment or its last
- * one does not read as an entry.
- */
+/** Rewrites the assignment the engine keeps (the last) as one line, in place and under the key it was written with, keeping the last line's ending; an omitted `newPath` or `singleton` keeps the old one, a trailing comment is dropped, earlier overridden assignments are left.
+ * Returns false, file untouched, when there is no assignment or the last does not read as an entry. */
 export function updateAutoloadEntry(
   projectFilePath: string,
   name: string,

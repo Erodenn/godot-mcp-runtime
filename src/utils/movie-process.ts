@@ -1,15 +1,5 @@
-/**
- * The spawn seam for `render_movie`: one bounded Godot process, its output
- * captured, never left running.
- *
- * Unlike a runtime session this holds no state on the runner and speaks no
- * protocol; the caller reads the result from disk. Every path out resolves
- * (never rejects), and a timeout kills the whole process tree, so a wedged
- * movie run cannot outlive the call or the server.
- *
- * The movie-writer run flow (argument set, frame-scaled timeout, stderr tail)
- * is adapted from PR 63 by Mickael Canevet.
- */
+/** The spawn seam for `render_movie`: one bounded Godot process, output captured, never left running. Every path out resolves (never rejects) and a timeout kills the whole process tree, so a wedged run cannot outlive the call or the server.
+ * The movie-writer run flow (argument set, frame-scaled timeout, stderr tail) is adapted from PR 63 by Mickael Canevet. */
 
 import { spawn, type ChildProcess } from 'child_process';
 import { logDebug } from './logger.js';
@@ -31,22 +21,12 @@ export interface MovieProcessResult {
   timedOut: boolean;
   /** Set when the process could not be started at all. */
   spawnError?: string;
-  /**
-   * Set on a timeout whose kill was sent but whose process did not report
-   * closing within the grace period: it may still be running.
-   */
+  /** Set on a timeout whose kill was sent but whose process did not report closing within the grace period: it may still be running. */
   killUnconfirmed?: boolean;
 }
 
-/** What the caller of a movie run is told about the child, apart from the result. */
 export interface MovieRunHooks {
-  /**
-   * Called once, when the child is known not to be running: it reported
-   * `close`, or it never started. Not called when the call merely gives up on
-   * a child that outlived its timeout kill, which is why a caller tracking
-   * "a movie process is using this project" ends that here and not on the
-   * result.
-   */
+  /** Called once when the child is known not to be running (it reported `close`, or never started), not when the call merely gives up on a child that outlived its timeout kill: a caller tracking 'a movie process uses this project' ends that here, not on the result. */
   onClosed?: () => void;
 }
 
@@ -67,14 +47,7 @@ const defaultMovieProcessDeps: MovieProcessDeps = {
   killTree: (proc) => killProcessTree(proc),
 };
 
-/**
- * Children still running. A server that exits mid-run must not leave a Godot
- * window behind, so the first spawn registers one exit hook over this set.
- * A child leaves the set only when it reports closing (or never started), not
- * when its call resolves: one that outlived a timeout kill stays tracked, so
- * the exit hook gets a second attempt at it. Each child is kept with the tree
- * kill its own call was given, so the hook never reaches past an injected one.
- */
+/** Children still running: the first spawn registers one exit hook over this set so a server exiting mid-run leaves no Godot window. A child leaves only when it reports closing (or never started), not when its call resolves, so one that outlived a timeout kill gets a second attempt; each is kept with its own call's tree kill. */
 const activeMovieChildren = new Map<ChildProcess, (proc: ChildProcess) => void>();
 let exitHookRegistered = false;
 
@@ -96,13 +69,7 @@ function appendTail(current: string, chunk: unknown): string {
   return (current + String(chunk)).slice(-MOVIE_OUTPUT_CAPTURE_MAX_CHARS);
 }
 
-/**
- * Run Godot with the given arguments and wait for it to exit, bounded by
- * `timeoutMs`. Never rejects: a start failure is `spawnError`, a timeout is
- * `timedOut` (after a tree kill was sent, with `killUnconfirmed` when the
- * process did not report closing within the grace period), and anything else
- * is the exit code and the tail of each output stream.
- */
+/** Runs Godot and waits for exit, bounded by `timeoutMs`; never rejects: `spawnError`, `timedOut` (tree kill sent; `killUnconfirmed` if it did not report closing within grace), else the exit code and each stream's tail. */
 export function runMovieProcess(
   godotPath: string,
   args: string[],

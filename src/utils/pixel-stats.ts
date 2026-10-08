@@ -1,18 +1,5 @@
-/**
- * Pixel statistics for a rendered frame, measured from a decoded PNG.
- *
- * This is the single statistics implementation for take_screenshot and movie
- * frames; there is no GDScript copy. The colour numbers (chromatic, dominant,
- * distinct) are observations of one frame sampled on a regular grid, which is
- * what a colour distribution wants. The two verdicts are not sampled: whether
- * a frame is blank (isLikelyBlank) and whether two frames differ
- * (computeFrameDifference, showsMotion) are decided over every pixel, because
- * the thing they ask about, one small sprite or a two-pixel caret, fits
- * between the points of any grid. Their thresholds are not parameters: fixed
- * constants, and for motion a count that follows the frame's size.
- *
- * The statistics code originates in PR 63 by Mickael Canevet.
- */
+/** Pixel statistics for a rendered frame from a decoded PNG, the single implementation for take_screenshot and movie frames. Colour numbers are sampled on a regular grid; the verdicts (isLikelyBlank, computeFrameDifference, showsMotion) read every pixel, because one small sprite or a two-pixel caret fits between grid points.
+ * Their thresholds are fixed constants, for motion a count that follows the frame size. The statistics code originates in PR 63 by Mickael Canevet. */
 
 import { readFileSync } from 'fs';
 import { decodePng } from './png-decoder.js';
@@ -20,10 +7,7 @@ import { getErrorMessage } from './error-response.js';
 import { ok, err, type Result } from './result.js';
 
 export const RGBA_BYTES_PER_PIXEL = 4;
-/**
- * Sampling aims at about this many pixels per frame; the grid visits fewer than 4x this.
- * At 1920x1080 the step is 15 px (9,216 points); it was 22 px (4,400 points) at a target of 4096.
- */
+/** Sampling aims at about this many pixels per frame (the grid visits fewer than 4x this); at 1920x1080 the step is 15 px. */
 export const PIXEL_SAMPLE_TARGET = 8192;
 /** A pixel is chromatic when max(r,g,b) - min(r,g,b) exceeds this. */
 export const CHROMATIC_SPREAD_THRESHOLD = 8;
@@ -33,11 +17,7 @@ const BITS_PER_CHANNEL = 8;
 const RGB_CHANNELS = 3;
 const CHANNEL_MAX = 255;
 const COLOR_BITS_KEPT = BITS_PER_CHANNEL - COLOR_QUANT_SHIFT;
-/**
- * A frame is blank when no channel varies by more than this (of 255) across
- * the whole frame: one flat colour, give or take the +-1..2 steps debanding
- * and dithering add to a cleared viewport.
- */
+/** A frame is blank when no channel varies by more than this (of 255): one flat colour, give or take the +-1..2 steps debanding and dithering add. */
 export const BLANK_CHANNEL_TOLERANCE = 8;
 
 /** RGBA, row-major. */
@@ -65,10 +45,7 @@ export function sampleStep(width: number, height: number): number {
   return Math.max(1, Math.floor(Math.sqrt((width * height) / PIXEL_SAMPLE_TARGET)));
 }
 
-/**
- * The one definition of the sampling grid. Calls visit with the byte offset of each
- * sampled pixel (x and y from 0 in steps of sampleStep) and returns how many were visited.
- */
+/** The one definition of the sampling grid: visits the byte offset of each sampled pixel and returns how many were visited. */
 export function forEachSampleOffset(
   width: number,
   height: number,
@@ -112,20 +89,12 @@ export function computePixelStats(frame: RgbaFrame): PixelStats {
   };
 }
 
-/**
- * True when the whole frame is one flat colour, within
- * BLANK_CHANNEL_TOLERANCE per channel. Every pixel is read, so a frame whose
- * only content is one small sprite is not blank, and neither is a frame of
- * two colours however few there are: white text on black, or a 1-bit game, is
- * rendered content. Alpha is ignored.
- */
+/** True when the whole frame is one flat colour within BLANK_CHANNEL_TOLERANCE; every pixel is read, so a lone small sprite or a two-colour frame (white text on black, a 1-bit game) is content. Alpha is ignored. */
 export function isLikelyBlank(frame: RgbaFrame): boolean {
   const { data } = frame;
   const end = frame.width * frame.height * RGBA_BYTES_PER_PIXEL;
   if (end === 0) throw new RangeError('isLikelyBlank requires at least one pixel');
-  // The running range of each channel. The scan stops at the first pixel
-  // that widens one past the tolerance, so a rendered frame costs a few
-  // pixels and only a blank one is read to the end.
+  // The scan stops at the first pixel that widens a channel range past the tolerance, so a rendered frame costs a few pixels and only a blank one is read to the end.
   const low = new Uint8Array(RGB_CHANNELS).fill(CHANNEL_MAX);
   const high = new Uint8Array(RGB_CHANNELS);
   for (let i = 0; i < end; i += RGBA_BYTES_PER_PIXEL) {
@@ -161,17 +130,9 @@ export function measurePngFile(filePath: string): Result<MeasuredFrame, string> 
   return measurePngBuffer(buffer);
 }
 
-/**
- * A pixel counts as changed when any of its R, G, B channels differs by more than this
- * (of 255). Above the +-1..2 steps that dithering and lossy encoders add to a still
- * scene, and below the shift a real sprite, tint or fade produces.
- */
+/** A pixel counts as changed when any of R, G, B differs by more than this (of 255): above the +-1..2 steps of dithering and lossy encoders, below a real sprite, tint or fade. */
 export const MOTION_CHANNEL_THRESHOLD = 8;
-/**
- * The fewest changed pixels that show motion, at any frame size. A two-pixel caret blinking
- * or an 8x8 sprite moving changes far more; one or two pixels flickering past the channel
- * threshold is what temporal anti-aliasing and reprojection noise leave on a still scene.
- */
+/** The fewest changed pixels that show motion at any frame size: a blinking two-pixel caret or an 8x8 sprite changes far more, while one or two pixels is temporal anti-aliasing noise. */
 export const MOTION_MIN_CHANGED_PIXELS = 4;
 export const MOTION_REFERENCE_FRAME_WIDTH = 1152;
 export const MOTION_REFERENCE_FRAME_HEIGHT = 648;
@@ -179,11 +140,7 @@ export const MOTION_REFERENCE_FRAME_HEIGHT = 648;
 export const MOTION_REFERENCE_FRAME_PIXELS =
   MOTION_REFERENCE_FRAME_WIDTH * MOTION_REFERENCE_FRAME_HEIGHT;
 
-/**
- * The changed-pixel count a pair of frames of `totalPixels` needs to show motion. Noise
- * pixels grow with the frame's area, so the threshold does too: the floor up to the
- * reference frame, then in proportion (12 at 1920x1080, 45 at 3840x2160).
- */
+/** The changed-pixel count a pair of `totalPixels` needs to show motion: noise grows with area, so the floor holds up to the reference frame, then scales (12 at 1920x1080, 45 at 3840x2160). */
 export function motionMinChangedPixels(totalPixels: number): number {
   return Math.max(
     MOTION_MIN_CHANGED_PIXELS,
@@ -200,11 +157,8 @@ export interface ChangedBounds {
 }
 
 export interface FrameDifference {
-  /** Mean absolute R, G, B difference over every pixel, 0..1. */
   mean: number;
-  /** Pixels where any channel moved by more than MOTION_CHANNEL_THRESHOLD. */
   changedPixels: number;
-  /** Pixels compared, so changedPixels / totalPixels is the changed fraction. */
   totalPixels: number;
   /** The changedPixels count this pair needs to show motion; see motionMinChangedPixels. */
   motionThreshold: number;
@@ -212,10 +166,7 @@ export interface FrameDifference {
   changedBounds: ChangedBounds | null;
 }
 
-/**
- * Compare two frames pixel by pixel. Alpha is ignored. Null when the sizes differ,
- * because no pairing of pixels is defined then, or when there is no pixel to compare.
- */
+/** Compares two frames pixel by pixel, alpha ignored; null when the sizes differ (no pairing is defined) or there is no pixel. */
 export function computeFrameDifference(a: RgbaFrame, b: RgbaFrame): FrameDifference | null {
   if (a.width !== b.width || a.height !== b.height) return null;
   const { width, height } = a;

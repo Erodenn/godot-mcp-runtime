@@ -1,21 +1,4 @@
-/**
- * Receiver for Godot's own remote-debugger profiler stream.
- *
- * `run_project({ profiling: true })` binds this listener first and passes
- * `--remote-debug tcp://127.0.0.1:<port>` to the spawned engine, so the
- * measurements are the stock editor ones — no engine build, no addon, and
- * nothing injected into the project. Attached sessions cannot profile: the
- * debugger channel only exists if it was on the command line at launch.
- *
- * Three engine profilers feed one capture: `servers` (script functions and
- * the frame budget, always on), `visual` (render-stage CPU/GPU timestamps,
- * opt-in) and `performance` (the Monitors tab, which the engine enables by
- * itself whenever a debugger is attached and samples once a second).
- *
- * Godot pauses the game on a script error or `breakpoint` while a debugger is
- * connected, so every `debug_enter` is answered with `continue` — profiling
- * must never turn a runtime error into a frozen window.
- */
+/** Receiver for the engine's remote-debugger profiler stream; only a launch with `--remote-debug` can profile, so attached sessions cannot. */
 
 import * as net from 'net';
 import {
@@ -53,51 +36,27 @@ export const PROFILE_MAX_SECONDS = 60;
 export const CAPTURE_LIMIT_MIN = 16;
 export const CAPTURE_LIMIT_MAX = 512;
 export const PROFILE_TOP_MAX = 100;
-/**
- * The engine's errors when a frame runs out of render timestamp slots:
- * RenderingDevice (Forward+/Mobile) says so, while the Compatibility renderer
- * only fails the condition, so stderr shows `Condition "...timestamp_count >=
- * max_timestamp_query_elements" is true.`
- */
+/** Engine text when a frame runs out of render timestamp slots (RenderingDevice says so; Compatibility only fails the condition). */
 export const TIMESTAMP_OVERFLOW_ERRORS = [
   'Tried capturing more timestamps than the configured maximum',
   'timestamp_count >= max_timestamp_query_elements',
 ] as const;
-/**
- * What to do about it, shared by every tool that can surface it. The setting
- * is read by RenderingDevice at startup; the Compatibility renderer ignores it
- * and stops at its compile-time MAX_QUERIES of 256.
- */
+/** Remedy shared by every tool that surfaces it; the Compatibility renderer ignores the setting and stops at a compile-time MAX_QUERIES of 256. */
 export const TIMESTAMP_OVERFLOW_FIX =
   'Forward+/Mobile: add settings/profiler/max_timestamp_query_elements=4096 under [debug] in project.godot and relaunch. Compatibility: the limit is fixed at 256 - profile this scene without visual.';
 export const TIMELINE_MS_MIN = 250;
 export const TIMELINE_MS_MAX = 5000;
-/**
- * Intervals a timeline splits its window into. Every interval costs the agent
- * a few hundred bytes of context, so a longer window gets wider intervals.
- * Frames arriving just after the window closes can add one or two more.
- */
+/** Intervals a timeline splits its window into; a longer window gets wider intervals to bound the agent's context cost. */
 export const MAX_TIMELINE_BUCKETS = 60;
-/** A widened interval rounds up to a multiple of this, so it stays readable. */
 const TIMELINE_MS_STEP = 50;
 export const TARGET_FPS_MAX = 1000;
 export const DEFAULT_TARGET_FPS = 60;
 export const MS_PER_SECOND = 1000;
-/**
- * Intervals a timeline may grow past its window: the frames that arrive just
- * after the window closes. Anything later is not placed.
- */
+/** Intervals a timeline may grow past its window for frames arriving just after it closes; later ones are not placed. */
 const TIMELINE_OVERRUN_BUCKETS = 2;
-/**
- * The share of an interval the trailing bucket must cover before its frame
- * count is divided into a rate. Shorter than that, the rate is noise.
- */
+/** Share of an interval the trailing bucket must cover before its frame count is divided into a rate; shorter is noise. */
 const TRAILING_BUCKET_MIN_SHARE = 1 / 4;
 
-/**
- * The interval a timeline over `seconds` actually uses: `timelineMs`, widened
- * when the window would not fit in MAX_TIMELINE_BUCKETS intervals of it.
- */
 export function timelineBucketMs(timelineMs: number, seconds: number): number {
   const widest =
     Math.ceil((seconds * MS_PER_SECOND) / MAX_TIMELINE_BUCKETS / TIMELINE_MS_STEP) *
@@ -107,36 +66,17 @@ export function timelineBucketMs(timelineMs: number, seconds: number): number {
 
 /** Bound on the rows kept for the slowest frame — a full frame is unbounded. */
 const WORST_FRAME_ROWS = 30;
-/** The same bound for the render stages kept from the slowest rendered frame. */
 const WORST_FRAME_AREAS = 15;
 /** Every visual row is `[name, cpu ms, gpu ms]`. */
 const AREA_STRIDE = 3;
-/**
- * The marker `TIMESTAMP_BEGIN()` writes only while frame profiling is on. A
- * frame without it was timed before the profiler was enabled.
- */
+/** Written by `TIMESTAMP_BEGIN()` only while frame profiling is on; a frame without it was timed before the profiler was enabled. */
 const FRAME_BEGIN = 'Frame Begin';
-/**
- * Visual frames skipped after every enable. Both renderers read timestamps
- * back through a ring of two or three frames and stamp each readback with a
- * fresh frame number, so the first few can hold timing taken before this
- * capture: the Compatibility renderer's internal markers, or, when a capture
- * starts right after another, frames the previous one recorded. Five covers
- * the deepest ring plus the enable landing mid-iteration (measured on 4.7).
- */
+/** Visual frames skipped after each enable: readback rings of 2-3 frames can hold timing from before this capture (5 measured on 4.7). */
 const VISUAL_SETTLE_FRAMES = 5;
-/**
- * Consecutive truncated frames after which a capture switches the visual
- * profiler off. The engine logs an error for every marker a frame loses, and
- * a scene over the limit loses hundreds per frame: left on, the logging slows
- * the game several times over for the rest of the window, and every timing in
- * the capture measures the logging instead of the game. One frame over the
- * limit costs little; three in a row mean the scene itself is over it.
- */
+/** Consecutive truncated frames after which the visual profiler is switched off: the per-marker error logging would slow the game and skew every timing. */
 const VISUAL_OVERFLOW_STOP_FRAMES = 3;
 /** Joins a stage to its groups. Engine stage names contain `/` but never this. */
 const PATH_SEPARATOR = ' > ';
-/** Time inside a render group that none of its markers account for. */
 const OTHER_AREA = '(other)';
 /** Uncovered group time at or below this is float noise, not an `(other)` row. */
 const OTHER_AREA_MIN_MS = 1e-9;
@@ -145,23 +85,11 @@ const MIB = 1024 * 1024;
 const MAX_CUSTOM_MONITORS = 64;
 /** Names of dropped custom monitors remembered, so a hostile peer cannot grow the set. */
 const MAX_DROPPED_MONITOR_NAMES = 256;
-/** Dropped custom monitor names a warning spells out. */
 const DROPPED_MONITOR_NAMES_SHOWN = 3;
-/**
- * How much longer than the engine's own frame times a frame may arrive after
- * the one before it before this process is blamed: the wall time between two
- * arrivals, minus the frame time the engine reports for the frames between
- * them. Network batching stays well under it; a synchronous stretch on this
- * server (a screenshot compare, a process kill) does not.
- */
+/** Arrival lag beyond the engine's own frame times after which this process is blamed; network batching stays under it, a synchronous stretch here does not. */
 const UNACCOUNTED_ARRIVAL_GAP_MS = 100;
-/**
- * Things of each kind a timeline bucket keeps totals for; its top few are
- * picked from these. Per kind, so a game with hundreds of script functions
- * cannot crowd the render stages and server calls out of the ranking.
- */
+/** Things kept per kind in a timeline bucket, so many script functions cannot crowd out render stages and server calls. */
 const MAX_BUCKET_ITEMS = 512;
-/** Heaviest things reported per timeline bucket. */
 const BUCKET_TOP = 3;
 /** Every engine row is `[signature id, calls, self, total, internal]`. */
 const ROW_STRIDE = 5;
@@ -172,21 +100,9 @@ const MS_ROUNDING = 10 ** MS_DECIMALS;
 const WAIT_CONNECT_MS = 5000;
 const WAIT_FIRST_FRAME_MS = 5000;
 const WAIT_TOTAL_MS = 10000;
-/**
- * The longest window a blocking capture (`captureWindow`, behind
- * `profile_project`) accepts. A call that blocks answers only at its end, and
- * a client that attached no progress token gives up on a request after 60 s
- * by default (the MCP SDK's per-request timeout), so a result that arrives
- * later is never read. The window is held to what keeps the call's worst case
- * (`PROFILE_WINDOW_WORST_CASE_MS`) under that. A capture that returns at once
- * (`start`) is bounded by `PROFILE_MAX_SECONDS` instead.
- */
+/** Longest blocking-capture window: the call answers only at its end, and a client with no progress token drops requests after 60 s (MCP SDK default). */
 export const PROFILE_WINDOW_MAX_SECONDS = 30;
-/**
- * The longest a blocking capture can take inside this receiver: the wait for
- * the debugger connection, the wait for the first frame, the window, and the
- * wait for the engine's closing packet.
- */
+/** Worst case a blocking capture takes: connection wait, first-frame wait, the window and the closing-packet wait. */
 export const PROFILE_WINDOW_WORST_CASE_MS =
   WAIT_CONNECT_MS +
   WAIT_FIRST_FRAME_MS +
@@ -195,11 +111,7 @@ export const PROFILE_WINDOW_WORST_CASE_MS =
 
 /** The packet that answers a `profiler:servers` disable. Its body is never read. */
 const SENTINEL_MESSAGE = 'servers:profile_total';
-/**
- * The messages this receiver reads. Any other debugger message (`output`,
- * `error`, the scene and stack messages) is recognised by name and its body
- * is never decoded.
- */
+/** Messages this receiver reads; any other debugger message is recognised by name and its body never decoded. */
 const CONSUMED_MESSAGES: ReadonlySet<string> = new Set([
   'set_pid',
   'debug_enter',
@@ -212,42 +124,15 @@ const CONSUMED_MESSAGES: ReadonlySet<string> = new Set([
 ]);
 /** Every debugger message this server understands is `[name, thread id, data]`. */
 const MESSAGE_ARITY = 3;
-/**
- * Monitor samples after which an unanswered disable is given up on. The
- * engine ticks its profilers and then reads debugger messages, once per
- * iteration, and sends a monitor sample once a second from that tick. After a
- * disable is written, at most two samples can still precede its sentinel: one
- * already in flight, and one from the iteration that then reads the disable
- * (the tick runs first). A third sample means the engine has iterated past
- * the disable, so the sentinel was sent and lost (the engine drops messages
- * when its outgoing queue is full) and waiting for it would discard every
- * later capture's frames.
- */
+/** Monitor samples after which an unanswered disable is given up on: past the two that can precede the sentinel,
+ * it was sent and lost (the engine drops messages when its queue is full) and waiting would discard later captures' frames. */
 const SENTINEL_LOST_AFTER_MONITOR_SAMPLES = 3;
-/**
- * Least time between two monitor samples that both count toward
- * `SENTINEL_LOST_AFTER_MONITOR_SAMPLES`, and between the disable and the first
- * one that counts: half the engine's one-second sample interval. The count is
- * evidence only as far as it reflects when samples were sent, and this side
- * sees when they are received. Samples that queued up while the event loop
- * was busy (a full-frame PNG compare, a synchronous process kill) are
- * delivered together, some of them sent before the disable was, so a burst
- * counts once.
- */
+/** Least spacing between counted monitor samples (half the engine's 1 s interval): samples queued behind a busy event loop
+ * arrive together, some sent before the disable, so a burst counts once. */
 const SENTINEL_LOST_SAMPLE_MIN_SPACING_MS = 500;
-/**
- * Least time since a disable was written before it is given up on, whatever
- * the sample count says. Longer than any pause this process is expected to
- * take in one stretch, and shorter than the wait a `stop` gives the sentinel,
- * so a lost sentinel still ends a stop early.
- */
+/** Least wait before a disable is given up on, whatever the sample count; shorter than a stop's sentinel wait so a lost sentinel still ends a stop early. */
 const SENTINEL_LOST_MIN_WAIT_MS = 4_000;
-/**
- * Keys whose values come from the game and are reported exactly as sampled:
- * a timeline interval's tracked values and the custom monitors. Rounding is
- * for this server's own timing arithmetic; a tracked 0.00003 is the game's
- * number, not float noise.
- */
+/** Game-supplied values are reported exactly as sampled; rounding is for this server's own timing arithmetic. */
 const GAME_VALUE_KEYS: ReadonlySet<string> = new Set(['track', 'custom']);
 
 export interface ProfilePeak {
@@ -270,18 +155,15 @@ export interface ProfileRow {
   selfMsPerFrame: number;
   totalMsPerFrame: number;
   msPerCall: number;
-  /** Inclusive share of an average frame, the editor's "Frame %" measure. */
   percentOfFrame: number | null;
   peak: ProfilePeak | null;
 }
 
-/** Average and worst value of one per-frame measurement across the capture. */
 export interface ProfileStat {
   avg: number;
   max: number;
 }
 
-/** The engine's own frame breakdown — the editor's "Frame Time" category. */
 export interface FrameTimings {
   frameMs: number;
   processMs: number;
@@ -300,54 +182,38 @@ export interface ProfileStartResult {
   active: boolean;
   visual: boolean;
   timeline: boolean;
-  /** The timeline's interval, widened for a long window; null without a timeline. */
   timelineMs: number | null;
   maxSeconds: number;
   firstFrame: number | null;
   captureLimit: number;
 }
 
-/** What a capture records beyond the function profiler it always runs. */
 export interface CaptureOptions {
   visual?: boolean;
   /** Timeline bucket length in ms; absent or null records no timeline. */
   timelineMs?: number | null;
-  /** Frame rate whose frame time `slowFrames` counts against. */
   targetFps?: number;
-  /**
-   * NodePath:property specs the bridge samples during the capture. The
-   * samples reach the capture through the `TrackCollector` its stop is
-   * given: this receiver only speaks to the debugger, never to the bridge.
-   */
+  /** NodePath:property specs the bridge samples; they reach the capture through the `TrackCollector` given to stop, never through this receiver. */
   track?: string[];
 }
 
-/** One bridge sample, stamped with the engine process frame it was taken on. */
 export interface TrackSample {
   frame: number;
   values: Record<string, unknown>;
 }
 
-/**
- * Fetch a capture's track from the bridge: its samples, or why there are
- * none. Called once the capture has closed, so the bridge's work handing the
- * samples over lands outside the measured frames. Must not reject.
- */
+/** Fetch a capture's track from the bridge once it has closed, so the hand-over lands outside measured frames; must not reject. */
 export type TrackCollector = () => Promise<{ samples: TrackSample[] | null; error: string | null }>;
 
-/** One of the heaviest things in a timeline bucket. */
 export interface TimelineItem {
-  /** A GDScript function, an engine server function, or a render stage. */
   kind: 'script' | 'server' | 'render';
   name: string;
   /** Milliseconds per frame across the bucket; render stages use the heavier of CPU and GPU. */
   ms: number;
-  /** The most it took in any one frame of the bucket. */
   maxMs: number;
 }
 
 export interface TimelineBucket {
-  /** Seconds from the capture's first frame to the start of this bucket. */
   t: number;
   frames: number;
   /** Null for a trailing bucket too short to divide by. */
@@ -357,34 +223,26 @@ export interface TimelineBucket {
   physicsMs: number | null;
   scriptMs: number | null;
   slowFrames: number;
-  /**
-   * Render timeline per profiled frame; null without `visual` or when no
-   * render frame landed in the bucket. `gpuMs` is null when the renderer
-   * timed no GPU work in the whole capture.
-   */
+  /** Render timeline per profiled frame; `gpuMs` is null when no GPU work was timed in the whole capture. */
   render: { cpuMs: number; gpuMs: number | null } | null;
   drawCalls: number | null;
   top: TimelineItem[];
-  /** The last tracked sample taken inside the bucket's frames. */
   track: Record<string, unknown> | null;
 }
 
 export interface TimelineResult {
   bucketMs: number;
   track: string[];
-  /** Why tracked values are missing, when they are. */
   trackError: string | null;
   buckets: TimelineBucket[];
 }
 
-/** One render stage from the editor's Visual Profiler, over the capture. */
 export interface VisualArea {
   /** The engine's group nesting, e.g. `Render Viewports > Render Viewport 0 > Render 3D Scene`. */
   path: string;
   name: string;
   /** A bracketed group: its times include everything inside it. */
   group: boolean;
-  /** Frames the stage appeared in. Averages divide by every folded frame. */
   frames: number;
   cpuMs: ProfileStat;
   /** Null when the renderer timed no GPU work (`gpuTimed` false). */
@@ -405,23 +263,11 @@ export interface VisualResult {
   frames: number;
   /** False when every GPU timestamp was zero: the renderer did not time the GPU. */
   gpuTimed: boolean;
-  /**
-   * Frames whose markers ran out before the frame ended: the renderer hit
-   * `debug/settings/profiler/max_timestamp_query_elements` and dropped the
-   * rest (the engine logs an error per dropped marker).
-   */
+  /** Frames that lost markers to `debug/settings/profiler/max_timestamp_query_elements`; the engine logs an error per dropped marker. */
   truncatedFrames: number;
-  /**
-   * Seconds into the capture at which the visual profiler was switched off
-   * because frames kept running out of timestamp slots; null when it ran for
-   * the whole capture.
-   */
+  /** Seconds into the capture at which the visual profiler was switched off for repeated truncation; null if it ran throughout. */
   stoppedAt: number | null;
-  /**
-   * The whole render timeline of a frame, first marker to last. `cpuMs` is
-   * null when no render frame was folded (`frames` is 0); `gpuMs` is null
-   * then too, and whenever `gpuTimed` is false.
-   */
+  /** The whole render timeline of a frame; `cpuMs` and `gpuMs` are null when no render frame was folded, and `gpuMs` also when `gpuTimed` is false. */
   cpuMs: ProfileStat | null;
   gpuMs: ProfileStat | null;
   areasReceived: number;
@@ -435,15 +281,8 @@ export interface MonitorStat {
   max: number;
 }
 
-/**
- * `Performance.Monitor` indices this server names, with the factor that turns
- * the engine's unit (bytes) into the reported one. The enum only grows at its
- * end — 0-32 since 4.0, 33-38 in 4.4, 39-58 in 4.5 — so an index means the
- * same monitor on every 4.x build that sends it. The TIME_* monitors (0-3) are
- * left out: FPS counts the engine's previous full second, which can reach up
- * to two seconds before the sample, and the process times are per-second
- * maxima. The capture's own frames measure both more exactly.
- */
+/** `Performance.Monitor` indices with the factor from bytes to the reported unit; the enum only grows at its end, so an index is stable across 4.x. */
+// TIME_* (0-3) are left out: FPS lags up to two seconds and the process times are per-second maxima.
 const MONITORS = [
   ['staticMemMiB', 4, 1 / MIB],
   ['objects', 7, 1],
@@ -464,16 +303,12 @@ const MONITORS = [
 
 export type MonitorName = (typeof MONITORS)[number][0];
 export const MONITOR_NAMES: readonly MonitorName[] = MONITORS.map(([name]) => name);
-/** `drawCallsInFrame`'s engine index, the one monitor a timeline bucket carries. */
 const DRAW_CALLS_MONITOR = MONITORS.find(([name]) => name === 'drawCallsInFrame')![1];
 
 /** `PIPELINE_COMPILATIONS_*` (4.4+): running totals since launch, not per frame. */
 const PIPELINE_COMPILATION_MONITORS = [34, 35, 36, 37, 38];
 
-/**
- * A named monitor is null when no sample carried a finite value for it: a 0
- * would read as "no draw calls" or "no nodes" rather than "not measured".
- */
+/** A named monitor is null when no sample carried a finite value: a 0 would read as 'no draw calls' rather than 'not measured'. */
 export type MonitorsResult = { samples: number } & Record<MonitorName, MonitorStat | null> & {
     /** `duringCapture` is null when a single sample left nothing to count from. */
     pipelineCompilations: { duringCapture: number | null; total: number } | null;
@@ -487,44 +322,30 @@ export interface ProfileResult {
   complete: boolean;
   seconds: number;
   frames: number;
-  /**
-   * Engine frames per second across the capture: the frame-number span over
-   * the wall time between the first and last folded frame. Null when that
-   * span is empty: fewer than two frames folded, or all of them at once.
-   */
+  /** Engine frames per second: the frame-number span over the wall time between first and last folded frame; null when that span is empty. */
   fps: number | null;
   targetFps: number;
-  /** Folded frames whose `frameMs` exceeded `1000 / targetFps`. */
   slowFrames: number;
   framesReceived: number;
   firstFrame: number | null;
   lastFrame: number | null;
   frameGaps: number;
-  /**
-   * Debugger packets dropped because the codec could not represent them. A
-   * non-zero value means the capture may be missing frames it was sent.
-   */
+  /** Debugger packets the codec could not represent; non-zero means the capture may be missing frames. */
   undecodablePackets: number;
   captureLimit: number;
   limitReached: boolean;
   sort: ProfileSort;
   functionsReceived: number;
   unresolvedFunctions: number;
-  /** Per-frame engine breakdown, averaged over the capture and at its worst. */
   frame: Record<keyof FrameTimings, ProfileStat>;
-  /** Server-side timings (physics, audio, …), averaged per frame. */
   servers: ProfileServer[];
   rows: ProfileRow[];
   worstFrame: ({ frame: number } & FrameTimings & { rows: FrameRow[] }) | null;
-  /** Engine monitors sampled once a second; null when no sample arrived. */
   monitors: MonitorsResult | null;
-  /** Render stages; null unless the capture was started with `visual`. */
   visual: VisualResult | null;
-  /** The capture over time; null unless it was started with a timeline. */
   timeline: TimelineResult | null;
 }
 
-/** One function's numbers inside a single received frame. */
 interface FrameRow {
   signature: string;
   function: string;
@@ -538,21 +359,15 @@ interface FrameRow {
 
 interface Capture {
   limit: number;
-  /** Window the caller asked for; the auto-stop is armed off the first frame. */
   maxSeconds: number;
   startedAt: number;
-  /**
-   * Wall-clock arrival time of the newest folded frame; 0 before the first.
-   * It ends the `fps` span and, for a capture closed without the engine's
-   * totals, the window.
-   */
+  /** Arrival time of the newest folded frame (0 before the first); ends the `fps` span and, for a capture closed without totals, the window. */
   lastFrameAt: number;
   elapsedMs: number;
   /** Frames folded into the totals (excludes the discarded boundary frame). */
   frames: number;
   framesReceived: number;
   frameGaps: number;
-  /** Packets the codec could not represent while this capture was open. */
   undecodablePackets: number;
   firstFrame: number | null;
   lastFrame: number | null;
@@ -561,27 +376,19 @@ interface Capture {
   peaks: Map<string, ProfilePeak>;
   timingSums: FrameTimings;
   timingMax: FrameTimings;
-  /** server name → function name → summed milliseconds. */
   servers: Map<string, Map<string, number>>;
   worst: ({ frame: number } & FrameTimings & { rows: FrameRow[] }) | null;
   result: FrameRow[] | null;
-  /**
-   * How the capture was closed out; null while it is still open. `no_start`
-   * is a capture whose first frame never arrived: it holds nothing.
-   */
+  /** How the capture was closed out; null while open. `no_start` means the first frame never arrived and nothing was recorded. */
   closedBy: 'sentinel' | 'timeout' | 'disconnect' | 'no_start' | null;
   monitors: MonitorCapture;
-  /** Null unless the capture enabled the engine's visual profiler. */
   visual: VisualCapture | null;
   targetFps: number;
   slowFrames: number;
   timeline: TimelineCapture | null;
   /** Frames that arrived later than the engine's frame times account for; see `UNACCOUNTED_ARRIVAL_GAP_MS`. */
   arrivalStalls: number;
-  /**
-   * Why the receiver itself closed the capture as `disconnect` (a stream it
-   * could not read), or null when the connection ended on the game's side.
-   */
+  /** Why the receiver itself closed the capture as `disconnect` (an unreadable stream); null when the game ended it. */
   receiverFault: string | null;
 }
 
@@ -592,11 +399,7 @@ interface BucketItem {
   max: number;
 }
 
-/**
- * A bucket's candidates for its `top`, per kind: scripts by signature, server
- * calls by server then function, render stages by path. Display names are
- * built once per item, not once per frame.
- */
+/** A bucket's candidates for its `top`, per kind; display names are built once per item, not once per frame. */
 interface BucketItems {
   scripts: Map<string, BucketItem>;
   servers: Map<string, Map<string, BucketItem>>;
@@ -604,7 +407,6 @@ interface BucketItems {
   render: Map<string, BucketItem>;
 }
 
-/** One slice of the timeline, filled by arrival time as frames come in. */
 interface Bucket {
   frames: number;
   frameSum: number;
@@ -615,22 +417,14 @@ interface Bucket {
   slowFrames: number;
   firstFrame: number | null;
   lastFrame: number | null;
-  /**
-   * Totals while the bucket fills. Once the capture moves past it nothing more
-   * arrives for it, so it is ranked into `top` and these are dropped: a long
-   * capture keeps one bucket's totals, not one per interval.
-   */
+  /** Totals while the bucket fills; dropped once ranked into `top`, so a long capture keeps one bucket's totals, not one per interval. */
   items: BucketItems | null;
   top: TimelineItem[];
   renderFrames: number;
   renderCpuSum: number;
   renderGpuSum: number;
   drawCalls: number | null;
-  /**
-   * True when this server's event loop was busy for part of the interval, so
-   * frames were read later than they arrived and the count over the interval's
-   * length says nothing about the game.
-   */
+  /** True when this server's event loop was busy during the interval: frames were read late, so the count over its length says nothing about the game. */
   stalled: boolean;
 }
 
@@ -646,7 +440,6 @@ interface TimelineCapture {
   collecting: Promise<void> | null;
 }
 
-/** Running count, sum and range of one monitor. */
 interface Accumulator {
   count: number;
   sum: number;
@@ -654,28 +447,19 @@ interface Accumulator {
   max: number;
 }
 
-/**
- * Monitor samples, folded as they arrive: the peer decides how many arrive
- * and how wide they are, so none is kept whole.
- */
+/** Monitor samples folded as they arrive; the peer decides how many and how wide, so none is kept whole. */
 interface MonitorCapture {
   samples: number;
   named: Map<MonitorName, Accumulator>;
   custom: Map<string, Accumulator>;
-  /** Names of custom monitors past `MAX_CUSTOM_MONITORS` that were not tracked. */
   droppedCustom: Set<string>;
-  /**
-   * Pipeline compilations at the last sample before the capture opened: the
-   * baseline that lets even a one-sample capture report what compiled.
-   */
+  /** Pipeline compilations at the last sample before the capture opened, so even a one-sample capture can report what compiled. */
   baselineCompilations: number | null;
   firstCompilations: number | null;
   lastCompilations: number | null;
 }
 
-/** A render stage's time inside one frame, in milliseconds. */
 interface FrameArea {
-  /** `areaKey` of the stage, computed once per frame. */
   key: string;
   path: string;
   name: string;
@@ -699,7 +483,6 @@ interface VisualCapture {
   framesReceived: number;
   frames: number;
   truncatedFrames: number;
-  /** Truncated frames in a row, up to the newest folded one. */
   truncatedRun: number;
   stoppedAt: number | null;
   /** Number of the newest folded frame; a repeat of it is the same draw re-sent. */
@@ -743,11 +526,7 @@ function badFrame(what: string): ProfilerError {
   );
 }
 
-/**
- * Engine timings come from integer tick counts and are always finite. A NaN
- * or an infinity would serialize as `null` and break the output schema, so it
- * is treated like any other layout the server does not understand.
- */
+/** Engine timings are finite integer ticks; a NaN or infinity would serialize as `null` and break the output schema, so it is treated as an unknown layout. */
 function asNumber(value: Variant | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw badFrame('expected a finite number');
@@ -755,12 +534,7 @@ function asNumber(value: Variant | undefined): number {
   return value;
 }
 
-/**
- * Loop bounds and element counts must be real non-negative integers. Plain
- * `asNumber` would accept a float — and a layout shift that lands a timing
- * value where a count belongs makes `for (i < 0.016)` run once instead of
- * throwing, walking `offset` off silently. Fail loudly on version drift.
- */
+/** Counts and loop bounds must be non-negative integers: a float from a layout shift would make `for (i < 0.016)` run once instead of throwing. */
 function asCount(value: Variant | undefined, limit: number): number {
   const count = asNumber(value);
   if (!Number.isSafeInteger(count) || count < 0 || count > limit) {
@@ -769,11 +543,7 @@ function asCount(value: Variant | undefined, limit: number): number {
   return count;
 }
 
-/**
- * Trim float noise from the summary's own timing arithmetic: these are
- * milliseconds, not physics. A subtree under one of `GAME_VALUE_KEYS` is
- * handed back untouched.
- */
+/** Trims float noise from the summary's own millisecond arithmetic; a subtree under `GAME_VALUE_KEYS` is returned untouched. */
 function roundNumbers<T>(value: T): T {
   if (typeof value === 'number') return (Math.round(value * MS_ROUNDING) / MS_ROUNDING) as T;
   if (Array.isArray(value)) return value.map(roundNumbers) as T;
@@ -796,27 +566,17 @@ const noTimings = (): FrameTimings => ({
   scriptMs: 0,
 });
 
-/** One received frame, in the same three parts the editor's tree shows. */
 interface FrameSample {
   frame: number;
   timings: FrameTimings;
   servers: Array<{ name: string; functions: Array<{ name: string; ms: number }> }>;
   rows: FrameRow[];
-  /**
-   * Rows the engine actually sent, before zero-call rows are dropped. The
-   * engine's `captureLimit` applies to this count, so the truncation check
-   * has to use it rather than the filtered `rows.length`.
-   */
+  /** Rows the engine sent before zero-call rows are dropped; `captureLimit` applies to this count, so the truncation check needs it. */
   rawRowCount: number;
 }
 
-/**
- * Split the engine's per-frame array. Layout: the frame number, five timing
- * fields, a server count, that many `name, entryCount, ...name/time pairs`
- * blocks, then the flattened function rows preceded by their own length.
- * Verified against `ServersProfilerFrame::serialize()`; `internal_time` at
- * `i + 4` is deliberately skipped (the editor's "internal functions" toggle).
- */
+/** Splits the engine's per-frame array (verified against `ServersProfilerFrame::serialize()`). */
+// `internal_time` at `i + 4` is deliberately skipped (the editor's 'internal functions' toggle).
 function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSample {
   const timings: FrameTimings = {
     frameMs: asNumber(data[1]) * 1000,
@@ -872,11 +632,7 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
   };
 }
 
-/**
- * Split the engine's visual frame: the frame number, the length of the rest,
- * then `name, cpu ms, gpu ms` per marker. Verified against
- * `VisualProfilerFrame::serialize()`, unchanged since 4.0.
- */
+/** Splits the engine's visual frame: `name, cpu ms, gpu ms` per marker (verified against `VisualProfilerFrame::serialize()`, unchanged since 4.0). */
 function parseVisualFrame(data: Variant[]): VisualSample {
   const length = asCount(data[1], data.length);
   if (length % AREA_STRIDE !== 0 || 2 + length !== data.length) {
@@ -900,14 +656,7 @@ const areaKey = (area: { path: string; group: boolean }): string =>
 const childPath = (parent: { path: string } | undefined, name: string): string =>
   parent === undefined ? name : `${parent.path}${PATH_SEPARATOR}${name}`;
 
-/**
- * Turn one frame's markers into stage times. A marker's stage lasts until the
- * next marker, as in the editor's tree; `>name` opens a group and `<name`
- * closes it. Unlike the editor, a group's time is the span between its own
- * markers, and whatever its children leave uncovered becomes an `(other)` row
- * — in the Compatibility renderer that is the blit and buffer swap inside a
- * viewport, which the editor's tree silently drops.
- */
+/** A marker's stage lasts until the next; `>name` opens a group and `<name` closes it. Unlike the editor, uncovered group time becomes an `(other)` row. */
 function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; truncated: boolean } {
   const areas = new Map<string, FrameArea>();
   const add = (path: string, name: string, group: boolean, cpuMs: number, gpuMs: number): void => {
@@ -944,7 +693,6 @@ function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; tru
       parent.childGpuMs += gpuMs;
     }
   };
-  /** Close groups down to and including the innermost open one named `name`. */
   const closeTo = (name: string, at: { cpuMs: number; gpuMs: number }): void => {
     if (!stack.some((group) => group.name === name)) return;
     let group = stack.pop();
@@ -959,11 +707,8 @@ function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; tru
   markers.forEach((marker, i) => {
     if (marker.name.startsWith('>')) {
       const name = marker.name.slice(1).trim();
-      // A group opened while one of its name is still open is that stage's
-      // next pass, not a child of it: the engine opens "Render
-      // DirectionalLight2D Shadows" once per light but closes it once, after
-      // the loop (renderer_viewport.cpp). Nested, the first pass would stay
-      // open to the end of the viewport and claim its swap and vsync wait.
+      // A group opened while one of its name is open is that stage's next pass, not a child: the engine opens 'Render DirectionalLight2D Shadows'
+      // once per light but closes it once (renderer_viewport.cpp), so nesting would let the first pass claim the swap and vsync wait.
       closeTo(name, marker);
       stack.push({
         path: childPath(stack[stack.length - 1], name),
@@ -976,16 +721,12 @@ function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; tru
       return;
     }
     if (marker.name.startsWith('<')) {
-      // A close with no open group of its name is dropped, so it cannot
-      // wreck the rest of the frame.
+      // A close with no open group of its name is dropped so it cannot wreck the rest of the frame.
       closeTo(marker.name.slice(1).trim(), marker);
       return;
     }
     const parent = stack[stack.length - 1];
-    // The first marker opens the timeline and the last one ends it; neither
-    // starts a stage (the editor skips both the same way). The Compatibility
-    // renderer puts its own "Internal Begin" ahead of "Frame Begin", which is
-    // no stage either.
+    // The first and last markers bound the timeline and start no stage, as in the editor; the Compatibility 'Internal Begin' ahead of 'Frame Begin' is none either.
     const next = markers[i + 1];
     if (i === 0 || i === last || next === undefined || marker.name === FRAME_BEGIN) return;
     const cpuMs = Math.max(0, next.cpuMs - marker.cpuMs);
@@ -996,9 +737,7 @@ function frameAreas(markers: VisualSample['markers']): { areas: FrameArea[]; tru
       parent.childGpuMs += gpuMs;
     }
   });
-  // By the end of a whole frame every group is closed, a re-opened one by its
-  // re-open above. One still open means the frame ran out of timestamp slots
-  // and lost its remaining markers, closes included.
+  // A group still open here means the frame ran out of timestamp slots and lost its remaining markers, closes included.
   const truncated = stack.length > 0;
   const end = markers[last];
   if (end !== undefined) {
@@ -1025,7 +764,6 @@ function newVisualCapture(): VisualCapture {
   };
 }
 
-/** A visual frame that made it into the totals, for the timeline to place too. */
 interface FoldedRender {
   cpuMs: number;
   gpuMs: number;
@@ -1036,12 +774,9 @@ interface FoldedRender {
 function foldVisualFrame(visual: VisualCapture, sample: VisualSample): FoldedRender | null {
   visual.framesReceived += 1;
   if (visual.framesReceived <= VISUAL_SETTLE_FRAMES) return null;
-  // A frame timed while profiling was off: the Compatibility renderer writes
-  // its "Internal Begin/End" pair whether or not anyone is profiling.
+  // Timed while profiling was off: the Compatibility renderer writes 'Internal Begin/End' regardless.
   if (!sample.markers.some((marker) => marker.name === FRAME_BEGIN)) return null;
-  // While nothing draws (a minimized window, low-processor mode with nothing
-  // changed) the engine re-sends the last drawn frame every iteration under
-  // the same number. Only a new draw advances it.
+  // While nothing draws, the engine re-sends the last frame under the same number; only a new draw advances it.
   if (visual.lastFrame !== null && sample.frame <= visual.lastFrame) return null;
   visual.lastFrame = sample.frame;
   const first = sample.markers[0];
@@ -1101,11 +836,9 @@ function summarizeVisual(
   hardware: VisualResult['hardware'],
   top: number,
 ): VisualResult {
-  // No folded frame means no area and no worst frame either, so the only
-  // divisions below that could meet a zero are the two whole-frame stats.
+  // No folded frame means no area or worst frame, so only the two whole-frame stats could divide by zero.
   const frames = visual.frames;
-  // A renderer that times no GPU work sends 0 for every GPU timestamp. That
-  // is "not measured", so every GPU figure is null rather than a free GPU.
+  // A renderer that times no GPU work sends 0 for every GPU timestamp: null, not a free GPU.
   const gpu = <T>(measured: T): T | null => (visual.gpuTimed ? measured : null);
   const areas: VisualArea[] = [];
   for (const totals of visual.areas.values()) {
@@ -1157,16 +890,7 @@ function newTimeline(bucketMs: number, maxSeconds: number, track: string[]): Tim
   };
 }
 
-/**
- * The bucket for something that arrived `elapsedMs` after the capture's first
- * frame. A frame grows the timeline up to it, so an interval with no frames at
- * all (a freeze) still shows as an empty bucket. Anything else (a monitor
- * sample, a visual frame, which lags its draw by a few frames) never grows it
- * and lands in the newest bucket instead: arriving after the last frame, it
- * would otherwise open a frameless trailing bucket that reads as a freeze and
- * leaves the real last interval measured over a full interval's time. Null
- * past the window's end.
- */
+/** Bucket for something arriving `elapsedMs` after the first frame. Only frames grow the timeline: a late monitor sample or visual frame lands in the newest bucket instead of opening a frameless trailing one that reads as a freeze. Null past the window's end. */
 function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): Bucket | null {
   const index = Math.max(0, Math.floor(elapsedMs / timeline.bucketMs));
   if (index >= timeline.maxBuckets) return null;
@@ -1174,8 +898,7 @@ function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): 
     return timeline.buckets[timeline.buckets.length - 1] ?? null;
   }
   while (timeline.buckets.length <= index) {
-    // Things are placed by arrival time, so once a later bucket exists
-    // nothing more lands in the one before it: rank that one now.
+    // A later bucket existing means nothing more lands before it: rank this one now.
     const previous = timeline.buckets[timeline.buckets.length - 1];
     if (previous !== undefined) closeBucket(previous);
     timeline.buckets.push({
@@ -1200,7 +923,6 @@ function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): 
   return timeline.buckets[index] ?? null;
 }
 
-/** Mark every bucket from `fromMs` to `toMs` (after the capture's first frame) as stalled. */
 function markStalled(timeline: TimelineCapture, fromMs: number, toMs: number): void {
   const first = Math.max(0, Math.floor(fromMs / timeline.bucketMs));
   const last = Math.min(Math.floor(toMs / timeline.bucketMs), timeline.buckets.length - 1);
@@ -1212,7 +934,6 @@ function bump(item: BucketItem, ms: number): void {
   if (ms > item.max) item.max = ms;
 }
 
-/** The bucket's heaviest things, by the per-frame milliseconds they report. */
 function rankBucket(bucket: Bucket): TimelineItem[] {
   const items = bucket.items;
   if (items === null) return bucket.top;
@@ -1313,8 +1034,7 @@ function summarizeTimeline(
   const last = timeline.buckets.length - 1;
   const buckets = timeline.buckets.map((bucket, index): TimelineBucket => {
     const startMs = index * timeline.bucketMs;
-    // Only the trailing bucket is partial. Measured from its start to the last
-    // frame, it is too short to divide by when the capture ended just inside it.
+    // Only the trailing bucket is partial: from its start to the last frame it is too short to divide by if the capture ended just inside it.
     const durationMs = index === last ? spanMs - startMs : timeline.bucketMs;
     const fps =
       !bucket.stalled && durationMs >= timeline.bucketMs * TRAILING_BUCKET_MIN_SHARE
@@ -1392,12 +1112,7 @@ function monitorStat(accumulator: Accumulator): MonitorStat {
   };
 }
 
-/**
- * One `performance:profile_frame`, read against the custom monitor names in
- * force when it arrived. Built-in monitors lead; the custom ones fill the
- * tail. A value that is not a finite number is absent: the engine forwards
- * any custom value that `is_num()`, infinities included.
- */
+/** One `performance:profile_frame` read against the custom monitor names in force when it arrived; a non-finite value is absent (the engine forwards any `is_num()` value, infinities included). */
 function readMonitorSample(
   data: Variant[],
   customNames: string[],
@@ -1412,7 +1127,6 @@ function readMonitorSample(
   };
 }
 
-/** Sum of the `PIPELINE_COMPILATIONS_*` totals, or null on a build without them. */
 function compilationTotal(builtin: Array<number | null>): number | null {
   let total = 0;
   for (const index of PIPELINE_COMPILATION_MONITORS) {
@@ -1457,10 +1171,8 @@ function summarizeMonitors(monitors: MonitorCapture): MonitorsResult | null {
     named[name] = accumulator === undefined ? null : monitorStat(accumulator);
   }
 
-  // Running totals since launch: what compiled is the growth from the last
-  // sample before the capture (or its own first one) to its last one. With
-  // neither a baseline nor a second sample there is nothing to count from,
-  // and a 0 would read as "nothing compiled".
+  // Running totals since launch: compiled = growth from the last sample before the capture to its last. With no baseline and one sample
+  // there is nothing to count from, and a 0 would read as 'nothing compiled'.
   const to = monitors.lastCompilations;
   const from =
     monitors.baselineCompilations ?? (monitors.samples > 1 ? monitors.firstCompilations : null);
@@ -1478,21 +1190,15 @@ function summarizeMonitors(monitors: MonitorCapture): MonitorsResult | null {
   };
 }
 
-/** A disable written to the engine whose sentinel has not arrived. */
 interface PendingDisable {
   capture: Capture;
-  /** Monitor samples counted since the disable was written; see `SENTINEL_LOST_SAMPLE_MIN_SPACING_MS`. */
   monitorSamples: number;
-  /** When the disable was written, in `Date.now()` milliseconds. */
   writtenAt: number;
-  /** When the last counted sample arrived; `writtenAt` until one has. */
   lastCountedAt: number;
 }
 
-/** Elements of a malformed message named in its logged shape. */
 const SHAPE_PREVIEW_ITEMS = 4;
 
-/** The layout of a message the receiver could not use, for the log and the diagnosis. */
 function describeShape(message: Variant): string {
   const kind = (value: Variant | undefined): string => {
     if (value === null || value === undefined) return 'null';
@@ -1519,28 +1225,14 @@ export class DebuggerProfiler {
   private lastDecodeError: string | null = null;
   private undecodable = 0;
   private signatures: Map<number, string> = new Map();
-  /**
-   * Sent once per visual toggle and by `performance:profile_names` only when
-   * the set changes — usually at startup, before any capture opens — so both
-   * are kept for the session rather than per capture.
-   */
+  /** Sent once per visual toggle and by `performance:profile_names` only when the set changes, usually before any capture opens, so both are kept for the session. */
   private hardware: VisualResult['hardware'] = null;
   private customMonitorNames: string[] = [];
-  /** Pipeline compilations at the newest monitor sample, captured or not. */
   private lastCompilations: number | null = null;
   private capture: Capture | null = null;
-  /**
-   * Disables written and not yet answered, oldest first. The engine handles
-   * debugger messages in the order it got them and answers every
-   * `profiler:servers` disable with one sentinel, so the oldest entry names
-   * the capture every frame-stream packet arriving now belongs to, and the
-   * capture the next sentinel closes. An entry outlives its capture when the
-   * capture was closed out by a timeout while the game was frozen: its late
-   * frames and its sentinel are then dropped here instead of being read as
-   * the next capture's.
-   */
+  /** Disables written and not yet answered, oldest first: the engine answers each `profiler:servers` disable with one sentinel, in order.
+   * An entry outlives a capture closed by timeout so its late frames and sentinel are dropped, not read as the next capture's. */
   private pendingDisables: PendingDisable[] = [];
-  /** Messages of the `[name, thread id, data]` layout, and those of any other. */
   private wellFormedMessages = 0;
   private malformedMessages = 0;
   private firstMalformedShape: string | null = null;
@@ -1555,7 +1247,6 @@ export class DebuggerProfiler {
     server.on('error', (err) => this.fail(err.message));
   }
 
-  /** Bind a loopback listener the spawned engine will dial back into. */
   static create(): Promise<DebuggerProfiler> {
     return new Promise((resolve, reject) => {
       const server = net.createServer();
@@ -1573,16 +1264,11 @@ export class DebuggerProfiler {
     });
   }
 
-  /**
-   * A finished capture is readable even once the engine is gone — `stop` only
-   * re-ranks data already folded, and the capture worth reading is often the
-   * one taken right before a crash.
-   */
+  /** A finished capture stays readable once the engine is gone: `stop` only re-ranks folded data, and the capture worth reading is often the one before a crash. */
   get hasResult(): boolean {
     return this.capture?.result !== null && this.capture !== null;
   }
 
-  /** True when the current capture folded at least one frame, so reading it ranks something. */
   get hasFrames(): boolean {
     return this.capture !== null && this.capture.frames > 0;
   }
@@ -1591,13 +1277,7 @@ export class DebuggerProfiler {
     return this.socket !== null && this.threadId !== null;
   }
 
-  /**
-   * What is wrong with the debugger stream when packets arrived and not one
-   * could be read as a message: this engine's debugger protocol is not the
-   * one this receiver speaks. Nothing can be profiled then, and a
-   * `debug_enter` is never answered, so the first script error leaves the
-   * game paused. Null while nothing has arrived or anything has been read.
-   */
+  /** Set when packets arrived and none read as a message: the debugger protocol differs, nothing can be profiled and `debug_enter` goes unanswered, so the first script error pauses the game. */
   get streamProblem(): string | null {
     const unread = this.malformedMessages + this.undecodable;
     if (unread === 0 || this.wellFormedMessages > 0) return null;
@@ -1613,12 +1293,7 @@ export class DebuggerProfiler {
     );
   }
 
-  /**
-   * Enable the engine profiler and return once frames are arriving. The
-   * capture stops itself after `seconds` so a forgotten `start_profiler`
-   * cannot profile the rest of the session. `options.visual` also turns on
-   * the engine's render-stage timestamps for the same window.
-   */
+  /** Enable the engine profiler; the capture stops itself after `seconds` so a forgotten `start_profiler` cannot profile the rest of the session. */
   async start(
     seconds: number,
     captureLimit: number,
@@ -1627,13 +1302,7 @@ export class DebuggerProfiler {
     return (await this.open(seconds, captureLimit, options)).started;
   }
 
-  /**
-   * Throw whatever `start` would refuse before it reaches the engine: an
-   * argument out of range, a dropped connection, or a capture already open. The tools check this
-   * before they ask the bridge for a track, because a track_start replaces
-   * any track that is running - a refused call must not take a running
-   * capture's track down with it.
-   */
+  /** Throws what `start` would refuse; the tools check first because a track_start replaces a running track, and a refused call must not take it down. */
   assertCanStart(
     seconds: number,
     captureLimit: number,
@@ -1669,15 +1338,13 @@ export class DebuggerProfiler {
         `captureLimit must be an integer in [${CAPTURE_LIMIT_MIN}, ${CAPTURE_LIMIT_MAX}]`,
       );
     }
-    // A debugger connection that has dropped can open nothing, and opening
-    // would replace the finished capture that stays readable after the exit.
+    // A dropped connection can open nothing, and opening would replace the finished capture that stays readable.
     if (this.error !== null || this.closed) {
       throw new ProfilerError('profile_disconnected', this.error ?? 'Profiler closed');
     }
     this.assertIdle();
   }
 
-  /** `start`, handing back the capture it opened so no caller has to re-read `this.capture`. */
   private async open(
     seconds: number,
     captureLimit: number,
@@ -1693,9 +1360,7 @@ export class DebuggerProfiler {
       WAIT_CONNECT_MS,
       'Godot never opened the debugger connection',
     );
-    // Two tool calls read off one stdin chunk both pass the check above before
-    // either reaches this point. Checking again here, where nothing can run
-    // between the check and the state change, lets only the first one open.
+    // Two calls read off one stdin chunk both pass the check above; checking again here, with nothing able to run between check and state change, lets only the first open.
     this.assertIdle();
 
     this.signatures = new Map();
@@ -1737,19 +1402,14 @@ export class DebuggerProfiler {
     if (visual) this.write(['profiler:visual', this.threadId, [true]]);
 
     try {
-      // `result` satisfies this too: if the engine closes the capture before a
-      // frame is folded, that is an answer, not a reason to sit out the wait
-      // and then report a timeout for a capture the engine actually finished.
+      // `result` also satisfies this: a capture the engine closes before any frame is an answer, not a timeout.
       await this.wait(
         () => capture.frames > 0 || capture.result !== null,
         WAIT_FIRST_FRAME_MS,
         'Godot sent no profiler frames',
       );
     } catch (err) {
-      // No frame was folded, so there is nothing the engine's answer could
-      // add: switch the profiler off and close the capture out here. Left to
-      // the sentinel, a game that is frozen would hold the receiver in
-      // `stopping`, refusing every later start as busy, until it thawed.
+      // With no frame folded the engine's answer adds nothing: close out here, or a frozen game would hold the receiver in `stopping`, refusing later starts as busy.
       if (capture.result === null) {
         if (this.capture === capture) this.autoStop();
         this.finalize(capture, 'no_start');
@@ -1776,13 +1436,7 @@ export class DebuggerProfiler {
     }
   }
 
-  /**
-   * Hand a closed capture the track it asked for, fetched through `collect`.
-   * Only the first hand-over counts, and overlapping stops share it: the
-   * bridge gives its samples up once, so a second request would only get an
-   * error back. Attached to `capture` itself, never to whichever capture is
-   * current once the fetch returns.
-   */
+  /** Hands a closed capture its track; only the first hand-over counts and overlapping stops share it, since the bridge gives its samples up once. */
   private async collectTrack(capture: Capture, collect: TrackCollector | undefined): Promise<void> {
     const timeline = capture.timeline;
     if (collect === undefined || timeline === null || timeline.track.length === 0) return;
@@ -1799,12 +1453,7 @@ export class DebuggerProfiler {
     await timeline.collecting;
   }
 
-  /**
-   * Stop an active capture (or re-read a finished one) and rank the functions.
-   * The engine's own accumulated totals close the capture, so this waits for
-   * the `profile_total` packet rather than summing the last frame. `collect`
-   * fetches the capture's track, if it asked for one.
-   */
+  /** Stop an active capture (or re-read a finished one); waits for the engine's `profile_total` rather than summing the last frame. */
   async stop(top: number, sort: ProfileSort, collect?: TrackCollector): Promise<ProfileResult> {
     if (!Number.isInteger(top) || top < 1 || top > PROFILE_TOP_MAX) {
       throw new ProfilerError('bad_args', `top must be an integer in [1, ${PROFILE_TOP_MAX}]`);
@@ -1819,11 +1468,7 @@ export class DebuggerProfiler {
     return this.finish(this.capture, top, sort, collect, WAIT_TOTAL_MS);
   }
 
-  /**
-   * Wait out a known capture's close, collect its track, and rank it. Takes
-   * the capture rather than re-reading `this.capture` so a caller that
-   * snapshotted one cannot be handed a different capture's numbers.
-   */
+  /** Takes the capture rather than re-reading `this.capture`, so a caller that snapshotted one cannot be handed another's numbers. */
   private async finish(
     capture: Capture,
     top: number,
@@ -1834,25 +1479,16 @@ export class DebuggerProfiler {
     try {
       await this.wait(() => capture.result !== null, waitMs, 'Godot sent no profiler totals');
     } catch (err) {
-      // Close the capture out either way, so it never sits in `stopping` and
-      // stays re-readable. But only a timeout is recoverable here: the engine
-      // went quiet while the connection held, and what we folded is still
-      // good. A disconnect means the process died mid-capture, which the
-      // caller needs told — a later stop_profiler re-reads the partial data.
+      // Close out either way so it never sits in `stopping`; only a timeout is recoverable (what was folded is good), a disconnect must be reported.
       const recoverable = err instanceof ProfilerError && err.code === 'profile_timeout';
       this.finalize(capture, recoverable ? 'timeout' : 'disconnect');
       if (!recoverable || capture.frames === 0) throw err;
     }
-    // Only now, with the profiler off: the bridge serializes every sample in
-    // one frame, and that hitch must not land in the capture it describes.
+    // Only with the profiler off: the bridge serializes every sample in one frame, and that hitch must not land in the capture.
     await this.collectTrack(capture, collect);
     return this.summarize(capture, top, sort);
   }
 
-  /**
-   * `start` + wait out the window + `stop`, for a one-shot capture. `collect`
-   * fetches the track the bridge sampled alongside, once the window closed.
-   */
   async captureWindow(
     seconds: number,
     top: number,
@@ -1862,10 +1498,7 @@ export class DebuggerProfiler {
     collect?: TrackCollector,
   ): Promise<ProfileResult> {
     const { capture } = await this.open(seconds, captureLimit, options, PROFILE_WINDOW_MAX_SECONDS);
-    // One wait, inside `finish`, covering the window and the close. A wait of
-    // its own here would reject past `finish`'s handling when the engine never
-    // sends its totals: the frames already folded would be withheld, and the
-    // capture would sit in `stopping`, refusing every later start as busy.
+    // One wait, inside `finish`: a wait here would reject past its handling when totals never arrive, withholding folded frames and leaving the capture in `stopping`.
     return this.finish(capture, top, sort, collect, seconds * MS_PER_SECOND + WAIT_TOTAL_MS);
   }
 
@@ -1884,8 +1517,6 @@ export class DebuggerProfiler {
     this.server.close();
   }
 
-  // --- transport ---
-
   private accept(socket: net.Socket): void {
     if (this.socket !== null || this.closed) {
       socket.destroy();
@@ -1895,14 +1526,12 @@ export class DebuggerProfiler {
     socket.on('data', (chunk: Buffer) => this.receive(chunk));
     socket.on('error', (err) => this.fail(err.message));
     socket.on('close', () => {
-      // Release the slot even when `fail` short-circuits on an earlier error,
-      // so `connected` stops claiming a peer that is gone.
+      // Release the slot even when `fail` short-circuits, so `connected` stops claiming a gone peer.
       if (this.socket === socket) this.socket = null;
       this.fail('Debugger disconnected');
     });
   }
 
-  /** Read one pending byte without joining the chunk list. */
   private byteAt(index: number): number {
     let remaining = index;
     for (const chunk of this.rxChunks) {
@@ -1916,8 +1545,7 @@ export class DebuggerProfiler {
     this.rxChunks.push(chunk);
     this.rxLength += chunk.length;
     while (this.rxLength >= 4) {
-      // Read the length prefix in place. Joining on every socket chunk would
-      // make assembling one large packet quadratic in its size.
+      // Read the length prefix in place: joining on every chunk makes assembling a large packet quadratic.
       const size =
         this.byteAt(0) +
         this.byteAt(1) * 0x100 +
@@ -1948,9 +1576,7 @@ export class DebuggerProfiler {
       const rest = joined.subarray(4 + size);
       this.rxChunks = rest.length > 0 ? [rest] : [];
       this.rxLength = rest.length;
-      // The name says whether the body is worth decoding. `output` and
-      // `error` arrive for the whole session, capture or not, and the sentinel
-      // carries up to a capture limit of rows nobody reads.
+      // The name says whether the body is worth decoding: `output` and `error` arrive all session and the sentinel carries rows nobody reads.
       const name = peekMessageName(payload);
       if (name !== null) {
         this.lastMessage = name;
@@ -1975,8 +1601,7 @@ export class DebuggerProfiler {
       try {
         this.handle(message);
       } catch (err) {
-        // A frame we cannot parse is a stream we cannot trust, but it is not a
-        // dropped connection — report it as what it is.
+        // An unparseable frame is a stream we cannot trust, not a dropped connection.
         const code = err instanceof ProfilerError ? err.code : 'profile_disconnected';
         this.fail(err instanceof Error ? err.message : String(err), code, true);
         return;
@@ -1985,19 +1610,8 @@ export class DebuggerProfiler {
     }
   }
 
-  /**
-   * Close the capture the oldest outstanding disable belongs to. One that a
-   * timeout already closed out is left as it is: this was its late answer.
-   *
-   * The engine's own accumulated rows are capped by `captureLimit` exactly as
-   * the frame packets are, and carry nothing the frames did not already
-   * deliver, while top-N membership rotates between frames, so summing them
-   * covers strictly more functions. Verified against Godot: at a limit of 16
-   * the frames saw 37 distinct functions and this packet only 16, and its
-   * call counts match our sums exactly. So this is a completion sentinel, not
-   * the source of the totals, and its layout is never parsed: an unusual one
-   * must not turn a complete capture into a failed one.
-   */
+  /** Close the capture the oldest outstanding disable belongs to; one a timeout already closed out is left as it is. */
+  // The engine's totals are capped by `captureLimit` and add nothing the frames did not (16 vs 37 functions measured): a completion sentinel only, layout never parsed.
   private handleSentinel(): void {
     const answered = this.pendingDisables.shift();
     if (answered === undefined) {
@@ -2007,11 +1621,7 @@ export class DebuggerProfiler {
     if (answered.capture.result === null) this.finalize(answered.capture, 'sentinel');
   }
 
-  /**
-   * The open capture a frame-stream packet arriving now belongs to, or null
-   * when it belongs to one already closed out (see `pendingDisables`) or to
-   * none.
-   */
+  /** The open capture a frame packet arriving now belongs to, or null if it belongs to one already closed out. */
   private packetOwner(): Capture | null {
     const pending = this.pendingDisables[0];
     const open =
@@ -2020,14 +1630,7 @@ export class DebuggerProfiler {
     return owner !== null && owner.result === null ? owner : null;
   }
 
-  /**
-   * Count a monitor sample against every outstanding disable, and give up on
-   * the ones the engine has provably iterated past: enough samples spaced the
-   * way the engine sends them (`SENTINEL_LOST_AFTER_MONITOR_SAMPLES`,
-   * `SENTINEL_LOST_SAMPLE_MIN_SPACING_MS`) and enough time since the disable
-   * was written (`SENTINEL_LOST_MIN_WAIT_MS`). Neither alone is proof: samples
-   * are counted when received, not when sent.
-   */
+  /** Gives up on disables the engine has provably iterated past; neither sample count nor elapsed time alone is proof, since samples are counted when received, not sent. */
   private countMonitorSampleAgainstDisables(): void {
     const now = Date.now();
     for (const pending of this.pendingDisables) {
@@ -2098,8 +1701,7 @@ export class DebuggerProfiler {
     const capturing =
       this.state === 'starting' || this.state === 'capturing' || this.state === 'stopping';
     if (name === 'performance:profile_frame') {
-      // Every sample moves the compilation baseline, so the next capture can
-      // count from the sample just before it opened.
+      // Every sample moves the baseline so the next capture counts from the sample just before it opened.
       const sample = readMonitorSample(data, this.customMonitorNames);
       this.lastCompilations = compilationTotal(sample.builtin) ?? this.lastCompilations;
       if (capturing && this.capture !== null) {
@@ -2146,14 +1748,10 @@ export class DebuggerProfiler {
 
     if (this.state === 'starting') this.state = 'capturing';
     capture.framesReceived += 1;
-    // Enabling the profiler inside a running VM call gives that first sample a
-    // zero start timestamp, so its elapsed time is fiction. Drop it — and with
-    // it any truncation it reported, which describes numbers we discarded.
+    // Enabling the profiler inside a running VM call gives that first sample a zero start timestamp; drop it and any truncation it reported.
     if (capture.framesReceived === 1) return;
 
-    // The engine fills each frame packet up to `captureLimit` rows, chosen by
-    // inclusive time, before we drop the zero-call ones — so the raw count is
-    // what says whether this frame was truncated.
+    // The engine fills a packet to `captureLimit` rows before zero-call rows are dropped, so the raw count says whether the frame was truncated.
     capture.capped = capture.capped || sample.rawRowCount >= capture.limit;
 
     const frame = sample.frame;
@@ -2163,8 +1761,7 @@ export class DebuggerProfiler {
     const previousFrame = capture.lastFrame;
     capture.lastFrameAt = arrivedAt;
     if (capture.frames === 1) {
-      // Measure the window from real data, not from the enable round trip: the
-      // handshake and first-frame latency are not time the game was profiled.
+      // Measure from real data, not the enable round trip: handshake and first-frame latency are not profiled time.
       capture.startedAt = Date.now();
       this.armAutoStop();
     }
@@ -2178,8 +1775,7 @@ export class DebuggerProfiler {
     const bucket = this.timelineBucket(capture, true);
     if (bucket !== null) foldTimelineFrame(bucket, sample, slow);
     if (capture.timeline !== null && previousArrivalAt !== null && previousFrame !== null) {
-      // The engine says how long the frames since the last arrival took. Wall
-      // time beyond that is time this process did not read its socket.
+      // Wall time beyond the engine's reported frame times is time this process did not read its socket.
       const engineMs = sample.timings.frameMs * Math.max(1, frame - previousFrame);
       if (arrivedAt - previousArrivalAt - engineMs > UNACCOUNTED_ARRIVAL_GAP_MS) {
         capture.arrivalStalls += 1;
@@ -2236,9 +1832,7 @@ export class DebuggerProfiler {
 
   private summarize(capture: Capture, top: number, sort: ProfileSort): ProfileResult {
     if (capture.frames === 0) {
-      // Dividing by a synthetic 1 here would return a well-formed payload of
-      // zeroes and an empty `rows`, which reads exactly like "nothing in this
-      // game is slow" rather than "nothing was measured".
+      // A synthetic 1 would return well-formed zeroes and an empty `rows`, which reads as 'nothing is slow' rather than 'nothing was measured'.
       const why =
         capture.closedBy === 'no_start'
           ? `The capture never started: Godot sent no usable profiler frame within ${WAIT_FIRST_FRAME_MS / MS_PER_SECOND} s of being asked`
@@ -2350,11 +1944,7 @@ export class DebuggerProfiler {
     });
   }
 
-  /**
-   * The timeline bucket for something arriving now. Nothing is placed before
-   * the first folded frame: that frame starts the clock the buckets count from.
-   * Only frames `grow` the timeline (see `bucketAt`).
-   */
+  /** The timeline bucket for something arriving now; nothing is placed before the first folded frame, which starts the clock. */
   private timelineBucket(capture: Capture, grow: boolean): Bucket | null {
     if (capture.timeline === null || capture.frames === 0) return null;
     return bucketAt(capture.timeline, Date.now() - capture.startedAt, grow);
@@ -2388,8 +1978,7 @@ export class DebuggerProfiler {
     this.clearAutoStop();
     // With no connection nothing is written, so no sentinel is owed.
     if (this.capture && this.socket !== null) {
-      // Recorded before the write: a write that fails drops the connection,
-      // and that clears every outstanding disable, this one included.
+      // Recorded before the write: a failed write drops the connection and clears every outstanding disable, this one included.
       const writtenAt = Date.now();
       this.pendingDisables.push({
         capture: this.capture,
@@ -2418,12 +2007,7 @@ export class DebuggerProfiler {
     this.autoStopTimer = null;
   }
 
-  /**
-   * Close a capture out. Called on the engine's `profile_total`, and again if
-   * that packet never arrives — a capture left in `stopping` would reject every
-   * later `start` as busy while `stop` kept timing out, and the advice on that
-   * error points straight back at `stop`.
-   */
+  /** Close a capture out, on `profile_total` or when it never arrives: one left in `stopping` would reject every later `start` as busy. */
   private finalize(
     capture: Capture,
     closedBy: NonNullable<Capture['closedBy']>,
@@ -2433,10 +2017,7 @@ export class DebuggerProfiler {
       capture.result = [...capture.totals.values()];
       capture.closedBy = closedBy;
       capture.receiverFault = receiverFault;
-      // Without the engine's closing packet the window ends at the last frame
-      // folded, not at this call, which may be a whole timeout later. Never
-      // below zero: the first folded frame is stamped a moment before it
-      // restarts the window, so a one-frame capture can read a tick negative.
+      // Without the closing packet the window ends at the last folded frame, not at this call; never below zero, as the first frame is stamped just before it restarts the window.
       if (closedBy === 'sentinel') capture.elapsedMs = Date.now() - capture.startedAt;
       else if (capture.frames > 0) {
         capture.elapsedMs = Math.max(0, capture.lastFrameAt - capture.startedAt);
@@ -2453,31 +2034,23 @@ export class DebuggerProfiler {
     code: ProfilerErrorCode = 'profile_disconnected',
     receiverFault = false,
   ): void {
-    // A clean teardown destroys the socket, which fires `close` — that is not a
-    // disconnect worth reporting or logging.
+    // A clean teardown destroys the socket, whose `close` is not a disconnect worth reporting.
     if (this.error !== null || this.closed) return;
     this.error = reason;
     logDebug(`[Profiler] ${reason}`);
-    // Stop reading: leaving the socket subscribed after a framing error means
-    // the bad header stays at offset 0 and the pending buffer never drains.
+    // Stop reading: after a framing error the bad header stays at offset 0 and the buffer never drains.
     this.socket?.destroy();
     this.socket = null;
     this.rxChunks = [];
     this.rxLength = 0;
     // No sentinel can arrive on a connection that is gone.
     this.pendingDisables = [];
-    // A capture nobody is waiting on (`start_profiler`) would otherwise stay
-    // open forever: its totals can no longer arrive, `finalize` has no other
-    // caller, and the frames folded so far would be unreadable.
+    // A capture nobody awaits (`start_profiler`) would stay open forever: its totals can no longer arrive and `finalize` has no other caller.
     this.finalizeOpenCapture(receiverFault ? reason : null);
     this.rejectWaiters(new ProfilerError(code, reason));
   }
 
-  /**
-   * Close out a capture that is still open because the connection is gone, so
-   * what it folded stays readable as an incomplete capture. One that folded no
-   * frame closes empty: `summarize` reports it as `profile_no_frames`.
-   */
+  /** Close out a capture left open by a gone connection so what it folded stays readable; one with no frame closes empty (`profile_no_frames`). */
   private finalizeOpenCapture(receiverFault: string | null = null): void {
     const capture = this.capture;
     if (capture === null || capture.result !== null) return;
@@ -2486,8 +2059,6 @@ export class DebuggerProfiler {
     }
     this.finalize(capture, 'disconnect', receiverFault);
   }
-
-  // --- waiting ---
 
   private wait(predicate: () => boolean, timeoutMs: number, what: string): Promise<void> {
     if (predicate()) return Promise.resolve();

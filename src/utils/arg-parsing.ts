@@ -1,14 +1,4 @@
-/**
- * Generic field helpers + per-handler argument parsers.
- *
- * Each helper returns `Result<T, ToolResponse>` so handlers can compose
- * parsing with `if (!parsed.ok) return parsed.error` and never touch the
- * raw `OperationParams` index signature.
- *
- * Path-shaped helpers (`parseProjectArgs`, `parseSceneArgs`, `parseNodePath`)
- * are added in the same module alongside the generic kit so handlers have a
- * single import for argument parsing.
- */
+/** Field helpers and per-handler argument parsers, each returning `Result<T, ToolResponse>`. */
 
 import { existsSync } from 'fs';
 import type { OperationParams, ToolResponse } from '../mcp.types.js';
@@ -27,8 +17,6 @@ import {
   projectSubPathError,
   PROJECT_SUB_PATH_SOLUTIONS,
 } from './path-validation.js';
-
-// --- Generic field helpers ---
 
 export function requireString(args: OperationParams, key: string): Result<string, ToolResponse> {
   const value = args[key];
@@ -213,13 +201,7 @@ export function requireArray(
   return ok(value);
 }
 
-// --- Path-shaped helpers ---
-
-/**
- * Parse and validate `projectPath` from raw args. The returned brand confirms
- * the path has been shape-checked AND the `project.godot` manifest exists on
- * disk — handlers can use the value verbatim without re-validating.
- */
+/** Parses `projectPath`; the brand confirms the path is shape-checked AND `project.godot` exists, so handlers use it verbatim. */
 export function parseProjectArgs(
   args: OperationParams,
 ): Result<{ projectPath: ProjectPath }, ToolResponse> {
@@ -255,18 +237,7 @@ export function parseProjectArgs(
   return ok({ projectPath: raw as ProjectPath });
 }
 
-/**
- * Parse and validate `projectPath` + `scenePath`. Two independent concerns:
- *
- * - Presence: `scenePath` must always be provided (you must say *where* the
- *   scene is or will be) — there is no opt-out.
- * - Existence: when `requireExists` is true (default), the scene file must
- *   already exist on disk. Pass `{ requireExists: false }` for operations
- *   like `create_scene` that write a scene to a path that need not exist yet.
- *
- * `access` says what the tool does with the scene: `'write'` for every tool
- * that saves it, `'read'` for one that only reads it. See `PathAccess`.
- */
+/** Parses `projectPath` + `scenePath`: `scenePath` is always required; `requireExists` (default true) demands the file exist, `{ requireExists: false }` for `create_scene`-style writes. `access` says whether the tool saves the scene (`'write'`) or only reads it (`PathAccess`). */
 export function parseSceneArgs(
   args: OperationParams,
   access: PathAccess,
@@ -318,12 +289,7 @@ export function parseSceneArgs(
   });
 }
 
-/**
- * Brand a string as a scene-tree NodePath after validating its shape. Use
- * for fields that hold a node path (e.g. `nodePath`, `parentNodePath`,
- * `targetNodePath`) — scene-tree paths live in a separate namespace from
- * filesystem paths and the project-root containment check does not apply.
- */
+/** Brands a string as a scene-tree NodePath after a shape check; that namespace is separate from files, so project-root containment does not apply. */
 export function parseNodePath(raw: string, fieldName = 'nodePath'): Result<NodePath, ToolResponse> {
   if (!validateNodePathShape(raw)) {
     return err(
@@ -366,13 +332,8 @@ export function parseOptionalNodePath(
   return parseNodePath(raw, key);
 }
 
-// --- Array item validators ---
-//
-// `normalizeParameters` does not descend into arrays, so the items of `nodes`,
-// `updates` and `operations` reach a handler spelled however the caller wrote
-// them. Each validator normalizes an item's keys once, checks that object and
-// returns it for the handler to forward: an item checked in one spelling and
-// forwarded raw lets a key spelled both ways run as the value nobody checked.
+// `normalizeParameters` does not descend into arrays, so items reach a handler spelled however the caller wrote them. Each validator normalizes an item's keys once and returns it
+// for forwarding: an item checked in one spelling and forwarded raw lets a key spelled both ways run as the value nobody checked.
 
 type ItemRecord = Record<string, unknown>;
 
@@ -459,12 +420,7 @@ export function checkUpdateItems(
   return ok(checked);
 }
 
-/**
- * The string-valued fields of a batch operation item. The script reads each of
- * them into a typed parameter or a string comparison, so a value of another
- * type raises inside the script and takes every other operation in the batch
- * down with it, with no per-operation result.
- */
+/** String-valued fields of a batch operation item: the script reads each into a typed parameter, so another type raises inside the script and takes every other operation in the batch down with it, with no per-operation result. */
 const BATCH_ITEM_STRING_FIELDS: readonly string[] = [
   'nodeType',
   'nodeName',
@@ -474,13 +430,7 @@ const BATCH_ITEM_STRING_FIELDS: readonly string[] = [
   'newPath',
 ];
 
-/**
- * The fields of a batch operation item that hold a path inside the project,
- * with what the operation does to the file: each scene an operation works on
- * is saved, and a `save` item's `newPath` is the copy it writes; a texture and
- * a scene named as a `nodeType` are only read. `applies` narrows a field that
- * is a path for some values only.
- */
+/** The batch item fields that hold a project path, with what the operation does to the file (scenes are saved, a `save` item's `newPath` is written, a texture or scene named as `nodeType` is only read); `applies` narrows a field that is a path for some values only. */
 const BATCH_ITEM_PATH_FIELDS: ReadonlyArray<{
   key: string;
   access: PathAccess;
@@ -492,11 +442,7 @@ const BATCH_ITEM_PATH_FIELDS: ReadonlyArray<{
   { key: 'nodeType', access: 'read', applies: isSceneFileNodeType },
 ];
 
-/**
- * Resolve every path field of one batch item by the rules a single call
- * applies. Returns the item with each path replaced by its project-relative
- * form, or the refusal naming the item and the field.
- */
+/** Resolves every path field of one batch item by the rules a single call applies; returns the item with project-relative paths, or the refusal naming the item and field. */
 function resolveBatchItemPaths(
   item: ItemRecord,
   where: string,
@@ -535,24 +481,8 @@ function batchOperationHint(item: Record<string, unknown>): string {
   return '';
 }
 
-/**
- * Validate the items of batch_scene_operations `operations`. An item whose
- * `operation` is missing, empty, not a string or not one of the four batch
- * operations is refused before Godot starts, so no other item in the batch runs
- * on a call that is malformed. A missing one names the operation the item's
- * other keys suggest. The script keeps its own hint branch for callers that
- * reach `executeOperation` without this check.
- *
- * Every path an item carries (`BATCH_ITEM_PATH_FIELDS`) goes through
- * `resolveProjectPath` with the intent a single call gives it, so a batch
- * accepts and refuses exactly the paths the single tools do. The value
- * returned is the operations to forward: the same items with camelCase keys
- * and each path in its resolved project-relative form.
- *
- * Keys are normalized before anything is checked: with one key spelled both
- * ways, one spelling would be checked and the other could be the one the
- * script reads, since the runner folds both to the same snake_case key.
- */
+/** Validates `operations` of batch_scene_operations. An item with a missing, empty or unknown `operation` is refused before Godot starts, so no item runs on a malformed call (the script keeps its own hint branch for callers that skip this check). Every path goes through `resolveProjectPath` with a single call's intent, so a batch accepts and refuses what the single tools do.
+ * Keys are normalized first: the runner folds both spellings to one snake_case key, so with a key spelled both ways one spelling could be checked and the other read by the script. */
 export function checkBatchOperationItems(
   items: unknown[],
   projectPath: string,

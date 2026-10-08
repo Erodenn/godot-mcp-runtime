@@ -1,47 +1,5 @@
-/**
- * Hand-written state-machine tokenizer for GDScript source.
- *
- * Used by `run-script-policy.ts` to evaluate scripts against the declarative
- * rule table. The tokenizer's job is to strip comments and string literals so
- * the policy never matches text inside `"OS.execute"` or `# OS.execute`, and
- * to coalesce member-access chains (`OS.execute`, `Foo.bar.baz`) into a single
- * `memberChain` token whose `chain` array the rules match against directly.
- *
- * Not a full GDScript parser — we only need enough to:
- *  - Recognize comments (`#` to EOL).
- *  - Skip string-literal contents in all GDScript forms (`"..."`, `'...'`,
- *    `"""..."""`, `'''...'''`, and each of them with the raw prefix
- *    `r`). Every form may span lines.
- *  - Skip node-path literals (`$Foo/Bar`, `^"..."`) — their contents are
- *    Godot scene paths, not GDScript code. A `^` before anything but a quote
- *    is the XOR operator and is emitted as an `other` token. `&"..."` is a
- *    StringName literal and is one `string` token as well.
- *  - Read a parenthesised single identifier used as a receiver
- *    (`(OS).execute`) as the member chain it is (`OS.execute`).
- *  - Emit identifiers, member chains, parentheses, commas, and a small set
- *    of other punctuation. Everything else (operators, numbers) collapses to
- *    an `other` token the policy ignores.
- *  - Track line numbers and the rough start column of each token so policy
- *    findings can name the offending line.
- *
- * Line continuation (`\` at end of line) is handled by treating the next line
- * as a continuation of the current logical line for member-chain coalescing
- * purposes. The chain builder also reads across a continuation and across a
- * `#` comment on either side of a `.`, as GDScript itself does.
- *
- * This tokenizer is a best-effort accident guard, not a sound static
- * analysis — see `run-script-policy.ts` and `docs/security.md` for the full
- * doctrine. One structural blind spot worth stating plainly here, since it's
- * inherent to token-level scanning and not a gap the next feature closes:
- * identifier aliasing / dataflow is invisible. `var f = OS; f.execute(...)`
- * tokenizes as two unrelated identifiers — the tokenizer has no notion of
- * "what does this variable refer to," so a rule keyed on `OS.execute` never
- * fires. Do not mistake this for a TODO; closing it would require a dataflow
- * analysis, which is out of scope for a hand-written tokenizer by design. The
- * policy answers the one step it can see, a guarded name used as a value
- * (`var f = OS`), with its alias rules; what happens to the value afterwards
- * stays invisible.
- */
+/** Hand-written tokenizer for GDScript source: strips comments and string literals so the policy never matches `"OS.execute"` or `# OS.execute`, and coalesces member-access chains into one `memberChain` token. Not a parser.
+ * Blind spot by design (see `docs/security.md`): aliasing and dataflow are invisible, so `var f = OS; f.execute(...)` is two unrelated identifiers; the policy answers only the alias step it can see (`var f = OS`) with its alias rules. */
 
 export type TokenKind =
   | 'identifier'
@@ -57,27 +15,11 @@ export interface Token {
   text: string;
   /** For memberChain, the dotted segments in order: `OS.execute` → `['OS','execute']`. */
   chain?: string[];
-  /**
-   * For identifier and memberChain tokens: true when the token is immediately
-   * preceded by a `.` member access (past whitespace, newlines, continuations
-   * and comments). `get_node("A").load(x)` and `$A.load(x)` leave `load` as a
-   * bare identifier whose receiver the scanner cannot see; this flag is how a
-   * rule that targets a global function tells it apart from a method call.
-   */
+  /** True when the token is immediately preceded by a `.` member access (past blanks, newlines, continuations and comments): `get_node("A").load(x)` leaves `load` bare, and this tells a global-function rule from a method call. */
   precededByDot?: boolean;
-  /**
-   * For identifier and memberChain tokens: true when the token directly
-   * follows the `func` keyword, so it is the name a declaration gives a
-   * function (`func load(slot):`) and not a use of that name.
-   */
+  /** True when the token directly follows `func`: the name a declaration gives, not a use. */
   precededByFunc?: boolean;
-  /**
-   * For a `string` token that is a quoted string, a `&"..."` StringName or a
-   * `^"..."` NodePath: the characters between the quotes, exactly as written
-   * (escapes not decoded; see `decodeStringLiteral`). The policy reads it only
-   * to learn the method a reflective call names (`OS.call("execute")`); no
-   * rule matches text inside a string.
-   */
+  /** For a quoted, `&"..."` or `^"..."` string: the characters between the quotes as written, escapes not decoded (see `decodeStringLiteral`); the policy reads it only for the method a reflective call names. */
   literal?: string;
   /** For a `string` token: true when it carries the raw prefix (`r"..."`), so `literal` has no escapes to decode. */
   raw?: boolean;
@@ -103,14 +45,7 @@ function isNodePathChar(ch: string): boolean {
   return NODE_PATH_CHAR_RE.test(ch);
 }
 
-/**
- * Skip inline whitespace (space/tab), newlines, backslash line continuations
- * and `#` comments starting at `pos`, tracking line/lineStart across any
- * newline crossed. Used by the member-chain builder to peek past everything
- * GDScript itself reads as insignificant around a `.` without committing to
- * the skip unless the peek finds what it's looking for (see the identifier
- * branch in `tokenize`).
- */
+/** Skips blanks, newlines, backslash continuations and `#` comments from `pos`, tracking line/lineStart; lets the chain builder peek past everything GDScript reads as insignificant around a `.` without committing unless the peek succeeds. */
 function skipWsAndNewlines(
   source: string,
   len: number,
@@ -160,10 +95,7 @@ function skipWsAndNewlines(
   return { pos, line, lineStart };
 }
 
-/**
- * Length of the line break at `pos` (2 for CRLF, 1 for LF or a bare CR, 0 when
- * `pos` is not at a line break).
- */
+/** Length of the line break at `pos` (2 for CRLF, 1 for LF or a bare CR, else 0). */
 function lineBreakLength(source: string, len: number, pos: number): number {
   const c = source[pos];
   if (c === '\n') return 1;
@@ -171,13 +103,7 @@ function lineBreakLength(source: string, len: number, pos: number): number {
   return 0;
 }
 
-/**
- * Consume a string body from `pos` (just past the opening delimiter) through
- * the first unescaped `closer`, which is the quote for a regular string and
- * three quotes for a triple-quoted one. Godot accepts a raw line break inside
- * either form, so a body runs across lines; line/lineStart track every break
- * crossed, escaped or not. An unterminated body runs to end of input.
- */
+/** Consumes a string body from `pos` through the first unescaped `closer`; Godot accepts a raw line break in either form, so a body runs across lines, and an unterminated body runs to end of input. */
 function skipStringBody(
   source: string,
   len: number,
@@ -215,11 +141,7 @@ function skipStringBody(
   return { pos, line, lineStart };
 }
 
-/**
- * The characters of a string literal between its delimiters: from `bodyStart`
- * to the closing delimiter that ends at `end`, or to `end` itself when the
- * string is unterminated.
- */
+/** A string literal's characters between its delimiters (to `end` when unterminated). */
 function literalBody(source: string, bodyStart: number, end: number, closer: string): string {
   const closed = end - closer.length >= bodyStart && source.startsWith(closer, end - closer.length);
   return source.slice(bodyStart, closed ? end - closer.length : end);
@@ -247,13 +169,7 @@ const HEX_DIGITS_REGEX = /^[0-9a-fA-F]+$/;
 const HEX_RADIX = 16;
 const MAX_CODE_POINT = 0x10ffff;
 
-/**
- * The value a `string` token's literal has once GDScript has compiled it:
- * escapes decoded (`"execute"` is `execute`), an escaped line break
- * dropped. A raw string is its own value. Null when the token carries no
- * literal or holds an escape GDScript does not define, so the value is not
- * known here.
- */
+/** The value a `string` token has once GDScript compiles it: escapes decoded, an escaped line break dropped, a raw string as is. Null when there is no literal or an escape GDScript does not define. */
 export function decodeStringLiteral(token: Token): string | null {
   const body = token.literal;
   if (body === undefined) return null;
@@ -297,11 +213,7 @@ function isQuote(ch: string | undefined): boolean {
   return ch === '"' || ch === "'";
 }
 
-/**
- * True when the last non-newline token is a member-access `.`. Newlines are
- * skipped to match how the chain builder joins across them; comments and
- * continuations never produce tokens, so they are skipped by construction.
- */
+/** True when the last non-newline token is a member-access `.`; newlines are skipped to match how the chain builder joins across them. */
 function lastTokenIsDot(tokens: readonly Token[]): boolean {
   for (let k = tokens.length - 1; k >= 0; k--) {
     const t = tokens[k]!;
@@ -319,11 +231,7 @@ function lastTokenIsFunc(tokens: readonly Token[]): boolean {
   return last !== undefined && last.kind === 'identifier' && last.text === FUNC_KEYWORD;
 }
 
-/**
- * Keywords an opening parenthesis can directly follow without being a call:
- * after `return`, `(` groups an expression, while after any other name it
- * opens that name's argument list.
- */
+/** Keywords an opening parenthesis can follow without being a call: after `return`, `(` groups an expression. */
 const GROUPING_KEYWORDS: ReadonlySet<string> = new Set([
   'return',
   'if',
@@ -343,11 +251,7 @@ const GROUPING_KEYWORDS: ReadonlySet<string> = new Set([
   'as',
 ]);
 
-/**
- * True when a `(` at the current position opens an argument list: it directly
- * follows a name, a member chain, or the `)` or `]` that ends a callable
- * expression. A `(` anywhere else groups an expression.
- */
+/** True when a `(` opens an argument list: it directly follows a name, a member chain, or a `)` or `]` ending a callable expression. */
 function parenOpensCall(tokens: readonly Token[]): boolean {
   const last = tokens[tokens.length - 1];
   if (last === undefined) return false;
@@ -362,12 +266,7 @@ interface ScanPosition {
   lineStart: number;
 }
 
-/**
- * Read `( name )`, with any number of nested parentheses around the one
- * identifier, starting at the `(` at `pos`. Returns the identifier and the
- * position just past the last `)`, or null when the parentheses hold anything
- * else.
- */
+/** Reads `( name )` with any nesting of parentheses around one identifier; null when they hold anything else. */
 function readParenthesisedName(
   source: string,
   len: number,
@@ -394,18 +293,8 @@ function readParenthesisedName(
   return { ...at, name };
 }
 
-/**
- * Read the `.identifier` segments that continue a member chain from `pos`,
- * tolerating whitespace, line breaks, continuations and comments both before
- * and after each `.`: GDScript already treats `a\n.b` inside parens as `a.b`,
- * and a tight "no whitespace" rule was a skeleton key that let `OS .execute`,
- * `OS. execute`, and `OS.\n  execute` bypass every two-segment rule in the
- * policy table at once. Each segment is committed only when both the `.` and
- * the identifier after it are found; on failure the returned position is where
- * the last committed segment ended, so a genuine `foo\nbar` (two separate
- * statements) still tokenizes as two identifiers and the skipped whitespace is
- * re-scanned normally by the caller.
- */
+/** Reads the `.identifier` segments continuing a member chain, tolerating blanks, line breaks, continuations and comments on both sides of each `.`: GDScript reads `a\n.b` inside parens as `a.b`, and a tight no-whitespace rule let `OS .execute`, `OS. execute` and `OS.\n execute` bypass every two-segment rule.
+ * A segment is committed only when both the `.` and the identifier after it are found, so `foo\nbar` stays two statements. */
 function readChainTail(
   source: string,
   len: number,
@@ -434,13 +323,7 @@ function readChainTail(
   return { ...at, segments };
 }
 
-/**
- * Tokens emitted by `tokenize`. Comments and string-literal contents are NOT
- * present — they are consumed silently. String literals as a whole are emitted
- * as a single `string` token so the policy can recognize "literal first
- * argument" patterns (e.g. `load("res://foo.tscn")`) without seeing the
- * characters inside.
- */
+/** Tokens emitted by `tokenize`: comments and string contents are consumed, and a string literal is one `string` token so the policy can recognise a literal first argument. */
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   const len = source.length;
@@ -453,7 +336,6 @@ export function tokenize(source: string): Token[] {
   while (i < len) {
     const ch = source[i]!;
 
-    // Newline — emit, advance line counter.
     if (ch === '\n') {
       tokens.push({ kind: 'newline', text: '\n', line, column: colOf(i) });
       i++;
@@ -462,7 +344,6 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // \r\n or bare \r — treat as newline.
     if (ch === '\r') {
       tokens.push({ kind: 'newline', text: '\n', line, column: colOf(i) });
       i++;
@@ -472,15 +353,12 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Whitespace.
     if (ch === ' ' || ch === '\t') {
       i++;
       continue;
     }
 
-    // Line continuation: `\` at end of line. Skip the backslash + newline so
-    // the next physical line is treated as the same logical line for chain
-    // coalescing. Don't emit a newline token in this case.
+    // Line continuation (`\` at end of line): skipped so the next physical line is the same logical line for chain coalescing; no newline token.
     if (ch === '\\') {
       let j = i + 1;
       while (j < len && (source[j] === ' ' || source[j] === '\t')) j++;
@@ -491,19 +369,16 @@ export function tokenize(source: string): Token[] {
         lineStart = i;
         continue;
       }
-      // Bare backslash is rare in GDScript outside strings; emit as other.
       tokens.push({ kind: 'other', text: '\\', line, column: colOf(i) });
       i++;
       continue;
     }
 
-    // Comment: `#` to EOL. Consume silently.
     if (ch === '#') {
       while (i < len && source[i] !== '\n' && source[i] !== '\r') i++;
       continue;
     }
 
-    // String literals (all GDScript forms), with or without the raw prefix.
     const rawPrefixed = ch === RAW_STRING_PREFIX && isQuote(source[i + 1]);
     if (isQuote(ch) || rawPrefixed) {
       const startLine = line;
@@ -511,9 +386,7 @@ export function tokenize(source: string): Token[] {
       const quoteAt = rawPrefixed ? i + 1 : i;
       const quote = source[quoteAt]!;
       const triple = source[quoteAt + 1] === quote && source[quoteAt + 2] === quote;
-      // A regular string ends at the matching unescaped quote, line breaks
-      // included: Godot compiles a string with a raw newline in it. In a raw
-      // string a backslash still keeps the quote after it from closing.
+      // A regular string ends at the matching unescaped quote, line breaks included (Godot compiles a raw newline in one); in a raw string a backslash still keeps the following quote from closing.
       const closer = triple ? quote.repeat(3) : quote;
       const bodyStart = quoteAt + closer.length;
       const body = skipStringBody(source, len, bodyStart, closer, line, lineStart);
@@ -531,9 +404,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // StringName literal: `&"..."`. One string token, so a method named with
-    // it (`OS.call(&"execute")`) reads as the literal it is. A `&` before
-    // anything else is an operator.
+    // StringName `&"..."` is one string token so `OS.call(&"execute")` reads as the literal it is; a `&` before anything else is an operator.
     if (ch === '&' && i + 1 < len && (source[i + 1] === '"' || source[i + 1] === "'")) {
       const startLine = line;
       const startCol = colOf(i);
@@ -553,8 +424,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Node-path literal: `$Foo/Bar` or `$"Foo Bar"`. Consume to whitespace,
-    // newline, or a clear non-path delimiter.
+    // Node-path literal `$Foo/Bar` or `$"Foo Bar"`: consumed to whitespace, newline or a clear non-path delimiter.
     if (ch === '$') {
       const startLine = line;
       const startCol = colOf(i);
@@ -571,9 +441,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // NodePath literal: `^"..."`, an opaque string. A `^` followed by
-    // anything else is the XOR operator, and what follows it is ordinary code
-    // (`1^OS.execute(...)` must still reach the identifier branch).
+    // NodePath `^"..."` is an opaque string; any other `^` is XOR and what follows is ordinary code (`1^OS.execute(...)` must still reach the identifier branch).
     if (ch === '^') {
       const startLine = line;
       const startCol = colOf(i);
@@ -599,7 +467,6 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Number literal — emit but otherwise ignored by policy.
     if (isDigit(ch)) {
       const startLine = line;
       const startCol = colOf(i);
@@ -607,7 +474,6 @@ export function tokenize(source: string): Token[] {
       while (i < len && (isDigit(source[i]!) || source[i] === '.' || source[i] === '_')) {
         i++;
       }
-      // Exponent.
       if (i < len && (source[i] === 'e' || source[i] === 'E')) {
         i++;
         if (i < len && (source[i] === '+' || source[i] === '-')) i++;
@@ -660,9 +526,7 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    // A parenthesised single identifier used as a receiver: `(OS).execute` is
-    // the chain `OS.execute`. Only a grouping `(` qualifies; in `wrap(OS).run()`
-    // the parentheses are an argument list and `run` belongs to the result.
+    // A parenthesised single identifier receiver `(OS).execute` is the chain `OS.execute`; only a grouping `(` qualifies, since in `wrap(OS).run()` the parentheses are an argument list.
     if (ch === '(' && !parenOpensCall(tokens)) {
       const receiver = readParenthesisedName(source, len, i, line, lineStart);
       const tail =
@@ -686,14 +550,12 @@ export function tokenize(source: string): Token[] {
       }
     }
 
-    // Punctuation we care about.
     if (ch === '(' || ch === ')' || ch === ',' || ch === '[' || ch === ']' || ch === '=') {
       tokens.push({ kind: 'punct', text: ch, line, column: colOf(i) });
       i++;
       continue;
     }
 
-    // Anything else (operators, `:`, `.` outside member chain) — collapse to other.
     tokens.push({ kind: 'other', text: ch, line, column: colOf(i) });
     i++;
   }
@@ -701,10 +563,6 @@ export function tokenize(source: string): Token[] {
   return tokens;
 }
 
-/**
- * Convenience: return only the non-newline, non-whitespace tokens. Useful for
- * policy rules that don't care about line structure.
- */
 export function tokenizeStripped(source: string): Token[] {
   return tokenize(source).filter((t) => t.kind !== 'newline');
 }

@@ -1,8 +1,4 @@
-/**
- * The scene a launch runs when the caller names none: the setting
- * `application/run/main_scene` in project.godot, read with the project.godot
- * grammar under whichever section split the file spells it with.
- */
+/** The scene a launch runs when the caller names none: `application/run/main_scene` from project.godot under whichever section split the file spells it. */
 
 import {
   closeSync,
@@ -29,11 +25,7 @@ const LINE_FEED = '\n';
 
 /** Files `findFilesByUid` opens before it gives up and reports an incomplete search. */
 export const UID_SCAN_MAX_FILES = 5000;
-/**
- * Directories `findFilesByUid` enters before it gives up and reports an
- * incomplete search. Counted apart from the files: a tree of empty folders
- * opens no file and would otherwise be walked without a bound.
- */
+/** Directories `findFilesByUid` enters before reporting an incomplete search, counted apart from files: a tree of empty folders opens no file and would otherwise be walked without a bound. */
 export const UID_SCAN_MAX_DIRECTORIES = 5000;
 /** Bytes read from the start of a `.tscn`: the first line carries the scene's `uid`. */
 export const UID_HEADER_READ_BYTES = 1024;
@@ -42,13 +34,7 @@ function isFileNotFound(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
-/**
- * Read the setting `application/run/main_scene` from project.godot. Returns
- * the value when it is a non-empty string (`res://...` as Godot writes it; a
- * bare value in a hand-edited file is tolerated), else null. With the setting
- * assigned more than once, under any spelling, the last one is read, the one
- * the engine keeps. Does NOT verify the file exists.
- */
+/** Reads `application/run/main_scene`: the value when a non-empty string (a bare value in a hand-edited file is tolerated), else null; the last assignment under any spelling wins. Does NOT verify the file exists. */
 export function readMainSceneFromProject(projectDir: string): string | null {
   let content: string;
   try {
@@ -83,19 +69,8 @@ function readFirstLine(absPath: string): string | null {
   }
 }
 
-/**
- * Every file in the project that carries this `uid://`: a `.tscn` whose header
- * names it, or the target of a `*.uid` sidecar whose content is it. The lookup
- * reads the text the engine writes, not `.godot/uid_cache.bin`, so it needs no
- * import to have run. Dot-directories (`.godot`, `.mcp`) are not entered.
- * Linked directories are entered (the launch scan follows links out of the
- * project), once per real path so a link cycle ends; a link that cannot be
- * resolved makes the search incomplete. After `maxFiles` opens, or on entering
- * more than `maxDirectories` directories, it stops and says the search is
- * incomplete; a directory, scene header or sidecar that
- * could not be read makes it incomplete too, since any of them may carry the
- * uid.
- */
+/** Every file carrying this `uid://`: a `.tscn` whose header names it, or the target of a `*.uid` sidecar. Reads the text the engine writes rather than `.godot/uid_cache.bin`, so no import is needed. Dot-directories are not entered; linked directories are, once per real path so a cycle ends.
+ * Incomplete (stops and says so) after `maxFiles` opens or `maxDirectories` entered, on an unresolvable link, or on an unreadable directory, header or sidecar, since any may carry the uid. */
 export function findFilesByUid(
   projectDir: string,
   uid: string,
@@ -182,33 +157,13 @@ export function findFilesByUid(
 /** Why a uid search can end before every file was read; worded to follow "the search was cut short". */
 export const UID_SEARCH_CUT_SHORT_CAUSE = `a limit of ${UID_SCAN_MAX_FILES} files or ${UID_SCAN_MAX_DIRECTORIES} folders, or a folder or file that could not be read`;
 
-/**
- * What a launch with no explicit `scene` argument runs. `none`: the project
- * configures no main scene. `unresolved`: it configures one that cannot be
- * turned into a file (a `uid://` nothing in the project carries, or a value
- * that is not a path inside the project); `reason` says when a uid search
- * ended before every file was read, so the scene may exist and was not found.
- * `scenes`: the files to scan, with notes for the caller to surface; more
- * than one file when several carry the same uid, since the engine may load
- * any of them. A note says when the uid search that found them was cut short,
- * so another carrier may exist that is not listed.
- */
+/** What a launch with no `scene` argument runs. `none`: no main scene configured. `unresolved`: one that cannot become a file (a `uid://` nothing carries, or a non-project path), with `reason` when the uid search was cut short so the scene may exist unfound. `scenes`: the files to scan, several when many carry the same uid since the engine may load any, with a note when the search was cut short and another carrier may exist. */
 export type LaunchScene =
   | { kind: 'scenes'; absPaths: string[]; notes: string[] }
   | { kind: 'none' }
   | { kind: 'unresolved'; value: string; reason: string };
 
-/**
- * The scene a launch with no explicit `scene` argument runs: `run/main_scene`
- * from project.godot. A path is resolved under the project root (`res://x`, or
- * `x` when a hand-edited value omits the prefix); a `uid://` is looked up with
- * `findFilesByUid`, which is what the editor writes, opening at most
- * `maxFiles` files. A launch that names a scene resolves it with
- * `resolveProjectPath` itself and never comes through here.
- *
- * Does NOT verify a path exists; the caller's `existsSync` check produces the
- * warning if the path is stale.
- */
+/** The scene a launch with no `scene` argument runs: `run/main_scene`, a path resolved under the project root or a `uid://` looked up with `findFilesByUid` (at most `maxFiles` opens). A launch naming a scene resolves it with `resolveProjectPath` itself. Does NOT verify a path exists; the caller's `existsSync` produces the warning. */
 export function resolveLaunchScene(
   projectDir: string,
   maxFiles: number = UID_SCAN_MAX_FILES,

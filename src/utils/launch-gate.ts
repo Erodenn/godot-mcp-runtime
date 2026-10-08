@@ -1,14 +1,4 @@
-/**
- * Launch gate: the pre-flight security scan and the once-per-project session
- * confirmation that run before this server starts, or injects into, a Godot
- * project.
- *
- * Kept free of `GodotRunner` and of everything under `src/tools/`, so any
- * handler that launches a project can call it without pulling in the spawn or
- * attach paths. The scan itself still routes through `evaluateScript` in
- * `run-script-policy.ts`; this module only decides which files to feed it and
- * what to do with the findings.
- */
+/** Pre-flight security scan and once-per-project confirmation that run before this server starts or injects into a project; free of `GodotRunner` and `src/tools/` so any launcher can call it. */
 
 import { existsSync, readFileSync } from 'fs';
 import { relative, resolve } from 'path';
@@ -47,11 +37,7 @@ import {
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */
 export const MAX_SCAN_WARNINGS_SHOWN = 10;
-/**
- * Cap on the scan warnings (what could not be scanned, what was skipped) a gate
- * outcome carries, counted apart from the findings so a long list of findings
- * never pushes an incomplete-scan notice out of the answer.
- */
+/** Cap on scan warnings, counted apart from findings so a long list of findings never pushes an incomplete-scan notice out. */
 export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
@@ -61,24 +47,14 @@ const UNRESOLVED_PATH_CAUSE = 'the path could not be resolved to a file inside t
 /** What a `project.godot` with lines Godot did not write means for the scan. */
 const NON_CANONICAL_PROJECT_FILE_CAUSE =
   'The autoloads and main scene could not be read reliably, so what the engine loads may not be what was scanned. Rewrite those lines as one key=value statement per line';
-/**
- * The one thing to do about a strict-mode refusal that the project itself
- * cannot fix. Strict mode is how an operator bounds a run nobody is watching,
- * so a refusal is never answered by advising the agent to turn it off.
- */
+/** The one thing to do about a strict-mode refusal the project cannot fix: strict mode bounds an unwatched run, so a refusal is never answered by advising the agent to turn it off. */
 const STRICT_MODE_IS_OPERATOR_SETTING =
   'Strict mode (GODOT_MCP_STRICT) is an operator setting: report this refusal to the user rather than changing it';
 /** Offered only for a prompt the client dismissed by itself, never for a user's decline. */
 const ELICITATION_OPT_OUT_SOLUTION =
   'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
 
-/**
- * Refuse a `scene` argument the engine would not run as a scene, or null when
- * the argument is one. Called by every launcher before the gate: the gate
- * scans the scene it is given, and Godot silently runs the project's main
- * scene instead when the argument has no scene extension, so letting such a
- * value through would scan one file and launch another.
- */
+/** Refuses a `scene` argument the engine would not run as a scene: Godot silently runs the main scene instead, so the gate would scan one file and launch another. Called by every launcher before the gate. */
 export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
   if (isLaunchScenePath(scene)) return null;
   return createErrorResponse(
@@ -91,64 +67,34 @@ export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
 }
 
 export interface LaunchGateRequest {
-  /** Validated project directory; resolved to an absolute path inside. */
   projectPath: string;
-  /** Resolved launch scene. Undefined scans `run/main_scene`. */
   scene?: ResolvedProjectPath | undefined;
-  /** Run the once-per-project session confirmation. */
   confirm: boolean;
-  /**
-   * True when this server starts the process (`run_project` in spawn mode,
-   * `render_movie`), so the scene it runs is the one the gate scanned. False
-   * for attach mode, where the user launches Godot and may pick a scene the
-   * server never sees: a project with no main scene is then only a warning in
-   * strict mode, because the missing scene says nothing about what runs.
-   */
+  /** True when this server starts the process, so the scene it runs is the one scanned. In attach mode the user may pick a scene the server never sees, so no main scene is then only a strict-mode warning. */
   launchedByServer: boolean;
-  /** Names the caller in the prompt, the refusals and the warnings. */
   toolName: string;
 }
 
 export interface LaunchGateOutcome {
-  /**
-   * Scan findings first, capped at `MAX_SCAN_WARNINGS_SHOWN` entries plus a
-   * `+N more` entry; then the scan warnings, capped at
-   * `MAX_SCAN_INCOMPLETE_SHOWN` entries plus a `+N more files were not scanned`
-   * entry; then the confirmation warning, when there is one, which no cap cuts.
-   */
+  /** Scan findings first (capped, plus `+N more`), then scan warnings (capped apart), then the confirmation warning, which no cap cuts. */
   warnings: string[];
 }
 
-/** A finding and the name to show for the source it came from. */
 interface ScanFinding {
   label: string;
   match: PolicyMatch;
 }
 
-/**
- * The name to show for a file: project-relative when it is inside the project.
- * Out-of-tree paths are surfaced verbatim (path.relative would emit
- * `..`-prefixed strings that obscure where the file actually lives).
- */
+/** Project-relative name when inside the project; out-of-tree paths verbatim, since `..`-prefixed relative paths obscure where the file lives. */
 function displayPath(projectPath: string, sourcePath: string): string {
   return isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
 }
 
-/**
- * Build a one-line summary of a project-scan finding so a launch response can
- * carry a `warnings` array without flooding it.
- */
 function formatScanFinding(finding: ScanFinding): string {
   return `${finding.label}:${finding.match.line} ${finding.match.matchedText} - ${finding.match.reason}`;
 }
 
-/**
- * Scan a single .gd file. Missing/unreadable files are reported as a single
- * warning string; the caller decides whether to surface them. `readFailed` is
- * true when the file exists and the read failed, which is not the same thing
- * as a file that is not there: the scan set out to read it and could not.
- * Tier and strict promotion semantics match `evaluateScript`.
- */
+/** Scans a single .gd file. `readFailed` marks a file that exists but could not be read, distinct from a missing one: the scan set out to read it. Tier and strict promotion match `evaluateScript`. */
 function scanScriptFile(
   filePath: string,
   strict: boolean,
@@ -174,49 +120,24 @@ function scanScriptFile(
   return { findings: decision.matches, warning: null, readFailed: false };
 }
 
-/**
- * Run the launch gate for one project. Returns the warnings to attach to the
- * caller's success payload, or the refusal response to return as is.
- *
- * `request.confirm: false` is for a caller that launches nothing itself: the
- * scan and its strict-mode refusal still run, the elicitor is never called and
- * the confirmed-project set is never written.
- */
+/** Runs the launch gate: warnings for the caller's success payload, or the refusal to return as is. `request.confirm: false` is for a caller that launches nothing: scan and strict refusal run, but no elicitation and no confirmed-project write. */
 export async function runLaunchGate(
   request: LaunchGateRequest,
   ctx: McpContext,
 ): Promise<Result<LaunchGateOutcome, ToolResponse>> {
-  // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set (complete no-op,
-  // Tier 1 included, the confirmation prompt too; see
-  // McpContext.disableSecurity).
+  // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set (no-op including Tier 1 and the prompt; see McpContext.disableSecurity).
   if (ctx.disableSecurity) return ok({ warnings: [] });
 
-  // Pre-flight security scan: autoloads + the launched scene's scripts,
-  // scanning transitively into every PackedScene it instances (subscene
-  // recursion, see collectSceneScripts) and into inline GDScript sub-resources.
-  // Result is a list of findings + a list of scan warnings (file-not-found,
-  // read errors, every script or scene the scan could not read, "no launchable
-  // scene"); both flow into the response warnings array.
-  // Strict mode + any Tier 1 finding → hard reject before launch.
+  // Pre-flight scan: autoloads plus the launch scene's scripts, recursing into instanced scenes and inline GDScript sub-resources.
+  // Findings and scan warnings both flow into the response warnings; strict mode + any Tier 1 finding rejects before launch.
   const scanWarnings: string[] = [];
-  // What the caller is told about the confirmation step. Kept apart from the
-  // scan warnings so their cap can never cut it.
+  // What the caller is told about the confirmation step, kept apart from scan warnings so their cap cannot cut it.
   const confirmationWarnings: string[] = [];
   const scanFindings: ScanFinding[] = [];
-  // The part of the scan that failed on something it reads: a GDScript file or
-  // text scene that exists and could not be read, a path or uid the engine
-  // would still try to load and the scan could not resolve to a file, a
-  // project.godot with lines that are not in the form Godot writes, an
-  // autoload line that does not read as an entry, or a scan step that threw. Each entry is also in scanWarnings. Strict mode
-  // refuses on these. Items the
-  // scan does not read by kind (a C# script, a binary scene, a resource file)
-  // are never added here: refusing on those would block whole classes of
-  // project, and whether strict mode should is left open (docs/security.md).
+  // Scan failures on something it reads (unreadable .gd or text scene, unresolvable path or uid, malformed project.godot or autoload line, a step that threw); each is also in scanWarnings and strict mode refuses on them.
+  // Kinds it does not read (C#, binary scene, resource file) are never added: refusing on those would block whole classes of project, and whether strict mode should is left open (docs/security.md).
   const scanReadFailures: string[] = [];
-  // The launch scene could not be found or resolved, so its scripts were not
-  // checked. Each entry is also in scanWarnings. `noSceneConfigured` marks the
-  // one case attach mode tolerates: nothing configured at all. A scene that is
-  // configured, or passed, and cannot be reached is never tolerated.
+  // The launch scene could not be found or resolved, so its scripts were not checked (also in scanWarnings). `noSceneConfigured` is the one case attach mode tolerates; a scene configured or passed and unreachable never is.
   const launchSceneFailures: Array<{ message: string; noSceneConfigured: boolean }> = [];
   const failLaunchScene = (message: string, noSceneConfigured = false): void => {
     scanWarnings.push(message);
@@ -245,8 +166,7 @@ export async function runLaunchGate(
     for (const m of findings) scanFindings.push({ label, match: m });
   };
 
-  // Scan one scene: every script file it reaches, the source of every inline
-  // script, and a note for everything the walk met and could not read.
+  // Scan one scene: its script files, inline script sources, and a note for everything the walk could not read.
   const scanScene = (scenePath: string): void => {
     const collected = collectSceneScripts(scenePath, absProjectPath);
     for (const filePath of collected.scripts) {
@@ -264,27 +184,20 @@ export async function runLaunchGate(
     for (const item of collected.unscanned) {
       const notice = `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`;
       scanWarnings.push(notice);
-      // A text scene or text resource is one the scan reads. A file of another
-      // extension that could not be read is a binary scene at best, which it
-      // does not.
+      // A text scene or resource is one the scan reads; another extension that could not be read is at best a binary scene, which it does not.
       const loweredItemPath = item.scenePath.toLowerCase();
       const sceneReadFailed =
         item.readFailed === true &&
         (loweredItemPath.endsWith(SCENE_EXTENSION) ||
           loweredItemPath.endsWith(TEXT_RESOURCE_EXTENSION));
-      // An unresolved reference is one the engine would still try to load, so
-      // it is a file the scan set out to read and did not.
-      // A malformed statement was read in part: the engine may load from it
-      // something the scan did not see.
+      // An unresolved reference is one the engine would still try to load, so the scan set out to read it and did not; a malformed statement was read in part, so the engine may load something unseen.
       if (sceneReadFailed || item.unresolved === true || item.malformed === true) {
         scanReadFailures.push(notice);
       }
     }
   };
 
-  // The scene the launch runs. An explicit scene takes precedence over the
-  // main scene; a main scene is resolved by `resolveLaunchScene`, which can
-  // answer with several files (one uid, several carriers) or none.
+  // An explicit scene takes precedence over the main scene; `resolveLaunchScene` may answer with several files (one uid, several carriers) or none.
   const scanLaunchScene = (): void => {
     const scenes: string[] = [];
     if (request.scene) {
@@ -326,33 +239,22 @@ export async function runLaunchGate(
     const projectGodot = projectGodotPath(absProjectPath);
     if (existsSync(projectGodot)) {
       const { entries: autoloads, unparsed, nonCanonical } = parseAutoloadSection(projectGodot);
-      // A line Godot did not write may make the engine load an autoload or a
-      // main scene other than the one read here, and a line that registers an
-      // autoload without reading as an entry names a file nothing scanned.
-      // Both are settings the scan set out to read and could not.
+      // A line Godot did not write may make the engine load an autoload or main scene other than the one read, and an autoload line that reads as no entry names a file nothing scanned: settings the scan could not read.
       if (nonCanonical !== null)
         failScanRead(`${nonCanonical}. ${NON_CANONICAL_PROJECT_FILE_CAUSE}`);
       for (const line of unparsed) {
         failScanRead(`Autoload line could not be parsed and was not scanned: ${line}`);
       }
       for (const entry of autoloads) {
-        // Skip this server's own injected bridge. It is left registered
-        // between a launch and its cleanup, so a second run_project against
-        // the same project would otherwise scan it — and it legitimately
-        // calls the filesystem-write primitives the table flags, which would
-        // surface as warnings blaming the user's project and, under strict
-        // mode, hard-reject the launch. An McpBridge entry pointing anywhere
-        // this server does not own is a user's own autoload and still scans.
+        // Skip this server's own injected bridge: it stays registered between launch and cleanup, and scanning it would blame the user's project for its filesystem-write primitives and, in strict mode, reject the launch.
+        // An McpBridge entry pointing anywhere this server does not own is a user's autoload and still scans.
         if (entry.name === BRIDGE_AUTOLOAD_NAME && isServerOwnedBridgePath(entry.path)) continue;
-        // A uid:// path is looked up before its extension is read: the file a
-        // uid names is found by the uid, and may be several files.
+        // A uid:// path is resolved by its uid before its extension is read, and may be several files.
         let targets: string[];
         if (isUidReference(entry.path)) {
           const found = findFilesByUid(absProjectPath, entry.path);
           if (found.paths.length === 0) {
-            // A search that read every file and found no carrier names a file
-            // of a kind the scan does not read, or nothing. One that was cut
-            // short may have missed a script it reads.
+            // A search that read every file and found no carrier names a kind the scan does not read, or nothing; one cut short may have missed a script it reads.
             if (found.complete) {
               scanWarnings.push(
                 `Autoload ${entry.name} (${entry.path}) was not scanned: no scene or .uid file in the project carries it`,
@@ -403,8 +305,7 @@ export async function runLaunchGate(
     }
     scanLaunchScene();
   } catch (error) {
-    // Whatever the loop above had not reached was not scanned, and nothing
-    // names it. That is a failed scan, not a kind of file the scan skips.
+    // Whatever the loop had not reached was not scanned and nothing names it: a failed scan, not a skipped kind.
     const failure = `${request.toolName} pre-flight scan failed: ${getErrorMessage(error)}`;
     scanWarnings.push(failure);
     scanReadFailures.push(failure);
@@ -429,10 +330,8 @@ export async function runLaunchGate(
     );
   }
 
-  // A launch the server performs runs the scene the scan was meant to read, so
-  // strict mode does not launch when that scene is missing, unresolved or not
-  // configured. In attach mode only a configured scene counts: with none, the
-  // user's own Godot decides what runs.
+  // A server-performed launch runs the scene the scan was meant to read, so strict mode does not launch when it is missing, unresolved or unconfigured;
+  // in attach mode only a configured scene counts, since the user's own Godot decides otherwise.
   const refusedLaunchScene = launchSceneFailures.filter(
     (failure) => request.launchedByServer || !failure.noSceneConfigured,
   );
@@ -457,9 +356,7 @@ export async function runLaunchGate(
     );
   }
 
-  // Strict mode is the setting for a launch nobody is watching, so it does not
-  // launch on a scan that failed on files it reads: their Tier 1 findings, if
-  // any, are exactly what was not found.
+  // Strict mode is the setting for an unwatched launch, so it does not launch on a scan that failed on files it reads: their Tier 1 findings are exactly what was not found.
   if (ctx.strictMode && scanReadFailures.length > 0) {
     const shown = scanReadFailures.slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
     const more =
@@ -480,15 +377,11 @@ export async function runLaunchGate(
     );
   }
 
-  // Session-confirmation gate: one elicitation per absolute projectPath per
-  // server session. Skipped when the caller launches nothing itself
-  // (`confirm: false`), and when this project was already confirmed.
+  // One elicitation per absolute projectPath per server session; skipped for `confirm: false` and for an already confirmed project.
   const projectKey = normalizeProjectKey(absProjectPath);
   if (request.confirm && !ctx.sessionState.runProjectConfirmed.has(projectKey)) {
     if (ctx.disableElicitation) {
-      // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION). Skip the
-      // blanket confirmation gate and launch with a recorded warning. The
-      // tiered scan above is the real security boundary; the gate is UX.
+      // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION): launch with a recorded warning; the tiered scan is the real security boundary, the gate is UX.
       confirmationWarnings.push(
         'Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); launching without user confirmation.',
       );
@@ -530,17 +423,13 @@ export async function runLaunchGate(
             ),
           );
         }
-        // Elicitation unsupported — fall through with a recorded warning. The
-        // tiered scan above is the real security boundary; the gate is UX.
+        // Elicitation unsupported: fall through with a recorded warning (the tiered scan is the real boundary; the gate is UX).
         confirmationWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
         elicitResult = { action: 'accept', content: { confirm: true } };
       }
       if (!isElicitAccepted(elicitResult)) {
-        // A `cancel` action means the client dismissed the prompt without an
-        // explicit choice. Some clients (e.g. Claude Desktop) auto-cancel
-        // elicitation without ever displaying it, so it is told apart from an
-        // explicit `decline`, and only it points at the opt-out: a decline is
-        // the user's answer, and nothing about it is to be worked around.
+        // `cancel` means the client dismissed the prompt without a choice (Claude Desktop auto-cancels without showing it): told apart from an explicit `decline`,
+        // and only it points at the opt-out, since a decline is the user's answer and not to be worked around.
         const cancelled = elicitResult.action === 'cancel';
         return err(
           createErrorResponse(

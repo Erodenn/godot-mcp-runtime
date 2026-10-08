@@ -4,11 +4,7 @@ import { RGBA_BYTES_PER_PIXEL, type RgbaFrame } from './pixel-stats.js';
 /** Each retry of a preview that is still over its byte cap doubles the downscale factor. */
 const PREVIEW_HALVING_FACTOR = 2;
 
-/**
- * Box-downscale by an integer factor. Each output pixel is the rounded mean of
- * its factor x factor source block (clamped at the frame edges), all four
- * channels. The output is floor(size / factor) per axis, at least 1.
- */
+/** Box-downscale by an integer factor: each output pixel is the rounded mean of its source block, clamped at the frame edges; output is floor(size / factor) per axis, at least 1. */
 export function downscaleRgba(frame: RgbaFrame, factor: number): RgbaFrame {
   if (factor <= 1) return frame;
   const outWidth = Math.max(1, Math.floor(frame.width / factor));
@@ -47,11 +43,7 @@ export interface FramePreview {
   factor: number;
 }
 
-/**
- * Downscale by the smallest integer factor that fits maxWidth x maxHeight,
- * encode as PNG, and keep halving the resolution until the PNG is within
- * maxBytes (or the frame is down to one pixel).
- */
+/** Downscales by the smallest integer factor fitting maxWidth x maxHeight, encodes as PNG, and keeps halving until within maxBytes (or one pixel). */
 export function buildFramePreview(
   frame: RgbaFrame,
   maxWidth: number,

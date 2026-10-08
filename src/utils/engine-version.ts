@@ -1,12 +1,4 @@
-/**
- * Godot version comparison between the engine this server drives and the
- * engine a project was last saved with.
- *
- * A project records the version it was saved with as the first `N.N` element of
- * `application/config/features`. An engine newer than that saves scenes in its
- * own format, which the older engine may not load. These helpers only read and
- * compare; what to say about the result is the caller's.
- */
+/** Godot version comparison between this server's engine and the engine a project was last saved with (the first `N.N` of `application/config/features`). A newer engine saves in a format the older may not load; these helpers only compare, what to say is the caller's. */
 
 import { readFileSync } from 'fs';
 import { projectGodotPath } from './path-validation.js';
@@ -29,12 +21,7 @@ export function parseMajorMinor(text: string): MajorMinor | null {
   return { major: Number(match[1]), minor: Number(match[2]) };
 }
 
-/**
- * The version a project was saved with: the first element of
- * `application/config/features` that reads as `N.N` (`"4.4"` in
- * `PackedStringArray("4.4", "Forward Plus")`). Null when the file, the key or
- * such an element is missing, or on any read failure.
- */
+/** The version a project was saved with: the first `application/config/features` element reading as `N.N`; null when missing or on any read failure. */
 export function readProjectFeatureVersion(projectPath: string): MajorMinor | null {
   try {
     const content = readFileSync(projectGodotPath(projectPath), 'utf8');

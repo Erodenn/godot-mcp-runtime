@@ -1,32 +1,7 @@
 import { join } from 'path';
 
-/**
- * Single source of truth for every path this server writes inside a target
- * Godot project. Nothing outside this module joins `.mcp` with a literal
- * subdirectory name.
- *
- * Layout:
- *
- *     <project>/.mcp/.gdignore                              (importer suppression, never deleted)
- *     <project>/.mcp/godot-runtime/bridge/mcp_bridge.gd     (session-scoped, removed by the last leaver)
- *     <project>/.mcp/godot-runtime/bridge/owners/<pid>-<instanceId>.json
- *                                                            (one file per live session on this project,
- *                                                             removed on that session's own cleanup)
- *     <project>/.mcp/godot-runtime/screenshots/             (persists across sessions)
- *     <project>/.mcp/godot-runtime/scripts/                 (run_script audit pairs, persists)
- *     <project>/.mcp/godot-runtime/validate/                (temp files, deleted per call)
- *     <project>/.mcp/godot-runtime/movies/<run id>/         (kept for `frames` and `video` runs, removed per call for `check`)
- *     <project>/.mcp/godot-runtime/scene-backups/<run id>/<scene path>
- *                                                            (a scene as it was before a save that dropped content;
- *                                                             never removed by the server)
- *
- * `.gdignore` stays at the `.mcp/` level and covers the whole subtree; the
- * autoload under it still loads, because autoload resolution goes through
- * `load()` rather than the importer.
- *
- * Pure path composition — no filesystem access. Each writer creates its own
- * directory with `mkdirSync(..., { recursive: true })`.
- */
+/** Single source of truth for every path this server writes inside a target project under `.mcp/`; pure composition, each writer creates its own directory.
+ * `.gdignore` sits at `.mcp/` and covers the subtree; the bridge autoload still loads because autoload resolution goes through `load()`, not the importer. */
 
 /** Container for every artifact this server writes into a target project. */
 const MCP_DIR_NAME = '.mcp' as const;
@@ -53,11 +28,7 @@ export type MovieOutputExtension = 'png' | 'avi' | 'ogv';
 /** Basename of the bridge autoload script, at both the new and legacy location. */
 const BRIDGE_SCRIPT_FILENAME = 'mcp_bridge.gd' as const;
 
-/**
- * Pre-namespace location of the bridge script: the project root. Read by
- * `BridgeManager.removeBridgeArtifacts` (migration cleanup) and
- * `BridgeManager.repairOrphaned` (stranded-artifact detection).
- */
+/** Pre-namespace location of the bridge script (the project root), read by `BridgeManager`'s migration cleanup and orphan repair. */
 export const LEGACY_BRIDGE_SCRIPT_FILENAME = BRIDGE_SCRIPT_FILENAME;
 
 /** Project-relative namespace root, in POSIX form for `res://` composition. */
@@ -67,11 +38,7 @@ const NAMESPACE_RES_DIR = `${MCP_DIR_NAME}/${ARTIFACT_NAMESPACE_DIR_NAME}` as co
 export const BRIDGE_SCRIPT_RES_PATH =
   `res://${NAMESPACE_RES_DIR}/${BRIDGE_DIR_NAME}/${BRIDGE_SCRIPT_FILENAME}` as const;
 
-/**
- * Project-relative directory for validate temp scripts. Handed to
- * `godot_operations.gd` as the prefix of a `script_path` parameter, so it must
- * stay POSIX-separated regardless of host platform.
- */
+/** Project-relative directory for validate temp scripts; handed to godot_operations.gd as a `script_path` prefix, so it must stay POSIX-separated on every host. */
 export const VALIDATE_RES_DIR = `${NAMESPACE_RES_DIR}/${VALIDATE_DIR_NAME}` as const;
 
 /** `<project>/.mcp` — home of the `.gdignore` marker. */
@@ -89,26 +56,13 @@ export function bridgeScriptAbsPath(projectPath: string): string {
   return join(bridgeDir(projectPath), BRIDGE_SCRIPT_FILENAME);
 }
 
-/**
- * `<project>/.mcp/godot-runtime/bridge/owners` — one JSON file per live
- * session on this project (registered by `BridgeManager.inject`, removed by
- * that session's own `BridgeManager.cleanup`). Read by every session to
- * decide whether it is the last leaver before removing the shared script and
- * autoload entry.
- */
+/** `.../bridge/owners`: one JSON file per live session, read by every session to decide whether it is the last leaver before removing the shared script and autoload entry. */
 export function bridgeOwnersDir(projectPath: string): string {
   return join(bridgeDir(projectPath), BRIDGE_OWNERS_DIR_NAME);
 }
 
-/**
- * `<project>/.mcp/godot-runtime/screenshots` — where the bridge saves PNGs and
- * the only directory `take_screenshot` will read one back from.
- *
- * KEEP IN SYNC: `src/scripts/mcp_bridge.gd` builds the same directory from its
- * own `SCREENSHOT_DIR_RES_PATH` const (it cannot import TypeScript), and
- * `handleTakeScreenshot` in `src/tools/runtime-tools.ts` uses this function as
- * the containment root for what the bridge hands back. All three move together.
- */
+/** `<project>/.mcp/godot-runtime/screenshots`: where the bridge saves PNGs and the only directory `take_screenshot` reads one back from.
+ * KEEP IN SYNC: `SCREENSHOT_DIR_RES_PATH` in `src/scripts/mcp_bridge.gd` builds the same directory, and `handleTakeScreenshot` in `src/tools/runtime-tools.ts` uses this as its containment root. */
 export function screenshotsDir(projectPath: string): string {
   return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, SCREENSHOTS_DIR_NAME);
 }
@@ -133,10 +87,7 @@ export function movieRunDir(projectPath: string, runId: string): string {
   return join(moviesDir(projectPath), runId);
 }
 
-/**
- * The path handed to `--write-movie`: `frame.png` for a PNG sequence (Godot
- * writes `frame<index>.png` next to it), `movie.avi` or `movie.ogv` for one video.
- */
+/** The path handed to `--write-movie`: `frame.png` for a PNG sequence (Godot inserts the frame index), `movie.avi` or `movie.ogv` for one video. */
 export function movieOutputPath(
   projectPath: string,
   runId: string,
@@ -152,55 +103,23 @@ export function movieAudioPath(projectPath: string, runId: string): string {
   return join(movieRunDir(projectPath, runId), fileName);
 }
 
-/**
- * `<project>/.mcp/godot-runtime/scene-backups` — one subdirectory per headless
- * save that dropped content. Never cleaned by the server.
- */
+/** `.../scene-backups`: one subdirectory per headless save that dropped content; never cleaned by the server. */
 export function sceneBackupsDir(projectPath: string): string {
   return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, SCENE_BACKUPS_DIR_NAME);
 }
 
-/**
- * Where the pre-save text of one scene is kept: the run directory followed by
- * the scene's own project-relative segments, so two scenes with one basename
- * never collide. `sceneRelPath` is a resolved `relPath` ('/' separators, no
- * `..`), never a raw user string.
- */
+/** Where the pre-save text of one scene is kept: the run directory plus the scene's project-relative segments, so two scenes with one basename never collide. `sceneRelPath` is a resolved `relPath`, never a raw user string. */
 export function sceneBackupPath(projectPath: string, runId: string, sceneRelPath: string): string {
   return join(sceneBackupsDir(projectPath), runId, ...sceneRelPath.split('/'));
 }
 
-/**
- * The same backup location in project-relative POSIX form, for the warning text
- * a caller reads: identical on every host platform.
- */
+/** The same location in project-relative POSIX form for warning text, identical on every host. */
 export function sceneBackupRelPath(runId: string, sceneRelPath: string): string {
   return `${NAMESPACE_RES_DIR}/${SCENE_BACKUPS_DIR_NAME}/${runId}/${sceneRelPath}`;
 }
 
-/**
- * True when an `[autoload]` path registered under the reserved `McpBridge`
- * name points at a location this server owns, and is therefore safe to rewrite
- * (migration) or delete (cleanup).
- *
- * Server-owned means exactly two shapes, after normalizing separators and
- * stripping a `res://` scheme and any `./` prefix:
- *
- *   - `mcp_bridge.gd` at the project root — the pre-namespace location.
- *   - anything at all under `.mcp/` — the current namespace and any older
- *     `.mcp/`-relative layout.
- *
- * WIDEST INPUT: this accepts every path beneath `.mcp/`, not just the bridge
- * script — `.mcp/anything.gd`, `.mcp/godot-runtime/scripts/x.gd`, a directory
- * path, a path with backslash separators. It also accepts a bare
- * `mcp_bridge.gd` written without the `res://` scheme. It does NOT accept:
- * a `uid://` form (an entry Godot rewrote to a UID reads as user-owned and
- * blocks inject rather than being silently clobbered), `addons/.mcp/...` or
- * any other path with `.mcp` below the root, `sub/mcp_bridge.gd`, or an
- * absolute filesystem path. Everything it rejects is treated as a user's own
- * autoload that happens to share the `McpBridge` name: left untouched, with
- * `inject` failing loudly instead of overwriting it.
- */
+/** True when an `[autoload]` path under the reserved `McpBridge` name points at a location this server owns, so it is safe to rewrite or delete.
+ * WIDEST INPUT: every path beneath `.mcp/` (not just the bridge script; directories and backslashes included) plus `mcp_bridge.gd` at the root with or without `res://`. Rejected: `uid://` forms (a Godot-rewritten entry reads as user-owned and blocks inject rather than being clobbered), `addons/.mcp/...`, `sub/mcp_bridge.gd`, absolute paths; those are a user's own autoload, left untouched with `inject` failing loudly. */
 export function isServerOwnedBridgePath(autoloadPath: string): boolean {
   const stripped = autoloadPath
     .replace(/\\/g, '/')

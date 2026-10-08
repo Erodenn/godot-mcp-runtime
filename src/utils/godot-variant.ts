@@ -1,26 +1,7 @@
-/**
- * The bounded Variant subset Godot's remote debugger speaks on the wire.
- *
- * Debugger packets are `[uint32 length][Variant]`, and every Variant the
- * profiler stream carries is a nil/bool/int/float/string/array or a packed
- * numeric array. A typed array (`TypedArray<StringName>` carries the custom
- * monitor names) decodes to a plain array: its element type is read and
- * dropped. A packed numeric array decodes to a JavaScript typed array, so a
- * packet-sized one costs its own bytes and not a boxed number per element.
- * Objects, dictionaries and vectors are deliberately *not*
- * decoded: an unrelated debugger packet must fail loudly instead of driving
- * allocation from an attacker-shaped length field. Callers treat a decode
- * failure as "not a message I care about" and move on.
- *
- * Separate from `bridge-protocol.ts` — that framing is ours and both ends are
- * in this repo; this one is Godot's and only the engine defines it.
- */
+/** The bounded Variant subset Godot's remote debugger speaks (`[uint32 length][Variant]` packets): nil/bool/int/float/string/array and packed numeric arrays, typed arrays decoding to plain ones. Objects, dictionaries and vectors are deliberately not decoded, so an unrelated packet fails loudly instead of driving allocation from an attacker-shaped length.
+ * Callers treat a decode failure as 'not a message I care about'. Separate from `bridge-protocol.ts`: that framing is ours, this one is Godot's. */
 
-/**
- * A decoded packed numeric array. `PackedInt64Array` lands in a Float64Array:
- * its elements go through the same `Number` conversion a scalar 64-bit int
- * does, exact up to 2^53.
- */
+/** A decoded packed numeric array; `PackedInt64Array` lands in a Float64Array, exact up to 2^53 like a scalar 64-bit int. */
 export type PackedArray = Uint8Array | Int32Array | Float32Array | Float64Array;
 
 /** Every value this codec can represent. */
@@ -56,11 +37,7 @@ const ARRAY_COUNT_MASK = 0x7fffffff;
 
 const padding = (length: number): number => (4 - (length % 4)) % 4;
 
-/**
- * Encode one outgoing debugger command. Only the types the debugger accepts
- * from us are supported — anything else is a bug in the caller, not a packet
- * we should try to serialize.
- */
+/** Encodes one outgoing debugger command; only the types the debugger accepts from us are supported. */
 export function encodeVariant(value: Variant): Buffer {
   if (value === null) {
     const buf = Buffer.alloc(4);
@@ -100,10 +77,7 @@ export function encodeVariant(value: Variant): Buffer {
   throw new Error('Unsupported outgoing debugger value');
 }
 
-/**
- * Decode one incoming packet payload. Throws on truncation, trailing bytes,
- * or a type outside the supported subset.
- */
+/** Decodes one incoming packet payload; throws on truncation, trailing bytes or a type outside the subset. */
 export function decodeVariant(raw: Buffer): Variant {
   let offset = 0;
 
@@ -164,9 +138,7 @@ export function decodeVariant(raw: Buffer): Variant {
         const typed = kind === TYPE_ARRAY ? header & TYPED_ARRAY_MASK : 0;
         if ((header & ~typed) !== kind) throw new Error(`Unsupported debugger Variant ${header}`);
         if (typed !== 0) {
-          // The element type precedes the count: a builtin type id, or the
-          // class name / script path of an object element type. The elements
-          // decode on their own, so the declaration is skipped.
+          // The element type precedes the count (a builtin type id, or an object's class name / script path); elements decode on their own, so the declaration is skipped.
           if (typed >> TYPED_ARRAY_SHIFT === TYPED_BUILTIN) u32();
           else readString();
         }
@@ -207,13 +179,7 @@ const PACKED_READERS: Record<number, PackedReader> = {
   [TYPE_PACKED_FLOAT64_ARRAY]: [8, (buf, at) => buf.readDoubleLE(at), (n) => new Float64Array(n)],
 };
 
-/**
- * The name of a debugger message, read without decoding the rest of it. Every
- * debugger message is an untyped array whose first element is its name, so the
- * receiver can tell from two header words and one string whether the payload
- * is one it consumes. Null when the packet does not start that way; the caller
- * then decodes it in full and reports what it found.
- */
+/** The name of a debugger message read without decoding the rest: every message is an untyped array starting with its name. Null when the packet does not start that way; the caller then decodes it in full. */
 export function peekMessageName(raw: Buffer): string | null {
   // Array header, element count, string header, string length.
   const nameAt = 4 * WORD_BYTES;

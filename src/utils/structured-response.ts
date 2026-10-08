@@ -1,15 +1,7 @@
 import type { HandlerResult } from '../mcp.types.js';
 import { ok } from './result.js';
 
-/**
- * Wrap a structured payload as a handler success that satisfies the MCP
- * outputSchema contract. The same payload is emitted both as a JSON text
- * content block (for lenient clients) and as `structuredContent` (required
- * by strict clients per MCP spec revision 2025-06-18).
- *
- * `extraContent` is prepended for handlers that also return non-text blocks
- * (e.g. `take_screenshot`'s inline image).
- */
+/** Wraps a structured payload as a handler success satisfying the MCP outputSchema contract: emitted as a JSON text block (lenient clients) and as `structuredContent` (strict clients, spec 2025-06-18); `extraContent` is prepended for non-text blocks like an inline image. */
 export function createStructuredResponse<T extends Record<string, unknown>>(
   payload: T,
   extraContent: Array<{ type: string; [k: string]: unknown }> = [],
@@ -20,12 +12,7 @@ export function createStructuredResponse<T extends Record<string, unknown>>(
   });
 }
 
-/**
- * Put a non-empty `warnings` array first and drop an empty one. GDScript's
- * JSON.stringify sorts keys, so a payload that crossed from
- * godot_operations.gd arrives with `warnings` last; the contract is that it
- * leads the payload whenever it is present.
- */
+/** Puts a non-empty `warnings` array first and drops an empty one: GDScript's JSON.stringify sorts keys, so a payload from godot_operations.gd arrives with `warnings` last, and the contract is that it leads. */
 export function leadWithWarnings(payload: Record<string, unknown>): Record<string, unknown> {
   const { warnings, ...rest } = payload;
   if (!Array.isArray(warnings)) return payload;

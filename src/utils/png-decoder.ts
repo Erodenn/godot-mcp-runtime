@@ -1,14 +1,6 @@
 import { inflateSync } from 'zlib';
 
-/**
- * Minimal PNG decoder for RGB(A) 8-bit images. Parses IHDR + IDAT chunks,
- * inflates the pixel stream, and reverses the per-scanline filters.
- * No external dependencies - keeps the server's zero-dep footprint.
- *
- * Returns raw RGBA bytes (8 bits per channel, alpha filled to 255 for RGB)
- * plus dimensions, or throws on unsupported formats (palette, 16-bit,
- * interlaced).
- */
+/** Minimal dependency-free PNG decoder for 8-bit RGB(A): parses IHDR + IDAT, inflates, reverses the scanline filters; returns RGBA bytes (alpha 255 for RGB) plus dimensions, and throws on palette, 16-bit or interlaced images. */
 
 /** Bytes in an IHDR payload: width, height, bit depth, color type, compression, filter, interlace. */
 const IHDR_DATA_LENGTH = 13;
@@ -30,7 +22,6 @@ function paethPredictor(a: number, b: number, c: number): number {
 export interface DecodedPng {
   width: number;
   height: number;
-  /** RGBA, 4 bytes per pixel, row-major */
   data: Uint8Array;
 }
 

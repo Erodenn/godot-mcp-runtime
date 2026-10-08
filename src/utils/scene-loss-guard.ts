@@ -1,32 +1,5 @@
-/**
- * Loss guard for headless scene saves.
- *
- * Every mutation tool edits a scene by load -> pack -> save, and a save can
- * drop content the operation never touched: a script that failed to compile
- * takes its stored exports with it, an inherited scene can be flattened, an
- * override inside an instance can vanish. The engine's own view cannot show
- * this, because the tree it would be asked about is the one that already lost
- * the content. So the guard compares TEXT: the scene file as it was before the
- * operation against the file afterwards.
- *
- * The save still happens. When the comparison finds something missing that the
- * operation did not ask to change, the caller leads its payload with warnings
- * naming it, and the pre-save file is written under
- * `.mcp/godot-runtime/scene-backups/`. A backup is written only together with
- * at least one reported loss, and backups are never pruned here. A save that
- * could not be compared at all (a binary scene, text that is not a scene) is
- * said to be unchecked instead of passing in silence; the caller says it once
- * per file, since it describes the file and not the call.
- *
- * One rule decides every comparison below: report content a user would call
- * lost, never canonicalization. A healthy save renumbers ids, reorders
- * sections, rewrites `load_steps`, adds `unique_id` (4.6) and drops values
- * equal to a default, so none of those is compared. Each rule that needed a
- * judgment carries its reason where it is applied.
- *
- * Nothing in this module throws into a handler: `beginSceneGuard` and
- * `finishSceneGuard` swallow every failure and answer with less.
- */
+/** Loss guard for headless scene saves: compares scene text before and after, because the engine's own tree has already lost the content.
+ * Reports content a user would call lost, never canonicalization; nothing here throws into a handler. */
 
 import { randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
@@ -72,14 +45,11 @@ const QUOTED_ITEM_REGEX = /"((?:[^"\\]|\\.)*)"/g;
 /** The engine's line for a script it could not compile. */
 const FAILED_SCRIPT_REGEX = /Failed to load script "([^"]+)"/g;
 
-/** A property of one node, named the way a tool call names it. */
 export interface TouchedProperty {
-  /** Tool-form node path ("root/A", "Main/A", "A", "./A", "%A"). */
   nodePath: string;
   property: string;
 }
 
-/** A signal connection, with tool-form node paths. */
 export interface SceneConnection {
   signal: string;
   from: string;
@@ -87,38 +57,24 @@ export interface SceneConnection {
   method: string;
 }
 
-/** What an operation asked to change, as far as a scene file is concerned. */
 export interface SceneChangeIntent {
   /** Tool-form node paths ("root/A", "Main/A", "A", "./A", "%A") the operation may rewrite as a whole. */
   touchedNodes: string[];
-  /** Tool-form node paths removed on purpose, with their subtrees. */
   deletedNodes: string[];
   /** Single properties the operation assigns. Everything else on those nodes is still compared. */
   touchedProperties?: TouchedProperty[];
-  /** Connections removed on purpose. */
   removedConnections?: SceneConnection[];
 }
 
 export interface SceneWriteIntent extends SceneChangeIntent {
-  /**
-   * Scene whose text before the operation is the baseline for `target`: the
-   * scene the operation loads, or for a file a save-as produced, the scene the
-   * copy was made from.
-   */
+  /** Scene whose pre-operation text is the baseline for `target`; for a save-as copy, the scene the copy was made from. */
   source: string;
-  /** File it writes. Equal to source unless save-as. */
   target: string;
-  /**
-   * True when the operation writes a new scene over whatever the path held
-   * (create_scene). The file is watched for having been written and is never
-   * compared: replacing it is the request.
-   */
+  /** The operation writes a new scene over whatever the path held (create_scene): never compared, since replacing it is the request. */
   replacesFile?: boolean;
 }
 
-/** What comparing one saved scene with its baseline found. */
 export interface SceneComparison {
-  /** One string per loss, uncapped; empty for a healthy save. */
   losses: string[];
   /** Why the pair could not be compared at all, or null when it was. */
   notChecked: string | null;
@@ -127,22 +83,15 @@ export interface SceneComparison {
 export interface SceneDiffOptions extends SceneChangeIntent {
   /** False for a save-as: the copy is a different file and gets no uid of its own. Default true. */
   compareSceneUid?: boolean;
-  /**
-   * Text of another scene of the project by its `res://` path, or null when it
-   * cannot be read. Used to tell an override that became redundant from one
-   * that was lost. Without it that question is answered "unknown".
-   */
+  /** Text of another project scene by `res://` path, or null; tells a redundant override from a lost one, and without it that is answered 'unknown'. */
   readScene?: (resPath: string) => string | null;
 }
 
 interface PropValue {
-  /** The value as written (a quoted string is shown with its quotes). */
   raw: string;
   /** `raw` with resource ids replaced by what they name, comparable across files. */
   norm: string;
-  /** `res://` paths of the external resources the value references. */
   exts: string[];
-  /** Ids of the inline resources the value references. */
   subs: string[];
 }
 
@@ -151,15 +100,10 @@ interface SceneNode {
   path: string;
   name: string;
   type: string | undefined;
-  /** True when the node line carries `instance=`. */
   hasInstance: boolean;
-  /** `res://` path the instance resolves to, when it does. */
   instancePath: string | undefined;
-  /** True when the node line carries `instance_placeholder=`. */
   isPlaceholder: boolean;
-  /** The scene path `instance_placeholder=` names. */
   placeholderPath: string | undefined;
-  /** True when the section stores `unique_name_in_owner = true`. */
   hasUniqueName: boolean;
   groups: string[];
   props: Map<string, PropValue>;
@@ -175,17 +119,12 @@ interface SceneModel {
   rootName: string;
   nodes: Map<string, SceneNode>;
   subs: Map<string, SubResource>;
-  /** File-form connection keys, see `connectionKey`. */
   connections: Map<string, SceneConnection>;
-  /** File-form paths of the instances an `[editable path="..."]` line names. */
   editable: Set<string>;
-  /** `res://` path -> uid, for the ext_resource lines that carry one. */
   extUids: Map<string, string>;
-  /** Every `res://` path an ext_resource line names. */
   extPaths: Set<string>;
 }
 
-/** A value on one line, cut to the display length. */
 function clip(text: string): string {
   const oneLine = text.replace(WHITESPACE_RUN_REGEX, ' ');
   return oneLine.length > MAX_VALUE_DISPLAY_CHARS
@@ -206,9 +145,7 @@ function readProps(
   for (const [key, raw] of header.rawProps) {
     const exts: string[] = [];
     const subs: string[] = [];
-    // Ids are renumbered by a save (`1_abc` becomes `1_x7k2p`), so a reference
-    // is compared by what it names: the path of an ext_resource, the type of
-    // an inline resource. A value can span lines, so line endings are folded too.
+    // A save renumbers ids (`1_abc` becomes `1_x7k2p`), so a reference is compared by what it names (ext_resource path, inline resource type); line endings are folded as a value can span lines.
     const norm = raw
       .replace(LINE_BREAK_REGEX, '\n')
       .replace(EXT_REF_REGEX, (_match, id: string) => {
@@ -229,7 +166,6 @@ function connectionKey(connection: SceneConnection): string {
   return [connection.signal, connection.from, connection.to, connection.method].join('\n');
 }
 
-/** The comparable shape of one text scene, or null when the text is not one. */
 function buildSceneModel(text: string): SceneModel | null {
   const scan = scanTscn(text);
   const first = scan.headers[0];
@@ -315,14 +251,7 @@ function buildSceneModel(text: string): SceneModel | null {
   return model;
 }
 
-/**
- * A tool-form node path as the file spells it. Mirrors `find_node_by_path` in
- * godot_operations.gd and the NodePath it hands the engine: "", ".", "root"
- * and the root's own name are the root, a leading "root" or root-name segment
- * is dropped, and "." segments ("./A", "A/./B") name the node they stand on.
- * A `%Name` segment is kept as written: what it names depends on the scene,
- * see `filePathCandidates`.
- */
+/** A tool-form node path as the file spells it; mirrors `find_node_by_path` in godot_operations.gd ("", ".", "root" and the root's name are the root; "./" segments are no-ops). A `%Name` segment is kept as written (see `filePathCandidates`). */
 export function toolPathToFilePath(toolPath: string, rootName: string): string {
   const path = toolPath.replace(/^\/+/, '').replace(/\/+$/, '');
   if (path === '' || path === ROOT_FILE_PATH || path === ROOT_TOOL_SEGMENT || path === rootName) {
@@ -336,17 +265,8 @@ export function toolPathToFilePath(toolPath: string, rootName: string): string {
   return named.length === 0 ? ROOT_FILE_PATH : named.join('/');
 }
 
-/**
- * The file-form paths a tool-form path can name in `model`. One path for every
- * spelling but `%Name`. A unique name is resolved against the model: the one
- * node called `Name` whose section stores `unique_name_in_owner = true`. When
- * the model cannot decide (no such node, or several: the flag can live in a
- * base or instanced scene), the answer depends on `guessUnresolved`. With it,
- * every node the spelling could name is returned, that is, every node whose
- * path ends with the named segments, so an intended property change is never
- * reported as a loss. Without it the answer is empty: a guess must never
- * exempt a whole subtree, which is what a deletion would make of it.
- */
+/** The file-form paths a tool-form path can name; only `%Name` is ambiguous (the unique-name flag can live in a base or instanced scene).
+ * Unresolved, `guessUnresolved` returns every node it could name so a change is never reported as a loss; without it none, since a guess must not exempt a whole deleted subtree. */
 function filePathCandidates(
   toolPath: string,
   model: SceneModel,
@@ -383,7 +303,6 @@ function filePathCandidates(
   return candidates;
 }
 
-/** A file-form path in the "root/..." form every node tool accepts. */
 function displayPath(filePath: string): string {
   return filePath === ROOT_FILE_PATH ? ROOT_TOOL_SEGMENT : `${ROOT_TOOL_SEGMENT}/${filePath}`;
 }
@@ -399,13 +318,11 @@ function parentOf(path: string): string | null {
   return slashAt === -1 ? ROOT_FILE_PATH : path.slice(0, slashAt);
 }
 
-/** `path` relative to `ancestor`, both file-form. */
 function relativeTo(path: string, ancestor: string): string {
   if (path === ancestor) return ROOT_FILE_PATH;
   return ancestor === ROOT_FILE_PATH ? path : path.slice(ancestor.length + 1);
 }
 
-/** The closest node at or above `path` that is an instance of another scene. */
 function nearestInstanceHolder(model: SceneModel, path: string): SceneNode | null {
   for (let at: string | null = path; at !== null; at = parentOf(at)) {
     const node = model.nodes.get(at);
@@ -418,10 +335,8 @@ type InheritedValue =
   | { kind: 'value'; norm: string }
   /** The scenes below do not set the key: the node gets its default there. */
   | { kind: 'not-stated' }
-  /** A scene in the chain could not be read as text; `against` is its path when one is known. */
   | { kind: 'unknown'; against: string | undefined };
 
-/** What the diff of one scene pair needs to answer "what would this node hold without the override?". */
 interface BaseLookup {
   readScene: ((resPath: string) => string | null) | undefined;
   models: Map<string, SceneModel | null>;
@@ -442,10 +357,6 @@ function baseModel(lookup: BaseLookup, resPath: string): SceneModel | null {
   return lookup.models.get(resPath) ?? null;
 }
 
-/**
- * The value `key` has on `path` in the scenes `model` instances or inherits,
- * that is, what the node holds once `model`'s own line for it is gone.
- */
 function inheritedValue(
   lookup: BaseLookup,
   model: SceneModel,
@@ -468,21 +379,13 @@ function inheritedValue(
   return inheritedValue(lookup, base, relPath, key, depth + 1);
 }
 
-/** What a reference-carrying value pointed at, for a loss item. */
 function describeRefs(model: SceneModel, exts: string[], subIds: string[]): string {
   const parts = [...exts];
   for (const id of subIds) parts.push(`an inline ${model.subs.get(id)?.type ?? 'resource'}`);
   return parts.join(', ');
 }
 
-/**
- * True when an external reference to `beforePath` in `beforeModel` and one to
- * `afterPath` in `afterModel` are the same resource: the same path, or two
- * paths that carry the same uid on their own side. The engine resolves a
- * reference by its uid and writes the current path on save, so a stale path
- * under an unchanged uid is canonicalization. A uid on one side only, or two
- * different uids, leaves the paths to decide.
- */
+/** True when two external references are the same resource: the same path, or the same uid on their own side. The engine resolves by uid and writes the current path on save, so a stale path under an unchanged uid is canonicalization. */
 function sameExternalRef(
   beforeModel: SceneModel,
   beforePath: string | undefined,
@@ -495,12 +398,7 @@ function sameExternalRef(
   return beforeUid !== undefined && beforeUid === afterModel.extUids.get(afterPath);
 }
 
-/**
- * The references `before` holds that `after` no longer does, described, or
- * null when all of them are still there. External references are matched by
- * uid when both sides carry one, else by path; inline ones by resource type,
- * since neither keeps its id.
- */
+/** The references `before` holds that `after` no longer does, or null. External ones match by uid when both sides carry one, else by path; inline ones by type, since neither keeps its id. */
 function lostRefs(
   beforeModel: SceneModel,
   before: PropValue,
@@ -530,16 +428,8 @@ interface DiffContext {
   failedScripts: ReadonlySet<string>;
 }
 
-/**
- * Compare one inline resource with its counterpart; returns the losses.
- *
- * Sub-resources: an inline resource has no stable identity (its id is
- * regenerated), so it is reached only through the property that references it
- * and compared by type. Inside it references are always compared. Plain keys
- * are compared only when the resource's script did not load, for the same
- * reason as on a node: a value equal to the resource's default is legitimately
- * not written back, while a script that failed takes every value it declares.
- */
+/** Compares one inline resource with its counterpart; reached only through the property that references it and compared by type, since its id is regenerated.
+ * Plain keys are compared only when its script did not load: a default-equal value is legitimately not written back, a failed script takes every value. */
 function compareInlineResource(
   context: DiffContext,
   label: string,
@@ -577,13 +467,7 @@ function compareInlineResource(
   return items;
 }
 
-/**
- * Compare the inline resources `before` references with the ones `after`
- * does, for a value that kept every reference. A value can hold several (a
- * dictionary of animations), and neither ids nor order identify them, so each
- * one is paired with the remaining resource of its type that it lost the least
- * against. A healthy save pairs every one with nothing lost.
- */
+/** Compares the inline resources a value references before and after; neither ids nor order identify them, so each is paired with the remaining resource of its type it lost least against. */
 function compareInlineRefs(
   context: DiffContext,
   label: string,
@@ -610,20 +494,13 @@ function compareInlineRefs(
   return items;
 }
 
-/** "1 stored override ... is" or "N stored overrides ... are". */
 function uncheckedOverridesItem(count: number, holderLabel: string, against: string): string {
   const subject = count === 1 ? '1 stored override' : `${count} stored overrides`;
   const verb = count === 1 ? 'is' : 'are';
   return `${subject} under ${holderLabel} ${verb} gone and could not be checked against ${against}`;
 }
 
-/**
- * Compare a scene's text before and after a save. `losses` holds what the file
- * lost that `intent` did not ask to change. `failedScripts` holds the `res://`
- * paths of scripts the engine reported it could not load during the save.
- * When either text is not a text scene nothing can be compared, and
- * `notChecked` says which side and why.
- */
+/** Compares a scene's text before and after a save; `losses` holds what `intent` did not ask to change, `failedScripts` the scripts the engine could not load. If either text is not a text scene, `notChecked` says which side and why. */
 export function compareSceneText(
   before: string,
   after: string,
@@ -639,11 +516,8 @@ export function compareSceneText(
   const items: string[] = [];
   const lookup: BaseLookup = { readScene: intent.readScene, models: new Map() };
   const toFile = (toolPath: string): string[] => filePathCandidates(toolPath, beforeModel, true);
-  // A deletion exempts its whole subtree, so it counts only where the path is
-  // known: a `%Name` this file cannot resolve exempts nothing, and the node it
-  // named is then reported as gone. The operation's own report names the node
-  // (`resolvedNodePath`, see `resolveIntentPaths`), so that is the rare case.
-  // The root cannot be deleted (the tool refuses), so a root entry exempts nothing.
+  // A deletion exempts its whole subtree, so it counts only where the path is known: an unresolvable `%Name` exempts nothing and the node is reported gone.
+  // The root cannot be deleted, so a root entry exempts nothing.
   const deleted = intent.deletedNodes
     .flatMap((toolPath) => filePathCandidates(toolPath, beforeModel, false))
     .filter((path) => path !== ROOT_FILE_PATH);
@@ -658,8 +532,7 @@ export function compareSceneText(
   }
   const isDeleted = (path: string): boolean =>
     deleted.some((ancestor) => isAtOrUnder(path, ancestor));
-  // Plain overrides that are gone while the scene they override could not be
-  // read: by instance and unreadable scene, counted and never guessed at.
+  // Plain overrides gone while the scene they override could not be read: counted, never guessed at.
   const unchecked = new Map<string, { holder: string; against: string; count: number }>();
 
   if (
@@ -674,10 +547,8 @@ export function compareSceneText(
     );
   }
 
-  // Subtrees already reported as gone. The override lines under a lost
-  // instance vanish with it, and listing each would bury the one cause. The
-  // root is never one of them: a scene that stopped being inherited still
-  // holds its nodes, written out, and they are compared as usual.
+  // Subtrees already reported gone: the override lines under a lost instance vanish with it, and listing each would bury the cause.
+  // Never the root: a scene that stopped being inherited still holds its nodes.
   const goneRoots: string[] = [];
   const isUnderGone = (path: string): boolean =>
     goneRoots.some((root) => path !== root && isAtOrUnder(path, root));
@@ -687,13 +558,9 @@ export function compareSceneText(
     const label = `"${displayPath(node.path)}"`;
     const nodeTouchedKeys = touchedKeys.get(node.path);
     const afterNode = afterModel.nodes.get(node.path);
-    // A node line with a type, an instance or a placeholder creates a node. A
-    // line with none of them (`[node name="Arm" parent="Unit" index="0"]`)
-    // only overrides a node another scene creates.
+    // A node line with a type, instance or placeholder creates a node; one with none (`[node name="Arm" parent="Unit" index="0"]`) only overrides a node another scene creates.
     const createsNode = node.type !== undefined || node.hasInstance || node.isPlaceholder;
-    // Properties on an override line, and on the line of an instance root, are
-    // overrides of another scene's values. For those the other scene can say
-    // whether a missing key was lost or had merely become redundant.
+    // Properties on an override line or an instance root override another scene's values; that scene says whether a missing key was lost or merely redundant.
     const holdsOverrides = node.type === undefined || node.hasInstance;
 
     const inheritedSame = (key: string, value: PropValue): boolean | 'unknown' => {
@@ -703,7 +570,6 @@ export function compareSceneText(
       }
       return 'unknown';
     };
-    // A plain override that is gone while the scene below could not be read.
     const countUnchecked = (key: string): void => {
       const inherited = inheritedValue(lookup, beforeModel, node.path, key, 0);
       const holder = nearestInstanceHolder(beforeModel, node.path)?.path ?? node.path;
@@ -721,17 +587,8 @@ export function compareSceneText(
         goneRoots.push(node.path);
         continue;
       }
-      // Override lines under instances: a line that disappears is a loss only
-      // if it changed the node. Scenes saved by earlier versions of this
-      // server pinned every inherited value into such lines, and a healthy
-      // save now drops them, so each key is checked against the scene it
-      // overrides: the same value there means the line was redundant. When
-      // that scene cannot be read, references are reported and plain values
-      // are counted (see `unchecked`), because a plain value cannot be told
-      // from a default.
-      // A line the operation assigned to is exempt the same way a surviving
-      // one is: setting an override back to the inherited value removes the
-      // line, and that is the request.
+      // A vanished override line is a loss only if it changed the node: earlier versions pinned every inherited value into such lines, so each key is checked against the scene it overrides (same value: redundant).
+      // Unreadable scene: references are reported, plain values counted (see `unchecked`), as a plain value cannot be told from a default. A line the operation assigned to is exempt.
       const lostOverrides: string[] = [];
       for (const [key, value] of node.props) {
         if (nodeTouchedKeys?.has(key)) continue;
@@ -767,8 +624,7 @@ export function compareSceneText(
       );
       if (node.path !== ROOT_FILE_PATH) goneRoots.push(node.path);
     }
-    // A placeholder that became a node or a full instance loads a scene the
-    // author had deferred, and one that names another scene is another node.
+    // A placeholder that became a node or full instance loads a scene the author had deferred; one naming another scene is another node.
     if (
       node.isPlaceholder &&
       (!afterNode.isPlaceholder || afterNode.placeholderPath !== node.placeholderPath)
@@ -777,9 +633,7 @@ export function compareSceneText(
         `${label} is no longer a placeholder for ${node.placeholderPath ?? 'another scene'}`,
       );
     }
-    // Type: compared only when both lines state one. Scenes saved by earlier
-    // versions of this server carry a redundant `type=` beside `instance=`,
-    // which a healthy save removes.
+    // Type is compared only when both lines state one: earlier versions wrote a redundant `type=` beside `instance=` that a healthy save removes.
     if (node.type !== undefined && afterNode.type !== undefined && node.type !== afterNode.type) {
       items.push(`${label} changed type from ${node.type} to ${afterNode.type}`);
     }
@@ -825,17 +679,13 @@ export function compareSceneText(
 
     if (missingPlainKeys.length === 0) continue;
     if (scriptInTrouble) {
-      // Plain keys on a node that creates itself: a value equal to the class
-      // or script default is legitimately not written back, and the text
-      // cannot tell that from a loss. The exception is a node whose script did
-      // not load: the save then drops every value the script declares.
+      // Plain keys on a self-creating node: a default-equal value is legitimately not written back and the text cannot tell it from a loss,
+      // except when the node's script did not load (it drops every value it declares).
       items.push(
         `${label} lost stored values of ${scriptPath ?? 'its script'}: ${missingPlainKeys.join(', ')}`,
       );
     } else if (holdsOverrides && nodeTouchedKeys === undefined) {
-      // Assigning one property can clear another on the same node (setting
-      // rotation_degrees to 0 removes `rotation`), so a node the operation
-      // assigned to is left out of this rule.
+      // Assigning one property can clear another (rotation_degrees to 0 removes `rotation`), so a node the operation assigned to is left out of this rule.
       const lostOverrides: string[] = [];
       for (const key of missingPlainKeys) {
         const same = inheritedSame(key, node.props.get(key)!);
@@ -856,9 +706,7 @@ export function compareSceneText(
     items.push(uncheckedOverridesItem(count, `"${displayPath(holder)}"`, against));
   }
 
-  // Editable instances: the overrides of an instance's children load only
-  // while its `[editable]` line is there. The line going with the instance
-  // itself is already covered by what was said about the instance.
+  // Editable instances: an instance's children overrides load only while its `[editable]` line is there; the line going with the instance itself is already covered.
   for (const path of beforeModel.editable) {
     if (afterModel.editable.has(path) || isDeleted(path)) continue;
     if (goneRoots.some((root) => isAtOrUnder(path, root))) continue;
@@ -867,9 +715,7 @@ export function compareSceneText(
     );
   }
 
-  // Connections: identified by signal, source, target and method. A healthy
-  // save keeps every one of them, so a missing line is a loss unless the
-  // operation removed it or deleted one of its ends.
+  // Connections are identified by signal, source, target and method; a missing line is a loss unless the operation removed it or deleted one of its ends.
   const removed = new Set(
     (intent.removedConnections ?? []).flatMap((connection) =>
       toFile(connection.from).flatMap((from) =>
@@ -915,7 +761,6 @@ export function capLossItems(items: string[]): string[] {
   ];
 }
 
-/** The scripts the engine said it could not load, by `res://` path. */
 export function failedScriptsIn(stderr: string): Set<string> {
   return new Set(Array.from(stderr.matchAll(FAILED_SCRIPT_REGEX), (match) => match[1] ?? ''));
 }
@@ -931,12 +776,7 @@ function stringField(record: Record<string, unknown>, camel: string, snake: stri
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
-/**
- * What a `set_node_properties` updates array asks to change. Assigning
- * `script` replaces what the node stores, so that node is touched as a whole;
- * any other update touches the one property it names. Reads both key
- * spellings and skips items that are not well formed.
- */
+/** What a `set_node_properties` updates array asks to change: assigning `script` replaces what the node stores, so the node is touched whole; any other update touches the one property. Reads both key spellings. */
 export function updateTouches(updates: unknown): {
   touchedNodes: string[];
   touchedProperties: TouchedProperty[];
@@ -955,12 +795,7 @@ export function updateTouches(updates: unknown): {
   return { touchedNodes, touchedProperties };
 }
 
-/**
- * What a finished `set_node_properties` or `delete_nodes` run says about the
- * node paths it was given: where each one led (`resolvedNodePath`, the
- * `root/...` path of the node, which a `%Name` path does not show) and whether
- * its entry succeeded. Null when `results` is not a results array.
- */
+/** What a finished `set_node_properties` or `delete_nodes` run says about its node paths: where each led (`resolvedNodePath`, which a `%Name` path does not show) and whether its entry succeeded; null if `results` is not an array. */
 function readResolvedPaths(
   results: unknown,
 ): { resolved: Map<string, string>; succeeded: Map<string, boolean> } | null {
@@ -979,13 +814,7 @@ function readResolvedPaths(
   return { resolved, succeeded };
 }
 
-/**
- * `intents` restated from the operation's own report. Every node path the
- * report resolved is replaced by the path of the node it led to, so a `%Name`
- * path no longer has to be guessed at. A deletion the report does not call a
- * success is dropped: nothing was deleted for it, so nothing is exempt.
- * A payload with no `results` array leaves the intents as they are.
- */
+/** `intents` restated from the operation's report: each resolved path is replaced by the node it led to (so `%Name` need not be guessed), and a deletion not reported as a success is dropped, since nothing was deleted. */
 export function resolveIntentPaths(
   intents: SceneWriteIntent[],
   payload: Record<string, unknown>,
@@ -1007,7 +836,6 @@ export function resolveIntentPaths(
   }));
 }
 
-/** The `sceneWrites` of an operation that writes one scene at the path it names. */
 export function inPlaceSceneWrite(
   scenePath: string,
   intent: Partial<Omit<SceneWriteIntent, 'source' | 'target'>> = {},
@@ -1015,19 +843,12 @@ export function inPlaceSceneWrite(
   return [{ source: scenePath, target: scenePath, touchedNodes: [], deletedNodes: [], ...intent }];
 }
 
-/** The one property `load_sprite` assigns. */
 export function loadSpriteTouch(nodePath: string): TouchedProperty {
   return { nodePath, property: TEXTURE_KEY };
 }
 
-/** One scene file of a project, by identity rather than by spelling. */
 interface SceneFileRef {
-  /**
-   * The same for every spelling of one file (`fileIdentityKey`): `main.tscn`,
-   * `./main.tscn` and `res://main.tscn` are one file everywhere, and
-   * `Main.tscn` is that file too only where the platform's file system says
-   * so. On a case-sensitive one it is another file with its own entry.
-   */
+  /** The same for every spelling of one file (`fileIdentityKey`); `Main.tscn` is `main.tscn` only where the file system is case-insensitive. */
   key: string;
   relPath: string;
   absPath: string;
@@ -1057,23 +878,8 @@ function emptyIntent(source: string, target: string): FullSceneWriteIntent {
   };
 }
 
-/**
- * The scene files a `batch_scene_operations` call may write, with what it asks
- * to change in each: one intent per file, whichever way the items spell it.
- *
- * A file's intent follows the file's content. An operation on a scene adds to
- * that scene's intent. A `save` item with a `newPath` makes the target a copy
- * of the source as the batch has changed it so far, so the target's baseline
- * becomes the source's baseline and its intent a copy of the source's; the
- * save-as wins over whatever the batch did to the target before, and later
- * operations on the target add to the copy's intent, not to the source's.
- *
- * `results` is the `results` array of the finished batch, when there is one.
- * With it, a save-as that did not succeed moves no baseline, since the target
- * was not replaced, and the node paths of a `set_node_properties` item are
- * replaced by the nodes its `updates` report says they led to. Without it every
- * save-as is taken to have succeeded and the paths stand as requested.
- */
+/** The scene files a `batch_scene_operations` call may write, one intent per file whichever way items spell it. A `save` with `newPath` makes the target a copy of the source as changed so far (baseline and intent copied; later operations add to the copy).
+ * With `results`, a failed save-as moves no baseline and `set_node_properties` paths become the nodes `updates` reports; without it every save-as is assumed to succeed. */
 export function batchSceneWrites(
   operations: unknown[],
   projectPath: string,
@@ -1131,7 +937,6 @@ interface GuardedFile extends SceneFileRef {
 }
 
 interface GuardedWrite extends Required<SceneChangeIntent> {
-  /** `SceneFileRef.key` of the baseline scene and of the file written. */
   sourceKey: string;
   targetKey: string;
   replacesFile: boolean;
@@ -1140,31 +945,19 @@ interface GuardedWrite extends Required<SceneChangeIntent> {
 export interface SceneGuard {
   projectPath: string;
   runId: string;
-  /** By `SceneFileRef.key`. */
   files: Map<string, GuardedFile>;
-  /** By source and target key. */
   writes: Map<string, GuardedWrite>;
 }
 
-/** A scene that was written and could not be compared. */
 export interface UncheckedSave {
-  /** `SceneFileRef.key` of the file: the same for every spelling of its path. */
   fileKey: string;
   warning: string;
 }
 
-/** What `finishSceneGuard` found. */
 export interface SceneGuardOutcome {
-  /** Warnings to lead the payload with: what each compared scene lost. */
   warnings: string[];
-  /**
-   * The scenes that were written and could not be compared, one per file.
-   * Kept apart from `warnings` because this is a fact about the file (it is a
-   * binary scene), true on every save of it: the caller decides how often to
-   * say it.
-   */
+  /** Scenes written but not comparable, kept apart from `warnings` because it is a fact about the file (a binary scene) true on every save: the caller decides how often to say it. */
   unchecked: UncheckedSave[];
-  /** True when at least one guarded file is new or holds other bytes than before the operation. */
   wroteScene: boolean;
 }
 
@@ -1172,12 +965,7 @@ function isTextScenePath(relPath: string): boolean {
   return relPath.toLowerCase().endsWith(TEXT_SCENE_EXTENSION);
 }
 
-/**
- * Fold `intents` into `guard.writes`. With `readFiles`, a scene the guard has
- * not met is read now, which is only right before the operation runs; without
- * it an intent naming such a scene is left out, because its text before the
- * operation is no longer there to read.
- */
+/** Fold `intents` into `guard.writes`. With `readFiles`, an unmet scene is read now (only right before the operation runs); without it such an intent is left out, as its pre-operation text is gone. */
 function recordWrites(guard: SceneGuard, intents: SceneWriteIntent[], readFiles: boolean): void {
   for (const intent of intents) {
     const source = sceneFileRef(guard.projectPath, intent.source);
@@ -1213,11 +1001,7 @@ function recordWrites(guard: SceneGuard, intents: SceneWriteIntent[], readFiles:
   }
 }
 
-/**
- * Read the scenes an operation is about to write, before it runs. Writes
- * nothing and never throws: a scene that does not resolve inside the project
- * is simply not guarded, and one that cannot be read has no text to compare.
- */
+/** Reads the scenes an operation is about to write, before it runs. Never throws: an unresolvable scene is not guarded, an unreadable one has no text to compare. */
 export function beginSceneGuard(projectPath: string, intents: SceneWriteIntent[]): SceneGuard {
   const guard: SceneGuard = {
     projectPath,
@@ -1233,11 +1017,7 @@ export function beginSceneGuard(projectPath: string, intents: SceneWriteIntent[]
   return guard;
 }
 
-/**
- * Replace what the guard takes the operation to have asked for, once the
- * operation has run and its own report says more than the request did. The
- * scenes read before the run stay as they are. Never throws.
- */
+/** Replaces what the guard takes the operation to have asked for once its own report says more than the request; scenes read before the run stay. Never throws. */
 export function restateSceneGuard(guard: SceneGuard, intents: SceneWriteIntent[]): void {
   const previous = guard.writes;
   try {
@@ -1249,23 +1029,13 @@ export function restateSceneGuard(guard: SceneGuard, intents: SceneWriteIntent[]
   }
 }
 
-/**
- * Compare every guarded scene with what is on disk now. Returns the warnings
- * to lead the payload with and whether any guarded file was written.
- *
- * Per scene that lost content: one lead line, then the capped items, and the
- * pre-save file under `.mcp/godot-runtime/scene-backups/<run id>/`. Per scene
- * that was written and could not be compared: one `unchecked` entry saying so,
- * and no backup. A scene the operation left byte-identical adds nothing. Never
- * throws.
- */
+/** Compares every guarded scene with disk. A scene that lost content gets one lead line, the capped items and a pre-save backup under `.mcp/godot-runtime/scene-backups/<run id>/` (never pruned here);
+ * one written but not comparable gets an `unchecked` entry and no backup. Never throws. */
 export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardOutcome {
   const outcome: SceneGuardOutcome = { warnings: [], unchecked: [], wroteScene: false };
   try {
     const failedScripts = failedScriptsIn(stderr);
-    // Another scene of the project, for the redundant-override question: the
-    // text it had before the operation when this operation also wrote it,
-    // because that is the scene the compared file was authored against.
+    // Another project scene for the redundant-override question: its text before the operation if this operation also wrote it, since the compared file was authored against that.
     const readScene = (resPath: string): string | null => {
       const scene = sceneFileRef(guard.projectPath, resPath);
       if (scene === null || !isTextScenePath(scene.relPath)) return null;
@@ -1277,7 +1047,6 @@ export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardO
         return null;
       }
     };
-    /** Backup location of each target already written in this call, or the reason it failed. */
     const backups = new Map<string, string>();
 
     for (const write of guard.writes.values()) {
@@ -1339,7 +1108,6 @@ export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardO
   return outcome;
 }
 
-/** Write one pre-save file. Returns where it is, or a note saying why it is not there. */
 function writeBackup(guard: SceneGuard, sceneRelPath: string, content: Buffer): string {
   const location = sceneBackupRelPath(guard.runId, sceneRelPath);
   try {

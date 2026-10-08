@@ -1,42 +1,5 @@
-/**
- * The one reader of `project.godot`. Text parsing, no Godot process.
- *
- * Two layers:
- *  - `scanProjectFile` reads the file into statements (`key=value` under a
- *    section), section headers and the lines it could not read, each with the
- *    line indexes it covers, so a caller that edits the file can find the exact
- *    lines a statement occupies.
- *  - `readProjectSettings` folds that scan into the `{ section: { key: value } }`
- *    shape `get_project_settings` returns.
- *
- * The reader does not reproduce the engine's parser, which reads the file as a
- * stream of tokens. It accepts the canonical form Godot itself writes and
- * flags everything else:
- *  - a blank line, and a line whose first character is `;` (a comment);
- *  - a header alone on its line: `[name]`, then only blanks or a `;` comment;
- *  - one statement per line, `key=value`: an unquoted key with no blank,
- *    quote, bracket, `=` or `;` in it, or a quoted key that needs its quotes
- *    (Godot quotes a key holding one of those characters); then exactly one
- *    complete value starting on that line, then only blanks or a `;` comment.
- *    A value may span lines inside a string or inside brackets. Blanks around
- *    the `=` are accepted too: the engine drops them, so they change nothing.
- * Anything else (two statements on a line, a statement after a header, blanks
- * in a key, a `#` line, a value that starts on a later line or is not one
- * whole value) is listed in `nonCanonical` with its line. Such a line is still
- * read as well as it can be, but the engine may read it differently, so a
- * caller that decides something from the file must treat a non-empty
- * `nonCanonical` as "this file could not be read reliably".
- *
- * A setting's identity is its full path, `section/key`, as it is for the
- * engine: `[application]` + `run/main_scene`, `[application/run]` +
- * `main_scene` and a top-level `application/run/main_scene` are one setting,
- * and the last assignment in the file is the one the engine keeps. Every
- * lookup here answers by path (`findSetting`, `findSettingByPath`); a caller
- * never filters statements by section name.
- *
- * This file may import from `scene-parsing.ts`; that file must never import
- * this one back.
- */
+/** The one reader of `project.godot`: accepts the canonical form Godot writes and lists anything else in `nonCanonical`; a caller deciding from the file must treat a non-empty list as 'not read reliably'. A setting's identity is its full path (`section/key`), the last assignment wins, and lookups go by path.
+ * May import from `scene-parsing.ts`; that file must never import this one back. */
 
 import { readQuoted } from './scene-parsing.js';
 
@@ -47,13 +10,11 @@ export interface ParsedSettings {
   warnings: string[];
 }
 
-/** One `key=value` statement and the lines it occupies. */
 export interface ProjectStatement {
   section: string;
   key: string;
   /** The setting the engine assigns: `section/key`, or `key` alone before any header. */
   path: string;
-  /** The value text as written, trimmed, with comments left out. */
   raw: string;
   /** The converted value; null when the value is empty. */
   value: SettingsValue;
@@ -68,24 +29,19 @@ export interface ProjectStatement {
   endLine: number;
 }
 
-/** One section header and the lines that belong to it. */
 export interface ProjectSection {
   name: string;
   /** 0-based index into `content.split('\n')`. */
   headerLine: number;
   /** Index of the next header line, or the line count; exclusive. */
   endLine: number;
-  /** True when a comment follows the closing bracket on the header line. */
   headerHasComment: boolean;
 }
 
-/** A line that is not in the form Godot writes, so the engine may read it differently. */
 export interface NonCanonicalStatement {
-  /** The section the reader was in when it met the line. */
   section: string;
   /** 0-based index into `content.split('\n')`; the first line of a statement that spans several. */
   line: number;
-  /** The line, trimmed. */
   text: string;
   /** What is not canonical about it, worded to stand in parentheses after the line number. */
   reason: string;
@@ -96,12 +52,8 @@ export interface NonCanonicalStatement {
 export interface ProjectFileScan {
   statements: ProjectStatement[];
   sections: ProjectSection[];
-  /** Lines that are neither blank, a comment, a header nor a statement; `text` is trimmed. */
   unparsed: Array<{ section: string; line: number; text: string }>;
-  /**
-   * Every line that is not in the canonical form, in file order. Empty for a
-   * file Godot wrote. Each `unparsed` line is in here too.
-   */
+  /** Every line not in canonical form, in file order; empty for a file Godot wrote. */
   nonCanonical: NonCanonicalStatement[];
 }
 
@@ -118,11 +70,7 @@ const REASON_KEY = 'the key is not written the way Godot writes one';
 const REASON_NO_VALUE = 'no value follows the = on its line';
 const REASON_VALUE = 'the value is not one complete value with nothing after it';
 
-/**
- * A header as Godot writes it, on a trimmed line: `[name]`, then only blanks or
- * a comment. The name is the raw first segment of a setting path, so it may hold
- * a blank (`[My Addon]` for `My Addon/enabled`); it may not start with one.
- */
+/** A header as Godot writes it: `[name]`, then only blanks or a comment; the name may hold a blank (`[My Addon]`) but not start with one. */
 const CANONICAL_HEADER_REGEX = /^\[(?=[^\s[\]"=;#\\])[^\r\n[\]"=;#\\]+\][ \t\r]*(?:;.*)?$/;
 /** Characters that make Godot quote a key when it writes one; so does a blank or control character. */
 const KEY_QUOTING_CHARACTERS: ReadonlySet<string> = new Set(['=', '"', ';', '[', ']']);
@@ -171,10 +119,7 @@ const NUMBER_VALUE_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 /** Outside a string, starts a comment that runs to the end of the line. */
 const COMMENT_START = ';';
 
-/**
- * The section a statement line opens, or null when the line is not a header.
- * A comment may follow the closing bracket, as Godot's own parser allows.
- */
+/** The section a statement line opens, or null; a comment may follow the bracket, as Godot's parser allows. */
 function sectionNameOf(line: string): string | null {
   const commentAt = line.indexOf(COMMENT_START);
   if (commentAt !== -1) {
@@ -184,12 +129,7 @@ function sectionNameOf(line: string): string | null {
   return SECTION_LINE_REGEX.test(line) ? line.slice(1, -1).trim() : null;
 }
 
-/**
- * True when a bracketed line can only be a section header: its content is a
- * name and not a value. `[2]`, `[1.5]` and `[true]` are one-element arrays, so
- * inside a multi-line value they are part of it; `[autoload]` is not a value
- * in any position.
- */
+/** True when a bracketed line can only be a section header: `[2]`, `[1.5]` and `[true]` are one-element arrays and part of a multi-line value, while `[autoload]` is not a value in any position. */
 function isSectionOnlyHeader(line: string): boolean {
   const name = sectionNameOf(line);
   return (
@@ -200,32 +140,18 @@ function isSectionOnlyHeader(line: string): boolean {
   );
 }
 
-/** The setting path the engine assigns for `key` written under `section`. */
 export function settingPath(section: string, key: string): string {
   return section === GLOBAL_SECTION ? key : `${section}/${key}`;
 }
 
 interface RawValue {
   raw: string;
-  /** Index of the line break that ended the value, or the content length. */
   end: number;
   unterminated: boolean;
 }
 
-/**
- * Read one value starting at `start` (just after the `=`). Quoted strings keep
- * their backslash escapes and may span lines; `{ [ (` depth is tracked outside
- * strings, and the value ends at the first line break at depth zero outside a
- * string. While inside brackets, a following line that can only be a section
- * header (`isSectionOnlyHeader`) ends the value as unterminated, so a
- * malformed file cannot swallow the rest of it; a bracketed line that is a
- * value, such as `[2]` inside an array, is part of the value.
- * A `;` outside a string starts a comment that runs to the end of its line, as
- * it does for Godot's own parser: the comment is left out of the value, and a
- * quote or bracket inside it opens nothing. `stopAtHeaders: false` is for a
- * value already known to be balanced (`canonicalValueEnd`), which is read to
- * its own end whatever its lines look like.
- */
+/** Reads one value starting just after the `=`: quoted strings keep escapes and may span lines, `{ [ (` depth is tracked outside strings, and the value ends at the first depth-zero line break. Inside brackets a following line that can only be a section header ends the value as unterminated, so a malformed file cannot swallow the rest.
+ * A `;` outside a string starts a comment, left out of the value. `stopAtHeaders: false` is for a value already known balanced (`canonicalValueEnd`). */
 function readRawValue(content: string, start: number, stopAtHeaders = true): RawValue {
   const length = content.length;
   let depth = 0;
@@ -271,15 +197,7 @@ function readRawValue(content: string, start: number, stopAtHeaders = true): Raw
   return { raw: valueUpTo(length), end: length, unterminated: inString || depth > 0 };
 }
 
-/**
- * Where the value of a statement whose `=` ends its line starts, or -1 when
- * no value follows. Godot skips blanks, line breaks and comments before a
- * value, so `Key=` with the value on a later line is one statement. What
- * follows is taken as that value only when it can start one: a string, a
- * number, a dictionary, an array, a bare word such as `true`, or a constructor
- * (`Vector2(`, `Array[`). The next statement (`other/key=`), a section header
- * and the end of the file are not values, and the statement is left empty.
- */
+/** Where the value of a statement whose `=` ends its line starts, or -1: Godot skips blanks, breaks and comments before a value, so `Key=` with the value on a later line is one statement, but the next statement, a header or end of file is not a value. */
 function findDeferredValueStart(content: string, from: number): number {
   const length = content.length;
   let i = from;
@@ -301,7 +219,6 @@ function findDeferredValueStart(content: string, from: number): number {
 
   const lineEnd = content.indexOf('\n', i);
   const rest = content.slice(i, lineEnd === -1 ? length : lineEnd);
-  /** True when nothing but blanks or a comment follows the first `tokenLength` characters. */
   const endsToken = (tokenLength: number): boolean => {
     const after = rest.slice(tokenLength).trim();
     return after === '' || after.startsWith(COMMENT_START);
@@ -336,7 +253,6 @@ function keyNeedsQuoting(key: string): boolean {
   return false;
 }
 
-/** True when `text` is a key Godot writes without quotes. */
 function isCanonicalUnquotedKey(text: string): boolean {
   return text !== '' && !text.startsWith(HASH) && !keyNeedsQuoting(text);
 }
@@ -351,11 +267,7 @@ function stringEnd(content: string, quoteAt: number): number {
   return -1;
 }
 
-/**
- * Index just past the bracket that closes the one at `openAt`, or -1 when the
- * file ends first. Strings and `;` comments inside are skipped, as
- * `readRawValue` skips them.
- */
+/** Index just past the bracket closing the one at `openAt`, or -1; strings and `;` comments inside are skipped as `readRawValue` skips them. */
 function balancedEnd(content: string, openAt: number): number {
   let depth = 0;
   let i = openAt;
@@ -381,13 +293,7 @@ function balancedEnd(content: string, openAt: number): number {
   return -1;
 }
 
-/**
- * Index just past the one value that starts at `start`, or -1 when what is
- * there is not a value in a form Godot writes: a string (plain, `&"x"`,
- * `^"x"`), a number, a dictionary or array, a constructor (`Vector2(...)`,
- * `Array[int]([...])`), or one of the bare words in `VALUE_BARE_WORDS`. The
- * inside of brackets is only balanced, not checked.
- */
+/** Index just past the one value at `start`, or -1 when it is not a form Godot writes; the inside of brackets is only balanced, not checked. */
 function oneValueEnd(content: string, start: number): number {
   const ch = content[start];
   if (ch === undefined) return -1;
@@ -419,12 +325,7 @@ function oneValueEnd(content: string, start: number): number {
   return number === null ? -1 : start + number[0].length;
 }
 
-/**
- * Where a canonical value that follows the `=` at `start - 1` ends: the index
- * of the line break after it, or the content length. -1 when the text is not
- * exactly one value that starts on this line and is followed, on its last
- * line, by nothing but blanks or a `;` comment.
- */
+/** Where a canonical value after the `=` ends (the line break after it), or -1 unless it is exactly one value starting on this line followed only by blanks or a `;` comment. */
 function canonicalValueEnd(content: string, start: number): number {
   let i = start;
   while (content[i] === ' ' || content[i] === '\t') i++;
@@ -438,21 +339,13 @@ function canonicalValueEnd(content: string, start: number): number {
   return lineEnd === -1 ? content.length : lineEnd;
 }
 
-/** The key of a statement line and where its `=` sits. */
 interface StatementKey {
   key: string;
-  /** Index of the `=` in the line. */
   equalsAt: number;
   canonical: boolean;
 }
 
-/**
- * Read the key of a statement line, or null when the line assigns nothing.
- * A quoted key directly followed by `=` is read as the engine reads it and is
- * canonical only when Godot would have quoted it; any other line is split at
- * its first `=`, and the key is canonical when Godot writes it without quotes.
- * Blanks between the key and the `=` are not part of the key.
- */
+/** Reads the key of a statement line, or null. A quoted key directly followed by `=` is read as the engine reads it and is canonical only if Godot would have quoted it; any other line splits at its first `=`. */
 function readStatementKey(rawLine: string): StatementKey | null {
   const keyStart = rawLine.length - rawLine.trimStart().length;
   if (rawLine[keyStart] === QUOTE) {
@@ -473,11 +366,7 @@ function readStatementKey(rawLine: string): StatementKey | null {
   return { key, equalsAt, canonical: isCanonicalUnquotedKey(key) };
 }
 
-/**
- * Convert a trimmed, non-empty raw value. A lone quoted string is unescaped;
- * `true`, `false` and plain numbers are typed; everything else (constructors
- * such as `PackedStringArray(...)`, arrays, dictionaries) stays its raw text.
- */
+/** Converts a trimmed raw value: a lone quoted string is unescaped, `true`/`false`/numbers are typed, everything else stays raw text. */
 function convertSettingsValue(raw: string): SettingsValue {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
@@ -496,13 +385,7 @@ function countLineBreaks(content: string, from: number, to: number): number {
   return count;
 }
 
-/**
- * Read `project.godot` text into statements, sections, unparsed lines and the
- * lines that are not in canonical form. Line indexes are counted in `\n` as
- * the read position advances, so they index `content.split('\n')` whatever the
- * file's line endings are, and a value that spans lines reports every line it
- * covers.
- */
+/** Reads `project.godot` text into statements, sections, unparsed and non-canonical lines. Line indexes count `\n` as the read advances, so they index `content.split('\n')` whatever the line endings, and a multi-line value reports every line it covers. */
 export function scanProjectFile(content: string): ProjectFileScan {
   const statements: ProjectStatement[] = [];
   const sections: ProjectSection[] = [];
@@ -595,12 +478,7 @@ export function scanProjectFile(content: string): ProjectFileScan {
   return { statements, sections, unparsed, nonCanonical };
 }
 
-/**
- * One sentence naming the lines of `project.godot` that are not in the form
- * Godot writes, or null when there are none. The first
- * `NON_CANONICAL_LINES_SHOWN_MAX` are named with their 1-based line number and
- * what is wrong with them.
- */
+/** One sentence naming the non-canonical lines (the first `NON_CANONICAL_LINES_SHOWN_MAX`, with 1-based line numbers), or null. */
 export function describeNonCanonical(scan: ProjectFileScan): string | null {
   const total = scan.nonCanonical.length;
   if (total === 0) return null;
@@ -611,11 +489,7 @@ export function describeNonCanonical(scan: ProjectFileScan): string | null {
   return `project.godot has ${total} line(s) that are not in the form Godot writes, so the engine may read them differently from what is reported here: ${shown.join('; ')}`;
 }
 
-/**
- * The statement that assigns the setting at `path` (`application/run/main_scene`),
- * or undefined. However the file spells the setting, the LAST statement that
- * assigns it is returned: the one the engine keeps.
- */
+/** The statement assigning the setting at `path`, or undefined; however the file spells it, the LAST assignment is returned, the one the engine keeps. */
 export function findSettingByPath(
   scan: ProjectFileScan,
   path: string,
@@ -627,11 +501,7 @@ export function findSettingByPath(
   return undefined;
 }
 
-/**
- * The statement that sets `key` of `section`, or undefined. The lookup is by
- * the setting's full path, so it also finds the setting written under another
- * section split or at the top level; see `findSettingByPath`.
- */
+/** The statement that sets `key` of `section`, or undefined; found by the setting's full path, so another section split or the top level also matches. */
 export function findSetting(
   scan: ProjectFileScan,
   section: string,
@@ -640,14 +510,8 @@ export function findSetting(
   return findSettingByPath(scan, settingPath(section, key));
 }
 
-/**
- * Parse `project.godot` text into `{ [section]: { [key]: value } }`, with the
- * warnings a reader needs to trust it: unterminated and empty values, the
- * lines that are not in the form Godot writes (`describeNonCanonical`), and a
- * setting assigned under more than one spelling. Only the assignment the engine keeps is listed for such a setting,
- * under the section it is written in. Sections and keys are held on
- * prototype-free objects, so a `[__proto__]` section is an ordinary entry.
- */
+/** Parses `project.godot` text into `{ [section]: { [key]: value } }` with the warnings a reader needs to trust it (unterminated and empty values, non-canonical lines, a setting under several spellings, listing only the assignment the engine keeps).
+ * Held on prototype-free objects, so a `[__proto__]` section is an ordinary entry. */
 export function readProjectSettings(content: string): ParsedSettings {
   const scan = scanProjectFile(content);
   const settings: ParsedSettings['settings'] = Object.create(null);

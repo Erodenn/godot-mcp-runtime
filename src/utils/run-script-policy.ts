@@ -1,25 +1,4 @@
-/**
- * Declarative policy table + evaluator for run_script / run_project security
- * gating. The rule catalogue here is the single auditable surface — see
- * `docs/security.md` for the rationale on each tier assignment.
- *
- * This is a best-effort filter, not a sound one and not a sandbox: GDScript
- * is Turing-complete and reflective, so no tokenizer-level rule table can be
- * complete. It catches the obvious, unobfuscated dangerous primitive; it does
- * not and cannot defend against an adversary who reads this file (it's open
- * source) and constructs a script the rules don't happen to match. See
- * `docs/security.md` "What this does NOT do" for the specific structural
- * gaps (identifier aliasing/dataflow, scripts in binary resources, etc.).
- *
- * Three tiers:
- *  - Tier 1 (hard_block): server refuses; bridge never sees the script.
- *  - Tier 2 (elicit_required): server asks client/user; strict mode promotes
- *    these to Tier 1.
- *  - Tier 3 (warn): executes, appended to the response `warnings` array.
- *
- * The evaluator is pure — no I/O, no client coupling. Handlers integrate the
- * decision with the elicitor and audit sidecar.
- */
+/** Declarative policy table and evaluator for run_script / run_project gating: a best-effort filter, not a sandbox (see `docs/security.md`, 'What this does NOT do'). */
 
 import { decodeStringLiteral, tokenize, type Token } from './gdscript-scanner.js';
 
@@ -39,125 +18,41 @@ export interface PolicyMatch {
 
 export interface PolicyDecision {
   decision: Decision;
-  /**
-   * Highest tier among matches AFTER strict-mode promotion. `null` when no
-   * rule matched (decision === 'ok').
-   */
+  /** Highest tier among matches after strict-mode promotion; null when nothing matched. */
   effectiveTier: Tier | null;
   matches: PolicyMatch[];
-  /** True when strict mode rewrote one or more Tier 2 matches to Tier 1. */
   promotedByStrict: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Rule shape
-// ---------------------------------------------------------------------------
-
-/**
- * A rule matches when the tokenizer emits a `memberChain` whose `chain`
- * array starts with `chain` (exact prefix match). `argumentKind` may further
- * narrow the match by classifying the call's *whole* first argument — used
- * to distinguish `load("res://foo")` (literal, Tier 3) from `load(some_var)`
- * or `load("res://" + evil)` (non-literal, Tier 1). See
- * `classifyFirstArgument` — classification looks at everything up to the
- * next top-level `,` or `)`, not just the first token, so `"a" + b` is
- * correctly non-literal rather than mistaken for the literal `"a"`.
- */
+/** A rule matches when a `memberChain` starts with `chain`; `argumentKind` classifies the call's whole first argument, so `"a" + b` is non-literal, not the literal `"a"`. */
 interface PolicyRule {
   id: string;
   tier: Tier;
-  /** Member chain that must appear as a prefix. e.g. ['OS','execute']. */
   chain: readonly string[];
-  /**
-   * Optional: require the call's whole first argument to classify as
-   * 'literal' (a lone string token) or 'nonliteral' (anything else — an
-   * identifier, an expression, multiple tokens). A no-argument call
-   * ('none') never matches either kind. If absent, any context matches.
-   */
+  /** A no-argument call ('none') never matches either kind; absent means any context matches. */
   argumentKind?: 'literal' | 'nonliteral';
-  /**
-   * Optional: also fire when the chain appears as a bare identifier (e.g.
-   * `load(...)` rather than `Foo.load(...)`). Used for the global functions
-   * `load`, `preload`, `str_to_var`, `bytes_to_var_with_objects` — and,
-   * combined with `matchLastSegment` below, for an instance-method
-   * primitive whose receiver expression contains a call
-   * (`tex.get_image().save_png(p)`), which the scanner cannot chain at all
-   * (a call always breaks chain-building — see gdscript-scanner.ts), so the
-   * method surfaces as a bare `identifier` token with zero receiver
-   * context. Only set this on a rule whose bare method name is distinctive
-   * enough to be safe with no receiver information whatsoever — the same
-   * bar `matchLastSegment` alone already applies, just stricter, since a
-   * bare-identifier match can't even be narrowed by "is this a two-segment
-   * chain."
-   */
+  /** Also fire as a bare identifier: global functions and, with `matchLastSegment`, a method whose receiver contains a call (`tex.get_image().save_png(p)`), which the scanner cannot chain.
+   * Only for names distinctive enough to match with no receiver at all. */
   matchAsBareIdentifier?: boolean;
-  /**
-   * Optional: match when `chain`'s single segment appears as the *last*
-   * segment of any member chain of length >= 2, rather than as a prefix.
-   * Used for the generic non-literal `.call`/`.callv` rule, which must fire
-   * on any receiver (`some_node.call(var)`), not just the named singletons
-   * that already have dedicated prefix rules above it in the table.
-   *
-   * May be combined with `matchAsBareIdentifier` on the same rule: the two
-   * flags are independent and cover two different token shapes for the
-   * same underlying primitive. `matchLastSegment` alone covers
-   * `receiver.method(...)` (a genuine two-segment-or-longer memberChain).
-   * Adding `matchAsBareIdentifier` additionally covers `method(...)` with
-   * no receiver info at all (a bare identifier) — the case produced when a
-   * call sits between the real receiver and the method
-   * (`foo().method(...)`), which the tokenizer cannot chain across. See
-   * `tokenMatchesRule`: when a `matchLastSegment` rule's token isn't a
-   * qualifying memberChain, it falls through to the bare-identifier check
-   * only if the rule opted into `matchAsBareIdentifier` too.
-   */
+  /** Match when the single `chain` segment is the last of any chain of length >= 2, for the generic `.call`/`.callv` rule that must fire on any receiver.
+   * With `matchAsBareIdentifier` it also covers `foo().method(...)`, where a call breaks the chain. */
   matchLastSegment?: boolean;
-  /**
-   * Optional: the rule targets a GDScript global function (`load`, `preload`,
-   * `str_to_var`), so a token immediately preceded by a `.` member access is a
-   * method of some other receiver and never matches. The scanner leaves the
-   * name a bare identifier after a call, subscript or `$Node` path
-   * (`get_node("A").load(x)`, `$A.load(x)`), so without this a Tier 1 rule
-   * on `load` hard-blocks ordinary `save_manager.load(slot)`-style code. Never
-   * set on a method primitive (`set_script`, `save_png`): those must keep
-   * matching after a dot.
-   */
+  /** Rule targets a global function (`load`, `preload`, `str_to_var`): a token after `.` is another receiver's method and never matches, or `save_manager.load(slot)` would be hard-blocked.
+   * Never set on a method primitive (`set_script`, `save_png`). */
   globalFunctionOnly?: boolean;
-  /**
-   * Optional: require the token to be used as a call, i.e. followed by `(`.
-   * For a class name whose constructor is the target (`Callable(self, "m")`)
-   * but which also appears as a type annotation (`cb: Callable`).
-   */
+  /** Require the token to be called (followed by `(`), for a constructor name that also appears as a type annotation (`cb: Callable`). */
   callOnly?: boolean;
-  /**
-   * Optional: the rule targets a guarded class or singleton name used as a
-   * value, which is how it gets another name (`var o = OS`, `foo(OS)`,
-   * `[OS][0]`, `OS["execute"]`). It matches the name only as a bare
-   * identifier: not the head of a member chain (the chain rules judge that),
-   * not after a `.`, and not where the name is a type or is being declared
-   * (`valueReferencePositions`). Only for a name whose every use as a value
-   * is worth a prompt; never above Tier 2.
-   */
+  /** The rule targets a guarded name used as a value (`var o = OS`, `OS["execute"]`): a bare identifier only, not a chain head, after `.`, or where it is a type or declaration. Never above Tier 2. */
   valueReferenceOnly?: boolean;
   reason: string;
   solutions: string[];
 }
 
-// ---------------------------------------------------------------------------
-// Argument classification
-// ---------------------------------------------------------------------------
-
 export type ArgumentClassification = 'literal' | 'nonliteral' | 'none';
 
-/**
- * Token visits one `evaluateScript` call may spend on scanning argument lists,
- * per token of the script. Each reflective call scans forward to its closing
- * `)`, so nested calls (`a.call(a.call(...))`) re-scan the whole inner region
- * at every level; the budget keeps the total linear in the script. An ordinary
- * script spends a small multiple of its token count.
- */
+/** Token visits per script token that argument scanning may spend: nested calls re-scan the inner region at every level, so the budget keeps the total linear. */
 const SCAN_BUDGET_PER_TOKEN = 64;
 
-/** The token visits left for argument scanning in one `evaluateScript` call. */
 interface ScanBudget {
   remaining: number;
 }
@@ -166,15 +61,7 @@ function newScanBudget(tokenCount: number): ScanBudget {
   return { remaining: tokenCount * SCAN_BUDGET_PER_TOKEN };
 }
 
-/**
- * The tokens of each top-level argument of the call whose `(` is at
- * `openParenIndex`. Bracket depth is tracked so a nested `(...)` or `[...]`
- * (e.g. `foo(bar(x), y)`) does not end an argument early: a top-level `,`
- * ends one argument and a top-level `)` ends the call. Newline tokens carry no
- * argument content and are skipped. A call with no arguments has one empty
- * argument. Null when the scan budget ran out before the call's end: the
- * arguments are then unknown.
- */
+/** The tokens of each top-level argument of the call opened at `openParenIndex`; null when the scan budget ran out, so the arguments are unknown. */
 function argumentsOf(
   tokens: readonly Token[],
   openParenIndex: number,
@@ -207,15 +94,7 @@ function argumentsOf(
   return args;
 }
 
-/**
- * Classify the tokens of one whole argument.
- *
- * - No tokens → 'none' (a no-arg call — must not match a non-literal rule,
- *   preserving "don't fire on load()").
- * - Exactly one token and it is a string literal → 'literal'.
- * - Anything else (an identifier, an operator, multiple tokens) → 'nonliteral'.
- */
-/** The classification of an argument list the scan budget cut short. */
+/** No tokens is 'none' (a no-arg call must not match a non-literal rule); one string literal is 'literal'; anything else is 'nonliteral'. */
 const UNREADABLE_ARGUMENT: ArgumentClassification = 'nonliteral';
 
 function classifyArgument(argument: readonly Token[]): ArgumentClassification {
@@ -224,12 +103,7 @@ function classifyArgument(argument: readonly Token[]): ArgumentClassification {
   return 'nonliteral';
 }
 
-/**
- * Classify a call's whole first argument, not just its first token — so
- * `load("res://" + evil_var)` is correctly 'nonliteral' instead of matching
- * on the leading string literal alone. See `argumentsOf` and
- * `classifyArgument`.
- */
+/** Classifies the whole first argument, so `load("res://" + evil_var)` is 'nonliteral' rather than matching on the leading literal. */
 export function classifyFirstArgument(
   tokens: readonly Token[],
   openParenIndex: number,
@@ -241,21 +115,8 @@ export function classifyFirstArgument(
   return classifyArgument(args[0] ?? []);
 }
 
-// ---------------------------------------------------------------------------
-// Reflective dispatch
-// ---------------------------------------------------------------------------
-
-/**
- * The receivers of the Tier 1 chain-prefix rules that can be handed a method
- * name at runtime: the engine singletons, and `Object` for the static-looking
- * `Object.call(...)` form. Naming a method on one of them with a non-literal
- * string reaches every Tier 1 primitive it has, so the dispatch itself is
- * Tier 1 (`reflectiveDispatchRules`). `Node` and `ConfigFile` carry Tier 1
- * rules too and are deliberately absent: they are classes, a script names
- * them to construct or annotate, and their reflective use goes through an
- * instance the scanner cannot see. A new Tier 1 singleton belongs here; the
- * unit test over the rule table fails when one is missing.
- */
+/** Receivers of Tier 1 chain-prefix rules that can be handed a method name at runtime: naming one with a non-literal string reaches every Tier 1 primitive it has.
+ * `Node` and `ConfigFile` are deliberately absent (classes, reached only through instances the scanner cannot see); a new Tier 1 singleton belongs here and the rule-table unit test fails without it. */
 export const TIER1_DISPATCH_RECEIVERS: readonly string[] = [
   'Object',
   'OS',
@@ -266,39 +127,24 @@ export const TIER1_DISPATCH_RECEIVERS: readonly string[] = [
   'GDExtensionManager',
 ];
 
-/** The `Object` methods that call a method named by their first argument. */
 const OBJECT_DISPATCH_METHODS: readonly string[] = ['call', 'callv', 'call_deferred'];
 
 /** The dispatch method whose forwarded arguments are the elements of an array. */
 const ARRAY_DISPATCH_METHOD = 'callv';
 
-/**
- * Every method that calls a method named by its first argument: the three on
- * `Object`, and the two `Node` adds. A call to one of them with a literal name
- * is evaluated as the call it makes (`reflectiveCallTarget`).
- */
+/** Every method that calls a method named by its first argument; a literal name is evaluated as the call it makes (`reflectiveCallTarget`). */
 const REFLECTIVE_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   ...OBJECT_DISPATCH_METHODS,
   'call_deferred_thread_group',
   'call_thread_safe',
 ]);
 
-/** A string literal that can be a method name. */
 const METHOD_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/**
- * How many dispatch methods a reflective call may name in a row
- * (`OS.call("call", "callv", ...)`) before the policy stops following and
- * treats the method as not known.
- */
+/** How many dispatch methods a reflective call may name in a row before the policy stops following and treats the method as unknown. */
 const MAX_DISPATCH_DEPTH = 4;
 
-/**
- * The guarded names that are a value in their own right, so that giving one
- * another name carries every Tier 1 primitive it has past the chain rules:
- * the engine singletons with Tier 1 chain rules, and `GDScript`, whose static
- * `new()` is the primitive. Each gets a Tier 2 `tier2.alias.<Name>` rule.
- */
+/** Guarded names that are values in their own right: giving one another name carries its Tier 1 primitives past the chain rules, so each gets a Tier 2 `tier2.alias.<Name>` rule. */
 export const TIER1_ALIASABLE_NAMES: readonly string[] = [
   'OS',
   'Engine',
@@ -309,19 +155,9 @@ export const TIER1_ALIASABLE_NAMES: readonly string[] = [
   'GDScript',
 ];
 
-/**
- * Heads of Tier 1 chain rules that get no alias rule, with the reason. The
- * unit test over the rule table fails when a Tier 1 chain head is in neither
- * list.
- *  - `Object`, `Node`: classes named in annotations, `extends` and
- *    `is_instance_of` throughout ordinary code. Their Tier 1 rules guard the
- *    static-looking spelling of an instance method, which an alias of the
- *    class does not reach either.
- *  - `ConfigFile`: every reference already fires `tier2.config.ConfigFile`.
- */
+/** Tier 1 chain heads with no alias rule (the rule-table unit test fails when a head is in neither list): `Object` and `Node` are classes named in annotations throughout ordinary code, and `ConfigFile` already fires `tier2.config.ConfigFile` on every reference. */
 export const TIER1_NAMES_WITHOUT_ALIAS_RULE: readonly string[] = ['Object', 'Node', 'ConfigFile'];
 
-/** One Tier 2 rule per aliasable name: the name used as a value. */
 function aliasRules(): PolicyRule[] {
   return TIER1_ALIASABLE_NAMES.map((name) => ({
     id: `tier2.alias.${name}`,
@@ -333,15 +169,7 @@ function aliasRules(): PolicyRule[] {
   }));
 }
 
-/**
- * One Tier 1 rule and one Tier 3 rule per dispatch receiver and method: a
- * non-literal method name is dynamic dispatch onto a receiver whose methods
- * include Tier 1 primitives; a literal name that reached this rule names a
- * method no other rule covers, and is only noted. "Literal" means the policy
- * read the method the call ends at (`resolveReflectiveCall`): a first argument
- * that is a string but does not compile to an identifier, or that names a
- * further dispatch the policy could not follow, counts as non-literal.
- */
+/** One Tier 1 and one Tier 3 rule per dispatch receiver and method: a non-literal name is dynamic dispatch onto Tier 1 primitives, a literal that reached here names a method no other rule covers. A string that does not compile to an identifier counts as non-literal. */
 function reflectiveDispatchRules(tier: 1 | 3): PolicyRule[] {
   const rules: PolicyRule[] = [];
   for (const receiver of TIER1_DISPATCH_RECEIVERS) {
@@ -370,12 +198,7 @@ function reflectiveDispatchRules(tier: 1 | 3): PolicyRule[] {
   return rules;
 }
 
-// ---------------------------------------------------------------------------
-// Rule table
-// ---------------------------------------------------------------------------
-
 export const policyRules: readonly PolicyRule[] = [
-  // ---- Tier 1: direct exec ----
   {
     id: 'tier1.direct_exec.OS.execute',
     tier: 1,
@@ -451,7 +274,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Register extensions in the project, not from a script at runtime'],
   },
 
-  // ---- Tier 1: resource-pack persistence ----
   {
     id: 'tier1.resource_pack.load',
     tier: 1,
@@ -474,7 +296,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Modify ProjectSettings only via the dedicated MCP tools'],
   },
 
-  // ---- Tier 1: engine tampering ----
   {
     id: 'tier1.engine.get_singleton',
     tier: 1,
@@ -497,7 +318,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the register_script_language call'],
   },
 
-  // ---- Tier 1: reflection bypasses ----
   {
     id: 'tier1.reflection.ClassDB.instantiate',
     tier: 1,
@@ -536,10 +356,7 @@ export const policyRules: readonly PolicyRule[] = [
       'Callable(target, "method") constructs runtime dynamic dispatch that bypasses static analysis',
     solutions: ['Call the method directly by name instead of constructing a Callable'],
   },
-  // `set_script` is an instance method: the idiomatic call is
-  // `node.set_script(s)` on a local, which the two class-name rules above
-  // never see. The name is distinctive, so it is matched on any receiver, and
-  // bare (on self, or after a call that breaks the chain).
+  // `node.set_script(s)` on a local is the idiomatic call and invisible to the class-name rules above: matched on any receiver, and bare.
   {
     id: 'tier2.reflection.set_script.bareIdentifier',
     tier: 2,
@@ -553,7 +370,6 @@ export const policyRules: readonly PolicyRule[] = [
     ],
   },
 
-  // ---- Tier 1: dynamic code ----
   {
     id: 'tier1.dynamic.Expression',
     tier: 1,
@@ -561,11 +377,7 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'Expression evaluates arbitrary GDScript expressions at runtime',
     solutions: ['Compute the value directly in GDScript instead of via Expression'],
   },
-  // `GDScript.new()` is how source held in a string becomes running code
-  // (`source_code = ...` then `reload()`), which is what `Expression` does for
-  // one expression. Keyed on the `.new` chain, a static constructor whose
-  // receiver is always the literal class name, so a `: GDScript` annotation
-  // and an `is GDScript` test are not matched.
+  // `GDScript.new()` turns source held in a string into running code. Keyed on the `.new` chain, so a `: GDScript` annotation or `is GDScript` test is not matched.
   {
     id: 'tier1.dynamic.GDScript.new',
     tier: 1,
@@ -595,12 +407,8 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Use bytes_to_var (no _with_objects) for data-only deserialization'],
   },
 
-  // Reading or assigning a script's source at runtime is the other half of
-  // `GDScript.new()`: `get_script().duplicate()` gives a script object without
-  // naming the class, and `source_code = ...` then `reload()` compiles it.
-  // Tier 2, not Tier 1: `source_code` is also a plausible name for a game's
-  // own variable (a code-editor widget, a programming puzzle), and a bare
-  // name cannot be told from the `Script` property.
+  // Reading or assigning `source_code` is the other half of `GDScript.new()`. Tier 2, not 1: a game may name its own variable `source_code`,
+  // and a bare name cannot be told from the `Script` property.
   {
     id: 'tier2.dynamic.source_code',
     tier: 2,
@@ -614,8 +422,7 @@ export const policyRules: readonly PolicyRule[] = [
       'Rename the variable if `source_code` is a name of your own',
     ],
   },
-  // `JavaScriptBridge` is a singleton, so the class name is the receiver.
-  // Tier 2: a web export calls it for ordinary browser integration.
+  // A singleton, so the class name is the receiver. Tier 2: a web export uses it for ordinary browser integration.
   {
     id: 'tier2.dynamic.JavaScriptBridge.eval',
     tier: 2,
@@ -623,8 +430,7 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'JavaScriptBridge.eval runs a string as JavaScript in the hosting page (web exports)',
     solutions: ['Confirm the JavaScript being evaluated is intentional'],
   },
-  // An instance id is a number, so the object it names is invisible to every
-  // receiver-based rule.
+  // An instance id is a number, so the object it names is invisible to every receiver-based rule.
   {
     id: 'tier2.reflection.instance_from_id',
     tier: 2,
@@ -638,15 +444,8 @@ export const policyRules: readonly PolicyRule[] = [
   // `[OS][0]`, `OS["execute"]`.
   ...aliasRules(),
 
-  // ---- Tier 1: ConfigFile load family ----
-  // These three fire only on the static-looking `ConfigFile.method(p)` form.
-  // The idiomatic form is an instance method (`var cf := ConfigFile.new();
-  // cf.load(p)`), which a chain-prefix rule cannot reach and which no
-  // last-segment rule may reach either: `load`, `save`, and `parse` are
-  // generic names that appear on unrelated receivers throughout ordinary
-  // game code, so keying on them alone would hard-block that code. Instance
-  // usage is covered instead by the `tier2.config.ConfigFile` class anchor
-  // further down, which fires on the `ConfigFile` reference itself.
+  // Static-looking `ConfigFile.method(p)` only: instance use is out of reach of a prefix rule, and `load`/`save`/`parse` are too generic for a last-segment rule.
+  // Instances are covered by the `tier2.config.ConfigFile` class anchor below.
   {
     id: 'tier1.config.ConfigFile.load',
     tier: 1,
@@ -669,7 +468,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the ConfigFile.parse call'],
   },
 
-  // ---- Tier 1: non-literal load/preload/call ----
   {
     id: 'tier1.indirect.load.nonliteral',
     tier: 1,
@@ -706,16 +504,10 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'ResourceLoader.load_threaded_request with a non-literal path can be redirected',
     solutions: ['Pass a literal `res://...` path to ResourceLoader.load_threaded_request'],
   },
-  // A method name that is not a literal, on a receiver that carries Tier 1
-  // primitives: `OS.call(name)`, `Engine.callv(name, args)`,
-  // `ClassDB.call_deferred(name)`.
+  // Non-literal method name on a receiver carrying Tier 1 primitives: `OS.call(name)`, `Engine.callv(name, args)`.
   ...reflectiveDispatchRules(1),
 
-  // ---- Tier 2: filesystem writes ----
-  // NOTE: FileAccess.open with WRITE mode requires looking at the second
-  // argument; we conservatively flag FileAccess.open uniformly at Tier 2 and
-  // rely on the warn-tier surface for the read-only literal case. This
-  // matches the spec's bias toward over-eliciting filesystem mutation.
+  // FileAccess.open is flagged uniformly at Tier 2 rather than inspecting the mode, biasing toward over-eliciting filesystem mutation.
   {
     id: 'tier2.fs.FileAccess.open',
     tier: 2,
@@ -726,9 +518,7 @@ export const policyRules: readonly PolicyRule[] = [
       'If writing, restructure the script to use a dedicated MCP write tool',
     ],
   },
-  // `remove`, `copy` and `rename` are instance methods with generic names, so
-  // these three guard the static-looking spelling only; instance use is noted
-  // by the `tier3.fs.DirAccess` class anchor (docs/security.md).
+  // `remove`, `copy` and `rename` are generic instance methods, so these guard the static spelling only; instance use is noted by the `tier3.fs.DirAccess` class anchor.
   {
     id: 'tier2.fs.DirAccess.remove',
     tier: 2,
@@ -781,7 +571,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Confirm the link creation is intentional'],
   },
 
-  // ---- Tier 2: network ----
   {
     id: 'tier2.net.HTTPRequest',
     tier: 2,
@@ -853,7 +642,6 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Confirm the DNS lookup is intentional'],
   },
 
-  // ---- Tier 3: warn (literal load/preload/call) ----
   {
     id: 'tier3.literal.load',
     tier: 3,
@@ -901,20 +689,8 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the OS.alert call if running headlessly'],
   },
 
-  // ---- Tier 2: resource and filesystem write primitives ----
-  // Every rule below is Tier 2; strict mode promotes each to Tier 1 for free
-  // via the evaluator's existing promotion step. Scope is runtime-reachable
-  // classes only — no EditorInterface / editor-only surface. Shape choice:
-  // matchLastSegment for distinctive method names that appear on arbitrary receivers (an instance-method primitive
-  // whose receiver is a local variable, never the literal class name — the
-  // exact bug this sweep is closing elsewhere); a two-segment chain prefix
-  // for methods that are singletons or static (so `ClassName.method(...)`
-  // really is the idiomatic call form); a single-segment class anchor for a
-  // class whose own generic-named instance methods (bare `save`, etc.) are
-  // unreachable by a token-level scanner, so the class reference itself
-  // (typically `ClassName.new()`) is the signal instead. No bare `save` or
-  // `call`-style last-segment rule is added — see the negative tests in
-  // `run-script-policy.test.ts` "write-primitive negatives".
+  // Tier 2 write primitives (strict mode promotes them). Instance-method primitives use `matchLastSegment`, static ones a two-segment prefix, and classes with
+  // generic instance methods a class anchor; no bare `save`/`call` last-segment rule (see 'write-primitive negatives' in run-script-policy.test.ts).
   {
     id: 'tier2.resource_saver.save',
     tier: 2,
@@ -946,18 +722,8 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'ConfigFile.save_encrypted_pass writes an encrypted config file to disk',
     solutions: ['Confirm the write is intentional'],
   },
-  // The four Image writers below carry matchAsBareIdentifier in addition to
-  // matchLastSegment: the idiomatic form is `tex.get_image().save_png(p)`
-  // — a call (`get_image()`) sits between the receiver and the write method,
-  // which the scanner cannot chain across, so `save_png` etc. surface as a
-  // bare identifier with zero receiver context (see tokenMatchesRule's
-  // matchLastSegment fallthrough). Safe to match with no receiver at all
-  // because these names are distinctive image-write verbs, not a generic
-  // name like `save` that appears on unrelated objects. That same reasoning
-  // is why `take_over_path`, `save_encrypted`, and `save_encrypted_pass`
-  // above do NOT get this flag — their idiomatic forms are plain
-  // `receiver.method(...)` with no intervening call, so matchLastSegment
-  // alone already reaches them.
+  // The four Image writers also set matchAsBareIdentifier: in `tex.get_image().save_png(p)` a call sits between receiver and method, which the scanner cannot chain across.
+  // Safe because these are distinctive verbs; the writers above take a plain `receiver.method(...)` and need no flag.
   {
     id: 'tier2.image.save_png',
     tier: 2,
@@ -1127,15 +893,8 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Confirm the UID removal is intentional'],
   },
 
-  // ---- Tier 2: generic non-literal .call/.callv (any receiver) ----
-  // Placed after every named-receiver .call/.callv rule above (per-token
-  // first-match-wins, so Object.call(var) still fires the more specific
-  // Tier 1 rule ahead of this one). Tier 2, not Tier 1: plenty of benign code
-  // does `some_callable.call(...)`, and over-blocking here would train
-  // reflexive elicitation approval. Both also match as a bare identifier:
-  // `call(name)` with no receiver is `Object.call` on self, and
-  // `get_node("A").call(name)` leaves `call` bare after the call that breaks
-  // the chain. The name is `Object`'s own method in either position.
+  // After every named-receiver `.call`/`.callv` rule (first match wins). Tier 2: benign code does `some_callable.call(...)`, and over-blocking trains reflexive approval.
+  // Both also match bare: `call(name)` is `Object.call` on self, and `get_node("A").call(name)` leaves `call` bare after the chain-breaking call.
   {
     id: 'tier2.generic.call.nonliteral',
     tier: 2,
@@ -1163,15 +922,7 @@ export const policyRules: readonly PolicyRule[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// Evaluation
-// ---------------------------------------------------------------------------
-
-/**
- * True when the token at index `i` is followed by a `(` (allowing newlines
- * between for the multi-line call style). Returns the index of the `(`, or
- * -1 if no opening paren follows.
- */
+/** Index of the `(` following token `i` (newlines allowed between), or -1. */
 function indexOfOpenParen(tokens: readonly Token[], i: number): number {
   for (let j = i + 1; j < tokens.length; j++) {
     const tok = tokens[j]!;
@@ -1182,12 +933,7 @@ function indexOfOpenParen(tokens: readonly Token[], i: number): number {
   return -1;
 }
 
-/**
- * `matchAsBareIdentifier`, evaluated on its own regardless of any other flag
- * on the rule: does this token qualify as the rule's bare identifier form?
- * Shared by the plain bare-identifier path and the `matchLastSegment`
- * fallthrough below, so both stay in sync by construction.
- */
+/** `matchAsBareIdentifier` on its own, shared by the bare-identifier path and the `matchLastSegment` fallthrough so the two stay in sync. */
 function matchesBareIdentifier(tok: Token, rule: PolicyRule): boolean {
   return (
     !!rule.matchAsBareIdentifier &&
@@ -1211,22 +957,14 @@ function tokenMatchesRule(tok: Token, rule: PolicyRule, isValueReference: boolea
     if (tok.kind === 'memberChain' && tok.chain && tok.chain.length >= 2) {
       return tok.chain[tok.chain.length - 1] === rule.chain[0];
     }
-    // Not a qualifying memberChain — e.g. a call broke the chain, leaving
-    // the method as a bare identifier (`tex.get_image().save_png(p)`
-    // tokenizes `save_png` as `identifier`, not `memberChain`; see
-    // gdscript-scanner.ts). Only rules that opted in via
-    // `matchAsBareIdentifier` get a second chance here; a rule that sets
-    // only `matchLastSegment` returns false, unchanged from before this
-    // fallthrough existed.
+    // A call broke the chain, leaving the method a bare identifier (`tex.get_image().save_png(p)`): only rules that opted into `matchAsBareIdentifier` get a second chance.
     return matchesBareIdentifier(tok, rule);
   }
   if (matchesBareIdentifier(tok, rule)) {
     return true;
   }
   if (rule.chain.length === 1) {
-    // Single-segment "chain" applied to a type reference like `Expression` or
-    // `HTTPRequest` — match against identifier OR the first segment of any
-    // member chain (e.g. `HTTPRequest.new` is a chain whose head matches).
+    // A single-segment chain on a type reference (`HTTPRequest`) matches an identifier or the head of any chain (`HTTPRequest.new`).
     if (tok.kind === 'identifier') return tok.text === rule.chain[0];
     if (tok.kind === 'memberChain' && tok.chain && tok.chain.length > 0) {
       return tok.chain[0] === rule.chain[0];
@@ -1241,13 +979,7 @@ function tokenMatchesRule(tok: Token, rule: PolicyRule, isValueReference: boolea
   return true;
 }
 
-/**
- * The first rule the token fires, or undefined. `openParen` is the index of
- * the `(` of the call the token makes, or -1 when it is not called;
- * `firstArgument` classifies the argument an `argumentKind` rule looks at;
- * `isValueReference` says whether the token stands where a value does (see
- * `valueReferencePositions`).
- */
+/** The first rule the token fires; `openParen` is the call's `(` or -1, `firstArgument` feeds `argumentKind`, `isValueReference` says whether the token stands where a value does. */
 function firstMatchingRule(
   tok: Token,
   openParen: number,
@@ -1270,33 +1002,22 @@ function firstMatchingRule(
 interface ReflectiveCallTarget {
   /** The token of the equivalent direct call: `OS.execute` for `OS.call("execute", ...)`. */
   token: Token;
-  /** The dispatch as written, with the method names it gives: `OS.call("execute")`. */
   matchedText: string;
-  /** Classification of the first argument that call receives. */
   firstArgument: () => ArgumentClassification;
 }
 
-/**
- * What a reflective dispatch resolves to: the direct call it stands for, or
- * `opaque` when the method it names cannot be read from the source.
- */
+/** What a dispatch resolves to: the direct call it stands for, or `opaque` when the method name cannot be read. */
 type DispatchResolution = { kind: 'target'; target: ReflectiveCallTarget } | { kind: 'opaque' };
 
 const OPAQUE_DISPATCH: DispatchResolution = { kind: 'opaque' };
 
-/**
- * The method name an argument gives, or null when it is not one plain string
- * literal whose compiled value is an identifier. The literal is decoded first,
- * so `"\u0065xecute"` names `execute`; an expression, an escape GDScript does
- * not define, and a string that is not an identifier all give null.
- */
+/** The method name an argument gives, or null unless it is one string literal whose decoded value is an identifier (a unicode-escaped spelling still names its method). */
 function methodNameOf(argument: readonly Token[]): string | null {
   if (argument.length !== 1 || argument[0]!.kind !== 'string') return null;
   const name = decodeStringLiteral(argument[0]!);
   return name !== null && METHOD_NAME_REGEX.test(name) ? name : null;
 }
 
-/** True when an argument is one string literal that decodes (it has no undefined escape). */
 function isPlainTextArgument(argument: readonly Token[]): boolean {
   return (
     argument.length === 1 &&
@@ -1305,20 +1026,12 @@ function isPlainTextArgument(argument: readonly Token[]): boolean {
   );
 }
 
-/**
- * True when the call's receiver is one the Tier 1 dispatch rules cover. Those
- * rules match on the head of the chain (`OS.call`), so the head is tested.
- */
+/** True when the call's receiver is one the Tier 1 dispatch rules cover; they match on the chain head. */
 function isTier1DispatchReceiver(chain: readonly string[]): boolean {
   return chain.length >= 2 && TIER1_DISPATCH_RECEIVERS.includes(chain[0]!);
 }
 
-/**
- * The elements of an argument that is exactly one array literal, or null when
- * it is anything else (a variable, `[a] + b`, no argument at all). The literal
- * is looked for from `callOpenParen` on: a search from the start of the script
- * would cost its whole length at every call.
- */
+/** The elements of an argument that is exactly one array literal, else null; searched from `callOpenParen` on, since a search from the script start would cost its whole length per call. */
 function arrayLiteralElements(
   tokens: readonly Token[],
   argument: readonly Token[],
@@ -1340,24 +1053,8 @@ function arrayLiteralElements(
   return argumentsOfArray(tokens, tokens.indexOf(first, callOpenParen), budget);
 }
 
-/**
- * `X.call("m", a)`, `X.callv("m", [a])` and `X.call_deferred("m", a)` call
- * `X.m(a)`. When the token at `tokens[i]` is such a dispatch, resolve the call
- * it stands for, so the same rule fires at the same tier as the direct
- * spelling. A method that is itself a dispatch (`X.call("callv", "m", [a])`)
- * is followed to the method it names in turn, up to `MAX_DISPATCH_DEPTH`.
- *
- * Null when the token is not a dispatch method, or is one called with no
- * argument. `opaque` when the method cannot be read: the name is not a plain
- * string literal that compiles to an identifier, a `callv` in the chain gets
- * something other than an array literal, or the chain is deeper than the
- * bound. The caller then judges the call as dispatch by a non-literal name.
- *
- * With no receiver in the token (`call("m")` on self, or after a call that
- * broke the chain) the target is a method of an object the scanner cannot
- * see, so it is marked as following a `.`: rules for a global function never
- * read it as one.
- */
+/** Resolves `X.call("m", a)` / `callv` / `call_deferred` to the direct call `X.m(a)`, so the same rule fires at the same tier; nested dispatch is followed up to `MAX_DISPATCH_DEPTH`.
+ * Null if the token is no dispatch or has no argument; `opaque` if the method cannot be read. With no receiver the target is marked as following a `.`, so global-function rules never read it. */
 function resolveReflectiveCall(
   tokens: readonly Token[],
   i: number,
@@ -1378,11 +1075,8 @@ function resolveReflectiveCall(
   for (let depth = 0; depth < MAX_DISPATCH_DEPTH; depth++) {
     const method = methodNameOf(args[0] ?? []);
     if (method === null) {
-      // The first argument is a text that is not a method name (`cb.call("Level
-      // complete!")`): an ordinary call with a string argument, not dispatch.
-      // A Tier 1 receiver keeps its decision, since the dispatch rules for it
-      // judge any name the policy cannot read. Only the first name is judged
-      // this way; after a nested dispatch the text is a forwarded argument.
+      // First argument is text, not a method name (`cb.call("Level complete!")`): an ordinary call, unless the receiver is Tier 1, whose dispatch rules judge any unreadable name.
+      // Only the first name is judged so; after a nested dispatch it is a forwarded argument.
       if (depth === 0 && isPlainTextArgument(args[0] ?? []) && !isTier1DispatchReceiver(chain)) {
         return null;
       }
@@ -1466,16 +1160,7 @@ const OPENING_BRACKETS: ReadonlySet<string> = new Set(['(', '[', '{']);
 const CLOSING_BRACKETS: ReadonlySet<string> = new Set([')', ']', '}']);
 const DICTIONARY_OPEN = '{';
 
-/**
- * For every token index, whether an identifier there stands where a value
- * does. False where the name is a type or is being declared:
- *  - after `:` that follows a name outside a dictionary literal (`var x: OS`,
- *    `func f(a: OS)`); inside `{...}` the colon separates a key from a value;
- *  - after `->` (a return type), `as`, `is`, `is not` and `extends`;
- *  - inside the brackets of `Array[...]` or `Dictionary[...]`;
- *  - after `var`, `const`, `func`, `class`, `class_name`, `signal`, `enum`.
- * `:=` is an assignment, so the name after it is a value.
- */
+/** For every token index, whether an identifier there stands where a value does; false after `:` outside a dictionary literal, `->`, `as`, `is`, `extends`, inside `Array[...]`/`Dictionary[...]`, and after declaring keywords. */
 function valueReferencePositions(tokens: readonly Token[]): boolean[] {
   const positions: boolean[] = new Array<boolean>(tokens.length).fill(false);
   const open: Array<{ bracket: string; holdsTypes: boolean }> = [];
@@ -1526,7 +1211,6 @@ function valueReferencePositions(tokens: readonly Token[]): boolean[] {
   return positions;
 }
 
-/** The first argument of a dispatch whose method name the policy could not read. */
 const UNREADABLE_METHOD_NAME: ArgumentClassification = 'nonliteral';
 
 export function evaluateScript(source: string, strict = false): PolicyDecision {
@@ -1544,11 +1228,8 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
 
     const openParen = indexOfOpenParen(tokens, i);
 
-    // A reflective dispatch with a literal method name is the direct call it
-    // makes. When that call fires a rule, the finding is that rule's; when it
-    // fires none, the token is evaluated as written. A dispatch whose method
-    // name cannot be read is evaluated as written too, as dispatch by a
-    // non-literal name, whatever its first argument looks like.
+    // A dispatch with a literal method name is the direct call it makes: that rule's finding if it fires one, else the token as written.
+    // An unreadable name is evaluated as written, as dispatch by a non-literal name.
     let matched: { rule: PolicyRule; text: string } | undefined;
     const dispatch = openParen === -1 ? null : resolveReflectiveCall(tokens, i, openParen, budget);
     if (dispatch?.kind === 'target') {
@@ -1557,8 +1238,7 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
       if (rule !== undefined) matched = { rule, text: target.matchedText };
     }
     if (matched === undefined) {
-      // Each token may only fire one rule (the first match wins). Subsequent
-      // rules of the same kind would only duplicate the finding.
+      // Each token fires one rule (first match wins); later rules of the kind would only duplicate the finding.
       const firstArgument =
         dispatch?.kind === 'opaque'
           ? (): ArgumentClassification => UNREADABLE_METHOD_NAME
@@ -1603,17 +1283,11 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
   };
 }
 
-/**
- * Format a one-line summary of the highest-priority finding. Used to build
- * the agent-facing error message on Tier 1 hard-block and Tier 2 denial.
- */
+/** One-line summary of the highest-priority finding, for the agent-facing error on a Tier 1 block or Tier 2 denial. */
 export function summarizeMatch(m: PolicyMatch): string {
   return `line ${m.line} ${m.matchedText} - ${m.reason}`;
 }
 
-/**
- * Build the human-readable warnings array attached to a `warn` decision.
- */
 export function matchesToWarnings(matches: readonly PolicyMatch[]): string[] {
   return matches.map((m) => `Warning line ${m.line}: ${m.matchedText} - ${m.reason}`);
 }

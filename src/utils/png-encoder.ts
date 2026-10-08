@@ -1,12 +1,7 @@
 import { deflateSync } from 'zlib';
 import { RGBA_BYTES_PER_PIXEL, type RgbaFrame } from './pixel-stats.js';
 
-/**
- * Minimal PNG encoder: 8-bit RGB (color type 2), filter 0 on every row, one
- * IDAT chunk. The counterpart of `decodePng` for the one place this server
- * writes an image of its own (downscaled inline frame previews). No external
- * dependencies; Node 20 has no `zlib.crc32`, so the CRC table is built here.
- */
+/** Minimal PNG encoder: 8-bit RGB, filter 0, one IDAT chunk; the counterpart of `decodePng` for inline frame previews. Node 20 has no `zlib.crc32`, so the CRC table is built here. */
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const IHDR_LENGTH = 13;

@@ -1,34 +1,5 @@
-/**
- * .tscn parsing helpers shared by the run-script security pipeline. Text
- * parsing, no Godot process required. project.godot is read by
- * `project-godot.ts`, and the launched scene is resolved by `launch-scene.ts`.
- *
- * Responsibilities:
- *  - Read a text scene with one scanner (`scanTscn`) that follows the
- *    statement grammar of Godot's own reader: section headers, their
- *    attributes, and the properties that follow them. A bracketed line inside
- *    a multi-line string is never mistaken for a header, a `]` inside a quoted
- *    path never ends one early, and a value ends where the engine ends it, so
- *    no section is hidden inside one.
- *  - Collect every script a scene brings with it (`collectSceneScripts`):
- *    the `.gd` files its `[ext_resource]` lines name, the source of inline
- *    `[sub_resource type="GDScript"]` scripts, and the same for every scene
- *    it references, transitively. A reference is classified by its path as
- *    well as by its `type` attribute, which is only a hint. A script attached
- *    to an instanced node, or assigned by an instance override, is always one
- *    of those two forms, so it is covered by construction.
- *  - Report what it could not read instead of skipping it: scripts that are
- *    not GDScript, binary scenes, resource files, scene files that exist and
- *    could not be read, malformed headers, unterminated strings, and every
- *    statement laid out in a way Godot's writer does not produce.
- *
- * Not read (documented limitation, see `docs/security.md`): scripts carried by
- * binary resources a scene references (`.res`), binary `.scn`
- * scenes, and references by `uid://` alone. Each of these that the walk meets
- * is reported, not dropped. One limit is not reported: an `ext_resource` that
- * carries both a `uid` and a `path` is read by its `path`, while the engine
- * prefers the `uid`, so a stale `path` names a file the engine will not load.
- */
+/** .tscn parsing for the run-script security pipeline: one scanner following Godot's own statement grammar, and a transitive collection of the scripts a scene brings with it, reporting what it cannot read rather than skipping it.
+ * Not read (see `docs/security.md`): binary `.res`/`.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -38,21 +9,11 @@ import { resolveProjectPath } from './path-validation.js';
 const TSCN_RAW_SNIPPET_MAX = 200;
 const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
-/**
- * Path extensions an `ext_resource` is walked as a scene for, whatever its
- * `type` says. A `.tres` is a text resource with the same statement grammar
- * (`gd_resource`), so its scripts, inline GDScript and further references are
- * collected like a scene's, and so is an `.escn`. A binary `.scn` is walked and
- * reported as not text.
- */
+/** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says: `.tres` and `.escn` share the statement grammar; a binary `.scn` is walked and reported as not text. */
 const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
 /** Path extensions of binary resource files, which can carry a script the scan cannot read. */
 const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.res'];
-/**
- * `type` values that say an `ext_resource` is a script. Godot's loaders take
- * the base class or the concrete one, so a hand-edited `type="GDScript"` loads
- * exactly as `type="Script"` does.
- */
+/** `type` values that mark an `ext_resource` as a script: Godot's loaders take the base or concrete class, so a hand-edited `type="GDScript"` loads as `Script` does. */
 const SCRIPT_TYPE_HINTS: ReadonlySet<string> = new Set(['Script', 'GDScript', 'CSharpScript']);
 const UNICODE_SHORT_ESCAPE_DIGITS = 4;
 const UNICODE_LONG_ESCAPE_DIGITS = 6;
@@ -81,10 +42,7 @@ const NOT_A_VALUE_REASON = 'value is not one Godot reads';
 const NO_ASSIGNMENT_REASON = 'line has no = and is not a statement';
 const TEXT_AFTER_VALUE_REASON = 'text after the value on the same line';
 const TEXT_AFTER_HEADER_REASON = 'text after the header on the same line';
-/**
- * The section tags of Godot's text scene and resource formats. A line that
- * opens one of these ends a value still open above it (see `readGroup`).
- */
+/** Section tags of Godot's text formats; a line opening one ends a value still open above it (see `readGroup`). */
 const KNOWN_SECTION_TAGS: ReadonlySet<string> = new Set([
   'gd_scene',
   'gd_resource',
@@ -118,10 +76,7 @@ function isFileNotFound(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
-/**
- * Read a scene file's content, returning null (not throwing) when the file
- * is missing — a stale ext_resource reference must not crash the pre-flight.
- */
+/** Reads a scene file's content, null when missing: a stale ext_resource reference must not crash the pre-flight. */
 function readSceneFileSafe(scenePath: string): string | null {
   try {
     return readFileSync(scenePath, 'utf8');
@@ -131,44 +86,26 @@ function readSceneFileSafe(scenePath: string): string | null {
   }
 }
 
-// --- Text scene scanner ---
-
-/** One `[tag key=value ...]` section header and the string properties under it. */
 export interface TscnHeader {
   tag: string;
-  /** Attribute values as written: quoted strings unescaped, bare tokens verbatim. */
   attrs: Map<string, string>;
   line: number;
   /** The header line, trimmed and capped at `TSCN_RAW_SNIPPET_MAX` characters. */
   raw: string;
-  /** Properties whose value is exactly one plain string, unescaped, by key. */
   stringProps: Map<string, string>;
-  /**
-   * Every other property, by key: the whole value, trimmed, comments removed
-   * and otherwise as written. A value that continues on later lines (a
-   * dictionary, mostly) is returned through its closing bracket, line breaks
-   * included. A value whose brackets never close is reported in `malformed`
-   * and cut at the end of its first line. A key is in one of the two maps at
-   * most, and in neither when its last assignment could not be read.
-   */
+  /** Every other property by key: the whole trimmed value, comments removed. A value whose brackets never close is reported in `malformed` and cut at its first line. A key is in at most one map, and in neither when its last assignment could not be read. */
   rawProps: Map<string, string>;
 }
 
 export interface TscnScan {
-  /** True when the first header is `gd_scene` or `gd_resource`. */
   isTextResource: boolean;
   headers: TscnHeader[];
-  /**
-   * What the scanner could not read as Godot's writer lays it out: headers
-   * that do not parse (none of them is in `headers`), strings that never end,
-   * and statements whose layout moves a statement boundary.
-   */
+  /** What the scanner could not read as Godot's writer lays it out: unparsed headers (none is in `headers`), unterminated strings, and statements that move a statement boundary. */
   malformed: Array<{ line: number; reason: string; raw: string }>;
 }
 
 export interface QuotedString {
   value: string;
-  /** Index just past the closing quote. */
   end: number;
 }
 
@@ -188,10 +125,7 @@ function isBlank(ch: string | undefined): boolean {
   return ch === ' ' || ch === '\t' || ch === '\r';
 }
 
-/**
- * Read the quoted string whose opening quote is at `start`, unescaping it.
- * Returns null when no closing quote is found before `limit`.
- */
+/** Reads the quoted string opening at `start`, unescaped; null when no closing quote precedes `limit`. */
 export function readQuoted(content: string, start: number, limit: number): QuotedString | null {
   let out = '';
   let i = start + 1;
@@ -223,19 +157,13 @@ export function readQuoted(content: string, start: number, limit: number): Quote
   return null;
 }
 
-/** Where one value ends, and what was found on the way. */
 interface ValueRead {
-  /** Index of the value's first character. */
   start: number;
-  /** Index just past the value, where the next statement starts. */
   end: number;
   /** Index just past the text kept as the value: `end`, or the end of the first line of a value that never closes. */
   textEnd: number;
-  /** The value when it is exactly one string, with or without a `&`, `^` or `@` prefix. */
   quoted: QuotedString | null;
-  /** True when `quoted` is a plain `"..."` string with no prefix. */
   plainString: boolean;
-  /** `[start, end)` of each comment inside the value. */
   comments: Array<[number, number]>;
   /** Why the text is not a value Godot reads, and where, or null when it is one. */
   problem: { reason: string; at: number } | null;
@@ -253,17 +181,12 @@ function isIdentifierChar(ch: string | undefined): boolean {
   return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
 }
 
-/** Index of the newline that ends the line `from` is on, or `limit`. */
 function lineEndFrom(content: string, from: number, limit: number): number {
   const newlineAt = content.indexOf('\n', from);
   return newlineAt === -1 || newlineAt > limit ? limit : newlineAt;
 }
 
-/**
- * Index of the next character that belongs to a token: past blanks, line
- * breaks and `;` comments, which Godot's tokenizer skips between any two
- * tokens. Comment ranges are added to `comments` when it is given.
- */
+/** Index of the next token character, past blanks, line breaks and `;` comments (which Godot's tokenizer skips between any two tokens); comment ranges go to `comments` when given. */
 function skipToToken(
   content: string,
   from: number,
@@ -283,7 +206,6 @@ function skipToToken(
   return i;
 }
 
-/** True when the line that starts at `from` opens a section Godot's scene format defines. */
 function startsKnownSection(content: string, from: number, limit: number): boolean {
   let i = from;
   while (i < limit && isBlank(content[i])) i++;
@@ -295,15 +217,8 @@ function startsKnownSection(content: string, from: number, limit: number): boole
   return KNOWN_SECTION_TAGS.has(content.slice(tagStart, i));
 }
 
-/**
- * Read the bracketed group whose opening bracket is at `openAt`, through the
- * bracket that closes it, into `read`. Strings and comments inside it open and
- * close nothing. Returns false, with `read.problem` set, when the group does
- * not close before `limit`, before a string that never ends, or before a line
- * that opens a known section: Godot's writer never puts such a line inside a
- * value, so a value that reaches one is cut there and the section is read.
- * Every character is read once, whatever the outcome.
- */
+/** Reads the bracketed group opened at `openAt` into `read`; strings and comments inside open and close nothing. Returns false with `read.problem` set when it does not close before `limit`, an unterminated string, or a line opening a known section:
+ * Godot's writer never puts one inside a value, so a value reaching it is cut there and the section is read. Every character is read once. */
 function readGroup(content: string, openAt: number, limit: number, read: ValueRead): boolean {
   let depth = 0;
   let firstNewlineAt = -1;
@@ -346,10 +261,7 @@ function readGroup(content: string, openAt: number, limit: number, read: ValueRe
   return cut(limit, UNTERMINATED_VALUE_REASON, limit);
 }
 
-/**
- * Index just past the number that starts at `from` (a digit or `-`), by the
- * states of Godot's tokenizer: digits, one fraction, one exponent with one sign.
- */
+/** Index just past the number at `from`, by Godot's tokenizer states: digits, one fraction, one exponent with one sign. */
 function numberEnd(content: string, from: number, limit: number): number {
   let i = content[from] === '-' ? from + 1 : from;
   while (i < limit && isDigit(content[i])) i++;
@@ -365,19 +277,8 @@ function numberEnd(content: string, from: number, limit: number): number {
   return i;
 }
 
-/**
- * Read the value that follows an `=`, the way Godot's own parser does: by its
- * first token. A string, a number, a `#` color and the bare words in
- * `BARE_WORD_VALUES` are complete by themselves. `{` and `[` open a group that
- * runs to its closing bracket across lines. Any other word is a constructor
- * (`Vector2(...)`, `ExtResource("1_a")`, `Array[int]([...])`) and is complete
- * at the bracket that closes its arguments.
- *
- * Counting brackets from the `=` instead reads less than the engine does:
- * after `a = 1 (`, the engine has its value at `1` and reads the next lines as
- * statements, section headers included, while a bracket count holds them
- * inside the value.
- */
+/** Reads the value after an `=` the way Godot's parser does, by its first token: string, number, `#` color and `BARE_WORD_VALUES` are complete alone, `{`/`[` open a group, any other word is a constructor complete at its closing bracket.
+ * Counting brackets from the `=` would read less than the engine: after `a = 1 (` the engine has its value at `1` and reads the next lines as statements, headers included. */
 function readValue(content: string, from: number, limit: number): ValueRead {
   const read: ValueRead = {
     start: limit,
@@ -426,8 +327,7 @@ function readValue(content: string, from: number, limit: number): ValueRead {
     return endAt(i);
   }
   if (c === '-' && isIdentifierStart(content[start + 1])) {
-    // `-inf` and `-nan`, which newer engines write. Any other word after a
-    // minus sign is no value on any engine.
+    // `-inf` and `-nan`, which newer engines write; any other word after a minus sign is no value on any engine.
     let i = start + 1;
     while (i < limit && isIdentifierChar(content[i])) i++;
     if (NEGATIVE_WORD_VALUES.has(content.slice(start + 1, i))) return endAt(i);
@@ -458,14 +358,7 @@ type HeaderParse =
   | { ok: true; tag: string; attrs: Map<string, string>; end: number }
   | { ok: false; reason: string };
 
-/**
- * Parse the header that starts at `start` (a `[`) and must end before
- * `lineEnd`. Each attribute value is read by `readValue`, so a quoted string
- * may hold `]` and a value such as `ExtResource("1_a")` or `["x", "y"]` runs
- * through its own brackets. A string written with a `&`, `^` or `@` prefix is
- * returned unescaped like a plain one: the engine converts it to the same text
- * where it reads `type` and `path`. `end` is the index just past the `]`.
- */
+/** Parses the header starting at `start` (a `[`) that must end before `lineEnd`; values go through `readValue`, so a quoted string may hold `]`. A `&`, `^` or `@` prefixed string is returned unescaped, as the engine converts it to the same text for `type` and `path`. `end` is just past the `]`. */
 function parseHeader(content: string, start: number, lineEnd: number): HeaderParse {
   let i = start + 1;
   // Godot skips blanks between the bracket and the tag: `[ ext_resource ...]`.
@@ -529,10 +422,7 @@ function restOfLineIsEmpty(content: string, from: number): boolean {
   return i >= content.length || content[i] === '\n' || content[i] === ';';
 }
 
-/**
- * The 1-based line of an index. Lines are counted from the last index asked
- * about, so a scan that asks in ascending order counts every line once.
- */
+/** The 1-based line of an index; lines count from the last index asked, so ascending queries count each once. */
 function lineCounter(content: string): (index: number) => number {
   let countedTo = 0;
   let line = 1;
@@ -547,40 +437,8 @@ function lineCounter(content: string): (index: number) => number {
   };
 }
 
-/**
- * Read a `.tscn` / `.tres` text in one pass, by the statement grammar of
- * Godot's own reader. That reader is not bound to lines. A statement is a
- * section header, or a key, an `=` and one value; blanks, line breaks and `;`
- * comments separate tokens and mean nothing else. A `[` opens a header only
- * where a statement starts. A key is every character up to the `=`, with
- * blanks dropped, and a quoted string there replaces what was read of the key.
- * A value is read by its first token (see `readValue`), and the next statement
- * starts right after it. A string runs to its closing quote across newlines,
- * so nothing inside one is ever read as structure. A leading byte order mark
- * is skipped.
- *
- * Reading statements the engine's way is what keeps a hand-edited file from
- * showing the scan less than the engine loads. On top of that, every layout
- * Godot's writer does not produce and that moves a statement boundary is
- * reported in `malformed`, so a caller that must not act on a partial reading
- * can tell:
- *  - text after a value or a header on the same line (the engine reads it as
- *    the next statement, and so does this scan; the property before it is
- *    dropped, never kept as if the line were ordinary);
- *  - a line of text with no `=` (the engine joins it to the key that follows);
- *  - a value that is no value, or whose brackets never close. One that never
- *    closes is cut at the next known section header, or runs to the end of the
- *    file, and keeps its first line as its text;
- *  - a header that does not close on its line, and a string that never ends.
- *
- * Two departures from the engine, both toward reading more: a `[` that starts
- * a line opens a header even after a line with no `=`, and scanning goes on
- * past a statement the engine would stop loading at.
- *
- * A key assigned twice keeps the last assignment, as the engine does, and an
- * assignment that could not be read removes the key: an earlier value is never
- * left standing in for a later one the scan did not read.
- */
+/** Reads a .tscn / .tres in one pass by the statement grammar of Godot's own reader, which is not bound to lines: blanks, breaks and `;` comments only separate tokens, a `[` opens a header only where a statement starts, and a string runs across newlines.
+ * Every layout Godot's writer does not produce that moves a statement boundary is reported in `malformed`; a key assigned twice keeps the last, and an unreadable assignment removes the key. Two departures, both toward reading more: a line-leading `[` opens a header even after a line with no `=`, and scanning continues past a statement where the engine stops. */
 export function scanTscn(content: string): TscnScan {
   const headers: TscnHeader[] = [];
   const malformed: TscnScan['malformed'] = [];
@@ -707,12 +565,7 @@ export function scanTscn(content: string): TscnScan {
   return { isTextResource: SCENE_HEADER_TAGS.has(headers[0]?.tag ?? ''), headers, malformed };
 }
 
-// --- Script collection ---
-
-/**
- * Absolute path of a reference read out of a scene file (`res://x`). The input
- * is file content, not a user string, so no containment check applies here.
- */
+/** Absolute path of a reference read out of a scene file; the input is file content, not a user string, so no containment check applies. */
 function resReferenceToAbs(projectDir: string, resPath: string): string {
   const rel = resPath.startsWith(TSCN_RES_PREFIX) ? resPath.slice(TSCN_RES_PREFIX.length) : resPath;
   return join(projectDir, rel);
@@ -720,43 +573,23 @@ function resReferenceToAbs(projectDir: string, resPath: string): string {
 
 /** An inline `[sub_resource type="GDScript"]`, or a `.tres` that is itself a GDScript, and its source. */
 export interface InlineSceneScript {
-  /** Absolute path of the scene file that holds the sub-resource. */
   scenePath: string;
-  /** The sub-resource id, or `resource` for the file's own resource. */
   id: string;
   source: string;
 }
 
-/** Something the walk met and could not read. */
 export interface UnscannedSceneItem {
   scenePath: string;
   reason: string;
-  /**
-   * True when `scenePath` exists and reading it failed (a permission error, a
-   * directory in its place). Different from the other entries, which are files
-   * of a kind the scan does not read: this one it set out to read and could
-   * not, so a caller that must not launch on an incomplete scan can tell.
-   */
+  /** True when `scenePath` exists and reading it failed (permission error, a directory in its place): unlike files of a kind the scan does not read, the scan set out to read it. */
   readFailed?: true;
-  /**
-   * True for a scene reference that could not be resolved to a file inside the
-   * project, so nothing was read for it. Like `readFailed`, the scan set out
-   * to follow it and could not.
-   */
+  /** True for a scene reference that did not resolve to a file inside the project; like `readFailed`, the scan set out to follow it. */
   unresolved?: true;
-  /**
-   * True for a statement of a scene file the scan read but could not take as
-   * written (an entry of `TscnScan.malformed`, or a script source that is not
-   * one plain string). The file was read in part: the
-   * engine may load something from that statement that the scan did not see,
-   * so a caller that must not launch on an incomplete scan treats it like
-   * `readFailed`.
-   */
+  /** True for a statement the scan read but could not take as written (a `TscnScan.malformed` entry, or a script source that is not one plain string): the engine may load something from it the scan did not see, so callers treat it like `readFailed`. */
   malformed?: true;
 }
 
 export interface SceneScriptCollection {
-  /** Absolute paths of the `.gd` files every reachable scene attaches. */
   scripts: string[];
   inlineScripts: InlineSceneScript[];
   unscanned: UnscannedSceneItem[];
@@ -767,25 +600,8 @@ function resPathOf(attrs: Map<string, string>): string | null {
   return path !== undefined && path.startsWith(TSCN_RES_PREFIX) ? path : null;
 }
 
-/**
- * Transitively walk the scenes `scenePath` references and collect, from every
- * reachable scene, the `.gd` files its ext_resources name and the source of
- * its inline GDScript sub-resources. A hostile script attached to a
- * PackedScene the launched scene instances is invisible to a single-scene scan.
- *
- * An `ext_resource` is classified by its path as well as by its `type`
- * attribute. The engine loads the file the path names, and `type` is a hint a
- * hand-edited scene can set to anything: a `.gd` path is scanned and a `.tscn`
- * or `.scn` path is walked whatever the hint says, and so is a `.tres` or `.escn`. A reference the walk does
- * not follow and that can still bring a script in (a script that is not
- * GDScript, a binary `.res` resource, a reference with no `res://` path)
- * is listed in `unscanned`, never dropped.
- *
- * Cycle-safe: scene graphs can reference each other, so a scene already walked
- * (by resolved absolute path) is never walked again. Nothing throws on a stale
- * reference or on a file that cannot be read; whatever could not be read is
- * listed in `unscanned` so the caller can say the scan was incomplete.
- */
+/** Transitively walks the scenes `scenePath` references, collecting the `.gd` files their ext_resources name and the source of inline GDScript: a hostile script in an instanced PackedScene is invisible to a single-scene scan.
+ * References are classified by path, not `type`, which a hand-edited scene can set to anything; what the walk cannot follow but could bring a script in is listed in `unscanned`, never dropped. Cycle-safe by resolved path; nothing throws on a stale or unreadable reference. */
 export function collectSceneScripts(scenePath: string, projectDir: string): SceneScriptCollection {
   const visited = new Set<string>();
   const scripts = new Set<string>();
@@ -818,9 +634,7 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
     try {
       content = readSceneFileSafe(currentScenePath);
     } catch (err) {
-      // The file is there and could not be read. One entry for it, and the
-      // walk goes on: a throw here used to abandon every scene and autoload
-      // the caller had not reached yet, with nothing naming them.
+      // The file is there and could not be read: one entry, and the walk goes on, since a throw would abandon every scene and autoload not yet reached, with nothing naming them.
       const detail = err instanceof Error ? err.message : String(err);
       unscanned.push({
         scenePath: absScenePath,
@@ -890,10 +704,7 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
         collectInlineScript(header, MAIN_RESOURCE_SCRIPT_ID);
       }
     }
-    // A malformed header loses the properties under it whatever its tag was,
-    // and a malformed statement may hold something the engine loads, so each
-    // is reported, up to a cap: a file of nothing but broken lines says so
-    // once, not once per line.
+    // A malformed header loses the properties under it whatever its tag, and a malformed statement may hold something the engine loads, so each is reported up to a cap: a file of broken lines says so once, not per line.
     const reportMalformed = (reason: string): void => {
       unscanned.push({ scenePath: absScenePath, reason, malformed: true });
     };
@@ -911,16 +722,7 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
   return { scripts: Array.from(scripts), inlineScripts, unscanned };
 }
 
-/**
- * Extract the `[ext_resource path="res://....gd"]` references of one scene as
- * absolute filesystem paths under the project root, whatever their `type`
- * attribute says (see `collectSceneScripts`).
- *
- * Does not chase subscenes (use `collectSceneScripts` for the transitive walk)
- * and does not read inline `[sub_resource type="GDScript"]` source. Returns
- * paths even when the file does not exist on disk; the caller owns the
- * existence check. A missing scene yields `[]`.
- */
+/** The `[ext_resource path="res://....gd"]` references of one scene as absolute paths, whatever their `type` says. Not transitive and ignores inline sources; paths are returned even if the file is missing (the caller checks), and a missing scene yields `[]`. */
 export function extractSceneScripts(scenePath: string, projectDir: string): string[] {
   const content = readSceneFileSafe(scenePath);
   if (content === null) return [];
