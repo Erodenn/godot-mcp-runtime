@@ -36,7 +36,7 @@ describe('outputSchema: fields a tool always returns are declared required', () 
   const ALWAYS_RETURNED: Array<[string, string[]]> = [
     ['simulate_input', ['projectPath', 'success', 'results']],
     ['get_ui_elements', ['projectPath', 'elements', 'tip']],
-    ['run_script', ['projectPath', 'success', 'result', 'tip']],
+    ['run_script', ['projectPath', 'result', 'tip']],
     [
       'start_profiler',
       [

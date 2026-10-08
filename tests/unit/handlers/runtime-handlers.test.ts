@@ -33,6 +33,7 @@ import {
   handleLaunchEditor,
   runtimeToolDefinitions,
 } from '../../../src/tools/runtime-tools.js';
+import { MAX_RUNTIME_TIMEOUT_MS } from '../../../src/utils/session-report.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { encodePng, solidRgba } from '../../helpers/png-fixtures.js';
 import { auditScriptsDir, screenshotsDir } from '../../../src/utils/artifact-paths.js';
@@ -202,6 +203,8 @@ interface RuntimeFake {
   /** Makes every wait for the session queue give up, as if the named call
    *  held it. Null (the default): the queue is free. */
   setQueueBusyBehind(label: string | null): void;
+  /** The call got its turn after waiting `waitedMs` behind `behind`. Null (the default): no wait. */
+  setQueueWait(waitedMs: number | null, behind?: string): void;
   /** Makes attachProject report that this server's live attached session on
    *  the project was kept, listening on `port`. Null (the default): a fresh attach. */
   setAlreadyAttached(port: number | null): void;
@@ -248,6 +251,7 @@ function createRuntimeFake(): RuntimeFake {
   let actionErrorTrailing: string[] = [];
   let actionSentinelTimedOut = false;
   let queueBusyBehind: string | null = null;
+  let queueWait: { waitedMs: number; behind: string } | null = null;
   let profilerStreamProblem: string | null = null;
   let alreadyAttachedPort: number | null = null;
   // Defaults model a healthy inject: the autoload is registered and no other
@@ -297,6 +301,11 @@ function createRuntimeFake(): RuntimeFake {
         throw new SessionQueueTimeoutError(label, queueBusyBehind, QUEUE_WAITED_MS);
       }
       return operation();
+    },
+    queueTurn() {
+      return queueWait === null
+        ? null
+        : { requestedAt: 0, waitedMs: queueWait.waitedMs, behind: queueWait.behind };
     },
     // The record a start created, read back through its reference. The fake
     // has one session, so the reference is its project path.
@@ -492,6 +501,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     setQueueBusyBehind(label) {
       queueBusyBehind = label;
+    },
+    setQueueWait(waitedMs, behind = 'run_project') {
+      queueWait = waitedMs === null ? null : { waitedMs, behind };
     },
     setAlreadyAttached(port) {
       alreadyAttachedPort = port;
@@ -2113,7 +2125,7 @@ describe('handleRunScript', () => {
     const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
     expect(hasError(result)).toBe(false);
     const parsed = JSON.parse(unwrap(result).content[0].text);
-    expect(parsed.success).toBe(true);
+    expect(parsed).not.toHaveProperty('success');
     expect(parsed.result).toBeNull();
     expect(Array.isArray(parsed.warnings)).toBe(true);
     expect(parsed.warnings[0]).toMatch(/GDScript does not propagate exceptions/);
@@ -4428,5 +4440,169 @@ describe('run_project reports what its start could not confirm', () => {
       expect(hasError(result)).toBe(true);
       expect(allText(result)).toContain(incomplete);
     });
+  });
+});
+
+describe('the queue wait is charged against the command it delayed', () => {
+  const BENIGN_SCRIPT =
+    'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 1\n';
+  const WAITED_MS = 20000;
+  const RUN_SCRIPT_DEFAULT_MS = 30000;
+  const SCREENSHOT_DEFAULT_MS = 10000;
+  /** Leaves a run_script timeout of 1000 ms, under the 2000 ms floor. */
+  const WAITED_PAST_FLOOR_MS = 29000;
+  /** A one-frame input batch (a 10.2 s worst case) plus this wait passes the 60 s request timeout. */
+  const WAITED_PAST_REQUEST_MS = 55000;
+  const SHORT_WAIT_MS = 1000;
+  const LONG_BATCH_WAITS = 2;
+  const LONG_BATCH_WAIT_MS = 45000;
+  const ONE_FRAME_BATCH = [{ type: 'wait', frames: 1 }];
+  const BAD_TIMEOUTS = [0, -1, 1.5, MAX_RUNTIME_TIMEOUT_MS + 1];
+  const BAD_LIMITS = [0, -1, 1.5];
+
+  function spawnedFake(projectPath = '/p'): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setSession({ mode: 'spawned', projectPath, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
+    return fake;
+  }
+
+  function sidecars(projectDir: string): Array<Record<string, unknown>> {
+    const dir = auditScriptsDir(projectDir);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir)
+      .filter((f) => f.endsWith('.policy.json'))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>);
+  }
+
+  // Red when the send passes the requested timeout through unchanged.
+  it('run_script sends with its timeout less the time it waited', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(WAITED_MS);
+    await handleRunScript(fake.asRunner, { script: BENIGN_SCRIPT }, makeContext());
+    expect(fake.bridgeCalls[0]?.timeoutMs).toBe(RUN_SCRIPT_DEFAULT_MS - WAITED_MS);
+  });
+
+  it('take_screenshot sends with its timeout less the time it waited', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(SHORT_WAIT_MS);
+    await handleTakeScreenshot(fake.asRunner, {});
+    expect(fake.bridgeCalls[0]?.timeoutMs).toBe(SCREENSHOT_DEFAULT_MS - SHORT_WAIT_MS);
+  });
+
+  // Red when the chargeQueueWait call is removed from run_script: the script is sent.
+  it('run_script waited past the floor is refused, nothing is sent, and the record says not_sent', async () => {
+    const projectDir = tmp.makeProject('run-script-charged-');
+    const fake = spawnedFake(projectDir);
+    fake.setQueueWait(WAITED_PAST_FLOOR_MS, 'simulate_input');
+    const result = await handleRunScript(fake.asRunner, { script: BENIGN_SCRIPT }, makeContext());
+    expectErrorMatching(result, /run_script waited 29000 ms for simulate_input to finish/);
+    expectErrorMatching(result, /Nothing was sent; retry/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+    expect(sidecars(projectDir)).toEqual([
+      expect.objectContaining({ decision: 'not_sent', admitted_as: 'ok' }),
+    ]);
+  });
+
+  // Red when the chargeQueueWait call is removed from take_screenshot.
+  it('take_screenshot waited past the floor is refused and nothing is sent', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(SCREENSHOT_DEFAULT_MS - SHORT_WAIT_MS);
+    const result = await handleTakeScreenshot(fake.asRunner, {});
+    expectErrorMatching(result, /take_screenshot waited 9000 ms for run_project to finish/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  // Red when the chargeQueueWait call is removed from simulate_input.
+  it('simulate_input whose worst case fits the request timeout is refused when the wait breaks it', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(WAITED_PAST_REQUEST_MS);
+    const result = await handleSimulateInput(fake.asRunner, { actions: ONE_FRAME_BATCH });
+    expectErrorMatching(result, /simulate_input waited 55000 ms/);
+    expectErrorMatching(result, /Nothing was sent/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('simulate_input that still fits the request timeout after a short wait is sent', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(SHORT_WAIT_MS);
+    fake.setBridgeResponse(JSON.stringify({ success: true, results: [] }), []);
+    await handleSimulateInput(fake.asRunner, { actions: ONE_FRAME_BATCH });
+    expect(fake.bridgeCalls[0]?.timeoutMs).toBe(computeInputTimeoutMs(ONE_FRAME_BATCH));
+  });
+
+  it('simulate_input already over the request timeout is not refused for having waited', async () => {
+    const fake = spawnedFake();
+    fake.setQueueWait(WAITED_PAST_REQUEST_MS);
+    fake.setBridgeResponse(JSON.stringify({ success: true, results: [] }), []);
+    const actions = Array.from({ length: LONG_BATCH_WAITS }, () => ({
+      type: 'wait',
+      ms: LONG_BATCH_WAIT_MS,
+    }));
+    await handleSimulateInput(fake.asRunner, { actions });
+    expect(fake.bridgeCalls).toHaveLength(1);
+    expect(fake.bridgeCalls[0]?.timeoutMs).toBe(computeInputTimeoutMs(actions));
+  });
+
+  // Red when the integer test is dropped from parseTimeoutMsArg.
+  it.each(BAD_TIMEOUTS)(
+    'run_script and take_screenshot refuse timeout %s naming the parameter',
+    async (bad) => {
+      const fake = spawnedFake();
+      const script = await handleRunScript(
+        fake.asRunner,
+        { script: BENIGN_SCRIPT, timeout: bad },
+        makeContext(),
+      );
+      const shot = await handleTakeScreenshot(fake.asRunner, { timeout: bad });
+      const message = new RegExp(
+        `timeout must be a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS}, got ${bad}`,
+      );
+      expectErrorMatching(script, message);
+      expectErrorMatching(shot, message);
+      expect(fake.bridgeCalls).toHaveLength(0);
+    },
+  );
+
+  it.each(BAD_LIMITS)('get_debug_output refuses limit %s naming the parameter', (bad) => {
+    const fake = spawnedFake();
+    const result = handleGetDebugOutput(fake.asRunner, { limit: bad });
+    expectErrorMatching(
+      result,
+      new RegExp(`limit must be a whole number from 1 or more, got ${bad}`),
+    );
+  });
+
+  it('accepts the largest timeout and a limit of 1', async () => {
+    const fake = spawnedFake();
+    await handleRunScript(
+      fake.asRunner,
+      { script: BENIGN_SCRIPT, timeout: MAX_RUNTIME_TIMEOUT_MS },
+      makeContext(),
+    );
+    expect(fake.bridgeCalls[0]?.timeoutMs).toBe(MAX_RUNTIME_TIMEOUT_MS);
+    expect(hasError(handleGetDebugOutput(fake.asRunner, { limit: 1 }))).toBe(false);
+  });
+
+  // Red when `success` comes back into the run_script payload.
+  it('run_script carries no success field and validates against its outputSchema', async () => {
+    const fake = spawnedFake();
+    const result = await handleRunScript(fake.asRunner, { script: BENIGN_SCRIPT }, makeContext());
+    const payload = expectMatchesOutputSchema('run_script', result);
+    expect(payload).not.toHaveProperty('success');
+    expect(payload.result).toBe(1);
+  });
+
+  // Red when the budget constants are retuned and the description keeps the old figure.
+  it('states the input batch action cap as the time budget derives it', () => {
+    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
+    const properties = simulateInput!.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties.actions?.description).toContain(
+      'The budget admits at most 5900 actions per call, fewer when they tap, hold or wait.',
+    );
   });
 });

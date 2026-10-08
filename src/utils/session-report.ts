@@ -1,4 +1,5 @@
 import {
+  CLIENT_REQUEST_TIMEOUT_MS,
   NoLiveCurrentSessionError,
   SessionStoppedError,
   type GodotRunner,
@@ -119,6 +120,79 @@ export async function runSessionExclusive(
     if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
     throw error;
   }
+}
+
+/** The longest `timeout` a runtime tool accepts, and the ceiling of one input batch's budget. */
+export const MAX_RUNTIME_TIMEOUT_MS = 600000;
+
+/**
+ * The least a command may be left with once the queue wait has been taken off
+ * its `timeout`. Under it the command could not finish what it was asked for,
+ * so it is refused with nothing sent.
+ */
+export const QUEUE_CHARGED_COMMAND_FLOOR_MS = 2000;
+
+/**
+ * What a command needs from the time it has left after the queue wait.
+ * `shorten`: the caller's `timeout` is the budget and the wait comes off it.
+ * `fixed`: the command takes up to `worstCaseMs` whatever it is given, so the
+ * wait is charged against the client's request timeout instead.
+ */
+export type QueueChargeNeed =
+  | { kind: 'shorten'; budgetMs: number }
+  | { kind: 'fixed'; worstCaseMs: number };
+
+/**
+ * Charge the time the caller spent waiting for its turn in the session queue
+ * against its command, and return the milliseconds the command may use. Call
+ * it inside the `runSessionExclusive` callback, after the session gate and
+ * before the send. A refusal sends nothing.
+ *
+ * `shorten`: the budget less the wait, refused when that is under
+ * `QUEUE_CHARGED_COMMAND_FLOOR_MS`. `fixed`: refused when the worst case fits
+ * the client's request timeout alone but not after the wait; a command whose
+ * worst case is over it already was never promised an answer in time, and is
+ * not refused for waiting.
+ */
+export function chargeQueueWait(
+  runner: GodotRunner,
+  toolName: string,
+  need: QueueChargeNeed,
+): Result<number, ToolResponse> {
+  const turn = runner.queueTurn();
+  const waitedMs = turn?.waitedMs ?? 0;
+  const behind = turn?.behind ?? 'another operation';
+  const refuse = (detail: string): Result<number, ToolResponse> =>
+    err(
+      createErrorResponse(
+        `${toolName} waited ${waitedMs} ms for ${behind} to finish, ${detail} Nothing was sent; retry the call now that the queue is free.`,
+        [
+          `Retry ${toolName}: it is not charged for a wait that did not happen`,
+          'A runtime session runs one operation at a time: issue runtime calls one after another, not in parallel',
+        ],
+      ),
+    );
+
+  if (need.kind === 'shorten') {
+    if (waitedMs === 0) return ok(need.budgetMs);
+    const remainingMs = need.budgetMs - waitedMs;
+    if (remainingMs < QUEUE_CHARGED_COMMAND_FLOOR_MS) {
+      return refuse(
+        `which leaves ${Math.max(0, remainingMs)} ms of its ${need.budgetMs} ms timeout, under the ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms a command needs.`,
+      );
+    }
+    return ok(remainingMs);
+  }
+
+  if (
+    need.worstCaseMs <= CLIENT_REQUEST_TIMEOUT_MS &&
+    waitedMs + need.worstCaseMs > CLIENT_REQUEST_TIMEOUT_MS
+  ) {
+    return refuse(
+      `and the call can take up to ${need.worstCaseMs} ms, which together pass the ${CLIENT_REQUEST_TIMEOUT_MS} ms after which a client that sent no progress token abandons the request.`,
+    );
+  }
+  return ok(need.worstCaseMs);
 }
 
 /** The one gate the runtime and profiling handlers share. */

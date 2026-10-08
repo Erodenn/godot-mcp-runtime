@@ -118,6 +118,8 @@ function createProfilerFake(
     replies?: Record<string, string | Error>;
     /** Run before the capture window answers, where the real profiler waits on its timers. */
     duringWindow?: () => Promise<void>;
+    /** How long the fake says the call waited for its turn in the session queue. */
+    queueWaitedMs?: number;
   } = {},
 ): ProfilerFake {
   const calls: ProfilerCall[] = [];
@@ -194,6 +196,11 @@ function createProfilerFake(
     // from inside the operation that holds it.
     runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
       return queue.run(label, operation);
+    },
+    queueTurn() {
+      const turn = queue.turn();
+      if (turn === null || options.queueWaitedMs === undefined) return turn;
+      return { ...turn, waitedMs: options.queueWaitedMs, behind: 'simulate_input' };
     },
     sendCommand(command: string, params: Record<string, unknown> = {}) {
       return queue.run(`bridge command '${command}'`, async () => {
@@ -1254,5 +1261,35 @@ describe('profiler handlers: incomplete captures', () => {
       expect(tool?.description).toContain('complete');
       expect(tool?.description.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS);
     }
+  });
+});
+
+describe('profile_project: the queue wait is charged against the 60 s request timeout', () => {
+  const FULL_WINDOW_SECONDS = 30;
+  const SHORT_WINDOW_SECONDS = 5;
+  const WAITED_LONG_MS = 25000;
+  const WAITED_SHORT_MS = 1000;
+
+  // Red when the chargeQueueWait call is removed from handleProfileProject.
+  it('a 30 s window that waited 25 s is refused and starts no capture', async () => {
+    const fake = createProfilerFake({ queueWaitedMs: WAITED_LONG_MS });
+    const result = await handleProfileProject(fake.asRunner, { seconds: FULL_WINDOW_SECONDS });
+    expectErrorMatching(result, /profile_project waited 25000 ms for simulate_input to finish/);
+    expectErrorMatching(result, /Nothing was sent/);
+    expect(fake.calls).toEqual([]);
+    expect(fake.bridge).toEqual([]);
+  });
+
+  it('a 30 s window that waited 1 s runs', async () => {
+    const fake = createProfilerFake({ queueWaitedMs: WAITED_SHORT_MS });
+    const result = await handleProfileProject(fake.asRunner, { seconds: FULL_WINDOW_SECONDS });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls[0]?.method).toBe('captureWindow');
+  });
+
+  it('a shorter window has a shorter worst case, so the same wait still runs', async () => {
+    const fake = createProfilerFake({ queueWaitedMs: WAITED_LONG_MS });
+    const result = await handleProfileProject(fake.asRunner, { seconds: SHORT_WINDOW_SECONDS });
+    expect(hasError(result)).toBe(false);
   });
 });

@@ -46,7 +46,7 @@ import {
   type KillTreeDeps,
 } from './process-tree.js';
 import { LineAssembler, Utf8StreamDecoder } from './child-output.js';
-import { SessionQueue } from './session-queue.js';
+import { SessionQueue, type QueueTurn } from './session-queue.js';
 
 /**
  * Thrown when the bridge socket closes (Godot exited, port closed, or peer
@@ -1256,6 +1256,16 @@ export class GodotRunner {
    */
   runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
     return this.queue.run(label, operation);
+  }
+
+  /**
+   * How the operation the caller is inside got its turn in the session queue
+   * (how long it waited, and behind what), or null when the caller is not
+   * inside one. A command about to be sent charges that wait against its own
+   * budget with it.
+   */
+  queueTurn(): QueueTurn | null {
+    return this.queue.turn();
   }
 
   /**

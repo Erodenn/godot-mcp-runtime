@@ -37,6 +37,7 @@ function makeFakeRunner(o: FakeRunnerOverrides): GodotRunner {
     ...fakeSessionApi(() => ({ current: { mode, projectPath, process: proc } })),
     // The session queue: nothing to serialize here, so the operation runs at once.
     runExclusive: <T>(_label: string, operation: () => Promise<T>): Promise<T> => operation(),
+    queueTurn: () => null,
     async sendCommandWithErrors(): Promise<{
       response: string;
       runtimeErrors: string[];

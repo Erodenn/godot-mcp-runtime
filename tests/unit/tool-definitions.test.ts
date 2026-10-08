@@ -151,7 +151,7 @@ describe('simulate_input actions property description', () => {
   ).actions.description;
 
   it('names the action cap and the reduced tail entries', () => {
-    expect(actions).toMatch(/10000 actions/);
+    expect(actions).toMatch(/at most 5900 actions/);
     expect(actions).toMatch(/details_dropped/);
   });
 

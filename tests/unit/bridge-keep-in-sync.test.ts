@@ -126,7 +126,13 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
       string,
       { description?: string }
     >;
-    expect(properties.actions?.description).toContain(`At most ${cap} actions per call`);
+    // The schema states the figure the time budget derives, which has to stay
+    // within the cap the bridge enforces.
+    const stated = /admits at most (\d+) actions per call/.exec(
+      properties.actions?.description ?? '',
+    );
+    expect(stated, 'the actions description must state the budget-derived cap').not.toBeNull();
+    expect(Number(stated![1])).toBeLessThanOrEqual(Number(cap));
   });
 
   it('reads the parent-watch port from the variable the server sets', () => {

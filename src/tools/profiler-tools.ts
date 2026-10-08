@@ -11,6 +11,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import {
+  chargeQueueWait,
   noLiveCurrentSessionError,
   runSessionExclusive,
   type NoSessionWording,
@@ -385,7 +386,7 @@ export const profilerToolDefinitions = [
       properties: {
         seconds: {
           type: 'number',
-          description: `Capture duration in seconds, greater than 0 and at most ${PROFILE_WINDOW_MAX_SECONDS} (default: ${DEFAULT_WINDOW_SECONDS}). The call answers only when the window has closed, and with its waits can take up to ${PROFILE_PROJECT_WORST_CASE_MS / MS_PER_SECOND} s, which the limit keeps under a client's 60 s request timeout. For a longer capture use start_profiler (up to ${PROFILE_MAX_SECONDS} s) and stop_profiler.`,
+          description: `Capture duration in seconds, greater than 0 and at most ${PROFILE_WINDOW_MAX_SECONDS} (default: ${DEFAULT_WINDOW_SECONDS}). The call answers only when the window has closed, and with its waits can take up to ${PROFILE_PROJECT_WORST_CASE_MS / MS_PER_SECOND} s, which the limit keeps under a client's 60 s request timeout. Time spent waiting for the session queue counts against that: a call whose wait plus its worst case would pass 60 s is refused with nothing sent. For a longer capture use start_profiler (up to ${PROFILE_MAX_SECONDS} s) and stop_profiler.`,
         },
         top: topProperty,
         sort: sortProperty,
@@ -1013,6 +1014,14 @@ export async function handleProfileProject(
       PROFILE_WINDOW_MAX_SECONDS,
     );
     if (!startable.ok) return startable;
+    // The worst case of this window: the receiver's waits, the window itself
+    // and the track commands either side of it.
+    const unusedWindowMs = (PROFILE_WINDOW_MAX_SECONDS - windowSeconds) * MS_PER_SECOND;
+    const charged = chargeQueueWait(runner, 'profile_project', {
+      kind: 'fixed',
+      worstCaseMs: PROFILE_PROJECT_WORST_CASE_MS - unusedWindowMs,
+    });
+    if (!charged.ok) return charged;
     tracksHeldForReRead.delete(receiver);
     const tracking = await startTrack(
       runner,

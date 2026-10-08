@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { CLIENT_REQUEST_TIMEOUT_MS, type GodotRunner } from '../../src/utils/godot-runner.js';
+import { QUEUE_CHARGED_COMMAND_FLOOR_MS, chargeQueueWait } from '../../src/utils/session-report.js';
+import { hasError } from '../helpers/assertions.js';
 import {
   SESSION_QUEUE_WAIT_TIMEOUT_MS,
   SessionQueue,
@@ -195,5 +198,98 @@ describe('SessionQueue', () => {
 
   it('keeps the wait under the default client timeout, so the queue error can still be delivered', () => {
     expect(SESSION_QUEUE_WAIT_TIMEOUT_MS).toBeLessThan(SDK_DEFAULT_CLIENT_TIMEOUT_MS);
+  });
+});
+
+describe('chargeQueueWait', () => {
+  const BUDGET_MS = 30000;
+  const WAITED_MS = 20000;
+  const BEHIND = 'simulate_input';
+
+  /** A runner whose caller got its turn after `waitedMs` behind `BEHIND`. */
+  function runnerWaited(waitedMs: number | null): GodotRunner {
+    const turn =
+      waitedMs === null ? null : { requestedAt: 0, waitedMs, behind: waitedMs > 0 ? BEHIND : null };
+    return { queueTurn: () => turn } as unknown as GodotRunner;
+  }
+
+  it('hands a call that did not wait its whole budget', () => {
+    const charged = chargeQueueWait(runnerWaited(0), 'run_script', {
+      kind: 'shorten',
+      budgetMs: BUDGET_MS,
+    });
+    expect(charged).toEqual({ ok: true, value: BUDGET_MS });
+  });
+
+  it('takes the wait off a shortened budget', () => {
+    const charged = chargeQueueWait(runnerWaited(WAITED_MS), 'run_script', {
+      kind: 'shorten',
+      budgetMs: BUDGET_MS,
+    });
+    expect(charged).toEqual({ ok: true, value: BUDGET_MS - WAITED_MS });
+  });
+
+  it('refuses a shortened budget left under the floor', () => {
+    const waited = BUDGET_MS - QUEUE_CHARGED_COMMAND_FLOOR_MS + 1;
+    expect(
+      hasError(
+        chargeQueueWait(runnerWaited(waited), 'run_script', {
+          kind: 'shorten',
+          budgetMs: BUDGET_MS,
+        }),
+      ),
+    ).toBe(true);
+    const atFloor = BUDGET_MS - QUEUE_CHARGED_COMMAND_FLOOR_MS;
+    expect(
+      chargeQueueWait(runnerWaited(atFloor), 'run_script', {
+        kind: 'shorten',
+        budgetMs: BUDGET_MS,
+      }),
+    ).toEqual({ ok: true, value: QUEUE_CHARGED_COMMAND_FLOOR_MS });
+  });
+
+  it('refuses a fixed worst case that fit the request timeout alone and no longer does', () => {
+    const worstCaseMs = CLIENT_REQUEST_TIMEOUT_MS - WAITED_MS;
+    expect(
+      chargeQueueWait(runnerWaited(WAITED_MS), 'profile_project', { kind: 'fixed', worstCaseMs }),
+    ).toEqual({ ok: true, value: worstCaseMs });
+    expect(
+      hasError(
+        chargeQueueWait(runnerWaited(WAITED_MS + 1), 'profile_project', {
+          kind: 'fixed',
+          worstCaseMs,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('never refuses a fixed worst case already over the request timeout, or a call outside a turn', () => {
+    const over = CLIENT_REQUEST_TIMEOUT_MS + 1;
+    expect(
+      chargeQueueWait(runnerWaited(WAITED_MS), 'simulate_input', {
+        kind: 'fixed',
+        worstCaseMs: over,
+      }),
+    ).toEqual({ ok: true, value: over });
+    expect(
+      chargeQueueWait(runnerWaited(null), 'simulate_input', { kind: 'fixed', worstCaseMs: over }),
+    ).toEqual({ ok: true, value: over });
+  });
+});
+
+describe('SessionQueue.turn as the runner exposes it', () => {
+  it('reports the wait and the holder a call got its turn behind', async () => {
+    const queue = new SessionQueue();
+    const first = gate();
+    const held = queue.run('first', () => first.opened);
+    let seen: ReturnType<SessionQueue['turn']> = null;
+    const second = queue.run('second', async () => {
+      seen = queue.turn();
+    });
+    first.open();
+    await Promise.all([held, second]);
+    expect(seen).toMatchObject({ behind: 'first' });
+    expect(seen!.waitedMs).toBeGreaterThanOrEqual(0);
+    expect(queue.turn()).toBeNull();
   });
 });

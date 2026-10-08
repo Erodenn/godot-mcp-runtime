@@ -62,6 +62,9 @@ import {
 import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 import {
+  MAX_RUNTIME_TIMEOUT_MS,
+  QUEUE_CHARGED_COMMAND_FLOOR_MS,
+  chargeQueueWait,
   noLiveCurrentSessionError,
   otherLiveSessionsClause,
   requireRuntimeSession,
@@ -119,8 +122,12 @@ const INPUT_TIMEOUT_BUFFER_MS = 10000;
  * KEEP IN SYNC: `MAX_BATCH_WAIT_MS` in src/scripts/mcp_bridge.gd bounds the
  * wall-clock waits of a batch at the same figure on the bridge side.
  */
-export const MAX_INPUT_BATCH_BUDGET_MS = 600000;
+export const MAX_INPUT_BATCH_BUDGET_MS = MAX_RUNTIME_TIMEOUT_MS;
 const MS_PER_SECOND = 1000;
+/** `get_debug_output` `limit` when omitted, and the least it accepts. */
+const DEFAULT_DEBUG_OUTPUT_LIMIT = 200;
+const MIN_DEBUG_OUTPUT_LIMIT = 1;
+const MIN_RUNTIME_TIMEOUT_MS = 1;
 /**
  * Wall-clock charged per engine frame a batch waits on. It is a floor on the
  * frame rate, not an estimate of it: a batch that outruns this budget times out
@@ -136,6 +143,17 @@ const INPUT_SETTLE_FRAMES_PER_ACTION = 1;
 // One process frame plus one physics frame, the tap hold for key and action.
 const INPUT_TAP_HOLD_FRAMES = 2;
 const INPUT_TEXT_PER_CHAR_MS = 1;
+/**
+ * The most actions the time budget admits when each costs only its settle
+ * frame (5900 at the current figures). The bridge's own cap
+ * (`MAX_BATCH_ACTIONS`, 10000) is above it and never reached through this
+ * server.
+ */
+const MAX_ACTIONS_WITHIN_BUDGET = Math.floor(
+  (MAX_INPUT_BATCH_BUDGET_MS - INPUT_TIMEOUT_BUFFER_MS) /
+    (INPUT_PESSIMISTIC_FRAME_MS * INPUT_SETTLE_FRAMES_PER_ACTION),
+);
+const ACTIONS_PER_CALL_SENTENCE = `The budget admits at most ${MAX_ACTIONS_WITHIN_BUDGET} actions per call, fewer when they tap, hold or wait.`;
 
 /** Bridge timeout for one screenshot command when the caller passes no `timeout`. */
 export const SCREENSHOT_DEFAULT_TIMEOUT_MS = 10000;
@@ -305,7 +323,7 @@ export const runtimeToolDefinitions = [
       properties: {
         limit: {
           type: 'number',
-          description: 'Max lines to return (default: 200, from end of output)',
+          description: `Max lines to return, a whole number of ${MIN_DEBUG_OUTPUT_LIMIT} or more (default: ${DEFAULT_DEBUG_OUTPUT_LIMIT}, from end of output)`,
         },
       },
       required: [],
@@ -392,7 +410,7 @@ export const runtimeToolDefinitions = [
       properties: {
         timeout: {
           type: 'number',
-          description: `Timeout in milliseconds to wait for the screenshot (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}). The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
+          description: `Timeout in milliseconds to wait for the screenshot, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}). Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
         },
         responseMode: {
           type: 'string',
@@ -460,7 +478,7 @@ export const runtimeToolDefinitions = [
       properties: {
         actions: {
           type: 'array',
-          description: `Array of input actions to execute sequentially. Each object must have a "type" field. A batch whose time budget (its waits and holds, plus every frame it spends counted at 10fps) exceeds ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s is rejected before anything is injected: split it across calls. At most 10000 actions per call. When results outgrow one reply (about 4 MiB), later entries keep only index, type, ok, frame, elapsed_ms and error, with details_dropped: true; the action still ran.`,
+          description: `Array of input actions to execute sequentially. Each object must have a "type" field. A batch whose time budget (waits, holds, and every frame counted at 10fps) exceeds ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s is rejected before anything is injected: split it across calls. ${ACTIONS_PER_CALL_SENTENCE} When results outgrow one reply (about 4 MiB), later entries keep only index, type, ok, frame, elapsed_ms and error, with details_dropped: true; the action still ran.`,
           items: {
             type: 'object',
             properties: {
@@ -707,7 +725,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, success, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result leads with a warning.',
+      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result leads with a warning.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -719,7 +737,7 @@ export const runtimeToolDefinitions = [
         },
         timeout: {
           type: 'number',
-          description: `Timeout in ms (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}). Increase for long-running scripts.`,
+          description: `Timeout in ms, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}). Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
         },
       },
       required: ['script'],
@@ -728,12 +746,11 @@ export const runtimeToolDefinitions = [
       type: 'object',
       properties: {
         projectPath: { type: 'string' },
-        success: { type: 'boolean' },
         result: {},
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },
-      required: ['projectPath', 'success', 'result', 'tip'],
+      required: ['projectPath', 'result', 'tip'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -1735,6 +1752,50 @@ function attachedNothingCapturedWarning(outputField: string, errorsField: string
   return `An attached session captures no stdout or stderr (Godot was launched outside MCP), so ${outputField} and ${errorsField} are null, not empty.`;
 }
 
+/**
+ * A whole number of `min` or more, and at most `max` when one is given. The
+ * error names the parameter, the value and the range, so a caller that sent
+ * 1.5 or -1 is not left to guess what was wrong.
+ */
+function parseIntegerRangeArg(
+  args: OperationParams,
+  name: string,
+  range: { min: number; max?: number },
+): Result<number | undefined, ToolResponse> {
+  const valueResult = optionalNumber(args, name);
+  if (!valueResult.ok) return valueResult;
+  const value = valueResult.value;
+  if (value === undefined) return ok(undefined);
+  const { min, max } = range;
+  if (!Number.isInteger(value) || value < min || (max !== undefined && value > max)) {
+    const rangeText = max === undefined ? `${min} or more` : `${min} to ${max}`;
+    return err(
+      createErrorResponse(`${name} must be a whole number from ${rangeText}, got ${value}`, [
+        `Omit ${name} for its default, or pass a whole number from ${rangeText}`,
+      ]),
+    );
+  }
+  return ok(value);
+}
+
+/**
+ * The `timeout` of `run_script` and `take_screenshot`: a whole number of
+ * milliseconds from 1 to `MAX_RUNTIME_TIMEOUT_MS`, `defaultMs` when omitted.
+ * Exported for direct unit testing.
+ */
+export function parseTimeoutMsArg(
+  args: OperationParams,
+  name: string,
+  defaultMs: number,
+): Result<number, ToolResponse> {
+  const parsed = parseIntegerRangeArg(args, name, {
+    min: MIN_RUNTIME_TIMEOUT_MS,
+    max: MAX_RUNTIME_TIMEOUT_MS,
+  });
+  if (!parsed.ok) return parsed;
+  return ok(parsed.value ?? defaultMs);
+}
+
 export function handleGetDebugOutput(
   runner: GodotRunner,
   args: OperationParams = {},
@@ -1784,9 +1845,9 @@ export function handleGetDebugOutput(
     );
   }
 
-  const limitResult = optionalNumber(args, 'limit');
+  const limitResult = parseIntegerRangeArg(args, 'limit', { min: MIN_DEBUG_OUTPUT_LIMIT });
   if (!limitResult.ok) return limitResult;
-  const limit = limitResult.value ?? 200;
+  const limit = limitResult.value ?? DEFAULT_DEBUG_OUTPUT_LIMIT;
   const response: {
     projectPath: string;
     sessionMode: 'spawned';
@@ -2017,9 +2078,9 @@ async function takeScreenshot(runner: GodotRunner, args: OperationParams): Promi
   if (!session.ok) return session;
   const sessionProjectPath = session.value.projectPath;
 
-  const timeoutResult = optionalNumber(args, 'timeout');
+  const timeoutResult = parseTimeoutMsArg(args, 'timeout', SCREENSHOT_DEFAULT_TIMEOUT_MS);
   if (!timeoutResult.ok) return timeoutResult;
-  const timeout = timeoutResult.value ?? SCREENSHOT_DEFAULT_TIMEOUT_MS;
+  const requestedTimeoutMs = timeoutResult.value;
   const responseMode = parseScreenshotResponseMode(args.responseMode);
   if (responseMode === null) {
     return err(
@@ -2052,6 +2113,13 @@ async function takeScreenshot(runner: GodotRunner, args: OperationParams): Promi
     commandParams.preview_max_width = previewMaxWidth;
     commandParams.preview_max_height = previewMaxHeight;
   }
+
+  const charged = chargeQueueWait(runner, 'take_screenshot', {
+    kind: 'shorten',
+    budgetMs: requestedTimeoutMs,
+  });
+  if (!charged.ok) return charged;
+  const timeout = charged.value;
 
   try {
     const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
@@ -2383,7 +2451,12 @@ async function simulateInput(runner: GodotRunner, args: OperationParams): Promis
     );
   }
 
-  const timeoutMs = computeInputTimeoutMs(actions);
+  const charged = chargeQueueWait(runner, 'simulate_input', {
+    kind: 'fixed',
+    worstCaseMs: computeInputTimeoutMs(actions),
+  });
+  if (!charged.ok) return charged;
+  const timeoutMs = charged.value;
   const params: Record<string, unknown> = watch.length > 0 ? { actions, watch } : { actions };
 
   try {
@@ -2606,9 +2679,9 @@ export async function handleRunScript(
 
   // Read before the gate: a call that cannot be sent must not prompt a human
   // or leave an audit record saying the script ran.
-  const timeoutResult = optionalNumber(args, 'timeout');
+  const timeoutResult = parseTimeoutMsArg(args, 'timeout', RUN_SCRIPT_DEFAULT_TIMEOUT_MS);
   if (!timeoutResult.ok) return timeoutResult;
-  const timeout = timeoutResult.value ?? RUN_SCRIPT_DEFAULT_TIMEOUT_MS;
+  const requestedTimeoutMs = timeoutResult.value;
 
   // Static-analysis gate. Decision drives audit + dispatch. Completely
   // skipped when GODOT_MCP_DISABLE_SECURITY is set: no scan, no Tier 1/2/3
@@ -2786,10 +2859,17 @@ export async function handleRunScript(
         ),
       );
     }
+    // The wait for this turn comes off the timeout. A refusal leaves the
+    // record to the `not_sent` write below: the script was admitted, not run.
+    const charged = chargeQueueWait(runner, 'run_script', {
+      kind: 'shorten',
+      budgetMs: requestedTimeoutMs,
+    });
+    if (!charged.ok) return charged;
     auditAdmitted(true);
     return executeAdmittedScript(runner, {
       script,
-      timeout,
+      timeout: charged.value,
       sessionProjectPath,
       sessionMode,
       tip,
@@ -2907,7 +2987,6 @@ async function executeAdmittedScript(
 
       const nullPayload: Record<string, unknown> = {
         projectPath: sessionProjectPath,
-        success: true,
         result: null,
         warnings: [
           'Script returned null. If unexpected, check get_debug_output for runtime errors - GDScript does not propagate exceptions.',
@@ -2925,7 +3004,6 @@ async function executeAdmittedScript(
       return createStructuredResponse({
         warnings: [ATTACHED_NULL_RESULT_WARNING, ...warningsFromPolicy],
         projectPath: sessionProjectPath,
-        success: true,
         result: null,
         tip,
       });
@@ -2933,7 +3011,6 @@ async function executeAdmittedScript(
 
     const payload: Record<string, unknown> = {
       projectPath: sessionProjectPath,
-      success: true,
       result: parsed.result,
       tip,
     };

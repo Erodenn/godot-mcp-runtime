@@ -107,6 +107,7 @@ export function createRuntimeFake(): RuntimeFake {
     // The session queue: the fake has nothing to serialize, so the operation
     // runs at once.
     runExclusive: <T>(_label: string, operation: () => Promise<T>): Promise<T> => operation(),
+    queueTurn: () => null,
     detectGodotPath: async () => '/usr/local/bin/godot',
     getVersion: async () => '4.7.2.stable.official',
     sendCommandWithErrors: async (
