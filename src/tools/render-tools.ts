@@ -22,7 +22,8 @@ import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
 import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
-import { liveSessionRemedy } from '../utils/session-report.js';
+import { liveSessionRemedy, sessionBusyError } from '../utils/session-report.js';
+import { SessionQueueTimeoutError } from '../utils/session-queue.js';
 import {
   BRIDGE_AUTOLOAD_NAME,
   BridgeManager,
@@ -1076,30 +1077,8 @@ export function createRenderMovieHandler(
     );
     if (!gate.ok) return gate;
 
-    // The gate can hold a confirmation prompt open for as long as a human
-    // takes to answer it. A session started on this project in that time has
-    // injected the bridge, and the movie process would load it with no session
-    // token and no port of its own. Asked again, now that the wait is over.
-    const busyAfterGate = refuseIfBridgeMayLoad(runner, root);
-    if (busyAfterGate !== null) return err(busyAfterGate);
-
     const runId = `${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);
-    try {
-      if (!isUnderDir(moviesDir(root), runDir)) {
-        throw new Error('the run directory is outside the movies directory');
-      }
-      BridgeManager.ensureArtifactRoot(root);
-      mkdirSync(runDir, { recursive: true });
-    } catch (error) {
-      return err(
-        createErrorResponse(
-          `render_movie could not prepare its output directory: ${getErrorMessage(error)}`,
-          ['Check write permissions on the project directory (.mcp/godot-runtime/movies/)'],
-        ),
-      );
-    }
-
     const outputPath = movieOutputPath(
       root,
       runId,
@@ -1117,19 +1096,67 @@ export function createRenderMovieHandler(
       gateWarnings: gate.value.warnings,
     };
 
+    // The last session check, the first disk write and the spawn are one step
+    // under the session queue, with the run registered on the runner before
+    // the spawn: a run_project on this project either ran before this step,
+    // and the check sees its session, or runs after it, and is refused while
+    // the movie child lives. The queue is held for that step only, never for
+    // the run. `started` is wrapped so the queue does not wait on the child.
+    const launchGodotPath = godotPath;
+    type Launch = HandlerResult | { started: Promise<MovieProcessResult> };
+    let launched: Launch;
+    try {
+      launched = await runner.runExclusive<Launch>('render_movie', async () => {
+        // The gate can hold a confirmation prompt open for as long as a human
+        // takes to answer it, and a session started on this project in that
+        // time has injected the bridge. Asked again, now that the wait is over.
+        const busyAfterGate = refuseIfBridgeMayLoad(runner, root);
+        if (busyAfterGate !== null) return err(busyAfterGate);
+        try {
+          if (!isUnderDir(moviesDir(root), runDir)) {
+            throw new Error('the run directory is outside the movies directory');
+          }
+          BridgeManager.ensureArtifactRoot(root);
+          mkdirSync(runDir, { recursive: true });
+        } catch (error) {
+          return err(
+            createErrorResponse(
+              `render_movie could not prepare its output directory: ${getErrorMessage(error)}`,
+              ['Check write permissions on the project directory (.mcp/godot-runtime/movies/)'],
+            ),
+          );
+        }
+        const endMovieRun = runner.beginMovieRun(root);
+        try {
+          return {
+            started: deps.runProcess(
+              launchGodotPath,
+              buildMovieArgs({
+                projectPath: root,
+                outputPath,
+                fps,
+                frames,
+                ...(scene !== undefined ? { scene } : {}),
+              }),
+              rc.timeoutMs,
+              { onClosed: endMovieRun },
+            ),
+          };
+        } catch (error) {
+          // Nothing was started, so nothing will report closing.
+          endMovieRun();
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
+      launched = { started: Promise.reject(error) };
+    }
+    if (!('started' in launched)) return launched;
+
     let response: HandlerResult;
     try {
-      const result = await deps.runProcess(
-        godotPath,
-        buildMovieArgs({
-          projectPath: root,
-          outputPath,
-          fps,
-          frames,
-          ...(scene !== undefined ? { scene } : {}),
-        }),
-        rc.timeoutMs,
-      );
+      const result = await launched.started;
       const frameFiles = mode === 'video' ? [] : discoverFrames(runDir);
       const failure = await findRunFailure(rc, result, frameFiles.length);
       if (failure !== null) {
@@ -1164,6 +1191,7 @@ export function createRenderMovieHandler(
 }
 
 export const handleRenderMovie = createRenderMovieHandler({
-  runProcess: runMovieProcess,
+  runProcess: (godotPath, args, timeoutMs, hooks) =>
+    runMovieProcess(godotPath, args, timeoutMs, undefined, hooks),
   displayAvailable: checkDisplayAvailable,
 });

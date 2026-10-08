@@ -47,6 +47,15 @@ export const BRIDGE_WAIT_SPAWNED_TIMEOUT_MS = 30000;
 export const OVERSIZE_RESPONSE_FIELD = 'response_too_large';
 
 /**
+ * The `error` the bridge answers with when a frame carries no token or the
+ * wrong one. Read by the readiness wait: a listener that answers a ping this
+ * way is a bridge, and not this session's.
+ *
+ * KEEP IN SYNC: `UNAUTHORIZED_ERROR` in src/scripts/mcp_bridge.gd.
+ */
+export const BRIDGE_UNAUTHORIZED_ERROR = 'Unauthorized: invalid or missing session token';
+
+/**
  * Key the bridge sets on a reply that carried non-finite numbers (INF, NAN) as
  * null, holding how many. Absent when there were none. The reader strips it and
  * leads its payload with `nonFiniteWarning`.

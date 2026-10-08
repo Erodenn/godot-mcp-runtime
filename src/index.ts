@@ -16,7 +16,7 @@ import { startProgressHeartbeat } from './utils/progress-heartbeat.js';
 import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
-import { registerProcessLifecycle } from './utils/process-lifecycle.js';
+import { registerProcessLifecycle, shutDownRunner } from './utils/process-lifecycle.js';
 import { SESSION_QUEUE_WAIT_TIMEOUT_MS } from './utils/session-queue.js';
 import { MS_PER_SECOND } from './utils/profiler.js';
 
@@ -183,7 +183,7 @@ class GodotMcpServer {
 
   private async cleanup() {
     console.error('[SERVER] Cleaning up resources');
-    await this.runner.stopAllSessions();
+    await shutDownRunner(this.runner);
     await this.server.close();
   }
 

@@ -38,10 +38,23 @@ export interface MovieProcessResult {
   killUnconfirmed?: boolean;
 }
 
+/** What the caller of a movie run is told about the child, apart from the result. */
+export interface MovieRunHooks {
+  /**
+   * Called once, when the child is known not to be running: it reported
+   * `close`, or it never started. Not called when the call merely gives up on
+   * a child that outlived its timeout kill, which is why a caller tracking
+   * "a movie process is using this project" ends that here and not on the
+   * result.
+   */
+  onClosed?: () => void;
+}
+
 export type RunMovieProcess = (
   godotPath: string,
   args: string[],
   timeoutMs: number,
+  hooks?: MovieRunHooks,
 ) => Promise<MovieProcessResult>;
 
 // The tree kill lives in process-tree.ts, shared with the session games.
@@ -99,10 +112,21 @@ export function runMovieProcess(
   args: string[],
   timeoutMs: number,
   deps: MovieProcessDeps = defaultMovieProcessDeps,
+  hooks: MovieRunHooks = {},
 ): Promise<MovieProcessResult> {
   return new Promise<MovieProcessResult>((resolve) => {
     let proc: ChildProcess | undefined;
     let settled = false;
+    let closedReported = false;
+    const reportClosed = (): void => {
+      if (closedReported) return;
+      closedReported = true;
+      try {
+        hooks.onClosed?.();
+      } catch (error) {
+        logDebug(`Non-fatal: a movie run's onClosed hook threw: ${getErrorMessage(error)}`);
+      }
+    };
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -119,6 +143,7 @@ export function runMovieProcess(
     try {
       proc = deps.spawn(godotPath, args, godotSpawnOptions('movie'));
     } catch (error) {
+      reportClosed();
       finish({
         exitCode: null,
         stdout,
@@ -147,10 +172,12 @@ export function runMovieProcess(
         return;
       }
       activeMovieChildren.delete(child);
+      reportClosed();
       finish({ exitCode: null, stdout, stderr, timedOut: false, spawnError: error.message });
     });
     child.on('close', (code: number | null) => {
       activeMovieChildren.delete(child);
+      reportClosed();
       finish({ exitCode: normalizeExitCode(code), stdout, stderr, timedOut });
     });
 

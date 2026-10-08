@@ -14,9 +14,10 @@
  * exercise a stale build locally and a missing one in CI.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'events';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { registerProcessLifecycle } from '../../src/utils/process-lifecycle.js';
+import { registerProcessLifecycle, shutDownRunner } from '../../src/utils/process-lifecycle.js';
 import type { LifecycleProcess } from '../../src/utils/process-lifecycle.js';
 import { GodotRunner, type GodotProcess } from '../../src/utils/godot-runner.js';
 import { bridgeDir, bridgeScriptAbsPath, mcpDir } from '../../src/utils/artifact-paths.js';
@@ -64,6 +65,94 @@ function makeFakeProcess(): FakeProcess {
 }
 
 const tmp = useTmpDirs();
+
+/** Pid of a fake headless child; nothing real is signalled. */
+const HEADLESS_RUN_PID = 43300;
+/** The bound the shutdown tests give the wait for headless runs. */
+const TEST_HEADLESS_WAIT_MS = 400;
+/** Promise hops between a timer or an event and the exit built on it; generous. */
+const MICROTASK_FLUSHES = 50;
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < MICROTASK_FLUSHES; i++) await Promise.resolve();
+}
+
+// The production cleanup is `shutDownRunner` followed by closing the MCP
+// server (src/index.ts), so these drive the real shutdown step and the real
+// registration, with a headless child put in the runner's set by hand.
+describe('a graceful shutdown with a headless run in flight', () => {
+  let runner: GodotRunner;
+  let proc: FakeProcess;
+  let events: string[];
+  let child: EventEmitter & { pid: number };
+  let headlessChildren: Set<unknown>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    runner = new GodotRunner({ godotPath: 'godot' });
+    proc = makeFakeProcess();
+    events = [];
+    child = Object.assign(new EventEmitter(), { pid: HEADLESS_RUN_PID });
+    const internals = runner as unknown as {
+      killTreeDeps: unknown;
+      headlessChildren: Set<unknown>;
+    };
+    headlessChildren = internals.headlessChildren;
+    headlessChildren.add(child);
+    internals.killTreeDeps = {
+      platform: 'win32',
+      spawnSync: (_command: string, args: string[]) => {
+        events.push(`taskkill ${args.join(' ')}`);
+        return { status: 0 };
+      },
+      kill: () => {},
+    };
+    registerProcessLifecycle({
+      runner,
+      cleanup: () => shutDownRunner(runner, TEST_HEADLESS_WAIT_MS),
+      proc,
+      // As process.exit does: the 'exit' listeners run inside the call.
+      exit: (code) => {
+        events.push(`exit ${code}`);
+        proc.emit('exit');
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('exits as soon as the run has closed, without killing it', async () => {
+    proc.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(TEST_HEADLESS_WAIT_MS / 2);
+    await flushMicrotasks();
+    // Red when the shutdown does not wait: the exit, and the kill in its
+    // hook, would already be here.
+    expect(events).toEqual([]);
+
+    // What the runner's own 'close' listener does for a real child.
+    headlessChildren.delete(child);
+    child.emit('close', 0);
+    await flushMicrotasks();
+
+    expect(events).toEqual(['exit 0']);
+  });
+
+  it('exits at the bound when the run has not closed, and only then is the run killed', async () => {
+    proc.emit('SIGTERM');
+    await vi.advanceTimersByTimeAsync(TEST_HEADLESS_WAIT_MS - 1);
+    await flushMicrotasks();
+    expect(events).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // Red when the kill comes before the wait (the order is reversed or the
+    // list starts with the kill), or when the wait has no bound (no exit).
+    expect(events).toEqual(['exit 0', `taskkill /PID ${HEADLESS_RUN_PID} /T /F`]);
+  });
+});
 
 describe('registerProcessLifecycle', () => {
   let runner: GodotRunner;

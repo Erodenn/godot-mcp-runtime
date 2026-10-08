@@ -7,7 +7,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../../src/utils/bridge-protocol.js';
+import {
+  BRIDGE_UNAUTHORIZED_ERROR,
+  BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
+} from '../../src/utils/bridge-protocol.js';
 import { SESSION_QUEUE_WAIT_TIMEOUT_MS } from '../../src/utils/session-queue.js';
 import {
   GodotRunner,
@@ -155,6 +158,41 @@ describe('bridge readiness budget', () => {
       waitedMs: expect.any(Number),
     });
     expect(harness.pings).toBeGreaterThan(BRIDGE_CONNECTED_PING_FAILURE_LIMIT);
+  });
+
+  it('ends the wait on the first ping a bridge refuses for its token, naming the port', async () => {
+    // A Godot left from an earlier session: it answers every ping, so the
+    // failure count never starts, and it will never accept this token. Red
+    // when the refusal is treated like any other answered ping: the loop then
+    // runs to 'budget expired' with many pings.
+    const harness = pollWithStub(() =>
+      Promise.resolve(JSON.stringify({ error: BRIDGE_UNAUTHORIZED_ERROR })),
+    );
+    const started = Date.now();
+
+    const result = await harness.poll();
+
+    expect(harness.pings).toBe(1);
+    expect(result.ready).toBe(false);
+    expect(result.error).toBe(
+      `A bridge with a different session token is listening on port ${STUB_BRIDGE_PORT}: a Godot left from an earlier session. Close it, then retry.`,
+    );
+    expect(Date.now() - started).toBeLessThan(SHORT_POLL_CEILING_MS);
+  });
+
+  it('keeps waiting on a bridge that answers with some other error', async () => {
+    // Only the token refusal is final. Any other error reply is a bridge that
+    // is up and not ready, which the wait exists for.
+    let calls = 0;
+    const harness = pollWithStub(() => {
+      calls += 1;
+      return Promise.resolve(
+        JSON.stringify(calls === 1 ? { error: 'Scene tree not ready' } : { status: 'pong' }),
+      );
+    });
+
+    expect(await harness.poll()).toEqual({ ready: true, waitedMs: expect.any(Number) });
+    expect(harness.pings).toBe(2);
   });
 
   it('does not count refusals from before the port accepted a connection', async () => {

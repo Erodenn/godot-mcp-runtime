@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Ajv from 'ajv';
 import { dirname, extname, join, resolve } from 'path';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
@@ -16,6 +16,7 @@ import {
 import { moviesDir } from '../../../src/utils/artifact-paths.js';
 import { BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
 import { normalizeProjectKey } from '../../../src/utils/mcp-context.js';
+import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import type { MovieProcessResult, RunMovieProcess } from '../../../src/utils/movie-process.js';
 import { MOTION_MIN_CHANGED_PIXELS } from '../../../src/utils/pixel-stats.js';
@@ -153,6 +154,8 @@ interface StubConfig {
   videoBytes?: Buffer;
   result?: Partial<MovieProcessResult>;
   onRun?: (info: StubRunInfo) => void;
+  /** The process keeps running until this resolves. Default: it ends at once. */
+  runsUntil?: Promise<void>;
 }
 
 interface StubCall {
@@ -163,7 +166,7 @@ interface StubCall {
 
 function createStub(config: StubConfig = {}): { runProcess: RunMovieProcess; calls: StubCall[] } {
   const calls: StubCall[] = [];
-  const runProcess: RunMovieProcess = async (godotPath, args, timeoutMs) => {
+  const runProcess: RunMovieProcess = async (godotPath, args, timeoutMs, hooks) => {
     calls.push({ godotPath, args, timeoutMs });
     const outputPath = args[args.indexOf('--write-movie') + 1]!;
     const dir = dirname(outputPath);
@@ -182,6 +185,10 @@ function createStub(config: StubConfig = {}): { runProcess: RunMovieProcess; cal
         writeFileSync(outputPath, config.videoBytes ?? Buffer.from('video bytes'));
       }
     }
+    if (config.runsUntil !== undefined) await config.runsUntil;
+    // As runMovieProcess does: a child whose kill was not confirmed has not
+    // reported closing, so nothing is said about it.
+    if (config.result?.killUnconfirmed !== true) hooks?.onClosed?.();
     return { exitCode: 0, stdout: '', stderr: '', timedOut: false, ...config.result };
   };
   return { runProcess, calls };
@@ -497,6 +504,108 @@ describe('render_movie asks again whether the bridge may load once the gate retu
     expectErrorMatching(result, /runtime session is active on this project/);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
+  });
+});
+
+describe('render_movie and a start on the same project', () => {
+  // The handler's last session check and its spawn are one step under the
+  // session queue, and the run is registered on the runner inside that step.
+  // A run_project on the project therefore runs wholly before the step (the
+  // check sees its session) or wholly after it (the runner refuses it, see
+  // godot-runner-multi-session.test.ts).
+  it('registers the run and spawns with the session queue held, then frees the queue while the movie runs', async () => {
+    let heldAtSpawn: string | null | undefined;
+    let endProcess!: () => void;
+    const runsUntil = new Promise<void>((done) => {
+      endProcess = done;
+    });
+    const ctx = setup({
+      stub: {
+        runsUntil,
+        onRun: () => {
+          heldAtSpawn = ctx.fake.queue.running;
+        },
+      },
+    });
+
+    const pending = ctx.handler(ctx.runner, { projectPath: ctx.dir, frames: TEST_FRAMES }, NO_GATE);
+    await vi.waitFor(() => expect(ctx.stub.calls.length).toBe(1));
+
+    // Red when the registration or the spawn is moved out of runExclusive:
+    // either would then see a free queue.
+    expect(heldAtSpawn).toBe('render_movie');
+    expect(ctx.fake.movieRuns).toEqual([
+      { projectPath: resolve(ctx.dir), queueHeldBy: 'render_movie', ended: false },
+    ]);
+    // Red when the queue is held for the whole run: commands for other
+    // sessions would wait behind a movie for as long as it renders.
+    await vi.waitFor(() => expect(ctx.fake.queue.running).toBeNull());
+    expect(ctx.fake.movieRuns[0]!.ended).toBe(false);
+
+    endProcess();
+    payloadOf(await pending);
+    expect(ctx.fake.movieRuns[0]!.ended).toBe(true);
+  });
+
+  it('keeps the run registered when the movie process may still be running', async () => {
+    // Red when the handler ends the registration on its own return: a start
+    // would then be let in under a Godot that is still rendering the project.
+    const { dir, runner, fake, handler } = setup({
+      stub: { result: { timedOut: true, exitCode: null, killUnconfirmed: true } },
+    });
+
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+
+    expectErrorMatching(result, /a Godot process may still be running/);
+    expect(fake.movieRuns.map((run) => run.ended)).toEqual([false]);
+  });
+
+  it('answers with what it waited behind when its turn in the session queue never came, having written nothing', async () => {
+    // Red when the queue timeout is left to propagate as a thrown error.
+    const waitedMs = 30000;
+    const { dir, runner, fake, stub, handler } = setup({
+      runner: {
+        exclusiveThrows: new SessionQueueTimeoutError('render_movie', 'run_project', waitedMs),
+      },
+    });
+
+    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+
+    expectErrorMatching(result, /render_movie waited 30000 ms for run_project to finish/);
+    expect(stub.calls.length).toBe(0);
+    expect(fake.movieRuns).toEqual([]);
+    expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
+  });
+
+  it('makes the second session check inside the queue step, and registers nothing when it refuses', async () => {
+    const { dir, runner, fake, stub, handler } = setup();
+    const heldAtCheck: Array<string | null> = [];
+    const fakeFields = runner as unknown as {
+      activeSessionMode: string | null;
+      activeProjectPath: string | null;
+      activeProcess: { hasExited: boolean } | null;
+      hasLiveSessionOnProject: (projectPath: string) => boolean;
+    };
+    const original = fakeFields.hasLiveSessionOnProject.bind(fakeFields);
+    fakeFields.hasLiveSessionOnProject = (projectPath) => {
+      heldAtCheck.push(fake.queue.running);
+      // A session goes live on the project between the two checks.
+      if (heldAtCheck.length === 2) {
+        fakeFields.activeSessionMode = 'spawned';
+        fakeFields.activeProjectPath = dir;
+        fakeFields.activeProcess = { hasExited: false };
+      }
+      return original(projectPath);
+    };
+
+    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+
+    // Red when the second check is left ahead of runExclusive: a start could
+    // then run between it and the registration.
+    expect(heldAtCheck.slice(0, 2)).toEqual([null, 'render_movie']);
+    expectErrorMatching(result, /runtime session is active on this project/);
+    expect(stub.calls.length).toBe(0);
+    expect(fake.movieRuns).toEqual([]);
   });
 });
 

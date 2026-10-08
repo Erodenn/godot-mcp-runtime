@@ -27,7 +27,7 @@ vi.mock('child_process', async (importOriginal) => {
   return { ...actual, spawn: (...args: unknown[]) => spawnMock(...args) };
 });
 
-const { GodotRunner } = await import('../../src/utils/godot-runner.js');
+const { GodotRunner, HEADLESS_SHUTDOWN_WAIT_MS } = await import('../../src/utils/godot-runner.js');
 type Runner = InstanceType<typeof GodotRunner>;
 
 const HEADLESS_PID = 51515;
@@ -410,6 +410,201 @@ describe('the exit hook and headless children', () => {
 
     // Nothing is left to kill: the list was not grown by the second call.
     expect(kills.taskkillPids).toEqual([String(HEADLESS_PID)]);
+  });
+});
+
+/** Promise hops between an event or a timer and the answer built on it; generous. */
+const MICROTASK_FLUSHES = 50;
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < MICROTASK_FLUSHES; i++) await Promise.resolve();
+}
+
+describe('a graceful shutdown and the headless runs in flight', () => {
+  let runner: Runner;
+  let child: FakeChild;
+  let projectPath: string;
+  let kills: { taskkillPids: string[] };
+
+  beforeEach(() => {
+    child = makeFakeChild(HEADLESS_PID);
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(child);
+    runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+    kills = fakeTreeKill(runner);
+    projectPath = tmp.makeProject('godot-mcp-shutdown-');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('waits for a run that closes inside the bound, and nothing is killed', async () => {
+    const pending = runner.executeOperation('save_scene', {}, projectPath);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    let waited: boolean | undefined;
+    void runner.waitForHeadlessChildren().then((value) => {
+      waited = value;
+    });
+    await flushMicrotasks();
+    // Red when the wait resolves without looking at the set.
+    expect(waited).toBeUndefined();
+
+    child.stderr.emit('data', Buffer.from('[INFO] Operation: save_scene\n'));
+    child.emit('close', 0);
+    await pending;
+    await flushMicrotasks();
+
+    expect(waited).toBe(true);
+    runner.killSpawnedProcessesSync();
+    expect(kills.taskkillPids).toEqual([]);
+  });
+
+  it('gives up exactly at the bound, kills nothing itself, and leaves the run for the exit hook', async () => {
+    vi.useFakeTimers();
+    const pending = runner
+      .executeOperation('save_scene', {}, projectPath)
+      .catch((error: unknown) => error);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    let waited: boolean | undefined;
+    void runner.waitForHeadlessChildren().then((value) => {
+      waited = value;
+    });
+    await vi.advanceTimersByTimeAsync(HEADLESS_SHUTDOWN_WAIT_MS - 1);
+    await flushMicrotasks();
+    expect(waited).toBeUndefined();
+
+    // Red when the wait has no bound: it would still be pending here, and a
+    // shutdown would hang on a wedged engine.
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+    expect(waited).toBe(false);
+    // Red when the wait kills: the kill belongs to the exit hook, after it.
+    expect(kills.taskkillPids).toEqual([]);
+
+    runner.killSpawnedProcessesSync();
+    expect(kills.taskkillPids).toEqual([String(HEADLESS_PID)]);
+
+    child.emit('close', null);
+    await pending;
+  });
+
+  it('answers at once when no headless run is in flight', async () => {
+    expect(await runner.waitForHeadlessChildren()).toBe(true);
+  });
+
+  it('refuses a headless operation and an import once the shutdown has begun', async () => {
+    await runner.stopAllSessions();
+
+    // Red when either starts: the shutdown has stopped looking for runs to
+    // wait for, so the exit hook would kill it partway through its work.
+    await expect(runner.executeOperation('save_scene', {}, projectPath)).rejects.toThrow(
+      /server is shutting down, so the save_scene operation was not started/,
+    );
+    await expect(runner.importAssets(projectPath)).rejects.toThrow(
+      /server is shutting down, so the asset import was not started/,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('one asset import per project at a time', () => {
+  it('hands a second caller the import in flight, and starts a new one only after it has finished', async () => {
+    const child = makeFakeChild(HEADLESS_PID);
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+    const projectPath = tmp.makeProject('godot-mcp-import-join-');
+
+    const first = runner.importAssets(projectPath);
+    // The same project under another spelling.
+    const second = runner.importAssets(`${projectPath}/`);
+    // Red when importAssets spawns per call: two engines would be importing
+    // one project.
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    child.emit('close', 0);
+    await Promise.all([first, second]);
+
+    const third = runner.importAssets(projectPath);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    child.emit('close', 0);
+    await third;
+  });
+
+  it('gives every caller of a failed import its error, and does not keep the failure for the next call', async () => {
+    const child = makeFakeChild(HEADLESS_PID);
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+    const projectPath = tmp.makeProject('godot-mcp-import-fail-');
+
+    const first = runner.importAssets(projectPath).catch((error: unknown) => error as Error);
+    const second = runner.importAssets(projectPath).catch((error: unknown) => error as Error);
+    child.stderr.emit('data', Buffer.from("ERROR: Error importing 'res://bad.png'\n"));
+    child.emit('close', 0);
+
+    expect(((await first) as Error).message).toMatch(/Asset import reported errors for 1 file/);
+    expect(((await second) as Error).message).toMatch(/Asset import reported errors for 1 file/);
+
+    const retry = runner.importAssets(projectPath);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    child.emit('close', 0);
+    await expect(retry).resolves.toBeUndefined();
+  });
+});
+
+describe('a Godot path whose version probe failed', () => {
+  let savedGodotPath: string | undefined;
+
+  beforeEach(() => {
+    savedGodotPath = process.env.GODOT_PATH;
+    // A file that exists, so the probe is reached; it is never run.
+    process.env.GODOT_PATH = process.execPath;
+  });
+
+  afterEach(() => {
+    if (savedGodotPath === undefined) delete process.env.GODOT_PATH;
+    else process.env.GODOT_PATH = savedGodotPath;
+  });
+
+  it.each([
+    {
+      label: 'an exit code and the end of its stderr',
+      close: [3, null] as const,
+      stderr: 'first line\n\nlast line\n',
+      expected:
+        /Could not find a valid Godot executable path\. Probed ".+": Process exited with code 3; stderr: first line \| last line/,
+    },
+    {
+      label: 'the signal that ended it',
+      close: [null, 'SIGKILL'] as const,
+      stderr: '',
+      expected:
+        /Could not find a valid Godot executable path\. Probed ".+": Process was ended by signal SIGKILL$/,
+    },
+  ])('is reported with $label', async ({ close, stderr, expected }) => {
+    const child = makeFakeChild(HEADLESS_PID);
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner();
+    stubBridge(runner);
+
+    const pending = runner
+      .executeOperation('validate', {}, tmp.makeProject('godot-mcp-probe-'))
+      .catch((error: unknown) => error as Error);
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    if (stderr !== '') child.stderr.emit('data', Buffer.from(stderr));
+    child.emit('close', ...close);
+
+    // Red when the bare message comes back: a probe that failed for a passing
+    // reason would read the same as a path that was never there.
+    expect(((await pending) as Error).message).toMatch(expected);
   });
 });
 

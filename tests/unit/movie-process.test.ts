@@ -154,6 +154,66 @@ describe('runMovieProcess', () => {
     expect(result.killUnconfirmed).toBe(true);
     child.emit('close', null);
   });
+
+  // onClosed is how a caller learns the child is no longer running, which is
+  // not the same moment as the call returning. Red when it is fired from
+  // `finish` (every resolve) instead of from the events that prove the child
+  // is gone: the unconfirmed-kill case below would then report a close.
+  describe('onClosed', () => {
+    it('fires when the child reports close', async () => {
+      const child = createFakeChild();
+      const onClosed = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child), {
+        onClosed,
+      });
+      expect(onClosed).not.toHaveBeenCalled();
+      child.emit('close', 0);
+      await promise;
+      expect(onClosed).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires when the process never started, by a throw or by an error event', async () => {
+      const thrown = vi.fn();
+      await runMovieProcess(
+        '/fake/godot',
+        [],
+        TEST_TIMEOUT_MS,
+        {
+          spawn: (() => {
+            throw new Error('bad arguments');
+          }) as unknown as typeof spawn,
+          killTree: vi.fn(),
+        },
+        { onClosed: thrown },
+      );
+      expect(thrown).toHaveBeenCalledTimes(1);
+
+      const child = createFakeChild(null);
+      const errored = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child), {
+        onClosed: errored,
+      });
+      child.emit('error', new Error('spawn ENOENT'));
+      await promise;
+      expect(errored).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fire when the call gives up on a child whose kill was not confirmed, and fires once it closes', async () => {
+      vi.useFakeTimers();
+      const child = createFakeChild();
+      const onClosed = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child), {
+        onClosed,
+      });
+      vi.advanceTimersByTime(TEST_TIMEOUT_MS + MOVIE_KILL_GRACE_MS);
+      const result = await promise;
+      expect(result.killUnconfirmed).toBe(true);
+      expect(onClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null);
+      expect(onClosed).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe('killProcessTree', () => {

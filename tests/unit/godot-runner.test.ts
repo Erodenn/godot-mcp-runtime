@@ -6,7 +6,11 @@ import {
   OPAQUE_VALUE_KEYS,
 } from '../../src/utils/parameter-conversion.js';
 import { validatePath, validateNodePath, isUnderDir } from '../../src/utils/path-validation.js';
-import { extractGdError, createErrorResponse } from '../../src/utils/error-response.js';
+import {
+  extractGdError,
+  createErrorResponse,
+  STDERR_TAIL_LINES,
+} from '../../src/utils/error-response.js';
 import {
   extractJson,
   cleanStdout,
@@ -330,12 +334,29 @@ describe('extractGdError', () => {
     expect(extractGdError(stderr)).toBe('something broke');
   });
 
-  it('falls back to a generic message when no [ERROR] line present', () => {
-    const fallback = extractGdError('just noise\n[INFO] ok');
-    expect(fallback).toBe('the operation gave no reason (it printed no [ERROR] line)');
+  it('says no reason was given and carries the end of stderr when no [ERROR] line is present', () => {
+    // Red when the bare message is returned: the engine's last lines are the
+    // only account of why the run stopped.
+    const fallback = extractGdError('just noise\n\n[INFO] ok\n');
+    expect(fallback).toBe(
+      'the operation gave no reason (it printed no [ERROR] line)\nstderr (last lines): just noise\n[INFO] ok',
+    );
     // get_debug_output reads a runtime session, never a headless run, so the
     // fallback must not send the caller there.
     expect(fallback).not.toContain('get_debug_output');
+  });
+
+  it('keeps only the last lines of a long stderr, skipping blank ones', () => {
+    const lines = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`);
+    const fallback = extractGdError(lines.join('\n\n'));
+    expect(fallback).toContain(lines.slice(-STDERR_TAIL_LINES).join('\n'));
+    expect(fallback).not.toContain(`line ${12 - STDERR_TAIL_LINES}\n`);
+  });
+
+  it('says stderr was empty when it was', () => {
+    expect(extractGdError(' \n')).toBe(
+      'the operation gave no reason (it printed no [ERROR] line); its stderr was empty',
+    );
   });
 
   it('strips the prefix correctly when [ERROR] has surrounding context', () => {

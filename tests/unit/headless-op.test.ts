@@ -7,11 +7,16 @@
  * refactor.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { hostname as osHostname } from 'os';
-import { executeSceneOp, findLiveSessionOnProject } from '../../src/utils/headless-op.js';
+import {
+  executeSceneOp,
+  findLiveSessionOnProject,
+  HEADLESS_RESPONSE_MARGIN_MS,
+  IMPORT_RETRY_RESERVE_MS,
+} from '../../src/utils/headless-op.js';
 import { sceneBackupsDir } from '../../src/utils/artifact-paths.js';
 import {
   batchSceneWrites,
@@ -24,7 +29,11 @@ import { createFakeRunner } from '../helpers/fake-runner.js';
 import type { FakeRunner } from '../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 import { cleanStdout, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
-import type { GodotRunner } from '../../src/utils/godot-runner.js';
+import {
+  CLIENT_REQUEST_TIMEOUT_MS,
+  HEADLESS_OPERATION_TIMEOUT_MS,
+  type GodotRunner,
+} from '../../src/utils/godot-runner.js';
 import { BridgeRegistryUnreadableError } from '../../src/utils/bridge-manager.js';
 
 const TEST_FAILURE_PREFIX = 'Failed to op';
@@ -472,6 +481,176 @@ describe('executeSceneOp', () => {
       expectErrorMatching(result, /Refusing the scene edit/);
       expect(fake.calls.length).toBe(0);
     });
+  });
+});
+
+describe('executeSceneOp with no reason from the script', () => {
+  it('says once what stderr ended with, and says so when stderr was empty', async () => {
+    const noisy = await executeSceneOp(
+      createFakeRunner({ stdout: '', stderr: 'engine line one\nengine line two\n' }).asRunner,
+      'delete_nodes',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    const text = unwrap(noisy).content[0]?.text ?? '';
+    expect(text).toBe(
+      `${TEST_FAILURE_PREFIX}: the operation gave no reason (it printed no [ERROR] line)\nstderr (last lines): engine line one\nengine line two`,
+    );
+
+    const silent = await executeSceneOp(
+      createFakeRunner({ stdout: '', stderr: '' }).asRunner,
+      'delete_nodes',
+      {},
+      '/p',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+    // Red when the bare "no reason" message comes back for an empty stderr.
+    expectErrorMatching(silent, /printed no \[ERROR\] line\); its stderr was empty/);
+  });
+});
+
+// The import is waited for only while a retry still fits in the request: a
+// client with no progress token gives up at 60 s, and an answer sent after
+// that is never read.
+describe('executeSceneOp cold-import wait is bounded by the request', () => {
+  const MARKER_STDERR = '[IMPORT_NEEDED] main.tscn: res://assets/tex.png';
+  /** Promise hops between a timer firing and the call's answer; generous. */
+  const MICROTASK_FLUSHES = 50;
+
+  async function flushMicrotasks(): Promise<void> {
+    for (let i = 0; i < MICROTASK_FLUSHES; i++) await Promise.resolve();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function run(fake: ReturnType<typeof createFakeRunner>) {
+    return executeSceneOp(
+      fake.asRunner,
+      'get_scene_tree',
+      { scenePath: 'main.tscn' },
+      '/proj',
+      TEST_FAILURE_PREFIX,
+      EMPTY_SOLUTIONS,
+      EXCEPTION_SOLUTIONS,
+    );
+  }
+
+  it('answers "still importing, retry" before the request times out, leaves the import running, and a second call joins it', async () => {
+    vi.useFakeTimers();
+    let finishImport!: () => void;
+    const importPending = new Promise<void>((done) => {
+      finishImport = done;
+    });
+    const fake = createFakeRunner({
+      importPending,
+      responses: [
+        { stdout: '', stderr: MARKER_STDERR },
+        { stdout: '', stderr: MARKER_STDERR },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+
+    let first: Awaited<ReturnType<typeof run>> | undefined;
+    void run(fake).then((result) => {
+      first = result;
+    });
+    await vi.advanceTimersByTimeAsync(CLIENT_REQUEST_TIMEOUT_MS - 1);
+    await flushMicrotasks();
+
+    // Red when the import is awaited unconditionally: nothing has come back
+    // by the time the client stopped listening.
+    expect(first).toBeDefined();
+    expectErrorMatching(
+      first,
+      /the project's assets are still being imported, nothing was changed; retry this call/,
+    );
+    // The operation was not run a second time against a half-imported project.
+    expect(fake.calls).toHaveLength(1);
+
+    // The retry: its first attempt asks for the import again and is handed
+    // the one still in flight, then goes on once that has finished.
+    let second: Awaited<ReturnType<typeof run>> | undefined;
+    void run(fake).then((result) => {
+      second = result;
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushMicrotasks();
+    expect(second).toBeUndefined();
+    finishImport();
+    await flushMicrotasks();
+
+    expect(second).toBeDefined();
+    expect(hasError(second)).toBe(false);
+    expect(fake.importCalls).toEqual(['/proj', '/proj']);
+    expect(fake.calls).toHaveLength(3);
+  });
+
+  it('gives up the wait early enough that the retry it promises still had its reserve', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunner({
+      importPending: new Promise<void>(() => {}),
+      stdout: '',
+      stderr: MARKER_STDERR,
+    });
+    let answered = false;
+    void run(fake).then(() => {
+      answered = true;
+    });
+    const waitEndsAt =
+      CLIENT_REQUEST_TIMEOUT_MS - HEADLESS_RESPONSE_MARGIN_MS - IMPORT_RETRY_RESERVE_MS;
+
+    await vi.advanceTimersByTimeAsync(waitEndsAt - 1);
+    await flushMicrotasks();
+    expect(answered).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+    expect(answered).toBe(true);
+  });
+
+  it('retries once, with the time the request has left, when the import finishes in time', async () => {
+    vi.useFakeTimers();
+    const importTookMs = 40000;
+    const fake = createFakeRunner({
+      importPending: new Promise<void>((done) => setTimeout(done, importTookMs)),
+      responses: [
+        { stdout: '', stderr: MARKER_STDERR },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+    let result: Awaited<ReturnType<typeof run>> | undefined;
+    void run(fake).then((value) => {
+      result = value;
+    });
+    await vi.advanceTimersByTimeAsync(importTookMs);
+    await flushMicrotasks();
+
+    expect(result).toBeDefined();
+    expect(hasError(result)).toBe(false);
+    expect(fake.importCalls).toEqual(['/proj']);
+    expect(fake.calls).toHaveLength(2);
+    // Red when the retry is given the default timeout whatever is left: it
+    // could then outlast the request it is answering.
+    expect(fake.calls[1]!.timeoutMs).toBe(
+      CLIENT_REQUEST_TIMEOUT_MS - HEADLESS_RESPONSE_MARGIN_MS - importTookMs,
+    );
+  });
+
+  it('gives a quick import retry the ordinary operation timeout, not more', async () => {
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: '', stderr: MARKER_STDERR },
+        { stdout: '{"ok":true}', stderr: '' },
+      ],
+    });
+    expect(hasError(await run(fake))).toBe(false);
+    expect(fake.calls[1]!.timeoutMs).toBe(HEADLESS_OPERATION_TIMEOUT_MS);
   });
 });
 

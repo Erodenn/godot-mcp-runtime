@@ -142,6 +142,11 @@ const TRUNCATED_STRING_MARKER := "<truncated: %d more characters>"
 # tell it apart from a refusal, which means nothing was done.
 # KEEP IN SYNC: OVERSIZE_RESPONSE_FIELD in src/utils/bridge-protocol.ts.
 const OVERSIZE_RESPONSE_FIELD := "response_too_large"
+# What a frame with no token or the wrong one is answered with. The readiness
+# wait on the Node side reads it to tell another session's bridge from one
+# that is still starting.
+# KEEP IN SYNC: BRIDGE_UNAUTHORIZED_ERROR in src/utils/bridge-protocol.ts.
+const UNAUTHORIZED_ERROR := "Unauthorized: invalid or missing session token"
 # A reply that carried non-finite numbers (INF, NAN) as null says how many on
 # this key, written by _send_response and stripped on the Node side, which turns
 # it into a leading warning. Absent when there were none.
@@ -459,7 +464,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 	if session_token != "":
 		var provided = payload.get("token", "")
 		if typeof(provided) != TYPE_STRING or provided != session_token:
-			_send_response(peer, {"error": "Unauthorized: invalid or missing session token"})
+			_send_response(peer, {"error": UNAUTHORIZED_ERROR})
 			return
 	# The first frame of a connection that got this far is the client telling us
 	# its old connection is gone: it holds one socket and dials a new one only

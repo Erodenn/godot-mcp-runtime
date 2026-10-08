@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import {
   ACTION_BOUNDARY_SENTINEL,
+  BRIDGE_UNAUTHORIZED_ERROR,
   DEFAULT_BRIDGE_PORT,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
@@ -81,6 +82,14 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     // Red when either side renames the field: the handler would then report a
     // script that ran as a refusal where nothing ran.
     expect(gdConst('OVERSIZE_RESPONSE_FIELD')).toBe(`"${OVERSIZE_RESPONSE_FIELD}"`);
+  });
+
+  it('declares the same token refusal text, and answers a bad token with it', () => {
+    // Red when either side rewords the refusal: the readiness wait would then
+    // take another session's bridge for one that is still starting and wait
+    // out its whole budget.
+    expect(gdConst('UNAUTHORIZED_ERROR')).toBe(`"${BRIDGE_UNAUTHORIZED_ERROR}"`);
+    expect(gdFunctionBody('_dispatch_command')).toContain('{"error": UNAUTHORIZED_ERROR}');
   });
 
   it('declares the same non-finite count field', () => {

@@ -325,6 +325,83 @@ describe('multi-project runtime sessions', () => {
   // Session map
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Movie runs
+  // -------------------------------------------------------------------------
+
+  it('refuses both kinds of start on a project a movie run is using, and lets them through once it has closed', async () => {
+    const endMovieRun = runner.beginMovieRun(projectA);
+
+    // Red when either start skips the registry: it would inject the bridge
+    // under a Godot that is rendering the project.
+    await expect(runner.runProject(projectA, undefined, false, PORT_A)).rejects.toThrow(
+      /A render_movie run is using this project .*wait for it to return/,
+    );
+    await expect(runner.attachProject(projectA, PORT_A)).rejects.toThrow(
+      /A render_movie run is using this project/,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(bridge.injectCalls).toEqual([]);
+    expect(runner.listSessions()).toEqual([]);
+
+    // Another project is not held up by it.
+    await startProject(projectB, PORT_B);
+
+    endMovieRun();
+    // Ending twice ends one run, not two.
+    endMovieRun();
+    await startProject(projectA, PORT_A);
+    expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
+  });
+
+  it('counts two movie runs on one project: the start waits for both', async () => {
+    const endFirst = runner.beginMovieRun(projectA);
+    const endSecond = runner.beginMovieRun(projectA);
+
+    endFirst();
+    // Red when the registry is a set: the first end would clear the project
+    // while the second movie is still rendering it.
+    await expect(runner.runProject(projectA, undefined, false, PORT_A)).rejects.toThrow(
+      /A render_movie run is using this project/,
+    );
+
+    endSecond();
+    await startProject(projectA, PORT_A);
+    expect(runner.hasMovieRunOnProject(projectA)).toBe(false);
+  });
+
+  it('a start that queued behind the step a movie run registers in is refused when its turn comes', async () => {
+    queuedChildren.push(makeFakeChildProcess({ exitOnKill: true }));
+    // Issued from outside the exclusive step, so it queues behind it instead
+    // of running inside it.
+    let startOutcome: Promise<unknown> | undefined;
+    const issued = new Promise<void>((done) => {
+      setTimeout(() => {
+        startOutcome = runner.runProject(projectA, undefined, false, PORT_A).then(
+          () => 'started',
+          (error: unknown) => error,
+        );
+        done();
+      }, OUTSIDE_CALL_DELAY_MS);
+    });
+
+    let endMovieRun: (() => void) | undefined;
+    await runner.runExclusive('render_movie', async () => {
+      await issued;
+      // What render_movie does in this step: check, register, spawn.
+      expect(runner.hasLiveSessionOnProject(projectA)).toBe(false);
+      endMovieRun = runner.beginMovieRun(projectA);
+    });
+
+    // Red when the start does not go through the queue, or the registry is
+    // not read by it: the game would be spawned beside the movie process.
+    const outcome = await startOutcome;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/A render_movie run is using this project/);
+    expect(spawnMock).not.toHaveBeenCalled();
+    endMovieRun?.();
+  });
+
   it('starting a second project keeps the first session running', async () => {
     const childA = await startProject(projectA, PORT_A);
     await startProject(projectB, PORT_B);

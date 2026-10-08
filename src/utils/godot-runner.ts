@@ -17,6 +17,7 @@ import {
   clampTimerDelay,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
+  BRIDGE_UNAUTHORIZED_ERROR,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
   PARENT_WATCH_PORT_ENV,
   ParentWatchListener,
@@ -206,7 +207,16 @@ const STREAM_END_WAIT_TIMEOUT_MS = 500;
 /** Timeout of a headless child when the caller names none (the version probe). */
 const HEADLESS_DEFAULT_TIMEOUT_MS = 10000;
 /** Timeout of a headless operation when the caller names none. */
-const HEADLESS_OPERATION_TIMEOUT_MS = 30000;
+export const HEADLESS_OPERATION_TIMEOUT_MS = 30000;
+/**
+ * How long a graceful shutdown waits for headless runs still in flight to
+ * report `close` before the process exits and the exit hook kills what is
+ * left. A run that finishes inside it ends by itself, having written what it
+ * set out to write; one that does not is killed as before.
+ */
+export const HEADLESS_SHUTDOWN_WAIT_MS = 10000;
+/** How many trailing stderr lines of a failed `--version` probe are kept. */
+const PROBE_STDERR_TAIL_LINES = 5;
 /** Timeout of a bridge command when the caller names none. */
 const BRIDGE_COMMAND_DEFAULT_TIMEOUT_MS = 10000;
 /** How many trailing stderr lines a caller gets when it names no count. */
@@ -693,6 +703,17 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
   });
 }
 
+/** Why a `--version` probe failed, from what `spawnAsync` rejected with. */
+function describeProbeFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const tail = (asSpawnError(error)?.stderr ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .slice(-PROBE_STDERR_TAIL_LINES);
+  return tail.length === 0 ? message : `${message}; stderr: ${tail.join(' | ')}`;
+}
+
 /** A retry's disconnect, restated for a command whose first attempt was written. */
 function asSentDisconnect(err: BridgeDisconnectedError): BridgeDisconnectedError {
   return err.frameWritten ? err : new BridgeDisconnectedError(err.message, true);
@@ -787,6 +808,16 @@ export class GodotRunner {
    * stopped everything.
    */
   private shuttingDown = false;
+  /**
+   * Movie runs in flight per project ({@link sessionKey}), counted because
+   * two may run on one project. A start on a project named here is refused:
+   * it would inject the bridge under a Godot that is rendering the project.
+   */
+  private readonly movieRuns = new Map<string, number>();
+  /** The asset import in flight per project ({@link sessionKey}); a second caller joins it. */
+  private readonly importsInFlight = new Map<string, Promise<void>>();
+  /** Why the `--version` probe of a path failed, for the paths it failed on. */
+  private readonly probeFailures = new Map<string, string>();
 
   private socket: net.Socket | null = null;
   /**
@@ -927,7 +958,7 @@ export class GodotRunner {
         this.headlessChildren.delete(proc);
         settle(() => reject(err));
       });
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
         this.headlessChildren.delete(proc);
         // A sequence the stream ended in the middle of comes out here.
         stdout += stdoutDecoder.end();
@@ -941,7 +972,11 @@ export class GodotRunner {
             resolve({ stdout, stderr });
             return;
           }
-          const err = new Error(`Process exited with code ${code}`) as Error & {
+          const err = new Error(
+            code === null && typeof signal === 'string'
+              ? `Process was ended by signal ${signal}`
+              : `Process exited with code ${code}`,
+          ) as Error & {
             stdout: string;
             stderr: string;
             code: number | null;
@@ -965,6 +1000,7 @@ export class GodotRunner {
 
       if (path !== 'godot' && !existsSync(path)) {
         logDebug(`Path does not exist: ${path}`);
+        this.probeFailures.set(path, 'the file does not exist');
         this.validatedPaths.set(path, false);
         return false;
       }
@@ -974,11 +1010,34 @@ export class GodotRunner {
       logDebug(`Valid Godot path: ${path}`);
       this.validatedPaths.set(path, true);
       return true;
-    } catch {
-      logDebug(`Invalid Godot path: ${path}`);
+    } catch (error: unknown) {
+      const reason = describeProbeFailure(error);
+      logDebug(`Invalid Godot path: ${path} (${reason})`);
+      this.probeFailures.set(path, reason);
       this.validatedPaths.set(path, false);
       return false;
     }
+  }
+
+  /** ` Its --version probe failed: <why>.` for a path whose probe failed, else ''. */
+  private probeFailureNote(path: string): string {
+    const reason = this.probeFailures.get(path);
+    return reason === undefined ? '' : ` Its --version probe failed: ${reason}.`;
+  }
+
+  /**
+   * The error for a call that has no Godot executable to run, carrying why
+   * each probed path was turned down (exit code, signal, timeout, stderr
+   * tail): without it a probe that failed for a passing reason reads the same
+   * as a path that was never there.
+   */
+  private noGodotPathError(): Error {
+    const reasons = [...this.probeFailures].map(([path, reason]) => `"${path}": ${reason}`);
+    return new Error(
+      reasons.length === 0
+        ? 'Could not find a valid Godot executable path'
+        : `Could not find a valid Godot executable path. Probed ${reasons.join('; ')}`,
+    );
   }
 
   async detectGodotPath(): Promise<void> {
@@ -991,7 +1050,8 @@ export class GodotRunner {
         return;
       }
       logError(
-        `Configured Godot path "${this.godotPath}" is not a working Godot executable. ` +
+        `Configured Godot path "${this.godotPath}" is not a working Godot executable.` +
+          `${this.probeFailureNote(this.godotPath)} ` +
           `Pass a valid Godot 4.x binary via the godotPath config option.`,
       );
       this.godotPath = null;
@@ -1007,7 +1067,8 @@ export class GodotRunner {
         return;
       }
       logError(
-        `GODOT_PATH is set to "${normalizedPath}" but no working Godot executable was found there. ` +
+        `GODOT_PATH is set to "${normalizedPath}" but no working Godot executable was found there.` +
+          `${this.probeFailureNote(normalizedPath)} ` +
           `Update GODOT_PATH to your Godot 4.x binary or unset it to auto-detect.`,
       );
       return;
@@ -1101,7 +1162,7 @@ export class GodotRunner {
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
-        throw new Error('Could not find a valid Godot executable path');
+        throw this.noGodotPathError();
       }
     }
 
@@ -1119,6 +1180,7 @@ export class GodotRunner {
     logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
+    this.assertHeadlessRunAllowed(`the ${operation} operation`);
     this.bridge.repairOrphaned(projectPath);
 
     const snakeCaseParams = convertCamelToSnakeCase(params);
@@ -1127,9 +1189,13 @@ export class GodotRunner {
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
-        throw new Error('Could not find a valid Godot executable path');
+        throw this.noGodotPathError();
       }
     }
+
+    // Again after the await above: a shutdown that began during the probe
+    // has already stopped waiting for the headless runs it could see.
+    this.assertHeadlessRunAllowed(`the ${operation} operation`);
 
     const paramsJson = JSON.stringify(snakeCaseParams);
     const args = [
@@ -1213,12 +1279,31 @@ export class GodotRunner {
    * method inspects stderr for "ERROR: Error importing" and throws if found,
    * since the caller has no other signal that the import didn't fully succeed.
    */
-  async importAssets(projectPath: string, timeoutMs: number = IMPORT_TIMEOUT_MS): Promise<void> {
+  importAssets(projectPath: string, timeoutMs: number = IMPORT_TIMEOUT_MS): Promise<void> {
+    // One import per project at a time. A second caller joins the one in
+    // flight (and its timeout): two engines importing one project are two
+    // writers of the same .godot/ directory, and a caller that gave up
+    // waiting (see `runSceneOp`) retries into the import it left running.
+    const key = sessionKey(resolve(projectPath));
+    const inFlight = this.importsInFlight.get(key);
+    if (inFlight !== undefined) return inFlight;
+    const started = this.runImport(projectPath, timeoutMs);
+    this.importsInFlight.set(key, started);
+    const forget = (): void => {
+      if (this.importsInFlight.get(key) === started) this.importsInFlight.delete(key);
+    };
+    started.then(forget, forget);
+    return started;
+  }
+
+  private async runImport(projectPath: string, timeoutMs: number): Promise<void> {
+    this.assertHeadlessRunAllowed('the asset import');
     if (!this.godotPath) {
       await this.detectGodotPath();
       if (!this.godotPath) {
-        throw new Error('Could not find a valid Godot executable path');
+        throw this.noGodotPathError();
       }
+      this.assertHeadlessRunAllowed('the asset import');
     }
     logDebug(`Importing assets for project: ${projectPath}`);
     let stderr = '';
@@ -1242,6 +1327,82 @@ export class GodotRunner {
           '\nCheck the files are valid (PNG/SVG/etc.) and the Godot version matches the project.',
       );
     }
+  }
+
+  /**
+   * Refuse a headless run once the server is shutting down. The shutdown
+   * waits for the runs it can see and then exits; one started after that
+   * would be killed by the exit hook partway through its work.
+   */
+  private assertHeadlessRunAllowed(what: string): void {
+    if (!this.shuttingDown) return;
+    throw new Error(
+      `The server is shutting down, so ${what} was not started; nothing was changed.`,
+    );
+  }
+
+  /**
+   * Resolve when every headless child has reported `close`, or after
+   * `boundMs`, whichever comes first. True when none is left. Kills nothing:
+   * the exit hook (`killSpawnedProcessesSync`) kills what outlasts the bound.
+   * Called by the server's shutdown after `stopAllSessions`, which is what
+   * stops new runs from joining the set.
+   */
+  async waitForHeadlessChildren(boundMs: number = HEADLESS_SHUTDOWN_WAIT_MS): Promise<boolean> {
+    const pending = [...this.headlessChildren];
+    if (pending.length === 0) return true;
+    // A failed spawn reports 'error' and no 'close'; either takes the child
+    // out of the set, and the set is what the answer is read from.
+    const gone = pending.map(
+      (child) =>
+        new Promise<void>((resolveGone) => {
+          child.once('close', () => resolveGone());
+          child.once('error', () => resolveGone());
+        }),
+    );
+    await settlesWithin(Promise.all(gone), boundMs);
+    return this.headlessChildren.size === 0;
+  }
+
+  /**
+   * Record that a `render_movie` run is using a project, and return the
+   * function that ends the record. Until it is called, a start on the project
+   * is refused (`assertNoMovieRun`). The caller registers with the session
+   * queue held and before it spawns, so no start can run between its own
+   * session check and the registration, and ends the record when the movie
+   * child reports `close`, not when its own call returns: a child that
+   * outlived its timeout kill is still rendering the project.
+   *
+   * This server's process only. Another server process does not see the
+   * record, and a movie run registers no bridge owner for it to find.
+   */
+  beginMovieRun(projectPath: string): () => void {
+    const key = sessionKey(resolve(projectPath));
+    this.movieRuns.set(key, (this.movieRuns.get(key) ?? 0) + 1);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      const left = (this.movieRuns.get(key) ?? 1) - 1;
+      if (left > 0) this.movieRuns.set(key, left);
+      else this.movieRuns.delete(key);
+    };
+  }
+
+  /** True while a `render_movie` run this server started is using the project. */
+  hasMovieRunOnProject(projectPath: string): boolean {
+    return this.movieRuns.has(sessionKey(resolve(projectPath)));
+  }
+
+  /**
+   * Refuse a start on a project a movie run is using. First phase of both
+   * starts: nothing has been stopped, written or spawned.
+   */
+  private assertNoMovieRun(key: string, projectPath: string): void {
+    if (!this.movieRuns.has(key)) return;
+    throw new Error(
+      `A render_movie run is using this project (${projectPath}); wait for it to return, then retry. Nothing was stopped or launched: the movie process would load the bridge this start injects.`,
+    );
   }
 
   /**
@@ -1320,6 +1481,7 @@ export class GodotRunner {
       );
     }
     this.assertBridgePortNotHeld(bridgePort, key);
+    this.assertNoMovieRun(key, projectPath);
     const port = bridgePort ?? (await findFreePort());
     const parentWatchPort = await this.parentWatchPort();
     let profiler: DebuggerProfiler | null = null;
@@ -1969,6 +2131,7 @@ export class GodotRunner {
 
     // Phase 1: preconditions. Nothing is stopped or written here.
     this.assertBridgePortNotHeld(bridgePort, key);
+    this.assertNoMovieRun(key, projectPath);
     const port = bridgePort ?? (await findFreePort());
     this.assertNotShuttingDown(projectPath);
     this.bridge.precheckInject(projectPath, true);
@@ -3225,6 +3388,16 @@ export class GodotRunner {
         // yet is a bridge mid-startup, not a wrong listener.
         connectedPingFailures = 0;
         const parsed = JSON.parse(response);
+        // A bridge that refuses this session's token refuses it on every
+        // ping: it took its token from another session and reads no new one.
+        // Counted as "answered" above, it would otherwise spend the whole
+        // budget.
+        if (parsed !== null && parsed.error === BRIDGE_UNAUTHORIZED_ERROR) {
+          return result({
+            ready: false,
+            error: `A bridge with a different session token is listening on port ${session.bridgePort ?? 'unknown'}: a Godot left from an earlier session. Close it, then retry.`,
+          });
+        }
         if (opts.validatePong(parsed)) {
           if (opts.expectedPath && typeof parsed.project_path === 'string') {
             const bridgePath = normalizeForCompare(parsed.project_path);

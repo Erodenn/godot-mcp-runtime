@@ -8,11 +8,28 @@
  * server constructor's single call to it is the production registration path.
  */
 
-import type { GodotRunner } from './godot-runner.js';
+import { HEADLESS_SHUTDOWN_WAIT_MS, type GodotRunner } from './godot-runner.js';
 import { logError } from './logger.js';
 
 /** Exit code used for every graceful shutdown path below. */
 const GRACEFUL_EXIT_CODE = 0;
+
+/**
+ * What a graceful shutdown does with the runner before the process exits:
+ * stop every session, then give the headless runs still in flight up to
+ * `headlessWaitMs` to finish by themselves. The order matters. Stopping the
+ * sessions is what refuses new headless runs, so the wait is over a set that
+ * can only shrink; and the wait comes before the exit, whose hook kills
+ * whatever is left, so a run that needed a moment more is not killed while
+ * it is writing.
+ */
+export async function shutDownRunner(
+  runner: GodotRunner,
+  headlessWaitMs: number = HEADLESS_SHUTDOWN_WAIT_MS,
+): Promise<void> {
+  await runner.stopAllSessions();
+  await runner.waitForHeadlessChildren(headlessWaitMs);
+}
 
 /**
  * The slice of `process` `registerProcessLifecycle` touches. Narrow on purpose
@@ -30,7 +47,8 @@ export interface LifecycleProcess {
  * arguments defaulted, IS the production wiring.
  *
  * - `SIGINT` / `SIGTERM` and stdin `'end'` / `'close'` all run the async
- *   `cleanup` (which stops every running project) exactly once — `'end'` and
+ *   `cleanup` (which stops every running project and then waits, bounded, for
+ *   the headless runs in flight: `shutDownRunner`) exactly once — `'end'` and
  *   `'close'` both fire on a normal stdin close, and an MCP client going away
  *   is the case stdin EOF covers.
  * - `SIGHUP` is the terminal the server runs in going away. Its default
@@ -90,9 +108,11 @@ export function registerProcessLifecycle(opts: {
   proc.on('exit', () => {
     // Games first: one still running would otherwise outlive the server while
     // its bridge is removed from under it. A graceful shutdown has already
-    // stopped every session, so this only finds what that path missed. The
-    // same call kills headless runs still in flight, which would otherwise go
-    // on editing a project with nobody waiting for the result.
+    // stopped every session and waited for the headless runs in flight, so
+    // this only finds what that path missed: a headless run that outlasted
+    // the wait, or every one of them on an exit that skipped the graceful
+    // path. Left alone it would go on editing a project with nobody waiting
+    // for the result.
     try {
       opts.runner.killSpawnedProcessesSync();
     } catch {

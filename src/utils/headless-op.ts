@@ -1,6 +1,17 @@
-import type { GodotRunner } from './godot-runner.js';
+import {
+  CLIENT_REQUEST_TIMEOUT_MS,
+  HEADLESS_OPERATION_TIMEOUT_MS,
+  type GodotRunner,
+} from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
-import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
+import {
+  createErrorResponse,
+  extractGdError,
+  getErrorMessage,
+  NO_SCRIPT_ERROR_LINE_MESSAGE,
+  STDERR_TAIL_LINES,
+  stderrTailLines,
+} from './error-response.js';
 import { createStructuredResponse, leadWithWarnings } from './structured-response.js';
 import {
   BridgeRegistryUnreadableError,
@@ -33,8 +44,18 @@ const MAX_STDERR_DIAGNOSTIC_LINES = 5;
 /** Trailing stdout lines surfaced when an early-exit stdout tail is shown. */
 const STDOUT_TAIL_LINES = 10;
 
-/** Trailing stderr lines surfaced when parseScriptDiagnostics finds nothing. */
-const STDERR_TAIL_LINES = 5;
+/**
+ * How much of the client's request timeout a headless call keeps back for
+ * delivering its answer. The rest is the call's budget, counted from its
+ * start.
+ */
+export const HEADLESS_RESPONSE_MARGIN_MS = 5000;
+/**
+ * The least a cold-import retry is run with. The wait for the import ends
+ * this long before the call's budget does, so an import that finishes in
+ * time always leaves the retry a usable timeout.
+ */
+export const IMPORT_RETRY_RESERVE_MS = 10000;
 
 /**
  * Stderr marker godot_operations.gd prints when a scene-load probe finds a
@@ -100,19 +121,21 @@ function renderStderrDiagnostic(d: StderrDiagnostic): string {
  * better than dropping it entirely.
  */
 function renderStderrForEarlyExit(stderr: string): string | undefined {
+  const diagnostics = renderParsedDiagnostics(stderr);
+  if (diagnostics !== undefined) return diagnostics;
+  const tail = stderrTailLines(stderr, STDERR_TAIL_LINES);
+  return tail.length > 0 ? `stderr (last lines): ${tail.join('\n')}` : undefined;
+}
+
+/** The parsed script and compile diagnostics of a stderr, or undefined when it holds none. */
+function renderParsedDiagnostics(stderr: string): string | undefined {
   const diagnostics = parseScriptDiagnostics(stderr);
-  if (diagnostics.length > 0) {
-    const rendered = diagnostics
-      .slice(0, MAX_STDERR_DIAGNOSTIC_LINES)
-      .map(renderStderrDiagnostic)
-      .join('\n');
-    return `stderr: ${rendered}`;
-  }
-  if (stderr.trim()) {
-    const stderrTail = stderr.trim().split('\n').slice(-STDERR_TAIL_LINES).join('\n');
-    return `stderr (last lines): ${stderrTail}`;
-  }
-  return undefined;
+  if (diagnostics.length === 0) return undefined;
+  const rendered = diagnostics
+    .slice(0, MAX_STDERR_DIAGNOSTIC_LINES)
+    .map(renderStderrDiagnostic)
+    .join('\n');
+  return `stderr: ${rendered}`;
 }
 
 /**
@@ -192,7 +215,18 @@ function interpretOperationResult(
     // itself was stopped (a runtime error inside godot_operations.gd prints
     // SCRIPT ERROR lines and no [ERROR] line), and the engine's diagnostics are
     // the only account of why, so they are shown instead of being dropped.
+    // With no [ERROR] line anywhere, parsed diagnostics lead for their file
+    // and line; failing those, extractGdError carries the end of stderr itself
+    // (or says it was empty), so the message is never the bare "no reason".
     const reasons = scriptErrorLines(stderr);
+    if (!stderr.includes('[ERROR]')) {
+      const diagnostics = renderParsedDiagnostics(stderr);
+      const message =
+        diagnostics === undefined
+          ? `${failurePrefix}: ${extractGdError(stderr)}`
+          : `${failurePrefix}: ${NO_SCRIPT_ERROR_LINE_MESSAGE}\n${diagnostics}`;
+      return err(createErrorResponse(message, emptyStdoutSolutions));
+    }
     const stderrPart = reasons.length === 0 ? renderStderrForEarlyExit(stderr) : undefined;
     const message = `${failurePrefix}: ${extractGdError(stderr)}`;
     return err(
@@ -485,6 +519,9 @@ async function runSceneOp(
   // A read never passes `mutatesSceneFile`, so a refusal reached from here by
   // a read is worded for a read.
   const refused = options.mutatesSceneFile ? SCENE_EDIT : SCENE_READ_NEEDING_IMPORT;
+  // The call has to answer inside the client's request timeout. An import
+  // can take minutes, so it is waited for only while a retry still fits.
+  const answerBy = Date.now() + CLIENT_REQUEST_TIMEOUT_MS - HEADLESS_RESPONSE_MARGIN_MS;
   try {
     let { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
     lastAttempt.stderr = stderr;
@@ -517,8 +554,12 @@ async function runSceneOp(
         'This project also needs an asset import, which will run automatically once the session is stopped',
       ]);
       if (guard) return guard;
+      let imported: boolean;
       try {
-        await runner.importAssets(projectPath);
+        imported = await finishesBy(
+          runner.importAssets(projectPath),
+          answerBy - IMPORT_RETRY_RESERVE_MS,
+        );
       } catch (importErr) {
         return err(
           createErrorResponse(
@@ -531,7 +572,25 @@ async function runSceneOp(
           ),
         );
       }
-      ({ stdout, stderr } = await runner.executeOperation(operation, params, projectPath));
+      if (!imported) {
+        // The import was left running: the next call on this project joins it
+        // (`GodotRunner.importAssets`) instead of starting a second one.
+        return err(
+          createErrorResponse(
+            `${failurePrefix}: the project's assets are still being imported, nothing was changed; retry this call.`,
+            [
+              'Retry this call: it joins the import that is already running and goes on once it has finished',
+              'A first import of a large project can take a few minutes, so several retries may be needed',
+            ],
+          ),
+        );
+      }
+      ({ stdout, stderr } = await runner.executeOperation(
+        operation,
+        params,
+        projectPath,
+        Math.min(HEADLESS_OPERATION_TIMEOUT_MS, Math.max(0, answerBy - Date.now())),
+      ));
       lastAttempt.stderr = stderr;
       effectiveFailurePrefix = `${failurePrefix} (after the asset import step ran)`;
     }
@@ -548,6 +607,28 @@ async function runSceneOp(
       createErrorResponse(`${failurePrefix}: ${getErrorMessage(error)}`, exceptionSolutions),
     );
   }
+}
+
+/**
+ * Wait for `work` until `deadlineAt` (a `Date.now()` value). True when it
+ * finished in time, false when the deadline came first; a rejection in time is
+ * rethrown. `work` is not cancelled, and a rejection that comes after the
+ * deadline is taken here so it is not reported as unhandled.
+ */
+function finishesBy(work: Promise<void>, deadlineAt: number): Promise<boolean> {
+  return new Promise<boolean>((resolveWait, rejectWait) => {
+    const timer = setTimeout(() => resolveWait(false), Math.max(0, deadlineAt - Date.now()));
+    work.then(
+      () => {
+        clearTimeout(timer);
+        resolveWait(true);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        rejectWait(error);
+      },
+    );
+  });
 }
 
 /** Who is running a game on a project, as seen from this server. */

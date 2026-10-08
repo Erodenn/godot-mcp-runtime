@@ -23,6 +23,7 @@ import { GodotRunner, sessionKey, type OperationResult } from '../../src/utils/g
 import type { OperationParams } from '../../src/mcp.types.js';
 import type { BridgeOwnerInfo } from '../../src/utils/bridge-manager.js';
 import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
+import { SessionQueue } from '../../src/utils/session-queue.js';
 import { fakeSessionApi, liveSessionInfo } from './fake-sessions.js';
 
 /**
@@ -75,6 +76,21 @@ export interface FakeRunnerOptions {
   godotPath?: string | null;
   /** If set, importAssets() rejects with this error instead of resolving. */
   importThrows?: Error;
+  /**
+   * If set, importAssets() returns this promise, the same one to every caller,
+   * the way the real runner hands a second caller the import in flight.
+   */
+  importPending?: Promise<void>;
+  /** If set, runExclusive() rejects with this error and runs nothing. */
+  exclusiveThrows?: Error;
+}
+
+/** One `beginMovieRun` call on the fake. */
+export interface FakeMovieRun {
+  projectPath: string;
+  /** Label of the operation holding the session queue when the run was registered, or null. */
+  queueHeldBy: string | null;
+  ended: boolean;
 }
 
 export interface FakeRunner {
@@ -82,6 +98,10 @@ export interface FakeRunner {
   calls: FakeRunnerCall[];
   /** Project paths passed to importAssets(), in order. */
   importCalls: string[];
+  /** Movie runs registered through beginMovieRun(), in order. */
+  movieRuns: FakeMovieRun[];
+  /** The real queue behind runExclusive(), so a test can read who holds it. */
+  queue: SessionQueue;
   /** The runner cast to GodotRunner: pass directly to handlers. */
   asRunner: GodotRunner;
 }
@@ -89,6 +109,8 @@ export interface FakeRunner {
 export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const calls: FakeRunnerCall[] = [];
   const importCalls: string[] = [];
+  const movieRuns: FakeMovieRun[] = [];
+  const queue = new SessionQueue();
   const defaults: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'> = {
     stdout: options.stdout ?? '',
     stderr: options.stderr ?? '',
@@ -136,9 +158,22 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       if (merged.throws) throw merged.throws;
       return { stdout: frameBareJsonResult(merged.stdout ?? ''), stderr: merged.stderr ?? '' };
     },
-    async importAssets(projectPath: string): Promise<void> {
+    importAssets(projectPath: string): Promise<void> {
       importCalls.push(projectPath);
-      if (importThrows) throw importThrows;
+      if (importThrows) return Promise.reject(importThrows);
+      return options.importPending ?? Promise.resolve();
+    },
+    // The real queue, so a handler's exclusive step is one for real.
+    runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
+      if (options.exclusiveThrows) return Promise.reject(options.exclusiveThrows);
+      return queue.run(label, operation);
+    },
+    beginMovieRun(projectPath: string): () => void {
+      const run: FakeMovieRun = { projectPath, queueHeldBy: queue.running, ended: false };
+      movieRuns.push(run);
+      return () => {
+        run.ended = true;
+      };
     },
     async getVersion(): Promise<string> {
       return godotVersion;
@@ -183,6 +218,8 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   return {
     calls,
     importCalls,
+    movieRuns,
+    queue,
     asRunner: fake as unknown as GodotRunner,
   };
 }
