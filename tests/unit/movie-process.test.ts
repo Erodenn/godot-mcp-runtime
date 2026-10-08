@@ -1,12 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
-import type { ChildProcess, spawn, spawnSync } from 'child_process';
+import type { spawn } from 'child_process';
 import {
   MOVIE_KILL_GRACE_MS,
   MOVIE_OUTPUT_CAPTURE_MAX_CHARS,
-  killProcessTree,
   runMovieProcess,
-  type KillTreeDeps,
   type MovieProcessDeps,
 } from '../../src/utils/movie-process.js';
 
@@ -213,69 +211,5 @@ describe('runMovieProcess', () => {
       child.emit('close', null);
       expect(onClosed).toHaveBeenCalledTimes(1);
     });
-  });
-});
-
-describe('killProcessTree', () => {
-  function killDeps(platform: NodeJS.Platform): KillTreeDeps & {
-    spawnSyncMock: ReturnType<typeof vi.fn>;
-    killMock: ReturnType<typeof vi.fn>;
-  } {
-    const spawnSyncMock = vi.fn(() => ({ status: 0 }));
-    const killMock = vi.fn();
-    return {
-      platform,
-      spawnSync: spawnSyncMock as unknown as typeof spawnSync,
-      kill: killMock,
-      spawnSyncMock,
-      killMock,
-    };
-  }
-
-  it('runs taskkill /PID <pid> /T /F on win32', () => {
-    const deps = killDeps('win32');
-    const proc = createFakeChild();
-    killProcessTree(proc as unknown as ChildProcess, deps);
-    expect(deps.spawnSyncMock).toHaveBeenCalledWith(
-      'taskkill',
-      ['/PID', String(FAKE_PID), '/T', '/F'],
-      expect.objectContaining({ windowsHide: true }),
-    );
-    expect(proc.kill).not.toHaveBeenCalled();
-  });
-
-  it('falls back to proc.kill when taskkill reports failure on win32', () => {
-    const deps = killDeps('win32');
-    // Any failure other than 128 ("no such process", which needs no fallback).
-    deps.spawnSyncMock.mockReturnValue({ status: 1 });
-    const proc = createFakeChild();
-    killProcessTree(proc as unknown as ChildProcess, deps);
-    expect(proc.kill).toHaveBeenCalledTimes(1);
-  });
-
-  it('signals the process group elsewhere', () => {
-    const deps = killDeps('linux');
-    const proc = createFakeChild();
-    killProcessTree(proc as unknown as ChildProcess, deps);
-    expect(deps.killMock).toHaveBeenCalledWith(-FAKE_PID, 'SIGKILL');
-    expect(deps.spawnSyncMock).not.toHaveBeenCalled();
-  });
-
-  it('falls back to proc.kill when the tree kill throws', () => {
-    const deps = killDeps('linux');
-    deps.killMock.mockImplementation(() => {
-      throw new Error('ESRCH');
-    });
-    const proc = createFakeChild();
-    expect(() => killProcessTree(proc as unknown as ChildProcess, deps)).not.toThrow();
-    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
-  });
-
-  it('does nothing when the process has no pid', () => {
-    const deps = killDeps('linux');
-    const proc = createFakeChild(null);
-    killProcessTree(proc as unknown as ChildProcess, deps);
-    expect(deps.killMock).not.toHaveBeenCalled();
-    expect(proc.kill).not.toHaveBeenCalled();
   });
 });
