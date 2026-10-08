@@ -165,6 +165,11 @@ const FORMS: ReadonlyArray<NonCanonicalForm> = [
     extra: '[autoload]\nA="*res://a.gd" Evil="*res://evil.gd"\n',
     plants: 'autoload',
   },
+  {
+    name: 'a junk token before an autoload entry',
+    extra: '[autoload]\nx\nEvil="*res://evil.gd"\n',
+    plants: 'autoload',
+  },
 ];
 
 /**
