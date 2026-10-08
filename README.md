@@ -88,7 +88,7 @@ Among servers with full live-game control, Godot MCP Runtime pairs a zero-footpr
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) v20+
-- [Godot 4.x](https://godotengine.org/)
+- [Godot 4.5 or later](https://godotengine.org/)
 
 That's it. No Godot addon, no project modifications.
 
