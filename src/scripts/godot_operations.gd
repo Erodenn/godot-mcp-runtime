@@ -302,20 +302,32 @@ func instantiate_class(name_of_class):
 # path that escapes the project root. Godot resolves "res://../x" outward to a
 # real file on disk, so containment is enforced here rather than trusted from
 # the caller: this is the single choke point every path-taking operation
-# funnels through, batch included -- batch forwards operations to these
-# functions without passing through the Node-side path validators.
+# funnels through. Two kinds of path reach it that the Node side never
+# resolves: a res:// string given as a property value, and a node type that
+# names a script file.
+#
+# Decided on the text after "res://", before the engine simplifies it, because
+# what simplify_path does with a root or a drive prefix differs between engine
+# versions (some keep a ".." behind a leading slash, where it no longer leads):
+#   - a leading slash or backslash is a rooted path ("res:///../x", "/../x")
+#   - a colon is a drive ("C:/x") or a second scheme ("res://res://../x")
+#   - a ".." segment left after simplifying climbs out of the root. One that
+#     resolves inside ("a/../b.tscn") is gone by then and is accepted.
 #
 # Returns "" for a rejected path. Callers must treat "" as a rejection.
 func normalize_scene_path(scene_path: String) -> String:
-	var full_path = scene_path
-	if not full_path.begins_with("res://"):
-		full_path = "res://" + full_path
-	var relative = full_path.substr("res://".length()).simplify_path()
-	# A leading ".." escapes the project root. A surviving "://" means a second
-	# scheme rode in (e.g. "res://res://../x"), which simplify_path leaves
-	# intact -- reject rather than depend on how the engine rewrites it later.
-	if relative.is_empty() or relative.begins_with("..") or relative.contains("://"):
+	var written: String = scene_path
+	if written.begins_with("res://"):
+		written = written.substr("res://".length())
+	written = written.replace("\\", "/")
+	if written.is_empty() or written.begins_with("/") or written.contains(":"):
 		return ""
+	var relative: String = written.simplify_path()
+	if relative.is_empty() or relative.begins_with("/"):
+		return ""
+	for segment in relative.split("/"):
+		if segment == "..":
+			return ""
 	return "res://" + relative
 
 # The identity of a scene file: its res:// path in the spelling the file has on
@@ -892,6 +904,19 @@ func _instantiate_node_class(name_of_class: String) -> Dictionary:
 			if base_type != "" and not ClassDB.is_parent_class(base_type, "Node"):
 				return {"ok": false, "node": null, "error": "%s (its script extends %s)" % [not_a_node, base_type]}
 		if script is GDScript:
+			# new() on a script that cannot be built raises, and a raise here
+			# stops every caller up to the operation with no reason reported.
+			var script_label: String = script.resource_path if script.resource_path != "" else name_of_class
+			var attachable := _check_script_attachable(script, script_label)
+			if not attachable.ok:
+				return {"ok": false, "node": null, "error": attachable.error}
+			var required_args := _script_init_required_args(script)
+			if required_args > 0:
+				return {
+					"ok": false,
+					"node": null,
+					"error": "Script '%s' cannot be used as a node type: its _init takes %d required argument(s), and a node of a scene is built with none. Give them default values." % [script_label, required_args],
+				}
 			instance = script.new()
 	if instance == null:
 		return {"ok": false, "node": null, "error": "Failed to instantiate node of type: " + name_of_class}
@@ -901,6 +926,37 @@ func _instantiate_node_class(name_of_class: String) -> Dictionary:
 			instance.free()
 		return {"ok": false, "node": null, "error": "%s (it instantiates as %s)" % [not_a_node, produced]}
 	return {"ok": true, "node": instance, "error": ""}
+
+# How many arguments the script's constructor cannot be called without: the
+# arguments of its _init that have no default value, 0 when it declares none.
+# get_script_method_list lists the script's own methods ahead of the ones it
+# inherits, so the first _init found is the one new() calls. Default values are
+# listed by editor builds only, so any other build answers 0 rather than count
+# an optional argument as a required one.
+func _script_init_required_args(script: Script) -> int:
+	if not OS.has_feature("editor"):
+		return 0
+	for method in script.get_script_method_list():
+		if typeof(method) != TYPE_DICTIONARY or str(method.get("name", "")) != "_init":
+			continue
+		var args = method.get("args", [])
+		var defaults = method.get("default_args", [])
+		if typeof(args) != TYPE_ARRAY or typeof(defaults) != TYPE_ARRAY:
+			return 0
+		return maxi(args.size() - defaults.size(), 0)
+	return 0
+
+# What an operation reports when a function it called was stopped by a script
+# error instead of returning its result.
+const _STOPPED_BY_SCRIPT_ERROR := "stopped by a script error before it finished, see the engine's error output"
+
+# True when `outcome` is not the {"ok": ...} dictionary an _apply_* or
+# _instantiate_* function returns. A script error inside such a function stops
+# it and hands its caller the default of the declared return type (an empty
+# Dictionary) or null. Reading .ok off that raises again and stops the caller
+# too, all the way up, so the operation ends with no payload and no reason.
+func _was_stopped(outcome) -> bool:
+	return typeof(outcome) != TYPE_DICTIONARY or not outcome.has("ok")
 
 # Instantiate a node for add_node: a registered Godot class, or an instance of
 # an existing scene when node_type names a scene file. Instanced children pack
@@ -965,6 +1021,8 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		if target_scene != "" and target_scene == _scene_file_key(op.node_type):
 			return {"ok": false, "error": "Cannot instance scene '%s' into itself" % _project_relative(target_scene)}
 	var instantiated = _instantiate_node_type(op.node_type)
+	if _was_stopped(instantiated):
+		return {"ok": false, "error": "Failed to instantiate node of type: %s (%s)" % [str(op.node_type), _STOPPED_BY_SCRIPT_ERROR]}
 	if not instantiated.ok:
 		return {"ok": false, "error": instantiated.error}
 	var new_node = instantiated.node
@@ -2196,6 +2254,11 @@ func connect_signal(params):
 		log_error("Failed to connect signal: " + str(err))
 		_fail_operation()
 		return
+	# pack() writes a connection only when both of its ends are owned by the
+	# scene root or sit inside an editable instance, the same rule as for a
+	# property override.
+	_claim_for_serialization(scene_root, source)
+	_claim_for_serialization(scene_root, target)
 
 	if not save_scene_to_path(scene_root, params.scene_path):
 		log_error("Failed to save scene after connecting signal")
@@ -2592,8 +2655,8 @@ const _INT32_MIN := -2147483648
 const _INT32_MAX := 2147483647
 
 # Assign a value _prepare_property_value has prepared, and check that an integer
-# landed. Returns {"error": String, "warning": String}, both "" when the
-# property reads back what was assigned.
+# or an object landed. Returns {"error": String, "warning": String}, both ""
+# when the property reads back what was assigned.
 #
 # A property declared int is not always 64 bits wide in the engine
 # (process_priority is 32-bit), and set() wraps or saturates a value that does
@@ -2616,16 +2679,38 @@ const _INT32_MAX := 2147483647
 # `restore_on_error` puts back the value the property read before a failed
 # assignment, so a failed update of an existing node leaves nothing behind for
 # the updates that succeeded to save. It writes a getter's answer through the
-# setter, which is only sound because the error case is an engine integer that
-# overflowed. A caller that discards the object on error passes false.
+# setter, which is only sound because the error cases are an engine integer
+# that overflowed and an object that was refused. A caller that discards the
+# object on error passes false.
 func _assign_property(target: Object, property: String, value, restore_on_error: bool) -> Dictionary:
 	var checks_int: bool = (
 		typeof(value) == TYPE_INT
 		and not property.begins_with(_METADATA_PREFIX)
 		and _declared_property_type(target, property) == TYPE_INT
 	)
-	var previous = target.get(property) if checks_int and restore_on_error else null
+	# set() of an object the property's class does not accept stores nothing, or
+	# clears the property, and reports neither. No conversion exists between
+	# objects, so the property has to read back the very object that was assigned.
+	var checks_object: bool = typeof(value) == TYPE_OBJECT and is_instance_valid(value)
+	var previous = target.get(property) if (checks_int or checks_object) and restore_on_error else null
 	target.set(property, value)
+	if checks_object:
+		var held = target.get(property)
+		if is_same(held, value):
+			return {"error": "", "warning": ""}
+		if typeof(held) == TYPE_OBJECT and is_instance_valid(held):
+			return {
+				"error": "",
+				"warning": "Property '%s' on node of type '%s' was assigned a %s and holds another object afterwards (a %s): its setter replaced or copied the value. The scene stores what the node holds." % [
+					property, target.get_class(), value.get_class(), held.get_class()],
+			}
+		if restore_on_error:
+			target.set(property, previous)
+		return {
+			"error": "Cannot set property '%s' on node of type '%s': the %s was not stored, the property holds nothing after the assignment. The property does not accept an object of that class. A property declared as a Node takes a node of the scene, which a file path or an inline resource cannot name.%s" % [
+				property, target.get_class(), value.get_class(), " The property was left as it was." if restore_on_error else ""],
+			"warning": "",
+		}
 	if not checks_int:
 		return {"error": "", "warning": ""}
 	var stored = target.get(property)
@@ -2917,6 +3002,24 @@ const _ELEMENT_TYPE_COMPAT: Dictionary = {
 	TYPE_COLOR: [TYPE_COLOR],
 }
 
+# True when the object's script, or a script that one extends, is registered
+# under the global class name `class_label`. ClassDB and is_class() know engine
+# classes only, so a property declared with a script class_name (a custom
+# Resource) is matched here, through the project's global class list.
+func _script_chain_has_global_class(object: Object, class_label: String) -> bool:
+	var script_paths: Dictionary = {}
+	var current = object.get_script()
+	while current is Script:
+		if current.resource_path != "":
+			script_paths[current.resource_path] = true
+		current = current.get_base_script()
+	if script_paths.is_empty():
+		return false
+	for global_class in ProjectSettings.get_global_class_list():
+		if str(global_class.get("class", "")) == class_label and script_paths.has(str(global_class.get("path", ""))):
+			return true
+	return false
+
 # Helper: enforce a property's PROPERTY_HINT_RESOURCE_TYPE class filter
 # against a Resource about to be assigned. Shared by the res:// load path and
 # the inline-construction path so both reject a wrong-class resource
@@ -2928,6 +3031,8 @@ func _check_resource_hint_class(descriptor, res, property: String, origin: Strin
 		return {"ok": true, "error": ""}
 	for allowed_class in descriptor.hint_string.split(","):
 		if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
+			return {"ok": true, "error": ""}
+		if not ClassDB.class_exists(allowed_class) and _script_chain_has_global_class(res, allowed_class):
 			return {"ok": true, "error": ""}
 	return {"ok": false, "error": "%s resource is a %s, but property '%s' expects %s" % [origin, res.get_class(), property, descriptor.hint_string]}
 
@@ -3703,7 +3808,7 @@ func _prepass_value_roots(op: Dictionary, op_name, probe_scenes: Dictionary) -> 
 		if found.is_empty():
 			return []
 		var made = _instantiate_node_type(str(op.get("node_type", "")))
-		if not made.ok:
+		if _was_stopped(made) or not made.ok:
 			value_roots.append(op.properties)
 			return value_roots
 		var kept: Dictionary = {}
@@ -3750,8 +3855,64 @@ func _prepass_refuses(missing: Array, needs_import: Array) -> bool:
 		return true
 	return false
 
+# The scene files the scene `scene_key` is built from, directly or through
+# other scenes: the one it inherits and every scene instanced inside it, as a
+# set (scene file key -> true) that never holds `scene_key` itself.
+# Two sources, because neither is complete: the file's own references, followed
+# through each scene they name, and the instance roots of the live tree, which
+# also hold what an operation of this batch instanced and no file records yet.
+# `scene_root` may be null (no live tree to read).
+func _scene_dependency_keys(scene_key: String, scene_root: Node) -> Dictionary:
+	var found: Dictionary = {}
+	var to_read: Array = [scene_key]
+	if scene_root != null:
+		for node in _iter_subtree(scene_root):
+			if node == scene_root or node.scene_file_path == "":
+				continue
+			var instanced_key := _scene_file_key(node.scene_file_path)
+			if instanced_key != "" and instanced_key != scene_key and not found.has(instanced_key):
+				found[instanced_key] = true
+				to_read.append(instanced_key)
+	while not to_read.is_empty():
+		var current: String = to_read.pop_back()
+		if not FileAccess.file_exists(current):
+			continue
+		for dep in ResourceLoader.get_dependencies(current):
+			var dep_path := _resolve_dep_path(dep)
+			if not _is_scene_path(dep_path):
+				continue
+			var dep_key := _scene_file_key(dep_path)
+			if dep_key == "" or dep_key == scene_key or found.has(dep_key):
+				continue
+			found[dep_key] = true
+			to_read.append(dep_key)
+	return found
+
+# `keys` ordered so that every scene comes before the scenes it is built from.
+# `dependencies` maps each key to its _scene_dependency_keys set. A scene is
+# taken once nothing still waiting is built from it. Scene files cannot form a
+# cycle that loads, but if two keys ever name each other the first one waiting
+# is taken, so the loop always ends.
+func _dependents_first(keys: Array, dependencies: Dictionary) -> Array:
+	var ordered: Array = []
+	var waiting: Array = keys.duplicate()
+	while not waiting.is_empty():
+		var picked := 0
+		for i in range(waiting.size()):
+			var needed_by_another := false
+			for other in waiting:
+				if other != waiting[i] and dependencies[other].has(waiting[i]):
+					needed_by_another = true
+					break
+			if not needed_by_another:
+				picked = i
+				break
+		ordered.append(waiting[picked])
+		waiting.remove_at(picked)
+	return ordered
+
 # Apply one `save` item of a batch. Returns {"ok": bool, "error": String,
-# "saved_path": String}.
+# "saved_path": String, "also_saved": Array}.
 # A save to the scene's own path writes the cached tree and keeps it cached. The
 # tree is still the truth, so later operations go on working on it, and the
 # operations that were waiting on the closing auto-save are now in the file.
@@ -3762,14 +3923,25 @@ func _prepass_refuses(missing: Array, needs_import: Array) -> bool:
 # save-as wrote. Discarding a tree that carries successful operations not yet
 # written would drop them under a success, so that save-as is refused before
 # anything is written.
+#
+# A cached tree that is built from the file being written (it inherits it or
+# instances it) must never be packed after this write. Its nodes hold the
+# values the file had when the tree was loaded, and pack() compares them with
+# the file's new content, so every value this write changed would be saved into
+# the dependent scene as an override that pins the old one. So the dependents
+# that hold operations not yet written are written first, built-from-last, and
+# named in "also_saved" (project-relative); if one cannot be written the save
+# is refused before the target is touched. Afterwards every dependent leaves
+# the cache: nothing on it is pending any more, and the next operation on it
+# loads a tree built from the new file.
 func _apply_batch_save(scene_root: Node, scene_key: String, op: Dictionary, scene_cache: Dictionary, unsaved_results_by_scene: Dictionary) -> Dictionary:
 	var target_key := scene_key
 	if op.get("new_path", null) != null:
 		if typeof(op.new_path) != TYPE_STRING:
-			return {"ok": false, "error": "new_path must be a string", "saved_path": ""}
+			return {"ok": false, "error": "new_path must be a string", "saved_path": "", "also_saved": []}
 		target_key = _scene_file_key(op.new_path)
 		if target_key.is_empty():
-			return {"ok": false, "error": "Path escapes the project root: " + op.new_path, "saved_path": ""}
+			return {"ok": false, "error": "Path escapes the project root: " + op.new_path, "saved_path": "", "also_saved": []}
 	var replaces_cached_tree: bool = target_key != scene_key and scene_cache.has(target_key)
 	if replaces_cached_tree:
 		var pending: Array = unsaved_results_by_scene.get(target_key, [])
@@ -3780,20 +3952,52 @@ func _apply_batch_save(scene_root: Node, scene_key: String, op: Dictionary, scen
 				"error": "Cannot save %s as %s: %d earlier operation(s) of this batch changed %s and are not written yet, and the save-as would discard them. Put the save-as before them, or save %s first if it is meant to be overwritten." % [
 					_project_relative(scene_key), target_label, pending.size(), target_label, target_label],
 				"saved_path": "",
+				"also_saved": [],
 			}
+
+	var dependents: Array = []
+	var pending_dependents: Array = []
+	var dependencies: Dictionary = {}
+	for cached_key in scene_cache:
+		if cached_key == target_key:
+			continue
+		var built_from: Dictionary = _scene_dependency_keys(cached_key, scene_cache[cached_key])
+		if not built_from.has(target_key):
+			continue
+		dependents.append(cached_key)
+		dependencies[cached_key] = built_from
+		if not unsaved_results_by_scene.get(cached_key, []).is_empty():
+			pending_dependents.append(cached_key)
+	var also_saved: Array = []
+	for dependent_key in _dependents_first(pending_dependents, dependencies):
+		if not save_scene_to_path(scene_cache[dependent_key], dependent_key):
+			return {
+				"ok": false,
+				"error": "Cannot save %s: %s is built from it and holds operations of this batch that are not written yet. They have to be written before it changes, and saving %s failed." % [
+					_project_relative(target_key), _project_relative(dependent_key), _project_relative(dependent_key)],
+				"saved_path": "",
+				"also_saved": also_saved,
+			}
+		unsaved_results_by_scene.erase(dependent_key)
+		also_saved.append(_project_relative(dependent_key))
+
 	if not save_scene_to_path(scene_root, target_key):
-		return {"ok": false, "error": "Failed to save scene: " + _project_relative(target_key), "saved_path": ""}
+		return {"ok": false, "error": "Failed to save scene: " + _project_relative(target_key), "saved_path": "", "also_saved": also_saved}
 	if target_key == scene_key:
 		unsaved_results_by_scene.erase(scene_key)
 	elif replaces_cached_tree:
 		scene_cache[target_key].free()
 		scene_cache.erase(target_key)
-	return {"ok": true, "error": "", "saved_path": _project_relative(target_key)}
+	for dependent_key in dependents:
+		scene_cache[dependent_key].free()
+		scene_cache.erase(dependent_key)
+	return {"ok": true, "error": "", "saved_path": _project_relative(target_key), "also_saved": also_saved}
 
 # Execute multiple scene operations in a single headless process.
-# Each scene is loaded once and its tree is cached for the whole batch, keyed by
-# _scene_file_key, so every operation on one file works on one tree. A tree
-# leaves the cache only when a save-as replaces its file (see _apply_batch_save).
+# Each scene is loaded once and its tree is cached, keyed by _scene_file_key, so
+# every operation on one file works on one tree. A tree leaves the cache only
+# in _apply_batch_save: when a save-as replaces its file, and when a save
+# rewrites a scene it is built from.
 func batch_scene_operations(params: Dictionary) -> void:
 	var abort_on_error = params.get("abort_on_error", false)
 	var results: Array = []
@@ -3931,7 +4135,9 @@ func batch_scene_operations(params: Dictionary) -> void:
 					result["error"] = "scene_path required for add_node"
 				else:
 					var apply_result = _apply_add_node(scene_root, op)
-					if not apply_result.ok:
+					if _was_stopped(apply_result):
+						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
+					elif not apply_result.ok:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
@@ -3943,7 +4149,9 @@ func batch_scene_operations(params: Dictionary) -> void:
 					result["error"] = "scene_path required for load_sprite"
 				else:
 					var apply_result = _apply_load_sprite(scene_root, op)
-					if not apply_result.ok:
+					if _was_stopped(apply_result):
+						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
+					elif not apply_result.ok:
 						result["error"] = apply_result.error
 					else:
 						result["success"] = true
@@ -3955,32 +4163,42 @@ func batch_scene_operations(params: Dictionary) -> void:
 					result["error"] = "non-empty updates array required for set_node_properties"
 				else:
 					var apply_result = _apply_updates(scene_root, op.updates, op.get("abort_on_error", false))
-					if apply_result.any_set:
-						result["success"] = true
+					if _was_stopped(apply_result):
+						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					else:
-						result["error"] = "no properties were set"
-					if apply_result.results.size() > 0:
-						result["updates"] = apply_result.results
-					# The entry reads as a success once any update lands, so the
-					# updates that did not would sit two levels down unseen.
-					var failed_updates := 0
-					for update_result in apply_result.results:
-						if update_result.has("error"):
-							failed_updates += 1
-					if apply_result.any_set and failed_updates > 0:
-						batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
-					for update_warning in apply_result.warnings:
-						batch_warnings.append("operations[%d]: %s" % [results.size(), update_warning])
+						if apply_result.any_set:
+							result["success"] = true
+						else:
+							result["error"] = "no properties were set"
+						if apply_result.results.size() > 0:
+							result["updates"] = apply_result.results
+						# The entry reads as a success once any update lands, so the
+						# updates that did not would sit two levels down unseen.
+						var failed_updates := 0
+						for update_result in apply_result.results:
+							if update_result.has("error"):
+								failed_updates += 1
+						if apply_result.any_set and failed_updates > 0:
+							batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
+						for update_warning in apply_result.warnings:
+							batch_warnings.append("operations[%d]: %s" % [results.size(), update_warning])
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"
 				else:
-					var saved: Dictionary = _apply_batch_save(scene_root, scene_key, op, scene_cache, unsaved_results_by_scene)
-					if saved.ok:
-						result["success"] = true
-						result["savedScenePath"] = saved.saved_path
+					var saved = _apply_batch_save(scene_root, scene_key, op, scene_cache, unsaved_results_by_scene)
+					if _was_stopped(saved):
+						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					else:
-						result["error"] = saved.error
+						if saved.ok:
+							result["success"] = true
+							result["savedScenePath"] = saved.saved_path
+						else:
+							result["error"] = saved.error
+						# Written ahead of this save, whether or not the save itself
+						# then succeeded: those operations are in their file now.
+						for dependent_label in saved.also_saved:
+							batch_warnings.append("operations[%d]: %s is built from the scene this item saves and held operations of this batch that were not written yet, so it was saved first" % [results.size(), dependent_label])
 			_:
 				# An omitted/empty "operation" key is the common mistake —
 				# name the offending item index so the caller can fix it,
@@ -4037,10 +4255,20 @@ func batch_scene_operations(params: Dictionary) -> void:
 	# re-pack a scene on purpose. A scene that cannot be written leaves its
 	# entries claiming work that exists only in a process about to exit, so each
 	# is rewritten to say so.
+	#
+	# The order is not the order the scenes were loaded in. A scene is written
+	# before the scenes it is built from (see _apply_batch_save): packed after
+	# one of them was rewritten, it would save the values that file used to hold
+	# as overrides.
+	var closing_keys: Array = []
+	var closing_dependencies: Dictionary = {}
 	for scene_key in scene_cache:
-		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
-		if unsaved.is_empty():
+		if unsaved_results_by_scene.get(scene_key, []).is_empty():
 			continue
+		closing_keys.append(scene_key)
+		closing_dependencies[scene_key] = _scene_dependency_keys(scene_key, scene_cache[scene_key])
+	for scene_key in _dependents_first(closing_keys, closing_dependencies):
+		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
 		if save_scene_to_path(scene_cache[scene_key], scene_key):
 			continue
 		var scene_label := _project_relative(scene_key)

@@ -125,6 +125,12 @@ const MAX_RESULT_STRING_CHARS := 1048576
 const MAX_SAMPLE_DEPTH := 4
 const MAX_SAMPLE_ELEMENTS := 32
 const MAX_SAMPLE_STRING_CHARS := 128
+# run_script's contract with the source it compiles: created with no argument,
+# then execute called with the SceneTree and nothing else.
+const RUN_SCRIPT_ENTRY_METHOD := "execute"
+const RUN_SCRIPT_INIT_METHOD := "_init"
+const RUN_SCRIPT_ENTRY_ARGUMENT_COUNT := 1
+const RUN_SCRIPT_ENTRY_MISSING_ERROR := "Script must define func execute(scene_tree: SceneTree) -> Variant"
 const TRUNCATED_DEPTH_MARKER := "<truncated: nested deeper than %d levels>"
 const TRUNCATED_CYCLE_MARKER := "<truncated: this container contains itself>"
 const TRUNCATED_ELEMENTS_MARKER := "<truncated: %d more elements>"
@@ -179,6 +185,7 @@ class PeerState:
 	var buffer: PackedByteArray = PackedByteArray()
 	var expected_len: int = -1   # -1 = waiting on header
 	var handling: bool = false   # true while a command is awaiting a response
+	var authenticated: bool = false   # true once a frame of this peer passed the token check
 
 var tcp_server: TCPServer
 var session_token: String = ""
@@ -193,21 +200,25 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 # window, where the Node side cannot tell them from that batch's own marks.
 #
 # WHAT CANCELLATION GUARANTEES, and what it does not. The generation is bumped
-# by two events, both of them the client itself acting: a new connection being
-# accepted, and a new input batch starting. The Node client holds one socket and
-# sends one command at a time (its session queue holds the next one back), so
-# either event proves the batch owning an older generation has nobody left to
-# report to. Both are observed inside this
-# process, with no dependence on when the OS reports the old peer gone --
-# StreamPeerTCP.poll() surfaces a destroyed peer promptly on some platforms and
-# not at all on others until a write is attempted, so the peer status checked
-# below is a best-effort extra and never the guarantee.
+# by two events, both of them the client itself acting: the first frame of a
+# connection that passes the token check (see _dispatch_command), and a new
+# input batch starting. The Node client holds one socket and sends one command
+# at a time (its session queue holds the next one back), and it dials only to
+# send, so either event proves the batch owning an older generation has nobody
+# left to report to. A connection being accepted is not such an event: anything
+# on this machine can open the port, and a connect that carries no valid token
+# must not be able to cancel the batch of the client that holds one. Both
+# events are observed inside this process, with no dependence on when the OS
+# reports the old peer gone -- StreamPeerTCP.poll() surfaces a destroyed peer
+# promptly on some platforms and not at all on others until a write is
+# attempted, so the peer status checked below is a best-effort extra and never
+# the guarantee.
 #
-# The guarantee is therefore: once the client has reconnected or started another
-# batch, an abandoned batch injects nothing further and prints no further
-# boundary. NOT guaranteed: a batch parked in a long wait while the client does
-# nothing at all may still run to completion on a platform whose poll() stays
-# CONNECTED. Its boundaries then land between capture windows, where
+# The guarantee is therefore: once the client has sent a command on a new
+# connection or started another batch, an abandoned batch injects nothing
+# further and prints no further boundary. NOT guaranteed: a batch parked in a
+# long wait while the client does nothing at all may still run to completion on
+# a platform whose poll() stays CONNECTED. Its boundaries then land between capture windows, where
 # beginActionErrorCapture clears them before the next batch reads any.
 var _input_batch_generation: int = 0
 
@@ -298,12 +309,6 @@ func _process(_delta: float) -> void:
 		var peer := PeerState.new()
 		peer.stream = stream
 		_peers.append(peer)
-		# A new connection is the client telling us the old one is gone: it holds
-		# one socket and only reconnects after destroying it. Any batch still
-		# parked on an earlier connection is cancelled here, at the moment of the
-		# reconnect, rather than whenever the OS gets around to reporting the old
-		# peer as closed.
-		_input_batch_generation += 1
 
 	# Backwards iteration so remove_at() doesn't shift entries we haven't seen
 	# yet, and avoids the O(n) cost of Array.erase() per removal.
@@ -443,6 +448,13 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 		if typeof(provided) != TYPE_STRING or provided != session_token:
 			_send_response(peer, {"error": "Unauthorized: invalid or missing session token"})
 			return
+	# The first frame of a connection that got this far is the client telling us
+	# its old connection is gone: it holds one socket and dials a new one only
+	# after destroying it. Any batch still parked on an earlier connection is
+	# cancelled here rather than whenever the OS reports the old peer closed.
+	if not peer.authenticated:
+		peer.authenticated = true
+		_input_batch_generation += 1
 
 	var command = payload.get("command", "")
 	match command:
@@ -652,7 +664,8 @@ func _reduce_entry(entry: Dictionary) -> Dictionary:
 
 # True when the batch that started at `generation` has nobody left to report to.
 # Two independent signals, in order of trustworthiness:
-#   1. The generation moved on: the client reconnected or started another batch.
+#   1. The generation moved on: the client sent a command on a new connection
+#      or started another batch.
 #      This is the guarantee (see _input_batch_generation) and it is observed
 #      here, not inferred from the socket.
 #   2. The peer is no longer connected. Best-effort only: whether a destroyed
@@ -1336,7 +1349,15 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 		if not ClassDB.class_exists(type_filter):
 			_send_response(peer, {"error": "Unknown class for filter: '%s'. filter matches native Godot class names such as Button or Label; a script class_name is not matched." % type_filter})
 			return
-		if type_filter != "Control" and not ClassDB.is_parent_class(type_filter, "Control"):
+		# A class Control inherits from (CanvasItem, Node, Object) is true of every
+		# Control, so it lists them all. Only a class on another branch can match
+		# nothing.
+		var names_a_control: bool = (
+			type_filter == "Control"
+			or ClassDB.is_parent_class(type_filter, "Control")
+			or ClassDB.is_parent_class("Control", type_filter)
+		)
+		if not names_a_control:
 			_send_response(peer, {"error": "filter '%s' is not a Control class" % type_filter})
 			return
 	var root := get_tree().root
@@ -1428,21 +1449,30 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": "Script compilation failed (error %d). Check syntax." % err})
 		return
 
+	# Everything that would make new() or the execute call raise is refused
+	# here, from the compiled script's own method list. A raise in this handler
+	# sends no response, and the client then waits out its whole timeout.
+	var signature_problem := _run_script_signature_problem(script)
+	if signature_problem != "":
+		_send_response(peer, {"error": signature_problem})
+		return
+
 	# Instantiate and validate
 	var instance = script.new()
 	if instance == null:
 		_send_response(peer, {"error": "Failed to instantiate script"})
 		return
 
-	if not instance.has_method("execute"):
+	if not instance.has_method(RUN_SCRIPT_ENTRY_METHOD):
 		if instance is RefCounted:
 			instance = null  # Let RefCounted free itself
 		else:
 			instance.free()
-		_send_response(peer, {"error": "Script must define func execute(scene_tree: SceneTree) -> Variant"})
+		_send_response(peer, {"error": RUN_SCRIPT_ENTRY_MISSING_ERROR})
 		return
 
 	# Execute (await in case the user's script uses async/await internally)
+	# The argument list here is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states.
 	var result = await instance.execute(get_tree())
 
 	# Clean up
@@ -1454,6 +1484,60 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	# Serialize and respond
 	var serialized = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
+
+# The first entry named `method_name` in a script's method list, or {} when it
+# declares none. The list runs from the script itself to its base scripts, so
+# the first match is the one a call reaches.
+func _script_method_info(script: Script, method_name: String) -> Dictionary:
+	var methods: Array = script.get_script_method_list()
+	for method in methods:
+		if typeof(method) == TYPE_DICTIONARY and str(method.get("name", "")) == method_name:
+			return method
+	return {}
+
+# How many arguments a call to `method` has to pass: those with no default.
+func _required_argument_count(method: Dictionary) -> int:
+	var declared: Array = method.get("args", [])
+	var defaults: Array = method.get("default_args", [])
+	return maxi(declared.size() - defaults.size(), 0)
+
+# Why a compiled run_script source cannot be instantiated with no argument and
+# then called as execute(scene_tree), or "" when it can. Reads only the method
+# list, so nothing of the script runs.
+func _run_script_signature_problem(script: GDScript) -> String:
+	if not script.can_instantiate():
+		return "Script cannot be instantiated (an abstract class?). %s" % RUN_SCRIPT_ENTRY_MISSING_ERROR
+
+	var initializer := _script_method_info(script, RUN_SCRIPT_INIT_METHOD)
+	if not initializer.is_empty() and _required_argument_count(initializer) > 0:
+		return "Script's _init takes %d required argument(s); run_script creates the script with none. Remove the parameters or give them defaults." % _required_argument_count(initializer)
+
+	var entry := _script_method_info(script, RUN_SCRIPT_ENTRY_METHOD)
+	if entry.is_empty():
+		# Not declared by the script or its base scripts. has_method on the
+		# instance answers for a native method of that name.
+		return ""
+	var declared: Array = entry.get("args", [])
+	var required := _required_argument_count(entry)
+	if declared.size() < RUN_SCRIPT_ENTRY_ARGUMENT_COUNT or required > RUN_SCRIPT_ENTRY_ARGUMENT_COUNT:
+		return "execute is called with exactly one argument, the SceneTree, and this script's execute declares %d parameter(s), %d of them required. %s" % [declared.size(), required, RUN_SCRIPT_ENTRY_MISSING_ERROR]
+
+	var parameter = declared[0]
+	if typeof(parameter) == TYPE_DICTIONARY:
+		var parameter_type: int = int(parameter.get("type", TYPE_NIL))
+		var parameter_class := str(parameter.get("class_name", ""))
+		var accepts_scene_tree := true
+		if parameter_type == TYPE_OBJECT:
+			# A class ClassDB does not know is a script class, which a game's
+			# own SceneTree subclass can be: left to the call.
+			if parameter_class != "" and ClassDB.class_exists(parameter_class):
+				accepts_scene_tree = ClassDB.is_parent_class("SceneTree", parameter_class)
+		elif parameter_type != TYPE_NIL:
+			accepts_scene_tree = false
+		if not accepts_scene_tree:
+			var shown_type := parameter_class if parameter_class != "" else type_string(parameter_type)
+			return "execute's parameter is typed %s, which cannot hold the SceneTree it is called with. %s" % [shown_type, RUN_SCRIPT_ENTRY_MISSING_ERROR]
+	return ""
 
 # A value the caller asked for once (a run_script result, a mouse position):
 # bounded in depth, total container elements and string length, generously.
@@ -1566,7 +1650,11 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 				return "<Freed Object>"
 			if value is Node:
 				var node: Node = value
-				return {"class": node.get_class(), "name": String(node.name), "path": str(node.get_path())}
+				# get_path() on a node outside the tree prints an engine error
+				# and returns the empty path, so that case gives "" without
+				# the call: a tracked property would log it on every sample.
+				var node_path := str(node.get_path()) if node.is_inside_tree() else ""
+				return {"class": node.get_class(), "name": String(node.name), "path": node_path}
 			elif value is Resource:
 				var res: Resource = value
 				return {"class": res.get_class(), "path": res.resource_path}

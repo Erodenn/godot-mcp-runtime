@@ -112,7 +112,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       );
       const before = readFileSync(join(dirname(tmpProject), outside), 'utf-8');
 
-      await runner.executeOperation(
+      const { stdout } = await runner.executeOperation(
         'batch_scene_operations',
         {
           operations: [
@@ -128,6 +128,9 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
+      // Red when the batch stops refusing the path, and when the operation never
+      // ran (a misspelled operation name reports nothing about the path).
+      expect(stdout).toContain(ESCAPE_MESSAGE);
       // The external scene must be neither read into nor written back out.
       expect(readFileSync(join(dirname(tmpProject), outside), 'utf-8')).toBe(before);
     },
@@ -157,20 +160,20 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       plantOutside(tmpProject, 'outside.gd', 'extends Node\n');
 
-      let stdout = '';
-      try {
-        const result = await runner.executeOperation(
-          'attach_script',
-          { scenePath: 'main.tscn', nodePath: 'root', scriptPath: '../outside.gd' },
-          tmpProject,
-          30000,
-        );
-        stdout = result.stdout;
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
-      }
+      // A refused operation exits nonzero and still resolves with its output.
+      // Anything thrown here (an engine that died before dispatch, a timeout)
+      // is a failure of the test, not a refusal.
+      const { stdout, stderr } = await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root', scriptPath: '../outside.gd' },
+        tmpProject,
+        30000,
+      );
 
-      expect(stdout).not.toContain('attached');
+      // Red when the refusal is gone, and when the operation never ran: a
+      // misspelled operation name prints no such line.
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('outside.gd');
     },
     60000,
@@ -183,17 +186,16 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const target = join(dirname(tmpProject), 'escaped-save.tscn');
       rmSync(target, { force: true });
 
-      try {
-        await runner.executeOperation(
-          'save_scene',
-          { scenePath: 'main.tscn', newPath: '../escaped-save.tscn' },
-          tmpProject,
-          30000,
-        );
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
-      }
+      const { stdout, stderr } = await runner.executeOperation(
+        'save_scene',
+        { scenePath: 'main.tscn', newPath: '../escaped-save.tscn' },
+        tmpProject,
+        30000,
+      );
 
+      // Red when the refusal is gone, and when the operation never ran.
+      expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(existsSync(target)).toBe(false);
     },
     60000,
@@ -270,20 +272,15 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       plantOutside(tmpProject, 'outside_node.gd', 'extends Node2D\n');
 
-      let stderr = '';
-      try {
-        const result = await runner.executeOperation(
-          'add_node',
-          { scenePath: 'main.tscn', nodeType: 'res://../outside_node.gd', nodeName: 'Intruder' },
-          tmpProject,
-          30000,
-        );
-        stderr = result.stderr;
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
-      }
+      const { stdout, stderr } = await runner.executeOperation(
+        'add_node',
+        { scenePath: 'main.tscn', nodeType: 'res://../outside_node.gd', nodeName: 'Intruder' },
+        tmpProject,
+        30000,
+      );
 
       expect(stderr).toContain(ESCAPE_MESSAGE);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('Intruder');
     },
     60000,

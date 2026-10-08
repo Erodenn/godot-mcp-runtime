@@ -179,10 +179,10 @@ describe('a scene another loaded tree holds as a property value', () => {
   );
 
   itGodot(
-    'is still an ExtResource when the closing auto-save writes the held scene first',
+    'is still an ExtResource when the closing auto-save writes both scenes',
     async () => {
-      // The base is loaded first, so the closing auto-save writes it before
-      // the spawner, while the spawner's tree holds its PackedScene.
+      // The base is loaded first. The closing auto-save writes the spawner
+      // before it all the same, because the spawner references the base.
       const results = await runBatch([addNode(BASE_SCENE, 'N1'), addNode(SPAWNER_SCENE, 'A')]);
 
       expect(results.map((entry) => entry.error)).toEqual([undefined, undefined]);

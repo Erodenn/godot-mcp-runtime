@@ -1,31 +1,24 @@
 /**
- * Engine-premise probes.
+ * Behaviour that depends on what the engine itself does, observed on a real
+ * Godot: where a path the Node side never resolves is contained, what a scene
+ * save writes when scenes are built from each other, which property values
+ * the engine stores, and how the bridge answers while a game is running.
  *
- * Each probe settles a review claim that was reasoned from memory of the
- * engine and could not be executed when it was written. A probe states the
- * CORRECT behaviour as its final assertion, so it is red exactly when the
- * claimed defect exists and green when the defect cannot be reproduced. Before
- * that assertion it checks, with its own message, that the operation really
- * ran (a control call of the same shape succeeded, a file exists, a payload
- * parsed), so a probe cannot pass because the engine did nothing and a probe
- * that fails at a precondition is an authoring error, not a reproduction.
+ * Each case first checks, with its own message, that the operation really ran
+ * (a control call of the same shape succeeded, a file exists, a payload
+ * parsed), so a case cannot pass because the engine did nothing. An assertion
+ * whose message starts with "precondition:" failing means the case itself is
+ * wrong, not the code under test.
  *
- * The title of each probe starts with the id of the finding it settles
- * ("R6-1a: ..."), so a run's output is greppable by id.
- *
- * Guarded by GODOT_MCP_TEST_ENGINE_PREMISES=1 on top of GODOT_PATH, because a
- * probe is allowed to be red. A probe that is green before its fix stays as a
- * plain `itGodot` pin; a red one gets its fix and then loses the guard.
- *
- * Break conditions are given per probe: the change to the code under test that
- * turns the probe red (the defect named in the title's id).
+ * The comment at the top of each case names the change to the code that turns
+ * it red.
  */
 
-import { describe, it, beforeAll, afterEach, expect } from 'vitest';
+import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import net from 'net';
-import { hasGodot } from '../helpers/godot-skip.js';
+import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
 import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
 import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
@@ -47,8 +40,13 @@ import {
 } from '../../src/tools/runtime-tools.js';
 import { scanProjectFile } from '../../src/utils/project-godot.js';
 
-const PREMISE_ENV_VAR = 'GODOT_MCP_TEST_ENGINE_PREMISES';
-const itPremise = hasGodot && process.env[PREMISE_ENV_VAR] === '1' ? it : it.skip;
+/**
+ * Godot writes an infinite float into JSON as a number a JSON reader accepts
+ * from this minor (major 4) onward. Before it the text is a bare `inf`, which
+ * is not JSON, and what a tool should answer there is not settled.
+ */
+const NON_FINITE_JSON_MIN_MINOR = 6;
+const FIXTURE_MAIN_SCENE = 'main.tscn';
 
 const CASE_TIMEOUT_MS = 120_000;
 const RUNTIME_CASE_TIMEOUT_MS = 90_000;
@@ -88,7 +86,7 @@ function sleep(ms: number): Promise<void> {
 
 /** A parent directory holding a copy of the authored fixture at `parent/project`. */
 function authoredCopy(): { parent: string; project: string } {
-  const parent = tmp.make('godot-mcp-premise-');
+  const parent = tmp.make('godot-mcp-engine-');
   const project = join(parent, PROJECT_DIR);
   cpSync(authoredFixtureProjectPath, project, { recursive: true });
   dropProjectFeatureVersion(project);
@@ -96,19 +94,22 @@ function authoredCopy(): { parent: string; project: string } {
 }
 
 /**
- * A copy of the minimal fixture that launches `mainScene`, with `extraFiles`
- * (path relative to the project -> text) written beside it.
+ * A copy of the minimal fixture that launches `mainScene` (the fixture's own
+ * main scene, or a sibling of it), with `extraFiles` (path relative to the
+ * project -> text) written beside it.
  */
 function runtimeCopy(mainScene: string, extraFiles: Record<string, string> = {}): string {
-  const project = tmp.make('godot-mcp-premise-rt-');
+  const project = tmp.make('godot-mcp-engine-rt-');
   cpSync(fixtureProjectPath, project, { recursive: true });
-  const projectFile = join(project, 'project.godot');
-  const original = readFileSync(projectFile, 'utf8');
-  const rewritten = original.replace('res://main.tscn', `res://${mainScene}`);
-  expect(rewritten, 'precondition: project.godot names main.tscn as its main scene').not.toBe(
-    original,
-  );
-  writeFileSync(projectFile, rewritten, 'utf8');
+  if (mainScene !== FIXTURE_MAIN_SCENE) {
+    const projectFile = join(project, 'project.godot');
+    const original = readFileSync(projectFile, 'utf8');
+    const rewritten = original.replace(`res://${FIXTURE_MAIN_SCENE}`, `res://${mainScene}`);
+    expect(rewritten, 'precondition: project.godot names main.tscn as its main scene').not.toBe(
+      original,
+    );
+    writeFileSync(projectFile, rewritten, 'utf8');
+  }
   for (const [relPath, text] of Object.entries(extraFiles)) {
     writeFileSync(join(project, relPath), text, 'utf8');
   }
@@ -199,9 +200,9 @@ async function simulate(actions: Array<Record<string, unknown>>): Promise<InputP
 
 // ----------------------------------------------------------------- probes
 
-describe('engine premises: scene path containment', () => {
-  itPremise(
-    'R6-1a: add_node refuses a node type that names a script outside the project via a leading slash',
+describe('paths the Node side does not resolve', () => {
+  itGodot(
+    'add_node refuses a node type that names a script outside the project via a leading slash',
     async () => {
       // Red when normalize_scene_path lets "res:///../outside.gd" through: the
       // outside script is loaded and its _init runs.
@@ -241,8 +242,8 @@ describe('engine premises: scene path containment', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-1b: set_node_properties refuses a script property value that leaves the project via a leading slash',
+  itGodot(
+    'set_node_properties refuses a script property value that leaves the project via a leading slash',
     async () => {
       // Red when "res:///../outside.gd" is accepted on an Object-typed property.
       const { parent, project } = authoredCopy();
@@ -278,9 +279,9 @@ describe('engine premises: scene path containment', () => {
   );
 });
 
-describe('engine premises: headless scene saves', () => {
-  itPremise(
-    'R6-2: a batch that edits a base scene then adds to a derived scene does not pin the old base value',
+describe('headless scene saves', () => {
+  itGodot(
+    'a batch that edits a base scene then adds to a derived scene does not pin the old base value',
     async () => {
       // Red when the closing save order lets derived_unit.tscn write the
       // pre-batch Leg text as an override.
@@ -323,8 +324,65 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-3: assigning a scene path to a Node-typed export is an error, not a silent no-op',
+  itGodot(
+    'a batch that saves a base scene while a derived scene holds unwritten operations writes the derived scene first',
+    async () => {
+      // Red when the save item writes the base and leaves the derived tree
+      // cached: its closing save then pins the old Leg text, or its first
+      // operation is lost with the tree.
+      const { project } = authoredCopy();
+      expect(
+        text(project, 'derived_unit.tscn'),
+        'precondition: the derived scene starts with no Leg text override',
+      ).not.toContain('text = "leg"');
+
+      const result = await handleBatchSceneOperations(runner, {
+        projectPath: project,
+        operations: [
+          {
+            operation: 'add_node',
+            scenePath: 'derived_unit.tscn',
+            nodeType: 'Node2D',
+            nodeName: 'AddedFirst',
+          },
+          {
+            operation: 'set_node_properties',
+            scenePath: 'base_unit.tscn',
+            updates: [{ nodePath: 'root/Leg', property: 'text', value: 'new' }],
+          },
+          { operation: 'save', scenePath: 'base_unit.tscn' },
+          {
+            operation: 'add_node',
+            scenePath: 'derived_unit.tscn',
+            nodeType: 'Node2D',
+            nodeName: 'AddedSecond',
+          },
+        ],
+      });
+      const payload = payloadOf(result, 'batch with a save of the base scene in the middle');
+      const entries = payload.results as UpdateEntry[];
+      expect(entries.map((entry) => entry.success)).toEqual([true, true, true, true]);
+      expect(text(project, 'base_unit.tscn'), 'precondition: base saved the new text').toContain(
+        'text = "new"',
+      );
+
+      const derived = text(project, 'derived_unit.tscn');
+      expect(derived).toContain('name="AddedFirst"');
+      expect(derived).toContain('name="AddedSecond"');
+      expect(derived, 'derived_unit.tscn pinned the old base value as an override').not.toContain(
+        'text = "leg"',
+      );
+      const warnings = (payload.warnings as string[] | undefined) ?? [];
+      expect(
+        warnings.some((line) => line.includes('derived_unit.tscn') && line.includes('saved first')),
+        `the early write of the derived scene was not reported; warnings=${JSON.stringify(warnings)}`,
+      ).toBe(true);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'assigning a scene path to a Node-typed export is an error, not a silent no-op',
     async () => {
       // Red when set() stores nothing and the update still reports success.
       const { project } = authoredCopy();
@@ -371,8 +429,8 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-4: a custom Resource class export accepts a .tres of that class and still refuses a plain Resource',
+  itGodot(
+    'a custom Resource class export accepts a .tres of that class and still refuses a plain Resource',
     async () => {
       // Red when _check_resource_hint_class knows native classes only.
       const { project } = authoredCopy();
@@ -445,8 +503,8 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-5: a batch item whose script cannot be instantiated reports its own error and keeps the payload',
+  itGodot(
+    'a batch item whose script cannot be instantiated reports its own error and keeps the payload',
     async () => {
       // Red when script.new() raising inside add_node aborts the whole batch
       // with no results after an earlier save already landed.
@@ -488,8 +546,8 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-12: connect_signal from a node inside an instanced child saves the connection',
+  itGodot(
+    'connect_signal from a node inside an instanced child saves the connection',
     async () => {
       // Red when connect_signal never claims the instanced ancestors, so the
       // saved scene has no [connection] and the read-back fails.
@@ -542,8 +600,8 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R8-2: a stale ext_resource path with a valid uid is not reported as lost content',
+  itGodot(
+    'a stale ext_resource path with a valid uid is not reported as lost content',
     async () => {
       // Red when the loss guard compares references by path only and the
       // engine re-resolves the uid to the current path on save.
@@ -589,8 +647,8 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R4-6: a section name with a blank, as the engine writes it, scans as canonical',
+  itGodot(
+    'a section name with a blank, as the engine writes it, scans as canonical',
     async () => {
       // Red when CANONICAL_HEADER_REGEX refuses "[My Addon]".
       const { project } = authoredCopy();
@@ -633,11 +691,13 @@ describe('engine premises: headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-10a: run_script returning an infinite float still returns a parsed payload',
+  itGodot(
+    'run_script returning an infinite float still returns a parsed payload',
     async (ctx) => {
-      // Red when JSON.stringify writes inf and the frame is not valid JSON.
-      const project = runtimeCopy('main.tscn');
+      // Red when the bridge frame of a result holding an infinite float stops
+      // parsing on an engine that writes it as a JSON number.
+      if ((await engineMajorMinor()).minor < NON_FINITE_JSON_MIN_MINOR) ctx.skip();
+      const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
       const control = await handleRunScript(runner, {
@@ -655,10 +715,12 @@ describe('engine premises: headless scene saves', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-10b: get_node_properties on a script variable holding INF still returns a parsed payload',
-    async () => {
-      // Red when a non-finite float in a read-back makes the result line invalid JSON.
+  itGodot(
+    'get_node_properties on a script variable holding INF still returns a parsed payload',
+    async (ctx) => {
+      // Red when a non-finite float in a read-back makes the result line
+      // invalid JSON on an engine that writes it as a JSON number.
+      if ((await engineMajorMinor()).minor < NON_FINITE_JSON_MIN_MINOR) ctx.skip();
       const { project } = authoredCopy();
       writeFileSync(join(project, 'inf_holder.gd'), 'extends Node\n\n@export var x := INF\n');
       writeFileSync(
@@ -695,13 +757,13 @@ describe('engine premises: headless scene saves', () => {
   );
 });
 
-describe('engine premises: bridge and runtime', () => {
-  itPremise(
-    'R6-6: run_script whose execute takes no parameter answers with an error quickly',
+describe('bridge and runtime', () => {
+  itGodot(
+    'run_script whose execute takes no parameter answers with an error quickly',
     async (ctx) => {
       // Red when the bridge raises in the handler and never answers, so the
       // client sits out the command timeout.
-      const project = runtimeCopy('main.tscn');
+      const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
       const control = await bridgeScript(['return 7']);
@@ -729,8 +791,8 @@ describe('engine premises: bridge and runtime', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-7: an unauthenticated connection to the bridge port does not cancel a running input batch',
+  itGodot(
+    'an unauthenticated connection to the bridge port does not cancel a running input batch',
     async (ctx) => {
       // Red when the cancellation generation moves at accept: the batch loses
       // the settled action and reports success false with the rest skipped.
@@ -765,8 +827,8 @@ describe('engine premises: bridge and runtime', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-8: click_element on a Control declaring signal pressed(index) reports no bridge-caused errors',
+  itGodot(
+    'click_element on a Control declaring signal pressed(index) reports no bridge-caused errors',
     async (ctx) => {
       // Red when the observer is built for the table's arity regardless of the
       // signal's declared arity, so the emit logs a call-arity error.
@@ -812,8 +874,8 @@ describe('engine premises: bridge and runtime', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R5-3: get_ui_elements with an ancestor-of-Control filter returns what no filter returns',
+  itGodot(
+    'get_ui_elements with an ancestor-of-Control filter returns what no filter returns',
     async (ctx) => {
       // Red when only Control and its subclasses are accepted as a filter.
       const project = runtimeCopy(INPUT_PROBE_SCENE);
@@ -842,12 +904,12 @@ describe('engine premises: bridge and runtime', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'E5: run_script returning a Node outside the tree adds no engine error line',
+  itGodot(
+    'run_script returning a Node outside the tree adds no engine error line',
     async (ctx) => {
       // Red when serializing a detached node calls get_path() and the engine
       // prints an error that get_debug_output then shows.
-      const project = runtimeCopy('main.tscn');
+      const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
       await sleep(STDERR_SETTLE_MS);
       const errorsBefore = (
@@ -875,8 +937,8 @@ describe('engine premises: bridge and runtime', () => {
     RUNTIME_CASE_TIMEOUT_MS,
   );
 
-  itPremise(
-    'R6-13: a default key tap returns within its budget while Engine.time_scale is 0',
+  itGodot(
+    'a default key tap returns within its budget while Engine.time_scale is 0',
     async (ctx) => {
       // Red when the tap awaits physics_frame, which does not arrive at time_scale 0.
       const project = runtimeCopy(INPUT_PROBE_SCENE);

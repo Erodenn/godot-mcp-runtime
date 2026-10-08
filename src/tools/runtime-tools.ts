@@ -664,7 +664,7 @@ export const runtimeToolDefinitions = [
         filter: {
           type: 'string',
           description:
-            'Filter by native Control class name (e.g. "Button", "Label", "LineEdit"); subclasses match. A name that is not a Control class, including a script class_name, is an error.',
+            'Filter by native Control class name (e.g. "Button", "Label", "LineEdit"); subclasses match. A class Control inherits from (CanvasItem, Node) lists every Control. Any other name, including a script class_name, is an error.',
         },
       },
       required: [],

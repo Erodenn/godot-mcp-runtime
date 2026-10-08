@@ -18,6 +18,7 @@ import {
   DEFAULT_BRIDGE_PORT,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
+  OVERSIZE_RESPONSE_FIELD,
   PARENT_WATCH_PORT_ENV,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
@@ -72,6 +73,12 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
 
   it('declares the same action-boundary sentinel', () => {
     expect(gdConst('ACTION_BOUNDARY_SENTINEL')).toBe(`"${ACTION_BOUNDARY_SENTINEL}"`);
+  });
+
+  it('declares the same oversize-response field', () => {
+    // Red when either side renames the field: the handler would then report a
+    // script that ran as a refusal where nothing ran.
+    expect(gdConst('OVERSIZE_RESPONSE_FIELD')).toBe(`"${OVERSIZE_RESPONSE_FIELD}"`);
   });
 
   it('declares the same profiler track caps', () => {
@@ -324,5 +331,71 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
       .filter((line) => /(^|[^A-Za-z_])print\(/.test(line));
     expect(stdoutPrints).toHaveLength(1);
     expect(stdoutPrints[0]).toContain('print(OPERATION_RESULT_SENTINEL');
+  });
+});
+
+/**
+ * Two values the headless script shares with TypeScript modules that do not
+ * export them, so the TypeScript half is read as text like the GDScript half.
+ */
+describe('godot_operations.gd agrees with unexported TypeScript constants', () => {
+  const operationsSource = readFileSync(
+    new URL('../../src/scripts/godot_operations.gd', import.meta.url),
+    'utf8',
+  );
+  const runnerSource = readFileSync(
+    new URL('../../src/utils/godot-runner.ts', import.meta.url),
+    'utf8',
+  );
+  const sceneToolsSource = readFileSync(
+    new URL('../../src/tools/scene-tools.ts', import.meta.url),
+    'utf8',
+  );
+
+  /** The quoted strings of a bracketed list, in order. */
+  function quotedItems(list: string): string[] {
+    return [...list.matchAll(/["']([^"']*)["']/g)].map((item) => item[1]!);
+  }
+
+  it('prints the operation-started line the runner looks for', () => {
+    // Red when either the marker constant or the script's log line changes: the
+    // runner would then report every operation as an engine that died before
+    // dispatch, or miss a real one.
+    const marker = runnerSource.match(/^const OPERATION_STARTED_MARKER = '([^']*)';$/m);
+    expect(marker, 'godot-runner.ts must declare OPERATION_STARTED_MARKER').not.toBeNull();
+    const logPrefix = operationsSource.match(
+      /^func log_info\(message\):\s*printerr\("([^"]*)" \+ message\)$/m,
+    );
+    expect(logPrefix, 'godot_operations.gd log_info must print a quoted prefix').not.toBeNull();
+    const started = operationsSource.match(/^\tlog_info\("([^"]*)" \+ operation\)$/m);
+    expect(started, 'godot_operations.gd must log the operation it dispatches').not.toBeNull();
+    expect(`${logPrefix![1]!}${started![1]!}`.trimEnd()).toBe(marker![1]!);
+  });
+
+  it('promotes the same add_node parameters on both sides', () => {
+    // Red when one list gains or loses a name: a top-level parameter would then
+    // be applied by the standalone tool and ignored inside a batch, or the
+    // reverse.
+    const gdList = operationsSource.match(
+      /^const _PROMOTED_SPATIAL_PARAMS: Array = \[([^\]]*)\]$/m,
+    );
+    expect(gdList, 'godot_operations.gd must declare _PROMOTED_SPATIAL_PARAMS').not.toBeNull();
+    const tsList = sceneToolsSource.match(
+      /^const PROMOTED_SPATIAL_PARAMS = \[([^\]]*)\] as const;$/m,
+    );
+    expect(tsList, 'scene-tools.ts must declare PROMOTED_SPATIAL_PARAMS').not.toBeNull();
+    const promoted = quotedItems(gdList![1]!);
+    expect(promoted.length).toBeGreaterThan(0);
+    expect(promoted).toEqual(quotedItems(tsList![1]!));
+  });
+
+  it('ends the process in one place', () => {
+    // Red when a second quit is added: a later quit(code) replaces an earlier
+    // one's exit code, so a failure could leave with a success code.
+    const quits = operationsSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .filter((line) => /(^|[^A-Za-z_])quit\(/.test(line));
+    expect(quits).toHaveLength(1);
   });
 });

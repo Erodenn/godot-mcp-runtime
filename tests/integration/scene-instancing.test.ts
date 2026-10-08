@@ -135,23 +135,23 @@ describe('scene instancing via add_node', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
 
-      let stdout = '';
-      try {
-        const result = await runner.executeOperation(
-          'add_node',
-          {
-            scenePath: 'main.tscn',
-            nodeType: 'missing.tscn',
-            nodeName: 'Ghost',
-          },
-          tmpProject,
-          30000,
-        );
-        stdout = result.stdout;
-      } catch {
-        // acceptable: some engine versions propagate the nonzero exit
-      }
+      // A refused operation exits nonzero and still resolves with its output.
+      // Anything thrown here (an engine that died before dispatch, a timeout)
+      // is a failure of the test, not a refusal.
+      const { stdout, stderr } = await runner.executeOperation(
+        'add_node',
+        {
+          scenePath: 'main.tscn',
+          nodeType: 'missing.tscn',
+          nodeName: 'Ghost',
+        },
+        tmpProject,
+        30000,
+      );
 
+      // Red when the refusal is gone, and when the operation never ran: a
+      // misspelled operation name prints no such line.
+      expect(stderr).toContain('Scene file does not exist');
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       const after = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(after).toBe(before);
@@ -190,8 +190,10 @@ describe('scene instancing via add_node', () => {
       writeFileSync(outside, '[gd_scene format=3]\n[node name="Outside" type="Node2D"]\n');
       const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
 
+      let stdout = '';
+      let stderr = '';
       try {
-        await runner.executeOperation(
+        ({ stdout, stderr } = await runner.executeOperation(
           'add_node',
           {
             scenePath: 'main.tscn',
@@ -200,13 +202,14 @@ describe('scene instancing via add_node', () => {
           },
           tmpProject,
           30000,
-        );
-      } catch {
-        // acceptable: the operation exits nonzero on rejection
+        ));
       } finally {
         rmSync(outside, { force: true });
       }
 
+      // Red when the refusal is gone, and when the operation never ran.
+      expect(stderr).toContain('escapes the project root');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
     },
     60000,
@@ -307,20 +310,17 @@ describe('scene instancing via add_node', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       writeChildScene(tmpProject);
 
-      let stdout = '';
-      try {
-        const result = await runner.executeOperation(
-          'create_scene',
-          { scenePath: 'made.tscn', rootNodeType: 'child.tscn' },
-          tmpProject,
-          30000,
-        );
-        stdout = result.stdout;
-      } catch {
-        // acceptable: the operation exits nonzero
-      }
+      const { stdout, stderr } = await runner.executeOperation(
+        'create_scene',
+        { scenePath: 'made.tscn', rootNodeType: 'child.tscn' },
+        tmpProject,
+        30000,
+      );
 
-      expect(stdout).not.toContain('created successfully');
+      // Red when a scene path starts being accepted as a root type, and when
+      // the operation never ran.
+      expect(stderr).toContain('Failed to instantiate node of type: child.tscn');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(existsSync(join(tmpProject, 'made.tscn'))).toBe(false);
     },
     60000,
