@@ -91,11 +91,7 @@ describe('tool definitions: every tool declares an outputSchema', () => {
   );
 });
 
-/**
- * Hard cap on a tool description, in characters. Every description ships on
- * every handshake; detail beyond this belongs in a per-property description
- * or in docs/tools.md.
- */
+/** Hard cap on a tool description, in characters: it ships on every handshake. */
 const DESCRIPTION_MAX_CHARS = 500;
 
 describe('tool definitions: description budget', () => {
@@ -108,8 +104,7 @@ describe('tool definitions: description budget', () => {
   it.each(cases)(
     '%s description does not promise that stop_project clears an edit refusal',
     (_name, tool) => {
-      // Only true when the blocking session is the current one. The refusal
-      // itself names the right remedy.
+      // Only true when the blocking session is the current one.
       expect(tool.description).not.toMatch(/stop_project clears/);
     },
   );

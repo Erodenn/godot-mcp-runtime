@@ -153,10 +153,7 @@ describe('runMovieProcess', () => {
     child.emit('close', null);
   });
 
-  // onClosed is how a caller learns the child is no longer running, which is
-  // not the same moment as the call returning. Red when it is fired from
-  // `finish` (every resolve) instead of from the events that prove the child
-  // is gone: the unconfirmed-kill case below would then report a close.
+  // onClosed fires from the events that prove the child gone, not from `finish`: the unconfirmed-kill case would report a close.
   describe('onClosed', () => {
     it('fires when the child reports close', async () => {
       const child = createFakeChild();

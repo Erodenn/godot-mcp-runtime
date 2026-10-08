@@ -1,11 +1,3 @@
-/**
- * Unit tests for the text comparison behind the headless-save loss guard.
- *
- * `diffSceneText` is pure: two scene texts, what the operation asked to
- * change, and the scripts the engine failed to load. Every case below is a
- * pair of .tscn texts in the shapes Godot writes.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   batchSceneWrites,
@@ -308,8 +300,6 @@ describe('diffSceneText: inherited scenes and instances', () => {
   });
 
   it('accepts an override line that vanished because it repeated the base scene', () => {
-    // The shape earlier versions of this server wrote: every inherited value
-    // pinned into the override line.
     const pinned = DERIVED.replace(
       'position = Vector2(5, 6)',
       'position = Vector2(1, 2)\nmodulate = Color(1, 0, 0, 1)',

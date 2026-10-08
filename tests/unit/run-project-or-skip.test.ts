@@ -1,16 +1,4 @@
-/**
- * Unit tests for the shared runtime-test launch helper.
- *
- * The helper's one skip is decided from the display probe before anything is
- * launched. These tests pin that a bridge failure whose text mentions a
- * display never turns into a skip while a display exists, and that a missing
- * display is a skip locally but a failure in CI.
- *
- * Break conditions: restoring a substring test on the bridge error text makes
- * the "display text" case call skip; dropping the CI branch makes the CI case
- * skip instead of throwing; checking the display after the launch makes the
- * "no display" cases call runProject.
- */
+/** Break conditions: a substring test on the bridge error text, dropping the CI branch, or checking the display after launch. */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';

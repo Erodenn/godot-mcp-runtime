@@ -30,9 +30,7 @@ describe('outputSchema: every declared schema is valid', () => {
 });
 
 describe('outputSchema: fields a tool always returns are declared required', () => {
-  // A schema with no required list validates {} and every older payload, so a
-  // client reading it learns nothing is guaranteed. Each tool here returns the
-  // listed fields on every success branch.
+  // Each tool returns these fields on every success branch; a schema with no required list would validate {} and guarantee nothing.
   const ALWAYS_RETURNED: Array<[string, string[]]> = [
     ['simulate_input', ['projectPath', 'success', 'results']],
     ['get_ui_elements', ['projectPath', 'elements', 'tip']],
@@ -103,9 +101,7 @@ describe('outputSchema: fields a tool always returns are declared required', () 
 });
 
 describe('outputSchema and Returns: prose are complementary, not exclusive', () => {
-  // Per docs/tool-authoring.md §3, when a tool has an outputSchema it must also
-  // carry a Returns: sentence in its description: the schema is invisible to
-  // the agent, so the prose is the only return-shape signal the LLM ever sees.
+  // docs/tool-authoring.md section 3: an outputSchema needs a Returns: sentence in the description, the agent's only return-shape signal.
   it.each(toolsWithOutputSchema)(
     '%s description has a Returns: sentence alongside its outputSchema',
     (_name, tool) => {
@@ -115,16 +111,13 @@ describe('outputSchema and Returns: prose are complementary, not exclusive', () 
 });
 
 describe('simulate_input: every declared entry shape validates', () => {
-  // The per-action entry is the widest shape this server returns: keys differ by
-  // action type, a skipped entry carries almost nothing, and a failed batch
-  // still comes back success-shaped. Validate the payloads directly, since the
-  // interesting variety lives in the bridge's output rather than the handler's.
+  // The per-action entry is the widest shape: keys differ by action, skipped entries carry almost nothing, a failed batch is success-shaped.
+  // Validate payloads directly: the variety lives in the bridge's output, not the handler's.
   const simulateInputDef = toolsWithOutputSchema.find(([name]) => name === 'simulate_input')?.[1];
   if (!simulateInputDef) throw new Error('simulate_input outputSchema not found');
   const validate = ajv.compile(simulateInputDef.outputSchema as object);
 
-  // The payloads below are written as the bridge sends them. The handler adds
-  // the session's projectPath to every one, and the schema requires it.
+  // Payloads are as the bridge sends them; the handler adds projectPath, which the schema requires.
   function expectValid(payload: Record<string, unknown>): void {
     const valid = validate({ projectPath: fixtureProjectPath, ...payload });
     expect(valid, JSON.stringify(validate.errors)).toBe(true);
@@ -305,9 +298,7 @@ describe('check_project: every declared response shape validates and carries str
 });
 
 describe('renamed response fields: the old names no longer satisfy the schema', () => {
-  // Each payload below is what the tool returned before its fields were
-  // renamed, complete except for the new name. A schema without a `required`
-  // list would accept every one of them.
+  // Payloads from before the field renames, minus the new name: a schema without `required` would accept all of them.
   const retiredPayloads: Array<[string, Record<string, unknown>]> = [
     ['duplicate_node', { success: true, originalPath: 'root/A', newPath: 'root/A2' }],
     ['duplicate_node', { success: true }],

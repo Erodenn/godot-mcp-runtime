@@ -1,16 +1,4 @@
-/**
- * Profiler receiver tests, driven by a fake Godot on the other end of the
- * debugger socket. Everything worth verifying here is protocol behavior -
- * which commands we send, which frames we fold into the totals, and what a
- * dropped or silent debugger turns into: none of which needs a real engine.
- *
- * The frame layout mirrors what Godot 4.6/4.7 actually sends: a frame number,
- * five timing fields, a server count with that many `name, entryCount,
- * ...entries` blocks, then the flattened five-wide function rows behind their
- * length. Visual frames are a frame number, a length, then `name, cpu ms,
- * gpu ms` markers counted from the frame's first one; monitor samples are the
- * `Performance.Monitor` values in enum order, custom monitors last.
- */
+/** Frame layout mirrors Godot 4.6/4.7: number, five timings, `name, entryCount, ...entries` server blocks, then five-wide function rows. */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as net from 'net';
@@ -622,10 +610,7 @@ describe('DebuggerProfiler incomplete captures', () => {
     }
   });
 
-  // The one-shot window used to wait for the totals by itself before handing
-  // over to the shared close-out. When the engine never sent them, that wait
-  // rejected past the close-out: the frames already folded were withheld, and
-  // the capture stayed open, refusing every later capture as busy.
+  // The totals wait once rejected past the close-out, withholding folded frames and leaving the capture open (busy).
   it('a one-shot window whose totals never arrive returns what was folded, marked incomplete', async () => {
     const WINDOW_SECONDS = 1;
     const WINDOW_AND_TOTALS_TIMEOUT_MS = WINDOW_SECONDS * 1000 + TOTALS_TIMEOUT_ADVANCE_MS;
@@ -650,10 +635,7 @@ describe('DebuggerProfiler incomplete captures', () => {
       fake.send(['servers:profile_frame', THREAD, frame(1, 0.016, [])]);
       fake.send(['servers:profile_frame', THREAD, frame(2, 0.016, [[0, 1, 0.001, 0.002]])]);
       fake.send(['servers:profile_frame', THREAD, frame(3, 0.016, [[0, 2, 0.002, 0.004]])]);
-      // The frames arrive over a real socket, in real time. Wait for it until
-      // the capture holds its two timers: the window's auto-stop and the wait
-      // for totals. Bounded by the real clock, not by a count of loop turns:
-      // how many turns a loopback delivery takes differs by platform.
+      // Real-clock bounded wait for both timers (auto-stop, totals): loopback delivery turns differ by platform.
       const ioDeadline = performance.now() + IO_WAIT_MS;
       while (
         vi.getTimerCount() < TIMERS_ONCE_WAITING_FOR_TOTALS &&
@@ -923,11 +905,7 @@ function visualFrame(frameNumber: number, markers: Marker[]): Variant[] {
 /** A stage's path: its groups and its own name, outermost first. */
 const path = (...names: string[]): string => names.join(' > ');
 
-/**
- * A Forward+-shaped frame: cumulative timestamps, groups bracketed by
- * `>name` / `<name`. Stage times are the gaps to the next marker. The shadow
- * stage carries the engine's real name, slash included.
- */
+/** Forward+-shaped frame: cumulative timestamps, groups bracketed by `>name` / `<name`; the shadow stage keeps the engine's slash name. */
 const RENDER_FRAME: Marker[] = [
   ['Frame Begin', 0, 0],
   ['Prepare Render Frame', 0, 0],
@@ -959,11 +937,7 @@ const WARMUP_FRAME: Marker[] = [
   ['Internal End', 3.4, 4],
 ];
 
-/**
- * The five frames every enable hands back first. The receiver skips them
- * whatever they hold, so they are sent here as heavy, realistic-looking
- * frames: any of them leaking into a result would show.
- */
+/** The five settle frames every enable hands back; heavy on purpose so any leaking into a result shows. */
 function sendSettleFrames(fake: FakeGodot, firstNumber = 30): void {
   for (let i = 0; i < 5; i++) {
     fake.send(['visual:profile_frame', THREAD, visualFrame(firstNumber + i, STALE_FRAME)]);
@@ -1318,10 +1292,7 @@ function monitorSample(
   return [...builtin, ...custom];
 }
 
-/**
- * Wait until every message sent so far has been handled: the break round
- * trip comes back only after the packets queued ahead of it.
- */
+/** Wait until every message sent so far is handled: the break round trip returns after the queued packets. */
 async function drain(fake: FakeGodot): Promise<void> {
   const answered = fake.commandsNamed('continue').length + 1;
   fake.send(['debug_enter', THREAD, [false, 'barrier', true, 1]]);
@@ -1554,10 +1525,7 @@ describe('DebuggerProfiler timeline', () => {
     vi.useRealTimers();
   });
 
-  /**
-   * Send one frame and wait until it is folded, so the fake clock reads the
-   * same when the profiler stamps it as when the test set it.
-   */
+  /** Send one frame and wait until folded so the fake clock reads the same at stamp time. */
   async function sendAt(fake: FakeGodot, at: number, message: Variant): Promise<void> {
     vi.setSystemTime(at);
     fake.send(message);
@@ -1877,11 +1845,7 @@ describe('DebuggerProfiler incomplete captures keep what they measured', () => {
   const TRACK_SAMPLE = { frame: 3, values: { [TRACK]: { x: 1, y: 2 } } };
   const GAME_EXITED = 'The game exited before its track was collected';
 
-  /**
-   * An open capture with render stages, a timeline, a track and a monitor
-   * sample, all of it folded before any clock is faked: two usable frames,
-   * one render frame, one monitor sample.
-   */
+  /** An open capture with render stages, timeline, track and monitor sample, all folded before the clock is faked. */
   async function openRichCapture(): Promise<{ p: DebuggerProfiler; fake: FakeGodot }> {
     const { profiler: p, peer: fake } = await connectedProfiler();
     const running = p.start(5, 512, { visual: true, timelineMs: 500, track: [TRACK] });
@@ -2037,9 +2001,7 @@ describe('DebuggerProfiler ties each sentinel to the disable it answers', () => 
     await captureClosedByTimeout(p, fake);
     const afterA = serverCommands(fake);
 
-    // Capture B opens. The game thaws and sends what it still owed A, in the
-    // order the engine handles messages: one more A frame, then A's sentinel,
-    // and only then anything B's enable produced.
+    // B opens; the game thaws and sends what it owed A (an A frame, A's sentinel) before B's enable output.
     const second = p.start(5, 512);
     await waitUntil(() => serverCommands(fake) >= afterA + 1, 'second enable');
     fake.send(['servers:profile_frame', THREAD, frame(4, 0.5, [[0, 50, 0.4, 0.4]])]);
@@ -2139,9 +2101,7 @@ describe('DebuggerProfiler ties each sentinel to the disable it answers', () => 
     // Enabled, then switched off again by the failed start itself.
     await waitUntil(() => serverCommands(fake) >= 2, 'the failed start disabling the profiler');
 
-    // Not `stopping`: the next start is accepted, and reading the failed
-    // capture answers at once, saying it never started, instead of waiting out
-    // a totals timeout for a sentinel a frozen game will not send.
+    // Not `stopping`: the next start is accepted and reading answers at once instead of waiting out the totals timeout.
     expect(() => p.assertCanStart(5, 512)).not.toThrow();
     const reading = p.stop(10, 'selfMs');
     await expect(reading).rejects.toMatchObject({ code: 'profile_no_frames' });
@@ -2181,10 +2141,7 @@ describe('DebuggerProfiler ties each sentinel to the disable it answers', () => 
   /** Longer than the wait a disable gets before it can be given up on. */
   const PAST_THE_SENTINEL_WAIT_MS = 5_000;
 
-  /**
-   * Deliver `count` monitor samples one engine interval apart on the test
-   * clock, each one received before the next is sent. The clock must be faked.
-   */
+  /** Deliver `count` monitor samples one engine interval apart on the faked clock, each received before the next. */
   async function sendSpacedMonitorSamples(fake: FakeGodot, count: number): Promise<void> {
     for (let i = 0; i < count; i++) {
       vi.setSystemTime(Date.now() + MONITOR_SAMPLE_INTERVAL_MS);
@@ -2251,9 +2208,7 @@ describe('DebuggerProfiler ties each sentinel to the disable it answers', () => 
     expect(result.warnings?.[0]).toMatch(/capture is incomplete/);
   });
 
-  // Samples are counted when they are received, which is not when they were
-  // sent: after a pause of this process they arrive together, and some were
-  // sent before the disable was.
+  // Samples count on receipt, not send: after a pause they arrive in a burst.
   it('does not give up on samples delivered in one burst, and the sentinel still closes its own capture', async () => {
     const { profiler: p, peer: fake } = await connectedProfiler();
     await captureClosedByTimeout(p, fake);

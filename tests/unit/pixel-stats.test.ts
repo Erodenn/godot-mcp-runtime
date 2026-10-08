@@ -42,7 +42,6 @@ describe('computePixelStats', () => {
   });
 
   it('flags a uniform dark frame as low-chromatic, high-dominant', () => {
-    // 4x4 all black
     const rgba = new Uint8Array(64);
     const stats = computePixelStats({ width: 4, height: 4, data: rgba });
     expect(stats.chromatic).toBe(0);
@@ -51,7 +50,6 @@ describe('computePixelStats', () => {
   });
 
   it('handles RGB-only input (fills alpha to 255)', () => {
-    // 1x1 RGB red
     const rgba = new Uint8Array([255, 0, 0]);
     const stats = computePixelStats({ width: 1, height: 1, data: rgba });
     expect(stats.chromatic).toBe(1);

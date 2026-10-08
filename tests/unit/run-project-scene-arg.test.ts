@@ -16,9 +16,7 @@ const { MOCK_BRIDGE_PORT, spawnMock, findFreePortMock, injectMock, cleanupMock }
   },
 );
 
-// Specifiers resolve relative to THIS file, so they must name the same module
-// ids godot-runner.ts imports. A mismatch binds nothing, silently, and the real
-// implementation runs instead.
+// Specifiers resolve relative to this file and must name godot-runner.ts's module ids, or nothing binds and the real code runs.
 vi.mock('child_process', async () => ({
   ...(await vi.importActual('child_process')),
   spawn: (...args: unknown[]) => spawnMock(...args),

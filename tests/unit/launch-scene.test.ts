@@ -1,9 +1,3 @@
-/**
- * Tests for the main-scene reader behind a launch with no explicit `scene`
- * argument. Mirrors the autoload-ini test layout: tmp project dirs, project.godot
- * content as fixtures.
- */
-
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';

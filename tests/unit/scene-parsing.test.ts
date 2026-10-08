@@ -1,8 +1,3 @@
-/**
- * Tests for the .tscn helpers used by run_project's pre-flight scan. Mirrors
- * the autoload-ini test layout: tmp project dirs, TSCN content as fixtures.
- */
-
 import { describe, it, expect } from 'vitest';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';

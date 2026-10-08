@@ -1,14 +1,3 @@
-/**
- * How the launch scan decides what a scene's `ext_resource` lines bring in,
- * and what it does with a file that exists and cannot be read.
- *
- * The engine loads the file an `ext_resource` path names. Its `type` attribute
- * is a hint a hand-edited scene can set to anything, so the scan classifies a
- * reference by its path as well. A file the scan reads and could not read is
- * reported for that file alone, the scan goes on, and strict mode refuses the
- * launch: that is different from a file of a kind the scan never reads.
- */
-
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -168,9 +157,6 @@ describe('launch scan: references are classified by path, not only by type', () 
   });
 });
 
-// A scene that exists and cannot be read used to throw out of the whole scan:
-// one "pre-flight scan failed" line, and every autoload and scene after it
-// went unscanned with nothing naming them.
 describe('launch scan: a file that exists and cannot be read', () => {
   function projectWithUnreadableAutoloadScene(prefix: string): string {
     const dir = tmp.makeProject(
@@ -250,8 +236,7 @@ describe('launch scan: what strict mode refuses on besides a Tier 1 finding', ()
   });
 
   it('a scan step that threw', async () => {
-    // A project.godot that exists and cannot be read: the autoload section
-    // cannot be listed, so nothing after it was scanned.
+    // An unreadable project.godot cannot list its autoloads, so nothing after it was scanned.
     const dir = tmp.make('scan-strict-threw-');
     plantUnreadable(dir, 'project.godot');
 

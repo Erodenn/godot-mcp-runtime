@@ -1,8 +1,3 @@
-/**
- * Policy evaluator tests. Verifies tier assignment, argument-shape checks,
- * strict-mode promotion, and that comments / strings don't false-positive.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   evaluateScript,
@@ -181,7 +176,6 @@ describe('evaluateScript: strict mode promotion', () => {
     expect(strict.decision).toBe('hard_block');
     expect(strict.effectiveTier).toBe(1);
     expect(strict.promotedByStrict).toBe(true);
-    // Both should have been recorded.
     expect(strict.matches.some((m) => m.ruleId.startsWith('tier1.direct_exec'))).toBe(true);
     expect(strict.matches.some((m) => m.ruleId.startsWith('tier2.net'))).toBe(true);
   });
@@ -215,11 +209,6 @@ describe('evaluateScript: finding line numbers', () => {
     expect(d.matches[0]?.line).toBe(4);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Smoke tests for rules not covered above. One positive sample per rule.
-// Negative coverage lives in the "clean scripts" block.
-// ---------------------------------------------------------------------------
 
 describe('evaluateScript: Tier 1 OS family (smoke)', () => {
   it('blocks OS.kill(...)', () => {
@@ -317,10 +306,6 @@ describe('evaluateScript: Tier 2 network (smoke)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Bypass closure: Callable, OS/Engine/ClassDB/ProjectSettings.call, set_script
-// ---------------------------------------------------------------------------
-
 describe('evaluateScript: Tier 1 Callable bypass closure', () => {
   it('blocks Callable(target, "method") as bare identifier', () => {
     const d = evalLine('var c = Callable(self, "run")');
@@ -364,10 +349,7 @@ describe('evaluateScript: Tier 3 per-singleton .call literal arg', () => {
 });
 
 describe('evaluateScript: member chain whitespace/newline skeleton key', () => {
-  // Regression coverage: the tokenizer used to require the dot to sit
-  // immediately against both identifiers, so whitespace or a newline around
-  // the `.` dropped `execute` to a bare, unmatched identifier: silently
-  // defeating every OS.execute-style rule at once.
+  // Whitespace or a newline around the `.` must still match OS.execute-style rules.
   it('blocks OS .execute (space before the dot)', () => {
     const d = evalLine('OS .execute("rm", ["-rf", "/"])');
     expect(d.decision).toBe('hard_block');
@@ -394,9 +376,7 @@ describe('evaluateScript: member chain whitespace/newline skeleton key', () => {
 });
 
 describe('evaluateScript: whole-first-argument classification', () => {
-  // Regression coverage: classification used to look only at the first
-  // token after `(`, so `load("res://" + evil)` saw the leading string
-  // literal and dropped from Tier 1 (non-literal) to Tier 3 (warn).
+  // `load("res://" + evil)` must stay Tier 1 (non-literal), not drop to Tier 3 on the leading literal.
   it('blocks load("res://" + x) as non-literal, not warn', () => {
     const d = evalLine('var r = load("res://" + x)');
     expect(d.decision).toBe('hard_block');
@@ -466,10 +446,6 @@ describe('evaluateScript: Tier 2 set_script bare identifier', () => {
     );
   });
 });
-
-// ---------------------------------------------------------------------------
-// Resource and filesystem write primitives.
-// ---------------------------------------------------------------------------
 
 describe('evaluateScript: write primitives', () => {
   it('elicits on ResourceSaver.save(res, path)', () => {
@@ -691,8 +667,7 @@ describe('evaluateScript: ConfigFile instance usage', () => {
   });
 
   it('does not block a bare receiver.load(x) call: `load` is too generic to key on', () => {
-    // `save_manager.load(slot)` is ordinary game code. A last-segment rule on
-    // `load` would hard-block it, with a ConfigFile-flavoured reason string.
+    // `save_manager.load(slot)` is game code: a last-segment `load` rule would hard-block it.
     expect(evalLine('save_manager.load(slot)').decision).toBe('ok');
     expect(evalLine('img.load("res://x.png")').decision).toBe('ok');
   });
@@ -864,10 +839,6 @@ describe('evaluateScript: strings spanning raw newlines', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Declarations
-// ---------------------------------------------------------------------------
-
 describe('evaluateScript: a declaration is not a call', () => {
   it.each(['load', 'preload', 'str_to_var', 'bytes_to_var_with_objects'])(
     'does not fire on func %s(...)',
@@ -903,10 +874,6 @@ describe('evaluateScript: a declaration is not a call', () => {
     expect(evalLine('var f = func(): OS.execute("x", [])').decision).toBe('hard_block');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Reflective dispatch
-// ---------------------------------------------------------------------------
 
 describe('evaluateScript: a reflective call with a literal method name is the call it makes', () => {
   it.each([
@@ -1007,8 +974,7 @@ describe('evaluateScript: a reflective call with a literal method name is the ca
     expect(evalLine('print("OS.callv(\\"execute\\", [])")').decision).toBe('ok');
   });
 
-  // A text that is not a method name is an ordinary call with a string argument
-  // on a receiver that is not a Tier 1 singleton: nothing is dispatched by it.
+  // A non-method text is an ordinary string-arg call on a non-Tier-1 receiver: nothing is dispatched.
   it.each([
     'cb.call("Level complete!")',
     'cb.call("res://a.tscn")',
@@ -1019,8 +985,7 @@ describe('evaluateScript: a reflective call with a literal method name is the ca
     expect(evaluateScript(VALID_PREFIX + line + '\n', true).decision).toBe('ok');
   });
 
-  // The decision a null resolution leaves: the bare call token is judged as
-  // written, and its literal first argument fires no non-literal rule.
+  // Null resolution: the bare call token is judged as written; a literal first argument fires no non-literal rule.
   it('a literal text argument leaves no generic call rule firing', () => {
     expect(evalLine('cb.call("Level complete!")').matches).toEqual([]);
   });
@@ -1070,8 +1035,7 @@ describe('evaluateScript: a non-literal method name on a Tier 1 receiver', () =>
   });
 
   it('covers every receiver that carries a Tier 1 chain-prefix rule', () => {
-    // Classes a script names to construct or annotate; their reflective use
-    // goes through an instance, which no receiver rule can see.
+    // Constructed or annotated classes: reflective use goes through an instance, invisible to receiver rules.
     const classReceivers = ['Node', 'ConfigFile', 'GDScript'];
     const tier1Receivers = new Set(
       policyRules.filter((r) => r.tier === 1 && r.chain.length === 2).map((r) => r.chain[0]!),
@@ -1143,10 +1107,6 @@ describe('evaluateScript: bare call and callv', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Parenthesised receivers
-// ---------------------------------------------------------------------------
-
 describe('evaluateScript: a parenthesised receiver', () => {
   it('fires the rule of the plain spelling', () => {
     const d = evalLine('(OS).execute("rm", [])');
@@ -1171,10 +1131,6 @@ describe('evaluateScript: a parenthesised receiver', () => {
     expect(evalLine('print((OS).get_name())').decision).toBe('ok');
   });
 });
-
-// ---------------------------------------------------------------------------
-// New Tier 1 primitives
-// ---------------------------------------------------------------------------
 
 describe('evaluateScript: GDScript.new', () => {
   it('hard-blocks creating a script object', () => {
@@ -1612,8 +1568,7 @@ describe('evaluateScript: the scan work is bounded', () => {
       const source =
         `${VALID_PREFIX}` + 'a.call('.repeat(NESTING) + 'load("x")' + ')'.repeat(NESTING) + '\n';
       const decision = evaluateScript(source);
-      // Past the budget the first argument of the innermost load("x") answers
-      // nonliteral, so the literal is reported: the fail-closed side.
+      // Past the budget the innermost load("x") answers nonliteral: the fail-closed side.
       expect(decision.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(
         true,
       );

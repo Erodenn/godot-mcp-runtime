@@ -1,10 +1,3 @@
-/**
- * `terminateProcessTree`, the first stop of a session game, the outcome both
- * kill functions report, and `waitForProcessEvent`, the only evidence that a
- * kill worked. The forced tree kill's command lines are covered in
- * movie-process.test.ts through the same module's re-export.
- */
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import type { spawnSync } from 'child_process';

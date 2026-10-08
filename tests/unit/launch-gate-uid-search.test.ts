@@ -1,8 +1,4 @@
-/**
- * The launch gate when a uid search ends before every file was read. The cap
- * is thousands of files, so these tests lower it: the real search runs, with a
- * limit small enough to hit in a temp project.
- */
+/** The cap is thousands of files, so these tests lower it: the real search runs against a limit a temp project can hit. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'fs';

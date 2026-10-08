@@ -1,10 +1,3 @@
-/**
- * The launch gate and a scene reference the scene walk could not resolve to a
- * file inside the project. The walk reports such a reference in `unscanned`
- * with `unresolved: true`, and the gate counts it as a file it set out to read
- * and did not, which strict mode refuses on.
- */
-
 import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'fs';
 import { join } from 'path';

@@ -1,13 +1,4 @@
-/**
- * Unit test for `normalizeProjectKey`, the pure helper that collapses
- * case-differing Windows paths into the same `runProjectConfirmed` session
- * key. Tested directly (rather than through handleRunProject) to avoid
- * platform-gated flakiness in the handler-level session-gate tests.
- *
- * The function branches on `process.platform`, which vitest cannot safely
- * override mid-run: so the assertion only runs on win32 and is a no-op
- * (via `it.runIf`) everywhere else.
- */
+/** Runs only on win32 (`it.runIf`): the function branches on `process.platform`, which vitest cannot safely override mid-run. */
 
 import { describe, it, expect } from 'vitest';
 import {

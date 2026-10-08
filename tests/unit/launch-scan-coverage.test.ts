@@ -1,10 +1,3 @@
-/**
- * What the launch scan reads and what it admits it could not read: inline
- * GDScript sub-resources, scripts attached to instanced scenes, scene
- * autoloads, scripts that are not GDScript, and autoload lines the parser could
- * not understand. The scene-format tests run on hand-written `.tscn` text.
- */
-
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -289,8 +282,7 @@ describe('launch scan: layouts Godot reads that are not how it writes', () => {
   const SCRIPT_HEADER = '[ext_resource type="Script" path="res://late.gd" id="1"]';
 
   it('a quote inside a ; comment does not hide the headers after it', () => {
-    // Two comment lines with one quote each: read as a string, they would
-    // swallow the header between them without leaving an unterminated string.
+    // Two comment lines with one quote each: read as a string they would swallow the header between them.
     const scene = ['[gd_scene format=3]', '; it"s a note', SCRIPT_HEADER, '; another"', ''].join(
       '\n',
     );

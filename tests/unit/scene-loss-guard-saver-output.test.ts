@@ -1,11 +1,4 @@
-/**
- * Loss guard cases built from files Godot wrote, and from the value shapes its
- * saver produces that a one-line reader gets wrong.
- *
- * The "before" texts are the committed fixture scenes wherever one fits. The
- * "after" texts follow what the 4.6 saver writes back: no `load_steps`, a
- * `unique_id` on every node, and `parent` before `unique_id` before `instance`.
- */
+/** The "after" texts follow the 4.6 saver: no `load_steps`, a `unique_id` on every node, `parent` before `unique_id` before `instance`. */
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -46,7 +39,6 @@ const AGAINST_AUTHORED: SceneDiffOptions = { ...NOTHING_ASKED, readScene: readAu
 
 describe('a healthy 4.6 save of a fixture scene loses nothing', () => {
   it('host.tscn after add_node, as Godot 4.6 wrote it', () => {
-    // Captured from this branch: add_node of a Node2D named X under the root.
     const after = scene(
       '[gd_scene format=3 uid="uid://dmw7yey2g31wl"]',
       '',
@@ -322,8 +314,7 @@ describe('node path spellings the tools accept', () => {
   });
 
   it('treats a touched %Name the file cannot resolve as every node of that name', () => {
-    // No section stores unique_name_in_owner (the flag can live in an
-    // instanced scene), so the request could be about any node called Body.
+    // No section stores unique_name_in_owner (it can live in an instanced scene): any node called Body could be meant.
     const withTexture = PLAYER.replace(
       'position = Vector2(3, 4)',
       'position = Vector2(3, 4)\ntexture = ExtResource("1_abc")',

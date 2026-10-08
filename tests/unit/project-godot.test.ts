@@ -1,8 +1,3 @@
-/**
- * Direct unit tests for the project.godot reader: the statement scan with its
- * line spans, and the settings view built on it.
- */
-
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { describe, it, expect } from 'vitest';

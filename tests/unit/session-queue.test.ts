@@ -1,9 +1,3 @@
-/**
- * The session queue: one operation at a time, a bounded wait whose error
- * names what the caller waited behind, and nested calls from inside the
- * running operation that do not wait on themselves.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { CLIENT_REQUEST_TIMEOUT_MS, type GodotRunner } from '../../src/utils/godot-runner.js';
 import { QUEUE_CHARGED_COMMAND_FLOOR_MS, chargeQueueWait } from '../../src/utils/session-report.js';

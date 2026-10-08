@@ -1,18 +1,4 @@
-/**
- * Process-lifetime destructors: signals, stdin close, and the synchronous
- * exit handler.
- *
- * `registerProcessLifecycle` is the function the server constructor calls with
- * its two optional arguments defaulted, so driving it here with an injected
- * fake `process` exercises the production registration path rather than a
- * re-implementation of it. Only the `process` object and `process.exit` are
- * substituted.
- *
- * The literal `dist/index.js` child-process proof cannot live in vitest:
- * `npm test` runs before `npm run build` in `scripts/verify.sh`, and CI's
- * `godot-integration` job has no build step at all, so the child would
- * exercise a stale build locally and a missing one in CI.
- */
+/** The literal `dist/index.js` child proof cannot live in vitest: `npm test` runs before the build locally and CI's godot-integration job has no build step. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -77,9 +63,6 @@ async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < MICROTASK_FLUSHES; i++) await Promise.resolve();
 }
 
-// The production cleanup is `shutDownRunner` followed by closing the MCP
-// server (src/index.ts), so these drive the real shutdown step and the real
-// registration, with a headless child put in the runner's set by hand.
 describe('a graceful shutdown with a headless run in flight', () => {
   let runner: GodotRunner;
   let proc: FakeProcess;
@@ -202,9 +185,7 @@ describe('registerProcessLifecycle', () => {
     return { proc: platformProc, exits, cleanups: () => cleanups };
   }
 
-  // Outside Windows the games and headless runs lead their own process
-  // groups, so the terminal's hangup does not reach them, and SIGHUP's default
-  // action would end Node without running the exit handler.
+  // Outside Windows games and headless runs lead their own process groups, so SIGHUP's default would end Node without the exit handler.
   it.each(['linux', 'darwin'] as const)(
     'gives SIGHUP the graceful shutdown on %s: cleanup first, then the exit',
     async (platform) => {

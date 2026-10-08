@@ -1,10 +1,3 @@
-/**
- * Reading a process's start identity per platform. The operating system
- * calls are injected: these cases pin the parsing, the "unknown is null"
- * rule, and that the value is the kernel's own, not one derived from the
- * wall clock.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import {
   readProcessStartIdentity,

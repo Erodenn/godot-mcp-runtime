@@ -18,9 +18,7 @@ const OTHER_TOKEN = 'fedcba9876543210fedcba9876543210';
 const framed = (token: string): string =>
   `${OPERATION_RESULT_SENTINEL}${token}${OPERATION_RESULT_TOKEN_END}`;
 
-// Observed in production: headless operations emit Godot RID-leak warnings on
-// stdout, both AFTER a JSON payload (benign: handled) and INSTEAD of one,
-// when the operation quit(1)s before emitting JSON (masks the real error).
+// RID-leak warnings land on stdout after a payload (benign) or instead of one when quit(1) fires first (masks the error).
 describe('stdout payload extraction with interleaved engine noise', () => {
   const payload = { results: [{ ok: true }] };
   const payloadLine = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(payload)}`;
@@ -58,10 +56,8 @@ describe('stdout payload extraction with interleaved engine noise', () => {
     expect(extractOperationPayload(stdout)).toBe('{"n": 2}');
   });
 
-  // The emitter writes the sentinel once, at the start of the payload. A
-  // payload can still quote it: a Label whose text mentions it, a requested
-  // node name echoed in a warning. Reading from the last occurrence starts
-  // inside that string and reports a finished operation as invalid JSON.
+  // A payload can quote the sentinel (a Label's text, a node name echoed in a warning):
+  // reading from the last occurrence would start inside it and report invalid JSON.
   it('reads the whole payload when the payload itself quotes the sentinel', () => {
     const quoting = {
       results: [{ nodePath: 'root/Label', properties: { text: `${OPERATION_RESULT_SENTINEL}x` } }],
@@ -94,17 +90,13 @@ describe('stdout payload extraction with interleaved engine noise', () => {
   it('passes RID-only stdout through unchanged (no payload to extract)', () => {
     const stdout = "ERROR: 5 RID allocations of type 'P11GodotBody2D' were leaked at exit.\n";
     const cleaned = cleanStdout(stdout, RUN_TOKEN);
-    // Classifying this as an early exit rather than a JSON-format bug is
-    // executeSceneOp's responsibility, covered in headless-op.test.ts.
+    // Early-exit classification belongs to executeSceneOp (headless-op.test.ts).
     expect(cleaned).toBe(stdout.trim());
     expect(extractOperationPayload(cleaned)).toBeNull();
   });
 });
 
-// The sentinel is a constant any project script can print. An autoload's
-// _exit_tree runs after the operation wrote its result, and its _init before,
-// so neither "the last sentinel line" nor "the first" identifies the result.
-// Only the token the run was handed does.
+// Any project script can print the sentinel: an autoload's _exit_tree runs after the result and its _init before, so only the run's token identifies it.
 describe('a result line is told from a forged one by the run token', () => {
   const real = { name: 'Main', children: [] };
   const forged = { results: [{ nodePath: 'forged', success: true }] };
@@ -163,8 +155,6 @@ describe('a result line is told from a forged one by the run token', () => {
   });
 });
 
-// ─── condenseProcessTail ────────────────────────────────────────────────────
-
 describe('condenseProcessTail', () => {
   it('drops the renderer/device startup banner', () => {
     const lines = [
@@ -206,8 +196,7 @@ describe('condenseProcessTail', () => {
   });
 });
 
-// A force-killed process can report its exit code as the unsigned 32-bit
-// representation of a negative signal-kill status. See CLAUDE.md / plan A5.
+// A force-killed process can report the unsigned 32-bit form of a negative signal-kill status.
 describe('normalizeExitCode', () => {
   it('normalizes the unsigned 32-bit representation of -1 to -1', () => {
     expect(normalizeExitCode(4294967295)).toBe(-1);

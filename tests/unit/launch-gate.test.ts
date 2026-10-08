@@ -1,10 +1,3 @@
-/**
- * Unit tests for the launch gate: the pre-flight script scan and the
- * once-per-project session confirmation, exercised directly rather than
- * through a handler. No Godot and no runner: the gate reads project files and
- * the request context, nothing else.
- */
-
 import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'fs';
 import { join } from 'path';

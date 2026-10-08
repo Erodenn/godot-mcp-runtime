@@ -1,9 +1,3 @@
-/**
- * The snake_case / camelCase bridge. Keys arrive from the caller, so a key
- * that names something on `Object.prototype` must be treated as the ordinary
- * unmapped key it is.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   convertCamelToSnakeCase,
