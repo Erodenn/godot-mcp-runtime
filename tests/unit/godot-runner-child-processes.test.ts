@@ -1,12 +1,4 @@
-/**
- * What the runner observes of the processes it starts: output decoded across
- * pipe chunk boundaries, a timed-out headless run killed as a tree and its
- * exit confirmed before the timeout is reported, headless children killed by
- * the exit hook, and the parent-watch port handed to spawned games only.
- *
- * `child_process.spawn` is mocked at the I/O boundary, as in the session
- * lifecycle tests, so the runner's real bodies run without a Godot binary.
- */
+/** `child_process.spawn` is mocked, as in the session lifecycle tests, so the runner's real bodies run without a Godot binary. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -33,7 +25,6 @@ type Runner = InstanceType<typeof GodotRunner>;
 const HEADLESS_PID = 51515;
 const GAME_PID = 51516;
 const GAME_BRIDGE_PORT = 19961;
-/** Timeout handed to a headless operation in the timeout cases. */
 const OPERATION_TIMEOUT_MS = 25;
 /** The runner's own wait for a killed headless child to report `close`. */
 const KILL_CONFIRM_WAIT_MS = 3000;
@@ -56,7 +47,6 @@ function makeFakeChild(pid: number | undefined): FakeChild {
   return child;
 }
 
-/** Replace the runner's BridgeManager: nothing here touches a project's files. */
 function stubBridge(runner: Runner): void {
   (runner as unknown as { bridge: unknown }).bridge = {
     precheckInject: () => '',
@@ -68,7 +58,6 @@ function stubBridge(runner: Runner): void {
   };
 }
 
-/** Fake the OS kill calls for a Windows host and record what was killed. */
 function fakeTreeKill(
   runner: Runner,
   taskkill: (pid: string) => number = () => 0,
@@ -86,17 +75,14 @@ function fakeTreeKill(
   return { taskkillPids };
 }
 
-/** Split a buffer inside the first multi-byte sequence it holds. */
 function splitInsideFirstMultiByteSequence(bytes: Buffer): [Buffer, Buffer] {
   const lead = bytes.findIndex((byte) => byte >= 0xc0);
   if (lead === -1) throw new Error('the text holds no multi-byte character');
   return [bytes.subarray(0, lead + 1), bytes.subarray(lead + 1)];
 }
 
-/** Index of the options object in a `spawn(cmd, args, options)` call. */
 const SPAWN_OPTIONS_ARG = 2;
 
-/** The result token the runner put in the environment of its `call`-th spawn. */
 function resultTokenOfSpawn(call: number): string {
   const options = spawnMock.mock.calls[call]?.[SPAWN_OPTIONS_ARG] as
     | { env?: Record<string, string | undefined> }
@@ -106,7 +92,6 @@ function resultTokenOfSpawn(call: number): string {
   return token;
 }
 
-/** A result line as godot_operations.gd writes it for a run holding `token`. */
 function resultLine(token: string, payload: string): string {
   return `${OPERATION_RESULT_SENTINEL}${token}${OPERATION_RESULT_TOKEN_END}${payload}\n`;
 }
@@ -172,9 +157,8 @@ describe('headless child output is decoded across chunk boundaries', () => {
   });
 });
 
-// A project script can print the sentinel: an autoload's _init before the
-// operation is dispatched, its _exit_tree after the result is written. The
-// runner tells its own result line by the token it handed that run.
+// A project script can print the sentinel (an autoload's _init, or its _exit_tree after the result);
+// the runner tells its own result line by the token it handed that run.
 describe('a headless run returns its own result, not a sentinel line a project script printed', () => {
   const REAL_PAYLOAD = JSON.stringify({ name: 'Main', children: [] });
   const FORGED_MARKER = 'forged-by-a-project-script';
@@ -192,7 +176,6 @@ describe('a headless run returns its own result, not a sentinel line a project s
     projectPath = tmp.makeProject('godot-mcp-forged-');
   });
 
-  /** Run one operation whose child writes what `stdoutFor` returns for the run's token. */
   async function runWithStdout(
     stdoutFor: (token: string) => string,
     stderr = OPERATION_STARTED_LINE,
@@ -339,7 +322,6 @@ describe('a headless run that times out', () => {
       .executeOperation('save_scene', {}, projectPath, OPERATION_TIMEOUT_MS)
       .catch((error: unknown) => error as Error);
     await vi.advanceTimersByTimeAsync(OPERATION_TIMEOUT_MS);
-    // Not reported yet: the runner is waiting to see the process go.
     await vi.advanceTimersByTimeAsync(KILL_CONFIRM_WAIT_MS - 1);
     let settled = false;
     void pending.then(() => {
@@ -408,7 +390,6 @@ describe('the exit hook and headless children', () => {
     await pending;
     runner.killSpawnedProcessesSync();
 
-    // Nothing is left to kill: the list was not grown by the second call.
     expect(kills.taskkillPids).toEqual([String(HEADLESS_PID)]);
   });
 });
@@ -521,7 +502,6 @@ describe('one asset import per project at a time', () => {
     const projectPath = tmp.makeProject('godot-mcp-import-join-');
 
     const first = runner.importAssets(projectPath);
-    // The same project under another spelling.
     const second = runner.importAssets(`${projectPath}/`);
     // Red when importAssets spawns per call: two engines would be importing
     // one project.
@@ -639,7 +619,6 @@ describe('the parent-watch port', () => {
     const watchPort = Number(env[PARENT_WATCH_PORT_ENV]);
     expect(Number.isInteger(watchPort) && watchPort > 0).toBe(true);
 
-    // The game connects and writes heartbeats; the server accepts and discards.
     await new Promise<void>((resolve, reject) => {
       const socket = net.connect(watchPort, '127.0.0.1');
       socket.once('error', reject);

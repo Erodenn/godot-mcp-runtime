@@ -1,16 +1,5 @@
-/**
- * A bridge connect that outlives the command that started it.
- *
- * `sendCommand` dials lazily, and a command can time out (or be rejected by a
- * session switch) while its TCP connect is still pending. Connecting to a
- * closed loopback port takes about two seconds to fail on Windows, longer than
- * the ping and shutdown timeouts, so this is an ordinary sequence there. The
- * late outcome of such a connect must not touch the command that is in flight
- * by then, which may belong to another project's session.
- *
- * `net.connect` is replaced with hand-driven sockets so the order of events is
- * the test's to choose; everything else in `net` is the real module.
- */
+/** A bridge connect that outlives its command: connecting to a closed loopback port takes about 2 s to fail on Windows, longer than the ping and shutdown timeouts.
+ * `net.connect` is replaced with hand-driven sockets so the order of events is the test's to choose. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -51,7 +40,6 @@ interface FakeSocket extends EventEmitter {
   destroy: ReturnType<typeof vi.fn>;
 }
 
-/** A socket that connects, errors and receives data only when the test says so. */
 function makeFakeSocket(): FakeSocket {
   const sock = new EventEmitter() as FakeSocket;
   sock.setNoDelay = vi.fn();
@@ -97,19 +85,14 @@ describe('a bridge connect abandoned by its command', () => {
     runner.closeConnection();
   });
 
-  /**
-   * Time a command for project A out while its connect is pending, switch to
-   * project B, and leave a command for B in flight on its own pending connect.
-   * The in-flight command comes back wrapped: an async function that returned
-   * the promise itself would wait for it.
-   */
+  /** Time a command for project A out while its connect is pending, switch to B, and leave B's command in flight on its own pending connect.
+   * The in-flight command comes back wrapped: an async function returning the promise itself would wait for it. */
   async function abandonConnectThenSwitch(): Promise<{ pending: Promise<string> }> {
     await expect(runner.sendCommand('ping', {}, ABANDONED_COMMAND_TIMEOUT_MS)).rejects.toThrow(
       /timed out/,
     );
     runner.switchSession(PROJECT_B);
     const pending = runner.sendCommand('get_ui_elements', {}, LIVE_COMMAND_TIMEOUT_MS);
-    // A command takes its turn in the session queue, so it dials a tick later.
     await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(2));
     expect(connectMock).toHaveBeenNthCalledWith(1, PORT_A, LOOPBACK_HOST);
     expect(connectMock).toHaveBeenNthCalledWith(2, PORT_B, LOOPBACK_HOST);
@@ -126,7 +109,6 @@ describe('a bridge connect abandoned by its command', () => {
 
     staleSock.emit('connect');
 
-    // Not installed, and the abandoned ping is never written to project A.
     expect(staleSock.destroy).toHaveBeenCalledTimes(1);
     expect(staleSock.write).not.toHaveBeenCalled();
 
@@ -208,7 +190,6 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
 
       const result = await runner.attachProject(ATTACHED_PROJECT, PORT_RERUN);
 
-      // Nothing listens there: the session is replaced, not kept as "busy".
       expect(result.alreadyAttached).toBe(false);
       expect(injectCalls).toEqual([ATTACHED_PROJECT]);
       expect(runner.getSessionInfo(ATTACHED_PROJECT)).toMatchObject({ bridgePort: PORT_RERUN });
@@ -226,7 +207,6 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
 
       expect(result).toMatchObject({ alreadyAttached: true, existingBridge: 'silent' });
       expect(injectCalls).toEqual([]);
-      // The late socket belongs to no command and is not kept.
       expect(firstSock.destroy).toHaveBeenCalledTimes(1);
       expect(firstSock.write).not.toHaveBeenCalled();
     },
@@ -252,7 +232,6 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
       process: game,
     });
 
-    // A command to the game connects and then times out unanswered.
     const timedOut = runner
       .sendCommand('run_script', {}, CONNECTED_COMMAND_TIMEOUT_MS)
       .catch((error: unknown) => error);
@@ -261,8 +240,6 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
     expect(firstSock.write).toHaveBeenCalledTimes(1);
     expect(await timedOut).toMatchObject({ message: expect.stringMatching(/timed out/) });
 
-    // The attach probes the other project's session; its connect is pending
-    // when the game exits.
     const attach = runner.attachProject(ATTACHED_PROJECT, PORT_RERUN);
     await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(2));
     (

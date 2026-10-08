@@ -1,9 +1,3 @@
-/**
- * The Variant codec is a boundary against bytes we don't control, so the
- * interesting cases are the malformed ones: a length field that overruns the
- * packet, a type outside the supported subset, trailing bytes after a value.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   decodeVariant,
@@ -84,11 +78,7 @@ describe('decodeVariant rejects malformed packets', () => {
   });
 });
 
-/**
- * The encoder only ever emits the 64-bit form, so a round-trip test can never
- * reach the 32-bit branch: but the wire format allows it and a real engine may
- * send it. These build the narrow encodings by hand.
- */
+/** The encoder only emits the 64-bit form, so round trips never reach the 32-bit branch the wire format allows; these build the narrow encodings by hand. */
 describe('decodeVariant handles the encodings our encoder never emits', () => {
   const TYPE_INT = 2;
   const TYPE_FLOAT = 3;
@@ -191,11 +181,7 @@ describe('decodeVariant handles the encodings our encoder never emits', () => {
   });
 });
 
-/**
- * `performance:profile_names` carries a `TypedArray<StringName>`: the ARRAY
- * header gains a type-kind in bits 16-17 and the element type sits between
- * the header and the count (`_decode_container_type` in marshalls.cpp).
- */
+/** `performance:profile_names` carries a `TypedArray<StringName>`: the ARRAY header gains a type-kind in bits 16-17 (`_decode_container_type` in marshalls.cpp). */
 describe('decodeVariant reads typed arrays as plain arrays', () => {
   const TYPE_ARRAY = 28;
   const TYPE_STRING_NAME = 21;

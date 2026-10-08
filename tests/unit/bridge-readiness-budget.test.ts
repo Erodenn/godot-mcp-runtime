@@ -1,10 +1,5 @@
-/**
- * Relationship tests for the bridge readiness budgets. The behavior these
- * constants govern (how long a cold Godot start is given before a genuine
- * failure is reported) is unobservable without a real cold launch, so these
- * assert the invariants a future edit would break rather than simulate a
- * timeline with fake timers.
- */
+/** Relationship tests: the readiness budgets govern a cold start that is unobservable without a real launch,
+ * so these assert the invariants a future edit would break. */
 
 import { describe, it, expect } from 'vitest';
 import {
@@ -34,7 +29,6 @@ import { installSession } from '../helpers/session-install.js';
 
 /** The MCP SDK's default per-request client timeout. */
 const SDK_DEFAULT_CLIENT_TIMEOUT_MS = 60000;
-/** Port on the stub record. Nothing is dialed: `sendCommandTo` is replaced. */
 const STUB_BRIDGE_PORT = 19990;
 const OTHER_PROJECT_PATH = '/session-install/other-project';
 
@@ -49,17 +43,11 @@ interface PollOpts {
   deadlineAt?: number | null;
 }
 
-/** Longest a test waits for a poll that is expected to end on a short budget. */
 const SHORT_POLL_CEILING_MS = 1000;
 /** A request deadline this far ahead ends a poll long before either ceiling. */
 const NEAR_DEADLINE_MS = 60;
 
-/**
- * Drive `pollBridge` directly with a stubbed `sendCommandTo` and a short
- * extended ceiling. The failure cut-off is a property of the loop, not of the
- * shipped constants, so the test supplies its own budget and lets the real
- * `BRIDGE_CONNECTED_PING_FAILURE_LIMIT` decide when the loop gives up.
- */
+/** Drives `pollBridge` with a stubbed `sendCommandTo`; the cut-off is a property of the loop, so the real failure limit decides when it gives up. */
 function pollWithStub(
   ping: () => Promise<string>,
   opts: Partial<PollOpts> = {},
@@ -76,7 +64,6 @@ function pollWithStub(
     sendCommandTo: (target: RuntimeSession) => Promise<string>;
     pollBridge: (session: RuntimeSession, o: PollOpts) => Promise<BridgeWaitResult>;
   };
-  // The wait is on one record, which is registered like a started session's.
   const session = installSession(runner, { mode: 'attached', bridgePort: STUB_BRIDGE_PORT });
   // A TCP connect has been observed, which is what puts the extended ceiling
   // and the failure counter in force.
@@ -161,10 +148,8 @@ describe('bridge readiness budget', () => {
   });
 
   it('ends the wait on the first ping a bridge refuses for its token, naming the port', async () => {
-    // A Godot left from an earlier session: it answers every ping, so the
-    // failure count never starts, and it will never accept this token. Red
-    // when the refusal is treated like any other answered ping: the loop then
-    // runs to 'budget expired' with many pings.
+    // A Godot left from an earlier session answers every ping, so the failure count never starts, and never accepts this token.
+    // Red when the refusal is treated like any answered ping: the loop then runs to 'budget expired'.
     const harness = pollWithStub(() =>
       Promise.resolve(JSON.stringify({ error: BRIDGE_UNAUTHORIZED_ERROR })),
     );
@@ -196,10 +181,6 @@ describe('bridge readiness budget', () => {
   });
 
   it('does not count refusals from before the port accepted a connection', async () => {
-    // The normal attach flow: run_project is called, Godot is launched a few
-    // seconds later. Every ping before the listener exists is refused, then a
-    // connect succeeds and the first ping times out while the engine finishes
-    // starting, then the pong arrives.
     const refusalsBeforeListening = BRIDGE_CONNECTED_PING_FAILURE_LIMIT + 2;
     let calls = 0;
     const harness = pollWithStub(() => {
@@ -225,10 +206,8 @@ describe('bridge readiness budget', () => {
     expect(harness.pings).toBe(1);
   });
 
-  // The path the session was started with and the one Godot reports for
-  // res:// can differ in drive-letter or directory case and in the trailing
-  // slash. That is the same project, under the same folding the session map
-  // uses.
+  // The session's path and the one Godot reports for res:// can differ in drive-letter or directory case and trailing slash;
+  // that is the same project under the session map's folding.
   it('accepts a pong whose project path differs from the expected one only in case and trailing slash', async () => {
     const harness = pollWithStub(
       () =>
@@ -281,9 +260,8 @@ describe('bridge readiness budget', () => {
     expect(harness.pings).toBe(1);
   });
 
-  // A stop does not wait for the start that holds the queue, so the wait has
-  // to notice it: `stopped` is what tells run_project the session was ended on
-  // purpose and is not a bridge that failed to come up.
+  // A stop does not wait for the start holding the queue, so the wait must notice it: `stopped` tells run_project
+  // the session was ended on purpose, not a bridge that failed to come up.
   it('ends the wait as stopped when the session it waits on is stopped', async () => {
     const harness = pollWithStub(() => {
       harness.session.stopped = true;

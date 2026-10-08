@@ -1,12 +1,5 @@
-/**
- * Session lifecycle: the auto-clear on spawned-process exit, the idempotent
- * stop after a self-exit, and attached-mode disconnect handling.
- *
- * `child_process.spawn` is mocked at the I/O boundary so `runProject` runs its
- * real body: including the `'exit'` registration under test: without a Godot
- * binary. `BridgeManager` is replaced with a recorder so cleanup calls are
- * observable and nothing is written outside the tmp project.
- */
+/** `child_process.spawn` is mocked so `runProject` runs its real body (including the `'exit'` registration under test) without Godot.
+ * BridgeManager is a recorder, so cleanup calls are observable and nothing is written outside the tmp project. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -27,7 +20,6 @@ vi.mock('child_process', async (importOriginal) => {
 const { GodotRunner, BridgeDisconnectedError } = await import('../../src/utils/godot-runner.js');
 type Runner = InstanceType<typeof GodotRunner>;
 
-/** Fixed bridge port for the spawned-exit cases; no socket is opened there. */
 const UNUSED_BRIDGE_PORT = 19987;
 /** Comfortably past one 1000 ms retry delay plus the 1000 ms ping probe. */
 const DISCONNECT_CASE_TIMEOUT_MS = 15000;
@@ -38,7 +30,6 @@ interface FakeChildProcess extends EventEmitter {
   kill: ReturnType<typeof vi.fn>;
 }
 
-/** Minimal ChildProcess stand-in: an EventEmitter with stdout/stderr streams. */
 function makeFakeChildProcess(): FakeChildProcess {
   const proc = new EventEmitter() as FakeChildProcess;
   proc.stdout = new EventEmitter();
@@ -50,15 +41,12 @@ function makeFakeChildProcess(): FakeChildProcess {
 interface BridgeRecorder {
   cleanupCalls: string[];
   injectCalls: string[];
-  /** What `cleanup` reports as not confirmed. Empty models a complete cleanup. */
   cleanupProblems: string[];
 }
 
-/** Swap the runner's BridgeManager for a recorder. Touches no filesystem. */
 function stubBridge(runner: Runner): BridgeRecorder {
   const rec: BridgeRecorder = { cleanupCalls: [], injectCalls: [], cleanupProblems: [] };
   (runner as unknown as { bridge: unknown }).bridge = {
-    // A healthy project: nothing for the precheck to refuse.
     precheckInject: () => '',
     inject: (projectPath: string) => {
       rec.injectCalls.push(projectPath);
@@ -74,7 +62,6 @@ function stubBridge(runner: Runner): BridgeRecorder {
   return rec;
 }
 
-/** Read the four fields the auto-clear nulls, so assertions read as one statement. */
 function sessionFields(runner: Runner): Record<string, unknown> {
   const r = runner as unknown as {
     activeSessionMode: unknown;
@@ -154,12 +141,8 @@ describe('spawned-process exit auto-clear', () => {
     await start();
     const captured = runner.activeProcess!;
 
-    // Model the window a restart opens: `runProject` bumps the epoch as its
-    // first statement, then kills the old process, injects a fresh bridge
-    // script, and (under `profiling: true`) awaits DebuggerProfiler.create()
-    // before assigning the new `activeProcess`. Throughout that window the old
-    // process is still `activeProcess`, so an identity guard does not fire -
-    // only the epoch distinguishes the sessions.
+    // Models the window a restart opens: the old process is still `activeProcess` while the epoch is bumped and a new
+    // profiler is awaited, so an identity guard does not fire and only the epoch distinguishes the sessions.
     const internals = runner as unknown as {
       beginSessionTransition(session: RuntimeSession): number;
     };
@@ -168,10 +151,8 @@ describe('spawned-process exit auto-clear', () => {
 
     proc.emit('exit', 0);
 
-    // The buffer belongs to the captured process regardless of epoch.
     expect(captured.hasExited).toBe(true);
     expect(captured.exitCode).toBe(0);
-    // ...but nothing belonging to the incoming session was touched.
     expect(bridge.cleanupCalls).toEqual([]);
     expect(sessionFields(runner)).toEqual({
       mode: 'spawned',
@@ -196,7 +177,6 @@ describe('spawned-process exit auto-clear', () => {
     expect(result!.output.join('')).toContain('line one');
     expect(result!.errors.join('')).toContain('SCRIPT ERROR: boom');
     expect(runner.activeProcess).toBeNull();
-    // The exit handler already cleaned up; stop must not clean a second time.
     expect(bridge.cleanupCalls).toEqual([projectPath]);
     expect(proc.kill).not.toHaveBeenCalled();
   });
@@ -258,9 +238,7 @@ describe('spawned-process exit auto-clear', () => {
     expect(runner.activeProfiler).toBe(profiler);
   });
 
-  // What is left after that stop is a record holding only the capture. The
-  // next stop releases it, which is a stop that did something: a result, not
-  // the null that reads as "nothing to stop".
+  // What is left is a record holding only the capture; the next stop releases it, which did something: a result, not the null that means "nothing to stop".
   it('a second stop releases the retained capture and reports that it did', async () => {
     await start();
     const profiler = { hasResult: true, close: vi.fn() };
@@ -282,7 +260,6 @@ describe('spawned-process exit auto-clear', () => {
     expect(profiler.close).toHaveBeenCalledTimes(1);
     expect(runner.activeProfiler).toBeNull();
     expect(runner.listSessions()).toEqual([]);
-    // Nothing is left: a third stop has nothing to act on.
     expect(await runner.stopProject()).toBeNull();
   });
 
@@ -298,8 +275,6 @@ describe('spawned-process exit auto-clear', () => {
     expect(runner.activeProfiler).toBeNull();
   });
 
-  // An McpBridge name collision is the one inject failure the user can act on,
-  // so runProject must surface it instead of degrading to a bridge timeout.
   it('rethrows a bridge autoload collision instead of launching without a bridge', async () => {
     const { BridgeAutoloadCollisionError } = await import('../../src/utils/bridge-manager.js');
     (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
@@ -310,9 +285,7 @@ describe('spawned-process exit auto-clear', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  // An owner registry that cannot be read makes inject refuse. Launching anyway
-  // would start a game with no bridge and end as a bridge timeout that blames
-  // something else, so this one is surfaced too, before anything is spawned.
+  // An owner registry that cannot be read makes inject refuse; launching anyway would end as a bridge timeout that blames something else.
   it('rethrows an unreadable owner registry instead of launching without a bridge', async () => {
     const { BridgeRegistryUnreadableError } = await import('../../src/utils/bridge-manager.js');
     (runner as unknown as { bridge: { inject: () => void } }).bridge.inject = () => {
@@ -328,9 +301,8 @@ describe('spawned-process exit auto-clear', () => {
     expect(await runner.stopProject()).toBeNull();
   });
 
-  // The spawn-failure path is a second writer of the stderr buffer. It has to
-  // go through the same ingestion as real stderr, or its line lands in `errors`
-  // uncounted and every later getErrorsSince / sentinel window is off by one.
+  // The spawn-failure path is a second writer of the stderr buffer; it must use the same ingestion as real stderr,
+  // or every later getErrorsSince / sentinel window is off by one.
   it('counts a spawn failure line the same way a stderr line is counted', async () => {
     await start();
     const marker = runner.getErrorCount();
@@ -346,14 +318,8 @@ describe('spawned-process exit auto-clear', () => {
   });
 
   it('sendCommandWithErrors still classifies post-exit stderr as runtime errors, keyed on activeProcess', async () => {
-    // Exercise sendCommandWithErrors itself rather than calling
-    // extractRuntimeErrors directly: that call is unconditional, so a
-    // regression reverting the classification's key from `activeProcess` back
-    // to `activeSessionMode === 'spawned'` would leave a direct-call test
-    // green while the real behavior broke.
-    // The stderr line is written when the bridge has the frame and before it
-    // answers: after the command took its marker, which is the "post-exit"
-    // ordering under test.
+    // Exercises sendCommandWithErrors itself: a direct extractRuntimeErrors call is unconditional and would stay green if the key reverted to activeSessionMode.
+    // The stderr line is written after the command took its marker: the post-exit ordering under test.
     scripted = await startScriptedBridge(() => {
       proc.stderr.emit('data', Buffer.from('SCRIPT ERROR: post-exit line\n'));
       return { kind: 'reply', payload: OK };
@@ -364,10 +330,8 @@ describe('spawned-process exit auto-clear', () => {
     expect(runner.activeSessionMode).toBeNull();
     expect(runner.activeProcess).not.toBeNull();
 
-    // The auto-clear nulls activeBridgePort/activeSessionToken along with the
-    // rest of the session state, so point them at the scripted bridge only
-    // after the exit - mirroring how a caller would still be able to reach a
-    // bridge command after the session cleared (activeProcess survives).
+    // The auto-clear nulls activeBridgePort/activeSessionToken, so they point at the scripted bridge only after the exit
+    // (activeProcess survives, so a caller could still reach a bridge command).
     currentRecord(runner).bridgePort = scripted.port;
     currentRecord(runner).token = 'test-token';
 
@@ -377,10 +341,6 @@ describe('spawned-process exit auto-clear', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Attached-mode disconnect
-// ---------------------------------------------------------------------------
-
 type FrameAction = { kind: 'reply'; payload: string } | { kind: 'drop' } | { kind: 'hold' };
 
 interface ScriptedBridge {
@@ -389,12 +349,7 @@ interface ScriptedBridge {
   shutdown(): Promise<void>;
 }
 
-/**
- * Loopback TCP server that answers each framed command according to `script`.
- * `drop` destroys the peer without replying, which is what a Godot process
- * that went away looks like to `sendCommand`. `hold` keeps the connection
- * open and says nothing: a game that is alive and not answering.
- */
+/** Loopback TCP server answering framed commands per `script`; `drop` destroys the peer without replying, `hold` keeps it open and silent. */
 async function startScriptedBridge(
   script: (command: string, seenCount: number) => FrameAction,
 ): Promise<ScriptedBridge> {
@@ -435,9 +390,7 @@ async function startScriptedBridge(
 
 const PONG = '{"status":"pong"}';
 const OK = '{"ok":true}';
-/** What the bridge answers a `shutdown` it accepted with. */
 const SHUTTING_DOWN = '{"status":"shutting_down"}';
-/** What the bridge answers any command carrying the wrong token with. */
 const UNAUTHORIZED = '{"error":"Unauthorized: invalid or missing session token"}';
 
 describe('attached-mode bridge disconnect', () => {
@@ -509,9 +462,8 @@ describe('attached-mode bridge disconnect', () => {
   it(
     'a probe that times out does not end the session: the game is alive and not answering',
     async () => {
-      // The command's connection is dropped, then the probe ping is accepted
-      // and never answered. That is a timeout, not a disconnect, and only a
-      // disconnect says the bridge is gone.
+      // The command's connection is dropped, then the probe ping is never answered: a timeout, not a disconnect,
+      // and only a disconnect says the bridge is gone.
       scripted = await startScriptedBridge((command) =>
         command === 'ping' ? { kind: 'hold' } : { kind: 'drop' },
       );
@@ -567,9 +519,7 @@ describe('attached-mode bridge disconnect', () => {
     DISCONNECT_CASE_TIMEOUT_MS,
   );
 
-  // A status ping already is the question the probe asks. Teardown needs no
-  // exemption: a stop sends `shutdown` over a connection of its own, which the
-  // attached-stop cases below observe as the only frame the bridge receives.
+  // A status ping already is the probe's question; a stop sends `shutdown` over a connection of its own, the only frame the bridge receives.
   it(
     'ping is exempt: a status ping that meets a disconnect is not probed again and clears nothing',
     async () => {
@@ -587,9 +537,7 @@ describe('attached-mode bridge disconnect', () => {
     DISCONNECT_CASE_TIMEOUT_MS,
   );
 
-  // The detach goes ahead either way. What the stop must not do is imply the
-  // bridge inside the still-running Godot stopped listening when it never
-  // said so.
+  // The detach goes ahead either way; the stop must not imply the bridge in the still-running Godot stopped listening.
   it(
     'an attached stop records an unacknowledged shutdown',
     async () => {
@@ -694,10 +642,8 @@ describe('an attach whose bridge injection fails', () => {
     };
   }
 
-  // inject writes its owner file before it touches .gitignore and
-  // project.godot, so one that throws there has left a live owner claim behind.
-  // With no cleanup, every other server is told a session is running here
-  // until this server exits.
+  // inject writes its owner file before it touches .gitignore and project.godot, so a throw there leaves a live owner claim;
+  // without cleanup every other server is told a session runs here until this one exits.
   it('withdraws what the injection left on the project, with no earlier session', async () => {
     failInject('EPERM: operation not permitted, open project.godot');
 
@@ -722,15 +668,9 @@ describe('an attach whose bridge injection fails', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Spawn options at the three spawn sites
-// ---------------------------------------------------------------------------
-
 describe('spawn options reach child_process.spawn', () => {
   const EDITOR_PID = 4242;
-  /** Index of the options argument in a `spawn(cmd, args, options)` call. */
   const SPAWN_OPTIONS_ARG = 2;
-  /** Fixed bridge port for the runProject case; no socket is opened there. */
   const SPAWN_CASE_BRIDGE_PORT = 19988;
   let savedDisplay: string | undefined;
 

@@ -13,7 +13,6 @@ import { currentRecord, installSession } from '../helpers/session-install.js';
 /** Long enough for a destroyed socket's 'close' event to have been delivered. */
 const STALE_CLOSE_WINDOW_MS = 50;
 
-/** A frame header advertising one byte more than any frame may carry. */
 function oversizedFrameHeader(): Buffer {
   const header = Buffer.alloc(FRAME_HEADER_BYTES);
   header.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
@@ -23,17 +22,11 @@ function oversizedFrameHeader(): Buffer {
 interface MockBridge {
   port: number;
   server: net.Server;
-  /** Resolves with the JSON command string of the next frame. */
   nextFrame(): Promise<string>;
-  /** Send a framed JSON response back to the most recently connected peer. */
   reply(payload: string): void;
-  /** Send bytes as they are, unframed, to the most recently connected peer. */
   replyRaw(bytes: Buffer): void;
-  /** Close the most recently connected peer (no response). */
   closePeer(): void;
-  /** Stop accepting new connections; existing peers stay alive. */
   stopAccepting(): Promise<void>;
-  /** Tear everything down. */
   shutdown(): Promise<void>;
 }
 
@@ -142,13 +135,12 @@ describe('GodotRunner.sendCommand (TCP)', () => {
 
   it('holds a second concurrent command until the first has its reply, instead of rejecting it', async () => {
     const first = runner.sendCommand('slow');
-    const firstFrame = await bridge.nextFrame(); // ensure first has been written
+    const firstFrame = await bridge.nextFrame();
     const second = runner.sendCommand('other');
 
     bridge.reply('{"ok":"first"}');
     expect(JSON.parse(await first)).toEqual({ ok: 'first' });
 
-    // Only now is the second command written, on the same socket.
     const secondFrame = await bridge.nextFrame();
     bridge.reply('{"ok":"second"}');
     expect(JSON.parse(await second)).toEqual({ ok: 'second' });
@@ -170,7 +162,6 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     await bridge.nextFrame();
     await expect(pending).rejects.toThrow(/timed out/);
 
-    // Socket is destroyed on timeout. Next command must lazy-reconnect.
     const next = runner.sendCommand('ping');
     const recv = await bridge.nextFrame();
     expect(JSON.parse(recv)).toEqual({ command: 'ping' });
@@ -179,17 +170,14 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   });
 
   it('late reply for a timed-out command does not poison the next command', async () => {
-    // Without socket destruction on timeout, the bridge's late reply for A
-    // would correlate against B's promise (since the bridge serializes
-    // commands and only sees A's slot first). Closing the socket on timeout
-    // forces B to a new connection, making cross-talk impossible.
+    // Without socket destruction on timeout, the bridge's late reply for A would correlate against B's promise;
+    // closing the socket forces B onto a new connection.
     const slow = runner.sendCommand('slow', {}, 50);
     await bridge.nextFrame();
     await expect(slow).rejects.toThrow(/timed out/);
 
-    // Simulate the bridge eventually replying for the timed-out command on
-    // the now-destroyed socket. The write either errors silently or hits a
-    // closed socket: either way, B must not see this payload.
+    // The bridge replies late for the timed-out command on the destroyed socket: the write errors or hits a closed socket,
+    // and either way B must not see the payload.
     try {
       bridge.reply('{"this":"is the late slow reply"}');
     } catch {
@@ -204,10 +192,8 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     expect(r).toEqual({ this: 'is the fresh reply' });
   });
 
-  // A socket that delivered an unreadable frame is destroyed, and a destroyed
-  // socket still emits 'close' a tick later. With its listeners left on, that
-  // 'close' settled whichever command was in flight by then: in attached mode
-  // the probe ping, whose failure ends a live session.
+  // A socket that delivered an unreadable frame still emits 'close' a tick later; with listeners left on, it settled the command in flight
+  // (in attached mode the probe ping, whose failure ends a live session).
   it('an oversized frame header drops the socket without a listener left to fail the next command', async () => {
     const first = runner.sendCommand('first');
     await bridge.nextFrame();
@@ -215,7 +201,6 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     await expect(first).rejects.toThrow(/exceeds limit/);
     await expect(first).rejects.toBeInstanceOf(BridgeDisconnectedError);
 
-    // Sent at once, the way the attached-mode probe follows a failure.
     const next = runner.sendCommand('ping');
     const recv = await bridge.nextFrame();
     expect(JSON.parse(recv)).toEqual({ command: 'ping' });
@@ -250,7 +235,6 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   });
 
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {
-    // Point the runner at a port nobody is listening on.
     const r = new GodotRunner({ godotPath: 'godot' });
     installSession(r, { bridgePort: 1 });
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
@@ -291,16 +275,12 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('retries once on BridgeDisconnectedError during an active session', async () => {
-    // Simulate an active session so reconnect logic kicks in.
     currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();
-    // Drop the connection mid-flight to trigger BridgeDisconnectedError.
     bridge.closePeer();
 
-    // The reconnect delay is 1s, then it retries. The mock bridge accepts
-    // a new connection and receives the retry.
     const retryFrame = await bridge.nextFrame();
     expect(JSON.parse(retryFrame)).toEqual({ command: 'get_ui_elements' });
     bridge.reply('{"nodes":[]}');
@@ -356,7 +336,6 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
     await bridge.nextFrame();
     bridge.closePeer();
 
-    // Stop accepting connections so the retry also fails.
     await bridge.stopAccepting();
 
     await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);

@@ -14,8 +14,6 @@ import { expectErrorMatching } from '../helpers/assertions.js';
 import { itGodot } from '../helpers/godot-skip.js';
 import { bridgeScriptAbsPath } from '../../src/utils/artifact-paths.js';
 
-// ─── cleanOutput ─────────────────────────────────────────────────────────────
-
 describe('cleanOutput', () => {
   it('strips the Godot version banner line', () => {
     const input = 'Godot Engine v4.3.stable.official\n{"ok": true}';
@@ -64,8 +62,6 @@ describe('cleanOutput', () => {
   });
 });
 
-// ─── normalizeForCompare ──────────────────────────────────────────────────────
-
 describe('normalizeForCompare', () => {
   it('converts Windows backslashes to forward slashes', () => {
     expect(normalizeForCompare('C:\\Users\\foo\\project')).toBe('C:/Users/foo/project');
@@ -91,8 +87,6 @@ describe('normalizeForCompare', () => {
   });
 });
 
-// ─── parseProjectArgs ────────────────────────────────────────────────────────
-
 describe('parseProjectArgs', () => {
   const tmp = useTmpDirs();
 
@@ -115,8 +109,6 @@ describe('parseProjectArgs', () => {
     expect(result.value.projectPath).toBe(fixtureProjectPath);
   });
 });
-
-// ─── parseSceneArgs ──────────────────────────────────────────────────────────
 
 describe('parseSceneArgs', () => {
   const tmp = useTmpDirs();
@@ -205,8 +197,6 @@ describe('parseSceneArgs', () => {
   });
 });
 
-// ─── checkDisplayAvailable ──────────────────────────────────────────────────
-
 describe('checkDisplayAvailable', () => {
   const originalPlatform = process.platform;
   const originalDisplay = process.env.DISPLAY;
@@ -255,8 +245,6 @@ describe('checkDisplayAvailable', () => {
   });
 });
 
-// ─── detectGodotPath ────────────────────────────────────────────────────────
-
 describe('detectGodotPath', () => {
   const originalGodotPath = process.env.GODOT_PATH;
 
@@ -268,12 +256,7 @@ describe('detectGodotPath', () => {
     }
   });
 
-  // Regression: issue #15: a misconfigured GODOT_PATH used to be silently
-  // swallowed and the runner fell back to platform defaults (e.g. on Windows
-  // `C:\Program Files\Godot\Godot.exe`). Users who installed Godot elsewhere
-  // got "file not found" errors against a path they never chose. An explicit
-  // GODOT_PATH must now be authoritative: if it doesn't resolve, leave
-  // godotPath null so the caller can produce an actionable error instead.
+  // An explicit GODOT_PATH is authoritative: if it does not resolve, godotPath stays null instead of falling back to platform defaults.
   it('leaves godotPath null when GODOT_PATH points to a non-existent file', async () => {
     process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
     const runner = new GodotRunner();
@@ -282,11 +265,8 @@ describe('detectGodotPath', () => {
   });
 
   it('leaves godotPath null when GODOT_PATH is set but invalid, even if auto-detect would succeed', async () => {
-    // Even on a developer machine where `godot` is on PATH, an explicit
-    // (broken) GODOT_PATH must not silently fall through to the PATH binary -
-    // doing so masks the user's intent. We stub isValidGodotPath so auto-detect
-    // would unambiguously succeed for `godot`; the assertion proves the
-    // explicit-invalid branch short-circuits before auto-detect runs.
+    // Even where `godot` is on PATH, a broken explicit GODOT_PATH must not fall through to it;
+    // isValidGodotPath is stubbed so auto-detect would succeed, proving the explicit branch short-circuits.
     process.env.GODOT_PATH = '/nonexistent/godot-mcp-test-bogus-binary';
     const runner = new GodotRunner();
     const spy = vi
@@ -297,34 +277,23 @@ describe('detectGodotPath', () => {
       .mockImplementation(async (p: string) => p === 'godot');
     await runner.detectGodotPath();
     expect(runner.getGodotPath()).toBeNull();
-    // Sanity: the auto-detect candidates were never probed: the explicit
-    // GODOT_PATH branch short-circuited before reaching auto-detect.
     const probed = spy.mock.calls.map((c) => c[0]);
     expect(probed).not.toContain('godot');
     spy.mockRestore();
   });
 
   it('does not invent a hardcoded platform-default path when auto-detect finds nothing', async () => {
-    // Pre-fix behavior set godotPath to `C:\Program Files\Godot\Godot.exe`
-    // (Windows) / `/usr/bin/godot` (Linux) / `/Applications/Godot.app/...`
-    // (macOS) when nothing was found, then later spawn calls failed against
-    // that fabricated path. The runner must leave godotPath null instead OR
-    // resolve a real path: never the fabricated default.
+    // With nothing found the runner must leave godotPath null or resolve a real path, never a fabricated platform default.
     delete process.env.GODOT_PATH;
     const runner = new GodotRunner({ godotPath: '/nonexistent/godot-mcp-test-bogus-binary' });
-    // Constructor sync-validation rejects the bogus path, so godotPath starts null.
     expect(runner.getGodotPath()).toBeNull();
     await runner.detectGodotPath();
     const resolved = runner.getGodotPath();
-    // Unconditional contract: detectGodotPath never returns the fabricated
-    // platform default. Either null (CI) or a real path found via auto-detect.
     expect(resolved === null || typeof resolved === 'string').toBe(true);
   });
 
   itGodot('resolves a real Godot binary when GODOT_PATH points at one', async () => {
-    // Gated on GODOT_PATH presence (itGodot skips otherwise). With a valid
-    // GODOT_PATH, the runner must resolve to that exact path: never silently
-    // substitute the historical platform-default fabrication.
+    // Gated on GODOT_PATH presence: a valid one must resolve to exactly that path.
     const runner = new GodotRunner();
     await runner.detectGodotPath();
     const resolved = runner.getGodotPath();
@@ -332,8 +301,6 @@ describe('detectGodotPath', () => {
     expect(resolved).not.toMatch(/Program Files\\Godot\\Godot\.exe$/);
   });
 });
-
-// ─── attachProject bridge auth token ────────────────────────────────────────
 
 describe('GodotRunner.attachProject bridge auth token', () => {
   const tmp = useTmpDirs();
@@ -351,8 +318,6 @@ describe('GodotRunner.attachProject bridge auth token', () => {
     // 16 random bytes hex-encoded = 32 hex chars.
     expect(bakedToken).toMatch(/^[0-9a-f]{32}$/);
 
-    // The runner's in-memory token matches what was baked, so sendCommand's
-    // frames authenticate against exactly this script.
     expect((runner as unknown as { activeSessionToken: string | null }).activeSessionToken).toBe(
       bakedToken,
     );
@@ -375,14 +340,9 @@ describe('GodotRunner.attachProject bridge auth token', () => {
   });
 });
 
-// ─── GodotRunner.hasActiveRuntimeSession ─────────────────────────────────────
-
 const TRACKED_PROJECT = 'D:/projects/demo';
 
-/**
- * Minimal stand-in for a tracked child process. The predicate reads only
- * `hasExited`; the rest of GodotProcess is structural padding.
- */
+/** Stand-in for a tracked child process; the predicate reads only `hasExited`. */
 function trackedProcess(hasExited: boolean): GodotProcess {
   return {
     process: {} as ChildProcess,
@@ -414,10 +374,8 @@ describe('GodotRunner.hasActiveRuntimeSession', () => {
   });
 
   it('reports no session once the spawned process has exited', () => {
-    // A user closing the game window is the case that has to self-clear:
-    // activeSessionMode and activeProjectPath stay set until stopProject
-    // runs, so anything reading those fields directly would still see a
-    // session here.
+    // A user closing the game window must self-clear: activeSessionMode and activeProjectPath stay set until stopProject,
+    // so code reading those fields directly would still see a session.
     const runner = new GodotRunner({ godotPath: 'godot' });
     installSession(runner, {
       mode: 'spawned',
@@ -470,10 +428,8 @@ describe('GodotRunner.hasActiveRuntimeSession', () => {
   });
 });
 
-// The guard tests in headless-op.test.ts drive the fake runner, not a real
-// GodotRunner, so the fake carries its own copy of this predicate. If the two
-// ever disagree, those tests go on passing while asserting nothing about
-// production behavior. Pin them together across the whole input space.
+// The headless-op guard tests use a fake runner that carries its own copy of this predicate;
+// if the two disagree those tests assert nothing about production. Pin them together.
 describe('fake runner liveness predicate matches GodotRunner', () => {
   const CASES: Array<{
     mode: 'spawned' | 'attached' | null;

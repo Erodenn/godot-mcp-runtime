@@ -1,12 +1,3 @@
-/**
- * Direct unit tests for the [autoload] INI primitives.
- *
- * Both autoload-tools.ts (CRUD handlers) and bridge-manager.ts (McpBridge
- * inject/cleanup) consume these: when the grammar drifts, every consumer
- * silently breaks. Direct tests localize the failure to one function instead
- * of cascading through both call sites.
- */
-
 import { describe, it, expect } from 'vitest';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -30,10 +21,6 @@ function readProject(dir: string): string {
   return readFileSync(join(dir, 'project.godot'), 'utf8');
 }
 
-// ---------------------------------------------------------------------------
-// normalizeAutoloadPath
-// ---------------------------------------------------------------------------
-
 describe('normalizeAutoloadPath', () => {
   it('prefixes a project-relative path with res://', () => {
     expect(normalizeAutoloadPath('autoload/foo.gd')).toBe('res://autoload/foo.gd');
@@ -43,10 +30,6 @@ describe('normalizeAutoloadPath', () => {
     expect(normalizeAutoloadPath('res://autoload/foo.gd')).toBe('res://autoload/foo.gd');
   });
 });
-
-// ---------------------------------------------------------------------------
-// parseAutoloads
-// ---------------------------------------------------------------------------
 
 describe('parseAutoloads', () => {
   it('returns [] when [autoload] section is absent', () => {
@@ -111,10 +94,6 @@ describe('parseAutoloads', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// addAutoloadEntry
-// ---------------------------------------------------------------------------
-
 describe('addAutoloadEntry', () => {
   it('creates the [autoload] section when missing', () => {
     const dir = makeProject('config_version=5\n\n[application]\nconfig/name="X"\n');
@@ -163,10 +142,8 @@ describe('addAutoloadEntry', () => {
     expect(readProject(dir)).not.toContain('Plain="*');
   });
 
-  // The primitive itself is intentionally permissive about duplicates: handler
-  // code (handleAddAutoload) guards via parseAutoloads first. This test pins
-  // that contract so a future change to addAutoloadEntry that rejects duplicates
-  // breaks loudly and prompts the reviewer to update both layers in lockstep.
+  // The primitive is permissive about duplicates because handleAddAutoload guards via parseAutoloads first;
+  // this pins that so a change to addAutoloadEntry breaks loudly.
   it('appends a second line when called twice with the same name, and the last one is the entry', () => {
     const dir = makeProject('config_version=5\n');
     const file = join(dir, 'project.godot');
@@ -180,10 +157,6 @@ describe('addAutoloadEntry', () => {
     expect(section.shadowed).toEqual(['Dup="*res://one.gd" (line 4, overridden by line 5)']);
   });
 });
-
-// ---------------------------------------------------------------------------
-// removeAutoloadEntry
-// ---------------------------------------------------------------------------
 
 describe('removeAutoloadEntry', () => {
   it('returns false and leaves the file untouched when the name is unknown', () => {
@@ -233,10 +206,6 @@ describe('removeAutoloadEntry', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// updateAutoloadEntry
-// ---------------------------------------------------------------------------
-
 describe('updateAutoloadEntry', () => {
   it('returns false when the named autoload is absent', () => {
     const dir = makeProject('config_version=5\n\n[autoload]\nA="*res://a.gd"\n');
@@ -278,10 +247,6 @@ describe('updateAutoloadEntry', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Round-trip: add → parse → update → remove
-// ---------------------------------------------------------------------------
-
 describe('add/update/remove round-trip', () => {
   it('full lifecycle leaves a clean project.godot', () => {
     const dir = makeProject('config_version=5\n');
@@ -309,7 +274,6 @@ describe('add/update/remove round-trip', () => {
     const dir = makeProject('config_version=5\n');
     const file = join(dir, 'project.godot');
     addAutoloadEntry(file, 'X', 'x.gd', true);
-    // Insert a stray blank line + comment inside the section.
     const content = readFileSync(file, 'utf8').replace(
       '[autoload]\n',
       '[autoload]\n\n; user comment\n',
@@ -318,10 +282,6 @@ describe('add/update/remove round-trip', () => {
     expect(parseAutoloads(file)).toEqual([{ name: 'X', path: 'res://x.gd', singleton: true }]);
   });
 });
-
-// ---------------------------------------------------------------------------
-// parseAutoloadSection
-// ---------------------------------------------------------------------------
 
 describe('parseAutoloadSection', () => {
   it('parses an entry with spaces around the equals sign', () => {
@@ -360,10 +320,6 @@ describe('parseAutoloadSection', () => {
     expect(readProject(dir)).not.toContain('res://b.gd');
   });
 });
-
-// ---------------------------------------------------------------------------
-// The project.godot grammar: comments, line endings, spans, repeated sections
-// ---------------------------------------------------------------------------
 
 /** A line feed with no carriage return before it: a mixed line ending in a CRLF file. */
 const BARE_LF_REGEX = /(?<!\r)\n/;
@@ -643,15 +599,9 @@ describe('a section that is not empty after a removal', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// The engine's reading: a setting is its path, and the last assignment wins
-// ---------------------------------------------------------------------------
-
 describe('the project.godot the engine experiment used', () => {
-  // Godot 4.6 loaded probe_a, probe_second and probe_c from this file, and
-  // refused the [autoload/] entry with "Trying to add autoload with no name".
-  // probe_c is registered by a value on the line after its `=`, a form Godot
-  // never writes: it is reported as unparsed and flagged, not listed.
+  // Godot 4.6 loaded probe_a, probe_second and probe_c from this file and refused the [autoload/] entry ("no name").
+  // probe_c's value sits on the line after its `=`, a form Godot never writes: reported as unparsed and flagged, not listed.
   const EXPERIMENT = [
     'config_version=5',
     'autoload/ProbeA="*res://probe_a.gd"',

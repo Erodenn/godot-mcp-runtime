@@ -1,8 +1,3 @@
-/**
- * Decoding and line assembly for child process output: a UTF-8 sequence or a
- * line cut by a pipe chunk boundary must come out whole.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   LineAssembler,
@@ -12,14 +7,12 @@ import {
 } from '../../src/utils/child-output.js';
 
 const REPLACEMENT_CHARACTER = '�';
-/** A small cap, so the over-long-line cases need no megabyte strings. */
 const SMALL_PENDING_CAP = 8;
 
 describe('Utf8StreamDecoder', () => {
   it('joins a multi-byte character split across two chunks', () => {
     const decoder = new Utf8StreamDecoder();
     const bytes = Buffer.from('{"name":"José"}', 'utf8');
-    // Cut inside the two-byte sequence for the e-acute.
     const cut = bytes.indexOf(0xc3) + 1;
 
     const text = decoder.write(bytes.subarray(0, cut)) + decoder.write(bytes.subarray(cut));
@@ -41,7 +34,6 @@ describe('Utf8StreamDecoder', () => {
     const decoder = new Utf8StreamDecoder();
     const bytes = Buffer.from('é', 'utf8');
     expect(decoder.write(bytes.subarray(0, 1))).toBe('');
-    // The stream ended mid-sequence: the remainder is surfaced, not lost.
     expect(decoder.end()).toBe(REPLACEMENT_CHARACTER);
   });
 
@@ -88,7 +80,6 @@ describe('LineAssembler', () => {
     const lines = new LineAssembler(SMALL_PENDING_CAP);
     expect(lines.push('12345')).toEqual([]);
     expect(lines.push('6789abc')).toEqual(['12345678' + truncatedLineMarker(SMALL_PENDING_CAP)]);
-    // Still inside the same over-long line: nothing is held or returned.
     expect(lines.push('more of the same line')).toEqual([]);
     expect(lines.pendingText).toBe('');
     expect(lines.push(' and its end\nnext\n')).toEqual(['next']);

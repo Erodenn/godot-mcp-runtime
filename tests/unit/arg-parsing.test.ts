@@ -1,13 +1,3 @@
-/**
- * Direct unit tests for the generic field helpers in `src/utils/arg-parsing.ts`.
- *
- * These previously only had incidental coverage through handler tests, which
- * exercise the path-shaped parsers (parseProjectArgs/parseSceneArgs/parseNodePath
- * variants: covered in godot-runner-extended.test.ts) but not every generic
- * primitive directly. One `ok` case, one wrong-type `err` case, and (for the
- * optionals) the `undefined -> ok(undefined)` case per helper.
- */
-
 import { symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { describe, it, expect } from 'vitest';
@@ -248,9 +238,8 @@ describe('parseOptionalNodePath', () => {
   });
 });
 
-// The script reads these fields into typed parameters and string comparisons.
-// A value of another type raises inside it and takes every other operation in
-// the batch down with it, so each is refused here with the index it sits at.
+// The script reads these fields into typed parameters; a value of another type raises inside it
+// and takes the rest of the batch down, so each is refused here with its index.
 describe('checkBatchOperationItems', () => {
   function messageOf(result: { ok: boolean; error?: unknown }): string {
     if (result.ok) return '';
@@ -466,9 +455,8 @@ describe('checkBatchOperationItems resolves every path an item carries', () => {
     expect(messageOf(copy)).toContain('Invalid operations[0].newPath:');
   });
 
-  // Red when the items are checked as spelled: `newPath` is then the one
-  // resolved, and `new_path`, which the runner folds onto the same key after
-  // it, reaches the script unchecked.
+  // Red when the items are checked as spelled: `newPath` is then the one resolved,
+  // and `new_path`, which the runner folds onto the same key after it, reaches the script unchecked.
   it('a key spelled both ways is checked as the one value that is forwarded', () => {
     const projectDir = projectWithLinkedFolder();
     const SAVE = { operation: 'save', scenePath: 'main.tscn' };

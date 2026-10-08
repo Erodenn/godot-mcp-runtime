@@ -1,11 +1,3 @@
-/**
- * Tokenizer tests. The scanner's contract with the policy evaluator is:
- *  - Comments and string-literal contents never reach the policy.
- *  - `Foo.bar.baz` becomes a single memberChain token with chain ['Foo','bar','baz'].
- *  - Line numbers track multi-line input correctly.
- *  - Triple-quoted strings don't false-positive on dangerous identifiers inside.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   decodeStringLiteral,
@@ -29,7 +21,6 @@ function idents(source: string): string[] {
 describe('tokenize: comments', () => {
   it('strips line comments entirely', () => {
     const tokens = tokenize('# OS.execute("rm -rf /")\nx = 1\n');
-    // Nothing from the comment should survive.
     expect(tokens.some((t) => t.text === 'OS.execute')).toBe(false);
     expect(tokens.some((t) => t.text === 'OS')).toBe(false);
     expect(idents('# OS.execute("rm -rf /")\nx = 1\n')).toEqual(['x']);
@@ -54,7 +45,6 @@ describe('tokenize: strings', () => {
     const tokens = tokenize(source);
     expect(tokens.some((t) => t.text.startsWith('OS'))).toBe(false);
     expect(tokens.some((t) => t.text.startsWith('HTTPRequest'))).toBe(false);
-    // Code after the docstring should still tokenize.
     expect(idents(source)).toEqual(['var', 'doc', 'var', 'x']);
   });
 
@@ -109,23 +99,17 @@ describe('tokenize: line tracking', () => {
 
 describe('tokenize: line continuation', () => {
   it('treats `\\` + newline as a continuation (no extra newline emitted)', () => {
-    // Continuation between segments is unusual in practice; verify the
-    // tokenizer doesn't crash and treats the next line as the same logical
-    // line for line numbering of the next token.
     const tokens = tokenize('var x = 1 \\\n+ 2\nOS.execute()\n');
     const chain = tokens.find((t) => t.kind === 'memberChain');
-    // The continuation increments line (1→2) without emitting newline; then
-    // the `\n` after `+ 2` emits newline and increments (2→3). OS.execute
-    // therefore lives on physical line 3.
+    // The continuation increments line (1->2) without emitting newline; the newline after `+ 2` emits it (2->3),
+    // so OS.execute lives on physical line 3.
     expect(chain?.text).toBe('OS.execute');
     expect(chain?.line).toBe(3);
   });
 });
 
 describe('tokenize: member chains across whitespace/newlines', () => {
-  // Regression coverage for the skeleton-key bypass: a tight "no whitespace
-  // between identifier and dot" rule let `OS .execute`, `OS. execute`, and
-  // `OS.\n  execute` slip past every two-segment policy rule at once.
+  // Skeleton-key bypass: `OS .execute`, `OS. execute` and `OS.` + newline + `execute` must not slip past two-segment policy rules.
   it('coalesces OS .execute (space before the dot)', () => {
     expect(chains('OS .execute()\n')).toEqual([['OS', 'execute']]);
   });
@@ -148,7 +132,6 @@ describe('tokenize: member chains across whitespace/newlines', () => {
     const chain = tokens.find((t) => t.kind === 'memberChain');
     // Contract: the chain token's line stays that of the first segment.
     expect(chain?.line).toBe(2);
-    // A token after the chain must resume line tracking correctly.
     const closeParen = tokens.filter((t) => t.text === ')').pop();
     expect(closeParen?.line).toBe(3);
   });

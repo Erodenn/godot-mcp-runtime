@@ -127,10 +127,6 @@ describe('findFreePort', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Durations handed to setTimeout
-// ---------------------------------------------------------------------------
-
 describe('clampTimerDelay', () => {
   const ORDINARY_TIMEOUT_MS = 30000;
 
@@ -165,10 +161,6 @@ describe('clampTimerDelay', () => {
     expect(fired).not.toHaveBeenCalled();
   });
 });
-
-// ---------------------------------------------------------------------------
-// The listener a spawned game watches to learn its server is gone
-// ---------------------------------------------------------------------------
 
 describe('ParentWatchListener', () => {
   const HEARTBEAT = Buffer.from([0]);
@@ -216,7 +208,6 @@ describe('ParentWatchListener', () => {
     listener = new ParentWatchListener();
     const socket = await connect(await listener.port());
     const ended = new Promise<void>((resolve) => socket.once('close', () => resolve()));
-    // Read, so the peer's end of stream is delivered.
     socket.resume();
 
     listener.close();
@@ -225,15 +216,6 @@ describe('ParentWatchListener', () => {
     expect(socket.destroyed).toBe(true);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Action-boundary sentinel parsing and bucketing
-//
-// These two helpers are the whole of the per-action error attribution used by
-// simulate_input: the bridge prints one sentinel per action on stderr and the
-// runner splits its stderr window on the recorded marks. Both are pure so the
-// attribution logic is testable without a Godot process.
-// ---------------------------------------------------------------------------
 
 describe('parseActionBoundary', () => {
   it('accepts a zero index', () => {

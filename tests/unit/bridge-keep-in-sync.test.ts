@@ -1,15 +1,5 @@
-/**
- * The bridge's wire contract is written twice: once in TypeScript and once in
- * GDScript, with KEEP IN SYNC comments pointing each side at the other. Nothing
- * else in the suite reads the GDScript half, so a rename or a retuned constant
- * on the TypeScript side leaves every test green while the two stop agreeing.
- * The failure is silent by construction: a renamed sentinel, for instance, is
- * still printed by the game and still ignored by the reader, and per-action
- * error attribution quietly degrades to "trailing" on every call.
- *
- * These assertions read the script as text, which is all a Node test can do
- * with GDScript, and cost nothing.
- */
+/** The bridge's wire contract is written twice (TypeScript and GDScript) and nothing else reads the GDScript half, so drift leaves every test green.
+ * These assertions read the script as text. */
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -44,7 +34,6 @@ import {
   SCREENSHOT_FRAME_RENDER_BUDGET_MS,
 } from '../../src/tools/runtime-tools.js';
 
-/** The most bytes UTF-8 spends on one character. */
 const UTF8_MAX_BYTES_PER_CHAR = 4;
 
 const bridgeSource = readFileSync(
@@ -59,7 +48,6 @@ function gdConst(name: string): string {
   return match![1]!;
 }
 
-/** Body of one top-level `func`, up to the next top-level declaration. */
 function gdFunctionBody(name: string): string {
   const start = bridgeSource.indexOf(`\nfunc ${name}(`);
   expect(start, `mcp_bridge.gd must define func ${name}`).toBeGreaterThanOrEqual(0);
@@ -90,9 +78,8 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
   });
 
   it('declares the same token refusal text, and answers a bad token with it', () => {
-    // Red when either side rewords the refusal: the readiness wait would then
-    // take another session's bridge for one that is still starting and wait
-    // out its whole budget.
+    // Red when either side rewords the refusal: the readiness wait would take another session's bridge for one still starting
+    // and wait out its whole budget.
     expect(gdConst('UNAUTHORIZED_ERROR')).toBe(`"${BRIDGE_UNAUTHORIZED_ERROR}"`);
     expect(gdFunctionBody('_dispatch_command')).toContain('{"error": UNAUTHORIZED_ERROR}');
   });
@@ -123,9 +110,7 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(normalizeForCompare(screenshotsDir('/project'))).toBe(`/project/${projectRelative}`);
   });
 
-  // The budget is how long the bridge waits for a frame before it answers a
-  // screenshot with its own error. At or past the command timeout, that error
-  // could never arrive: the caller would get a generic timeout instead.
+  // At or past the command timeout the bridge's own screenshot error could never arrive; the caller would get a generic timeout.
   it('the screenshot frame budget matches its TypeScript twin and stays under the default screenshot timeout', () => {
     expect(gdConst('FRAME_RENDER_BUDGET_MS')).toBe(String(SCREENSHOT_FRAME_RENDER_BUDGET_MS));
     expect(SCREENSHOT_FRAME_RENDER_BUDGET_MS).toBeLessThan(SCREENSHOT_DEFAULT_TIMEOUT_MS);
@@ -188,16 +173,10 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
   });
 });
 
-/**
- * The parent watch quits a spawned game whose server is gone. What a text
- * read can pin is the shape that keeps it from quitting a game it should not:
- * it is started only from the environment variable (an attached Godot is
- * given none), and it quits only on a connection that was established first.
- */
+/** The parent watch quits a spawned game whose server is gone; a text read pins that it starts only from the environment variable and quits only after an established connection. */
 describe('mcp_bridge.gd parent watch', () => {
   it('is started from the environment variable and nowhere else', () => {
     const starts = bridgeSource.match(/_start_parent_watch\(/g) ?? [];
-    // The definition and the one call in _ready.
     expect(starts).toHaveLength(2);
     expect(bridgeSource).not.toMatch(/const PARENT_WATCH_PORT\s*:=/);
   });
@@ -218,10 +197,7 @@ describe('mcp_bridge.gd parent watch', () => {
   });
 });
 
-/**
- * A reply the bridge cannot frame must still be answered: the caller is
- * waiting, and silence reads as a dead game.
- */
+/** A reply the bridge cannot frame must still be answered: silence reads as a dead game. */
 describe('mcp_bridge.gd answers every command', () => {
   it('sends an error in place of a response over the frame limit, instead of sending nothing', () => {
     const send = gdFunctionBody('_send_response');
@@ -242,12 +218,7 @@ describe('mcp_bridge.gd answers every command', () => {
   });
 });
 
-/**
- * The value serializer recurses through containers, and a Dictionary can hold
- * itself. A Node test cannot run GDScript, so this reads the structure that
- * keeps the recursion bounded: the engine-side behavior is covered by the
- * Godot-backed integration run.
- */
+/** Pins the structure that bounds the value serializer's recursion (a Dictionary can hold itself); engine behavior is covered by the Godot integration run. */
 describe('mcp_bridge.gd bounds the values it serializes', () => {
   it('declares a depth bound for every serialization and size bounds for samples', () => {
     expect(Number(gdConst('MAX_RESULT_DEPTH'))).toBeGreaterThan(0);
@@ -325,11 +296,7 @@ describe('mcp_bridge.gd bounds the values it serializes', () => {
   });
 });
 
-/**
- * The headless-operation result sentinel is the same kind of two-sided
- * contract: godot_operations.gd prints it, output-parsing.ts reads it. A
- * drifted marker leaves every operation printing a payload nobody extracts.
- */
+/** godot_operations.gd prints the result sentinel and output-parsing.ts reads it; a drifted marker leaves payloads nobody extracts. */
 describe('godot_operations.gd agrees with the TypeScript result sentinel', () => {
   const operationsSource = readFileSync(
     new URL('../../src/scripts/godot_operations.gd', import.meta.url),
@@ -405,10 +372,7 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
   });
 });
 
-/**
- * Values the headless script shares with TypeScript modules that do not
- * export them, so the TypeScript half is read as text like the GDScript half.
- */
+/** Values the headless script shares with TypeScript modules that do not export them, so that half is read as text. */
 describe('godot_operations.gd agrees with unexported TypeScript constants', () => {
   const operationsSource = readFileSync(
     new URL('../../src/scripts/godot_operations.gd', import.meta.url),
@@ -431,15 +395,13 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     'utf8',
   );
 
-  /** The quoted strings of a bracketed list, in order. */
   function quotedItems(list: string): string[] {
     return [...list.matchAll(/["']([^"']*)["']/g)].map((item) => item[1]!);
   }
 
   it('prints the operation-started line the runner looks for', () => {
-    // Red when either the marker constant or the script's log line changes: the
-    // runner would then report every operation as an engine that died before
-    // dispatch, or miss a real one.
+    // Red when the marker constant or the script's log line changes: the runner would report every operation as an engine that died before dispatch,
+    // or miss a real one.
     const marker = runnerSource.match(/^const OPERATION_STARTED_MARKER = '([^']*)';$/m);
     expect(marker, 'godot-runner.ts must declare OPERATION_STARTED_MARKER').not.toBeNull();
     const logPrefix = operationsSource.match(
@@ -452,9 +414,8 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   });
 
   it('prints the import request as a line the retry check recognises', () => {
-    // Red when the marker text or the log_error prefix changes on one side
-    // only: a cold project would then fail every scene operation instead of
-    // importing and retrying.
+    // Red when the marker text or the log_error prefix changes on one side only:
+    // a cold project would fail every scene operation instead of importing and retrying.
     const errorPrefix = operationsSource.match(
       /^func log_error\(message\):\s*printerr\("([^"]*)" \+ message\)$/m,
     );
@@ -468,9 +429,7 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   });
 
   it('promotes the same add_node parameters on both sides', () => {
-    // Red when one list gains or loses a name: a top-level parameter would then
-    // be applied by the standalone tool and ignored inside a batch, or the
-    // reverse.
+    // Red when one list gains or loses a name: a top-level parameter would be applied by the standalone tool and ignored inside a batch, or the reverse.
     const gdList = operationsSource.match(
       /^const _PROMOTED_SPATIAL_PARAMS: Array = \[([^\]]*)\]$/m,
     );
@@ -499,9 +458,8 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   });
 
   it('dispatches the batch operations the item check admits, and names them in its hint', () => {
-    // Red when an operation is added to or removed from one side only: the
-    // item check would then refuse an operation the script runs, or admit one
-    // the script answers with "Unknown batch operation".
+    // Red when an operation is added to one side only: the item check would refuse an operation the script runs,
+    // or admit one it answers with "Unknown batch operation".
     const tsList = argParsingSource.match(
       /^const BATCH_OPERATION_NAMES = \[([^\]]*)\] as const;$/m,
     );

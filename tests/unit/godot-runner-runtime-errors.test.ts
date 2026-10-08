@@ -1,14 +1,3 @@
-/**
- * Direct tests for the runtime-error extraction primitives on GodotRunner:
- * `extractRuntimeErrors` and `getErrorsSince`.
- *
- * Both feed the runtime-error warning channel for take_screenshot,
- * simulate_input, get_ui_elements, and the false-positive escalation in
- * run_script. If SCRIPT_ERROR_PATTERNS drifts (case mismatch with actual
- * Godot 4.x stderr lines) all four handlers silently lose their warning
- * channel: `runtimeErrors.length > 0` is then always false.
- */
-
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import type { GodotProcess } from '../../src/utils/godot-runner.js';
@@ -16,9 +5,7 @@ import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
 import { MAX_PENDING_LINE_CHARS, truncatedLineMarker } from '../../src/utils/child-output.js';
 import { installSession } from '../helpers/session-install.js';
 
-/** Actions in a batch whose only stderr output is their boundary lines. */
 const BOUNDARY_ONLY_ACTIONS = 3;
-/** A newline-free stream, delivered in chunks that together pass the pending cap several times. */
 const NEWLINE_FREE_CHUNK_CHARS = 4096;
 const NEWLINE_FREE_CHUNKS = (MAX_PENDING_LINE_CHARS / NEWLINE_FREE_CHUNK_CHARS) * 3;
 
@@ -69,9 +56,7 @@ describe('GodotRunner.extractRuntimeErrors', () => {
   });
 
   it('is case-sensitive: lowercase variants are filtered out', () => {
-    // Documents current behavior. If Godot ever emits lowercase variants the
-    // caller's warning channel will silently miss them; this test will need
-    // updating alongside the patterns.
+    // Documents current behavior: lowercase variants would be silently missed, and this test updates alongside the patterns.
     const lines = ['script error: lower', 'user script error: lower', 'SCRIPT ERROR: kept'];
     expect(runner.extractRuntimeErrors(lines)).toEqual(['SCRIPT ERROR: kept']);
   });
@@ -111,7 +96,6 @@ describe('GodotRunner.getErrorsSince', () => {
       totalErrorsWritten: 4,
     });
     installSession(runner, { process: proc });
-    // Marker captured before e3 + e4 arrived.
     expect(runner.getErrorsSince(2)).toEqual(['e3', 'e4']);
   });
 
@@ -136,10 +120,6 @@ describe('GodotRunner.getErrorsSince', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Sentinel-aware stderr ingestion and per-action error attribution
-// ---------------------------------------------------------------------------
-
 describe('GodotRunner.ingestStderrChunk', () => {
   let runner: GodotRunner;
   beforeEach(() => {
@@ -147,9 +127,7 @@ describe('GodotRunner.ingestStderrChunk', () => {
   });
 
   it('keeps sentinel lines out of proc.errors and counts only retained lines', () => {
-    // proc.errors is the single buffer behind get_debug_output AND
-    // stop_project's finalErrors, so keeping sentinels out of it here is what
-    // keeps both of those clean - no per-read filter exists or is needed.
+    // proc.errors is the single buffer behind get_debug_output and stop_project's finalErrors, so keeping sentinels out of it keeps both clean.
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(
       proc,
@@ -203,8 +181,6 @@ describe('GodotRunner.ingestStderrChunk', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'a\n');
     runner.ingestStderrChunk(proc, 'b\n');
-    // The empty string after a final newline is not a line: nothing is
-    // retained for it, and the next chunk starts a line of its own.
     expect(proc.errors).toEqual(['a', 'b']);
     expect(proc.totalErrorsWritten).toBe(2);
   });
@@ -219,7 +195,6 @@ describe('GodotRunner.ingestStderrChunk', () => {
 
   it('retains no carriage return and no blank line from Windows line endings', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
-    // One line per chunk, the way a Windows pipe delivers them.
     runner.ingestStderrChunk(proc, 'first\r\n');
     runner.ingestStderrChunk(proc, '\r\n');
     runner.ingestStderrChunk(proc, 'second\r\nthird\r\n');
@@ -230,7 +205,6 @@ describe('GodotRunner.ingestStderrChunk', () => {
   it('rejoins a line whose chunk boundary fell between the carriage return and the newline', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     runner.ingestStderrChunk(proc, 'SCRIPT ERROR: boom\r');
-    // Not a line until its newline arrives.
     expect(proc.errors).toEqual([]);
     runner.ingestStderrChunk(proc, '\nnext\r\n');
     expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'next']);
@@ -239,7 +213,6 @@ describe('GodotRunner.ingestStderrChunk', () => {
 
   it('leaves no empty entry where a boundary line was stripped', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
-    // Each printerr arrives as its own CRLF-terminated chunk.
     for (let action = 0; action < BOUNDARY_ONLY_ACTIONS; action += 1) {
       runner.ingestStderrChunk(proc, `${ACTION_BOUNDARY_SENTINEL} ${action}\r\n`);
     }
@@ -254,9 +227,8 @@ describe('GodotRunner.ingestStderrChunk', () => {
 
   it('classifies a boundary only once its line has ended, so a split index is read whole', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
-    // The first chunk ends in text that already reads as boundary 1. It is the
-    // front of boundary 12: recording it at once would mark the wrong action
-    // and leave a stray line "2" in the log.
+    // The first chunk ends in text that already reads as boundary 1 but is the front of boundary 12:
+    // recording it at once would mark the wrong action and leave a stray line "2" in the log.
     runner.ingestStderrChunk(proc, `a\n${ACTION_BOUNDARY_SENTINEL} 1`);
     expect(proc.actionBoundaries ?? []).toEqual([]);
     runner.ingestStderrChunk(proc, '2\nb\n');
@@ -281,7 +253,6 @@ describe('GodotRunner.ingestStderrChunk', () => {
     runner.finishStderr(proc);
     expect(proc.errors).toEqual(['a', 'last words']);
     expect(proc.totalErrorsWritten).toBe(2);
-    // Finishing twice adds nothing.
     runner.finishStderr(proc);
     expect(proc.errors).toEqual(['a', 'last words']);
   });
@@ -298,13 +269,10 @@ describe('GodotRunner.ingestStderrChunk', () => {
     const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
     const chunk = 'x'.repeat(NEWLINE_FREE_CHUNK_CHARS);
     for (let i = 0; i < NEWLINE_FREE_CHUNKS; i += 1) runner.ingestStderrChunk(proc, chunk);
-    // One retained line: the cut head with its marker. The rest of the line
-    // is dropped, not accumulated.
     const cutLine =
       'x'.repeat(MAX_PENDING_LINE_CHARS) + truncatedLineMarker(MAX_PENDING_LINE_CHARS);
     expect(proc.errors).toEqual([cutLine]);
     expect(proc.stderrLines?.pendingText).toBe('');
-    // The newline that finally arrives ends the cut line; the next line is whole.
     runner.ingestStderrChunk(proc, 'tail\nnext\n');
     expect(proc.errors).toEqual([cutLine, 'next']);
   });

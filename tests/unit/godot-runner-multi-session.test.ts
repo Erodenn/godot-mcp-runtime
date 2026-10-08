@@ -1,13 +1,5 @@
-/**
- * Several projects running at once: one session record per project, a current
- * pointer that never moves by itself, a per-session exit epoch, and one bridge
- * socket that follows the current session.
- *
- * Same boundary as godot-runner-session-lifecycle.test.ts: `child_process.spawn`
- * is mocked so `runProject` runs its real body without a Godot binary, and
- * `BridgeManager` is replaced with a recorder. The profiler module is mocked
- * as well, so a test can hold `runProject` inside its profiler await.
- */
+/** `child_process.spawn` is mocked so `runProject` runs its real body without Godot, and BridgeManager is a recorder.
+ * The profiler is mocked too, so a test can hold `runProject` inside its profiler await. */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
@@ -53,26 +45,17 @@ const PORT_B = 19972;
 const PORT_C = 19973;
 /** Port for the second run of project A, so a replaced session is tellable from its replacement. */
 const PORT_A_RERUN = 19974;
-/** Stand-in debugger port reported by the fake profiler. */
 const FAKE_DEBUGGER_PORT = 19975;
-/**
- * A stop sends `shutdown` to a port nobody listens on and waits out the
- * runner's own shutdown timeout per session; three sessions fit well inside.
- */
+/** A stop sends `shutdown` to a port nobody listens on and waits out the runner's timeout per session. */
 const STOP_CASE_TIMEOUT_MS = 15000;
-/** How long after a faked kill the fake child reports its exit. */
 const EXIT_REPORT_DELAY_MS = 20;
 /** Delay before a call made from outside a queued operation, so it lands while the operation runs. */
 const OUTSIDE_CALL_DELAY_MS = 10;
-/** `taskkill` exit status for a pid no process has. */
 const TASKKILL_STATUS_NOT_FOUND = 128;
-/** Longest a test waits for a bridge wait that its request's deadline is expected to cut short. */
 const CUT_WAIT_CEILING_MS = 5000;
 /** How long ago a start that has used up nearly all of its request's time was requested. */
 const NEARLY_SPENT_REQUEST_AGE_MS = START_RESPONSE_BUDGET_MS - 1000;
-/** How long a fake child's stream stays open after its exit, in the stream-end case. */
 const STREAM_END_DELAY_MS = 40;
-/** Pid of another server process in a faked owner record. */
 const OTHER_SERVER_PID = 60001;
 const TOKEN_A = 'token-for-project-a';
 const TOKEN_B = 'token-for-project-b';
@@ -84,12 +67,7 @@ interface FakeChildProcess extends EventEmitter {
   kill: ReturnType<typeof vi.fn>;
 }
 
-/**
- * Minimal ChildProcess stand-in. With `exitOnKill`, the first `kill` queues
- * one `'exit'` in a microtask, the way a process that dies promptly looks to
- * the runner. Without it the test emits `'exit'` itself, at the moment under
- * test.
- */
+/** ChildProcess stand-in. With `exitOnKill` the first `kill` queues one `'exit'` in a microtask; without it the test emits `'exit'` itself. */
 function makeFakeChildProcess(opts: { exitOnKill: boolean }): FakeChildProcess {
   const proc = new EventEmitter() as FakeChildProcess;
   proc.stdout = new EventEmitter();
@@ -115,7 +93,6 @@ function makeFakeProfiler(hasResult: boolean): FakeProfiler {
   return { port: FAKE_DEBUGGER_PORT, hasResult, close: vi.fn() };
 }
 
-/** A retained process that has already exited, for records installed by hand. */
 function exitedProcess(exitCode: number): GodotProcess {
   return {
     process: makeFakeChildProcess({ exitOnKill: false }) as unknown as ChildProcess,
@@ -130,18 +107,14 @@ function exitedProcess(exitCode: number): GodotProcess {
 
 interface BridgeRecorder {
   cleanupCalls: string[];
-  /** Projects cleaned through `cleanupAtExit`, the entry that runs no helper program. */
   exitCleanupCalls: string[];
   injectCalls: string[];
   /** Thrown by the next prechecks, standing in for a refusal. Null: the project is healthy. */
   precheckError: Error | null;
-  /** Projects whose cleanup throws, after being recorded. */
   cleanupThrowsFor: Set<string>;
-  /** What cleanup reports as unconfirmed, per project. Absent: nothing. */
   cleanupProblemsFor: Map<string, string[]>;
 }
 
-/** Swap the runner's BridgeManager for a recorder. Touches no filesystem. */
 function stubBridge(runner: Runner): BridgeRecorder {
   const rec: BridgeRecorder = {
     cleanupCalls: [],
@@ -182,11 +155,8 @@ function stubBridge(runner: Runner): BridgeRecorder {
 
 interface RecordingBridge {
   port: number;
-  /** Every frame received, parsed, in arrival order. */
   frames: Array<Record<string, unknown>>;
-  /** Connections accepted so far. */
   connectionCount(): number;
-  /** Answer every command held back so far (see `held`). */
   releaseHeld(): void;
   shutdown(): Promise<void>;
 }
@@ -199,11 +169,7 @@ interface RecordingBridgeOptions {
   held?: string[];
 }
 
-/**
- * Loopback bridge that records each parsed frame and answers it with a pong.
- * With `dropFirstFrame`, the first frame it ever receives is recorded and its
- * connection closed without an answer, the way a transient drop looks.
- */
+/** Loopback bridge that answers each frame with a pong; with `dropFirstFrame` it closes the first frame's connection unanswered. */
 async function startRecordingBridge(opts: RecordingBridgeOptions = {}): Promise<RecordingBridge> {
   const frames: Array<Record<string, unknown>> = [];
   const peers = new Set<net.Socket>();
@@ -299,7 +265,6 @@ describe('multi-project runtime sessions', () => {
     for (const loopback of loopbacks) await loopback.shutdown();
   });
 
-  /** Run a project with a fresh fake child and hand the child back. */
   async function startProject(
     projectPath: string,
     port: number,
@@ -321,14 +286,6 @@ describe('multi-project runtime sessions', () => {
     return runner.listSessions().map((info) => info.projectPath);
   }
 
-  // -------------------------------------------------------------------------
-  // Session map
-  // -------------------------------------------------------------------------
-
-  // -------------------------------------------------------------------------
-  // Movie runs
-  // -------------------------------------------------------------------------
-
   it('refuses both kinds of start on a project a movie run is using, and lets them through once it has closed', async () => {
     const endMovieRun = runner.beginMovieRun(projectA);
 
@@ -344,11 +301,9 @@ describe('multi-project runtime sessions', () => {
     expect(bridge.injectCalls).toEqual([]);
     expect(runner.listSessions()).toEqual([]);
 
-    // Another project is not held up by it.
     await startProject(projectB, PORT_B);
 
     endMovieRun();
-    // Ending twice ends one run, not two.
     endMovieRun();
     await startProject(projectA, PORT_A);
     expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
@@ -388,7 +343,6 @@ describe('multi-project runtime sessions', () => {
     let endMovieRun: (() => void) | undefined;
     await runner.runExclusive('render_movie', async () => {
       await issued;
-      // What render_movie does in this step: check, register, spawn.
       expect(runner.hasLiveSessionOnProject(projectA)).toBe(false);
       endMovieRun = runner.beginMovieRun(projectA);
     });
@@ -490,10 +444,6 @@ describe('multi-project runtime sessions', () => {
     expect(runner.hasLiveSessionOnProject(projectC)).toBe(false);
   });
 
-  // -------------------------------------------------------------------------
-  // Per-session exit epoch
-  // -------------------------------------------------------------------------
-
   it('a restart held in its profiler await has stopped nothing and written nothing yet', async () => {
     const first = await startProject(projectA, PORT_A, { exitOnKill: false });
     let resolveProfiler: (profiler: FakeProfiler) => void = () => {};
@@ -505,9 +455,7 @@ describe('multi-project runtime sessions', () => {
     const second = makeFakeChildProcess({ exitOnKill: false });
     queuedChildren.push(second);
 
-    // The debugger listener is one of the start's preconditions. While it is
-    // pending the session being replaced is untouched: still running, still
-    // current, and its bridge has not been injected over.
+    // The debugger listener is a precondition: while it is pending, the session being replaced is untouched.
     const pending = runner.runProject(projectA, undefined, false, PORT_A_RERUN, true);
     await vi.waitFor(() => expect(profilerCreateMock).toHaveBeenCalledTimes(1));
     expect(first.kill).not.toHaveBeenCalled();
@@ -569,15 +517,10 @@ describe('multi-project runtime sessions', () => {
     childA.emit('exit', 0);
 
     expect(closeSpy).not.toHaveBeenCalled();
-    // The socket to B is the same one: the next command needs no new connect.
     await runner.sendCommand('ping');
     expect(loopbackB.connectionCount()).toBe(1);
     expect(loopbackB.frames).toHaveLength(2);
   });
-
-  // -------------------------------------------------------------------------
-  // Stop, and no fallback to another session
-  // -------------------------------------------------------------------------
 
   it(
     'stopProject stops the current session only and leaves current empty',
@@ -681,10 +624,6 @@ describe('multi-project runtime sessions', () => {
     expect(loopbackB.frames).toHaveLength(1);
   });
 
-  // -------------------------------------------------------------------------
-  // The current session's game exits by itself
-  // -------------------------------------------------------------------------
-
   it('a self-exit of the current session is reported with the other live session listed', async () => {
     await startProject(projectA, PORT_A);
     const childB = await startProject(projectB, PORT_B);
@@ -696,7 +635,6 @@ describe('multi-project runtime sessions', () => {
     expect(status.state).toBe('exited');
     expect(status.current).toMatchObject({ projectPath: projectB, exitCode: 3, live: false });
     expect(status.otherLiveSessions.map((info) => info.projectPath)).toEqual([projectA]);
-    // The exited session is still the current one, so its logs read at once.
     expect(runner.activeProcess?.output.join('')).toContain('last words from B');
     expect(runner.activeSessionMode).toBeNull();
   });
@@ -727,10 +665,6 @@ describe('multi-project runtime sessions', () => {
     expect(runner.readSessionLogs(projectB)).toBeNull();
     expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, current: false });
   });
-
-  // -------------------------------------------------------------------------
-  // Process-exit cleanup and shutdown
-  // -------------------------------------------------------------------------
 
   it('cleanupBridgeArtifactsSync visits every session that still holds artifacts', async () => {
     const childA = await startProject(projectA, PORT_A);
@@ -778,10 +712,6 @@ describe('multi-project runtime sessions', () => {
     STOP_CASE_TIMEOUT_MS,
   );
 
-  // -------------------------------------------------------------------------
-  // Spawning over this server's own attached session
-  // -------------------------------------------------------------------------
-
   it('spawning over an attached session on the same project shuts its bridge down first', async () => {
     const loopback = await startLoopback();
     await runner.attachProject(projectA, loopback.port);
@@ -822,15 +752,9 @@ describe('multi-project runtime sessions', () => {
     expect(runner.getSessionInfo(projectA)?.replacedAttached).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
-  // Games are killed as a process tree
-  // -------------------------------------------------------------------------
-
-  /** A pid for a fake child; nothing real is signalled, the OS calls are faked. */
   const FAKE_GAME_PID = 43210;
   const FAKE_OTHER_GAME_PID = 43211;
 
-  /** Replace the runner's OS kill calls with recorders for a Windows host. */
   function fakeWindowsTreeKill(onTaskkill: () => void = () => {}): { taskkillPids: string[] } {
     const taskkillPids: string[] = [];
     (runner as unknown as { killTreeDeps: unknown }).killTreeDeps = {
@@ -861,7 +785,6 @@ describe('multi-project runtime sessions', () => {
   it(
     'stopProject kills the spawned game as a tree, not the one pid it holds',
     async () => {
-      // The tree kill is what ends the process; report the exit as it would.
       let child: FakeChildProcess | null = null;
       const kills = fakeWindowsTreeKill(() => {
         queueMicrotask(() => child?.emit('exit', null));
@@ -872,7 +795,6 @@ describe('multi-project runtime sessions', () => {
 
       expect(result).toMatchObject({ mode: 'spawned', projectPath: projectA });
       expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID)]);
-      // taskkill succeeded, so the bare single-pid kill was never needed.
       expect(child.kill).not.toHaveBeenCalled();
     },
     STOP_CASE_TIMEOUT_MS,
@@ -932,14 +854,12 @@ describe('multi-project runtime sessions', () => {
       const result = await runner.stopProject();
 
       expect(result).toMatchObject({ killUnconfirmed: true, pid: FAKE_GAME_PID });
-      // No record is left to find the game through.
       expect(runner.listSessions()).toEqual([]);
       kills.taskkillPids.length = 0;
 
       runner.killSpawnedProcessesSync();
       expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID)]);
 
-      // Once the game has reported its exit there is nothing left to kill.
       child.emit('exit', null);
       kills.taskkillPids.length = 0;
       runner.killSpawnedProcessesSync();
@@ -973,7 +893,6 @@ describe('multi-project runtime sessions', () => {
 
       const result = await runner.stopProject();
 
-      // The polite stop and the forced one: both sent, neither answered.
       expect(kills.taskkillPids).toEqual([String(FAKE_GAME_PID), String(FAKE_GAME_PID)]);
       expect(result).toMatchObject({
         mode: 'spawned',
@@ -1054,7 +973,6 @@ describe('multi-project runtime sessions', () => {
     expect(() => runner.killSpawnedProcessesSync()).not.toThrow();
 
     expect(taskkillPids).toEqual([String(FAKE_GAME_PID), String(FAKE_OTHER_GAME_PID)]);
-    // With taskkill unavailable the single process is still killed.
     expect(childB.kill).toHaveBeenCalledTimes(1);
   });
 
@@ -1071,10 +989,6 @@ describe('multi-project runtime sessions', () => {
     expect(runner.getCurrentSessionInfo()).toBeNull();
     expect(bridge.cleanupCalls).toEqual([]);
   });
-
-  // -------------------------------------------------------------------------
-  // A start that fails
-  // -------------------------------------------------------------------------
 
   it('a start that throws leaves no session behind', async () => {
     spawnMock.mockImplementation(() => {
@@ -1106,8 +1020,6 @@ describe('multi-project runtime sessions', () => {
     expect(sessionPaths()).toEqual([projectA]);
     expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
     expect(bridge.cleanupCalls).toEqual([projectB]);
-    // Nothing was launched, so the call must not have moved the pointer: the
-    // session that was current before it is current again.
     expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA, live: true });
   });
 
@@ -1125,8 +1037,6 @@ describe('multi-project runtime sessions', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(sessionPaths()).toEqual([projectA, projectB]);
-    // A was current, not B: the pointer goes back to where it was, and the
-    // other live session is not picked instead.
     expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA });
   });
 
@@ -1153,8 +1063,6 @@ describe('multi-project runtime sessions', () => {
       'spawn godot ENOENT',
     );
 
-    // B was current and the restart killed it: there is nothing to go back
-    // to, and A is not promoted.
     expect(sessionPaths()).toEqual([projectA]);
     expect(runner.getCurrentSessionInfo()).toBeNull();
   });
@@ -1179,7 +1087,6 @@ describe('multi-project runtime sessions', () => {
 
     resolveProfiler(profiler);
 
-    // The resumed start must not go on to spawn a game after the shutdown.
     await expect(pending).rejects.toThrow(/server is shutting down.*nothing was launched/);
     expect(spawnMock).not.toHaveBeenCalled();
     expect(profiler.close).toHaveBeenCalledTimes(1);
@@ -1221,10 +1128,6 @@ describe('multi-project runtime sessions', () => {
     expect(runner.getCurrentSessionInfo()).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
-  // Preconditions come before the session being replaced is stopped
-  // -------------------------------------------------------------------------
-
   it('a restart whose precheck refuses leaves the running game alive and current', async () => {
     const child = await startProject(projectA, PORT_A, { exitOnKill: false });
     const record = (runner as unknown as { current: unknown }).current;
@@ -1238,7 +1141,6 @@ describe('multi-project runtime sessions', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(bridge.injectCalls).toEqual([projectA]);
     expect(bridge.cleanupCalls).toEqual([]);
-    // The same record, not a rebuilt one: still current, still live, same port.
     expect((runner as unknown as { current: unknown }).current).toBe(record);
     expect(runner.getCurrentSessionInfo()).toMatchObject({
       projectPath: projectA,
@@ -1286,10 +1188,6 @@ describe('multi-project runtime sessions', () => {
     expect((runner as unknown as { current: unknown }).current).toBe(record);
     expect(runner.getCurrentSessionInfo()).toMatchObject({ mode: 'attached', live: true });
   });
-
-  // -------------------------------------------------------------------------
-  // Attaching over this server's own attached session
-  // -------------------------------------------------------------------------
 
   it('an attach over a live attached session whose bridge answers keeps that session', async () => {
     const loopback = await startLoopback();
@@ -1348,7 +1246,6 @@ describe('multi-project runtime sessions', () => {
       token: TOKEN_B,
       current: false,
     });
-    // The current session: a game that exited, kept for its logs.
     installSession(runner, { mode: null, projectPath: projectA, process: exitedProcess(0) });
 
     const attach = runner.attachProject(projectB, PORT_B);
@@ -1364,10 +1261,6 @@ describe('multi-project runtime sessions', () => {
     expect(bridge.injectCalls).toEqual([]);
     expect(bridge.cleanupCalls).toEqual([]);
   });
-
-  // -------------------------------------------------------------------------
-  // Paths and ports a command may reach
-  // -------------------------------------------------------------------------
 
   it('a start on an explicit bridge port another live session holds is refused before anything is launched', async () => {
     const childA = await startProject(projectA, PORT_A);
@@ -1415,24 +1308,20 @@ describe('multi-project runtime sessions', () => {
     const send = (): Promise<unknown> =>
       runner.sendCommandWithErrors('run_script', {}).catch((error: unknown) => error);
 
-    // No current session at all.
     const noSession = await send();
     expect(noSession).toBeInstanceOf(NoLiveCurrentSessionError);
     expect(commandWasNotSent(noSession)).toBe(true);
 
-    // A session with no port: the channel fails before any frame exists.
     const record = installSession(runner, { mode: 'spawned', projectPath: projectA });
     const noPort = await send();
     expect((noPort as Error).name).toBe('BridgeDisconnectedError');
     expect(commandWasNotSent(noPort)).toBe(true);
 
-    // A record a stop has ended.
     record.stopped = true;
     const stopped = await send();
     expect(stopped).toBeInstanceOf(SessionStoppedError);
     expect(commandWasNotSent(stopped)).toBe(true);
 
-    // A frame that was written and then lost its connection may have run.
     const dropping = await startLoopback({ dropFirstFrame: true });
     installSession(runner, {
       mode: 'spawned',
@@ -1445,7 +1334,6 @@ describe('multi-project runtime sessions', () => {
     expect((dropped as Error).name).toBe('BridgeDisconnectedError');
     expect(commandWasNotSent(dropped)).toBe(false);
 
-    // A command a stop cut off was in flight.
     const wedged = await startLoopback({ unanswered: ['run_script'] });
     installSession(runner, {
       mode: 'attached',
@@ -1458,7 +1346,6 @@ describe('multi-project runtime sessions', () => {
     await runner.stopProject();
     expect(commandWasNotSent(await cut)).toBe(false);
 
-    // A frame that was written before this server closed the channel itself.
     const held = await startLoopback({ unanswered: ['run_script'] });
     installSession(runner, {
       mode: 'spawned',
@@ -1493,7 +1380,6 @@ describe('multi-project runtime sessions', () => {
     const childA = await startProject(projectA, PORT_A);
     childA.emit('exit', 1);
 
-    // The record keeps no port, and no default port stands in for it.
     await expect(runner.sendCommandWithErrors('run_script', {})).rejects.toThrow(/no bridge port/);
   });
 
@@ -1516,9 +1402,7 @@ describe('multi-project runtime sessions', () => {
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {});
     await vi.waitFor(() => expect(loopbackA.frames).toHaveLength(1));
-    // No tool call can move the pointer while a command holds the queue. A
-    // server shutdown can, so the pointer is moved underneath the command the
-    // way that would: the command must still finish on the session it began on.
+    // A server shutdown can move the pointer under a command; the command must still finish on the session it began on.
     const internals = runner as unknown as {
       sessions: Map<string, unknown>;
       setCurrent(session: unknown): void;
@@ -1534,10 +1418,6 @@ describe('multi-project runtime sessions', () => {
     ]);
     expect(loopbackB.frames).toEqual([]);
   });
-
-  // -------------------------------------------------------------------------
-  // One operation at a time
-  // -------------------------------------------------------------------------
 
   it('two commands issued together are sent one after the other, each to the session current at its turn', async () => {
     const loopback = await startLoopback();
@@ -1559,13 +1439,8 @@ describe('multi-project runtime sessions', () => {
       'get_ui_elements',
       'screenshot',
     ]);
-    // Both went down the one socket; neither was rejected as "in flight".
     expect(loopback.connectionCount()).toBe(1);
   });
-
-  // -------------------------------------------------------------------------
-  // A stop does not wait in the queue
-  // -------------------------------------------------------------------------
 
   it('a stop issued while a command is in flight cuts the command off and does not wait for it', async () => {
     // The game never answers run_script: a wedged script. Waiting for it would
@@ -1640,7 +1515,6 @@ describe('multi-project runtime sessions', () => {
     expect(error).toBeInstanceOf(SessionStoppedError);
     expect(error).toMatchObject({ command: 'get_ui_elements', cutOff: false });
     expect(loopback.connectionCount()).toBe(0);
-    // Not a disconnect: nothing probes the bridge or clears the session for it.
     expect(bridge.cleanupCalls).toEqual([]);
   });
 
@@ -1657,7 +1531,6 @@ describe('multi-project runtime sessions', () => {
           }),
       );
 
-      // The holder is still running when the stop returns.
       const stop = await runner.stopProject();
 
       expect(stop).toMatchObject({ mode: 'spawned', projectPath: projectA });
@@ -1692,9 +1565,7 @@ describe('multi-project runtime sessions', () => {
   it(
     'a start waiting for its bridge is told its session was stopped, not that its game exited',
     async () => {
-      // Nothing listens on PORT_A, so the wait would run its whole budget. The
-      // stop kills the game, so by the wait's next look the process has exited
-      // as well: the stop is what has to be reported.
+      // The stop kills the game, so by the wait's next look the process has exited: report the stop.
       const child = await startProject(projectA, PORT_A);
 
       const wait = runner.waitForBridge();
@@ -1709,11 +1580,6 @@ describe('multi-project runtime sessions', () => {
     STOP_CASE_TIMEOUT_MS,
   );
 
-  // -------------------------------------------------------------------------
-  // The time a start spent in the queue comes out of its bridge wait
-  // -------------------------------------------------------------------------
-
-  /** Make the queue report that the running operation was requested `ageMs` ago. */
   function stubQueueTurn(ageMs: number, waitedMs: number, behind: string | null): void {
     const queue = (runner as unknown as { queue: { turn(): unknown } }).queue;
     const requestedAt = Date.now() - ageMs;
@@ -1735,7 +1601,6 @@ describe('multi-project runtime sessions', () => {
       waitedMs: NEARLY_SPENT_REQUEST_AGE_MS,
     });
     expect(String(error)).toMatch(/Nothing was stopped or launched/);
-    // The session the start would have replaced is untouched.
     expect(running.kill).not.toHaveBeenCalled();
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(bridge.injectCalls).toEqual([]);
@@ -1780,10 +1645,6 @@ describe('multi-project runtime sessions', () => {
     expect(result.error).toContain('behind simulate_input');
   });
 
-  // -------------------------------------------------------------------------
-  // Logs handed back by a stop
-  // -------------------------------------------------------------------------
-
   it(
     'a stop waits for the streams of an exited game to end before it hands the logs back',
     async () => {
@@ -1825,10 +1686,6 @@ describe('multi-project runtime sessions', () => {
     STOP_CASE_TIMEOUT_MS,
   );
 
-  // -------------------------------------------------------------------------
-  // Re-attach: only a bridge seen to be gone is replaced
-  // -------------------------------------------------------------------------
-
   it(
     'an attach over an attached session whose bridge is listening and silent keeps that session',
     async () => {
@@ -1863,9 +1720,7 @@ describe('multi-project runtime sessions', () => {
       token: TOKEN_A,
     });
 
-    // A call from outside the operation, made while the operation holds the
-    // queue. The timer is created out here: one created inside the operation
-    // would count as part of it.
+    // The timer is created out here: one created inside the operation would count as part of it.
     let outsideError: unknown = null;
     const outsideCall = new Promise<void>((done) => {
       setTimeout(() => {

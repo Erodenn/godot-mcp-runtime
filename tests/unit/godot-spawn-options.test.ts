@@ -1,11 +1,4 @@
-/**
- * The options every Godot spawn is started with.
- *
- * What they are for (keeping a Windows Godot from writing onto the parent
- * terminal) cannot be observed from a test, so these cases pin only the
- * options themselves: which kind hides its console window, which kinds must
- * never ask for a hidden window, and that all of them keep piped stdio.
- */
+/** What the options are for (keeping a Windows Godot off the parent terminal) cannot be observed from a test, so these pin only the options themselves. */
 
 import { describe, it, expect } from 'vitest';
 import { godotSpawnOptions, type GodotSpawnKind } from '../../src/utils/godot-spawn-options.js';
@@ -68,7 +61,6 @@ describe('godotSpawnOptions', () => {
   it('every kind keeps piped stdio', () => {
     for (const kind of ALL_KINDS) {
       const { stdio } = godotSpawnOptions(kind);
-      // The movie run ignores stdin and pipes both output streams.
       const expected = kind === 'movie' ? ['ignore', 'pipe', 'pipe'] : 'pipe';
       expect(stdio, kind).toEqual(expected);
     }

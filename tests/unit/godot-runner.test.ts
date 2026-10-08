@@ -19,7 +19,6 @@ import {
 } from '../../src/utils/output-parsing.js';
 
 const RUN_TOKEN = '0123456789abcdef0123456789abcdef';
-/** The start of a result line as a run holding RUN_TOKEN writes it. */
 const RESULT_FRAME = `${OPERATION_RESULT_SENTINEL}${RUN_TOKEN}${OPERATION_RESULT_TOKEN_END}`;
 
 describe('normalizeParameters', () => {
@@ -80,9 +79,8 @@ describe('normalizeParameters', () => {
   });
 
   it('converts a sibling structural key while leaving the value subtree alone', () => {
-    // The shape a set_node_properties update actually arrives in: the keys the
-    // user authored inside `value` are a shader uniform name and must reach
-    // Godot byte for byte, while `node_path` beside it is ours to rename.
+    // The shape set_node_properties arrives in: keys inside `value` are a shader uniform name and must reach Godot byte for byte,
+    // while `node_path` beside it is ours to rename.
     const input = {
       node_path: 'root/Sprite',
       property: 'material',

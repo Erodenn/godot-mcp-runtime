@@ -16,7 +16,6 @@ const CODE_LINES_WITH_HAZARDS = 30;
 const HAZARD_COMMENTS = 3;
 const SPREAD_STRIDE = 10;
 
-/** One added hunk of `lines` for `path`, in `git diff --unified=0` shape. */
 function hunk(startLine: number, lines: string[]): string {
   return `@@ -0,0 +${startLine},${lines.length} @@\n${lines.map((l) => `+${l}`).join('\n')}\n`;
 }

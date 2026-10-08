@@ -1,12 +1,3 @@
-/**
- * Direct unit tests for executeSceneOp.
- *
- * Currently only covered transitively via the 15 scene/node handlers that
- * call it. A direct test localizes the failure when its contract drifts -
- * the empty-stdout branch and the catch branch are easy to break in a
- * refactor.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -47,11 +38,7 @@ interface LiveSession {
   hasExited?: boolean;
 }
 
-/**
- * Fake runner with live runtime-session state for the guard tests. Sets the
- * fields `hasActiveRuntimeSession()` actually reads, so the tests exercise
- * the real predicate rather than a stand-in.
- */
+/** Fake runner with live runtime-session state, setting the fields `hasActiveRuntimeSession()` reads so the real predicate runs. */
 function runnerWithLiveSession(session: LiveSession | null): FakeRunner {
   const fake = createFakeRunner({ stdout: '{"ok":true}' });
   const runner = fake.asRunner as GodotRunner & {
@@ -66,7 +53,6 @@ function runnerWithLiveSession(session: LiveSession | null): FakeRunner {
   return fake;
 }
 
-/** Give the fake live sessions on projects other than its current one. */
 function withExtraLiveSessions(fake: FakeRunner, projectPaths: string[]): void {
   (fake.asRunner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths =
     projectPaths;
@@ -123,7 +109,6 @@ describe('executeSceneOp', () => {
     );
     expectErrorMatching(result, /Failed to op/);
     expectErrorMatching(result, /node not found at root\/Missing/);
-    // Empty-stdout-specific solutions surface in the secondary text block.
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toContain('empty: a');
     expect(solutionsText).not.toContain('exc: a');
@@ -198,7 +183,7 @@ describe('executeSceneOp', () => {
         { mutatesSceneFile: true },
       );
       expectErrorMatching(result, /active.*session|session.*active/i);
-      expect(fake.calls.length).toBe(0); // rejected before spawning headless Godot
+      expect(fake.calls.length).toBe(0);
     });
 
     it('errors when mutating a scene while an attached session is active on the same project', async () => {
@@ -384,9 +369,7 @@ describe('executeSceneOp', () => {
       expectErrorMatching(result, /pid 4242/);
       expectErrorMatching(result, /wait/i);
       expect(fake.calls.length).toBe(0);
-      // The owner is on another host, so it counts as live for as long as its
-      // file exists. The refusal has to give the way out: the host it came
-      // from and the file to delete.
+      // The owner is on another host, so it counts as live while its file exists; the refusal must name that host and the file to delete.
       expectErrorMatching(result, /registered from another host \("some-host"/);
       const solutions = unwrap(result).content[1]?.text ?? '';
       expect(solutions).toContain('4242-abc123.json');
@@ -514,12 +497,9 @@ describe('executeSceneOp with no reason from the script', () => {
   });
 });
 
-// The import is waited for only while a retry still fits in the request: a
-// client with no progress token gives up at 60 s, and an answer sent after
-// that is never read.
+// The import is waited for only while a retry still fits in the request: a client with no progress token gives up at 60 s.
 describe('executeSceneOp cold-import wait is bounded by the request', () => {
   const MARKER_STDERR = '[IMPORT_NEEDED] main.tscn: res://assets/tex.png';
-  /** Promise hops between a timer firing and the call's answer; generous. */
   const MICROTASK_FLUSHES = 50;
 
   async function flushMicrotasks(): Promise<void> {
@@ -571,11 +551,8 @@ describe('executeSceneOp cold-import wait is bounded by the request', () => {
       first,
       /the project's assets are still being imported, nothing was changed; retry this call/,
     );
-    // The operation was not run a second time against a half-imported project.
     expect(fake.calls).toHaveLength(1);
 
-    // The retry: its first attempt asks for the import again and is handed
-    // the one still in flight, then goes on once that has finished.
     let second: Awaited<ReturnType<typeof run>> | undefined;
     void run(fake).then((result) => {
       second = result;
@@ -654,9 +631,6 @@ describe('executeSceneOp cold-import wait is bounded by the request', () => {
   });
 });
 
-// Cold-import retry contract: executeSceneOp reacts to the [IMPORT_NEEDED]
-// stderr marker by running importAssets() and retrying the operation exactly
-// once, capped structurally (no loop that could re-enter on a second marker).
 describe('executeSceneOp cold-import retry', () => {
   it('imports once and retries once when the marker appears with empty stdout, then succeeds', async () => {
     const fake = createFakeRunner({
@@ -779,9 +753,7 @@ describe('executeSceneOp cold-import retry', () => {
     expect(fake.importCalls).toEqual([]);
     expect(fake.calls).toHaveLength(1);
     expectErrorMatching(result, /second time/i);
-    // The caller has to know what did land, or it cannot resume safely.
     expectErrorMatching(result, /add_node/);
-    // The quoted payload is shown without its stdout framing.
     const message = unwrap(result).content[0]?.text ?? '';
     expect(message).not.toContain(OPERATION_RESULT_SENTINEL);
     expect(message).toContain(`reported by this run: ${partialBatch}`);
@@ -821,9 +793,7 @@ describe('executeSceneOp cold-import retry', () => {
     expect(hasError(result)).toBe(false);
   });
 
-  // A single-step operation emits its payload after it has saved. Replaying
-  // one adds the node a second time: Godot renames the copy, and the caller
-  // gets a success for the copy while the first node is never reported.
+  // A single-step operation emits its payload after saving; replaying it adds the node twice (Godot renames the copy).
   describe('an operation that emitted its result is never replayed', () => {
     const ADDED = JSON.stringify({ nodeName: 'Hud', nodeType: 'Label', nodePath: 'root/Hud' });
 
@@ -843,8 +813,7 @@ describe('executeSceneOp cold-import retry', () => {
     }
 
     it('when DEBUG=true echoes a parameter that holds the marker text', async () => {
-      // What log_debug writes to stderr for add_node with a Label text of
-      // "[IMPORT_NEEDED] soon": the marker text, quoted, on a line of its own kind.
+      // What log_debug writes to stderr for add_node with a Label text of "[IMPORT_NEEDED] soon".
       const { fake, result } = await addNodeWith(
         '[INFO] Operation: add_node\n[DEBUG] Params JSON: {"scene_path":"main.tscn","properties":{"text":"[IMPORT_NEEDED] soon"}}\n',
       );
@@ -925,12 +894,6 @@ describe('executeSceneOp cold-import retry', () => {
   });
 });
 
-// parseStdoutAsJson failure diagnosis: when a headless operation exits before
-// emitting its JSON payload (early quit(1) on error), stdout contains only
-// engine noise: RID-leak warnings are the canonical production shape (the
-// JSON-absent case). Blaming "GDScript returned invalid JSON" sends the
-// caller debugging the operation script instead of the actual failure; the
-// error must surface the offending stdout content and any stderr diagnostics.
 describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
   it('reports the non-JSON stdout content in the parse-failure error', async () => {
     const ridNoise = "ERROR: 5 RID allocations of type 'P11GodotBody2D' were leaked at exit.\n";
@@ -947,10 +910,8 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
     );
     expect(hasError(result)).toBe(true);
     expectErrorMatching(result, /Failed to op/);
-    // The misleading blame is gone...
     const message = unwrap(result).content[0]?.text ?? '';
     expect(message).not.toContain('bug in godot_operations.gd');
-    // ...and the offending stdout is surfaced so the real cause is visible.
     expect(message).toContain('RID allocations');
   });
 
@@ -1046,16 +1007,14 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
       { parseStdoutAsJson: true },
     );
     expectErrorMatching(result, /Identifier "Foo" not declared/);
-    // The continuation line carries the file+line: the single most useful
-    // part of a Godot diagnostic: and must survive into the error message.
+    // The continuation line carries the file and line and must survive into the error message.
     expectErrorMatching(result, /res:\/\/scripts\/bar\.gd/);
     expectErrorMatching(result, /:3/);
   });
 
   it('classifies unrecognized bracket-free stdout as an early exit rather than a JSON bug', async () => {
-    // A line shape the noise whitelist does not know (a stray print() from
-    // the operation script before it died) must not fall back to blaming
-    // JSON emission: with no JSON opener anywhere, nothing was emitted.
+    // A line shape the noise whitelist does not know (a stray print() before the script died) must not blame JSON emission:
+    // with no JSON opener anywhere, nothing was emitted.
     const fake = createFakeRunner({
       stdout:
         "Attaching script to root/Player\nERROR: 2 RID allocations of type 'P11GodotBody2D' were leaked at exit.",
@@ -1099,15 +1058,8 @@ describe('executeSceneOp parseStdoutAsJson failure diagnosis', () => {
   });
 });
 
-// Captured verbatim from Godot 4.6.2.stable.mono on Windows: attach_script
-// against a missing node (log_error + quit(1)) with DEBUG=true, back when
-// log_debug still wrote to stdout. It is kept as the fixture because it is the
-// worst stdout a headless op can produce: non-empty, non-JSON, and carrying
-// `{`/`[` from the echoed params, so any classifier keying on bracket presence
-// reads it as a payload attempt and reports a JSON emission bug. The debug
-// lines now go to stderr (see the logging invariant at the end of this file),
-// so this exact stdout is no longer producible -- the classifier still has to
-// handle it, and anything else that ever lands non-JSON on stdout.
+// Captured from Godot 4.6.2 mono on Windows (attach_script on a missing node, DEBUG=true): non-JSON stdout carrying `{`/`[` from the echoed params.
+// The worst case a classifier must handle; log_debug now writes to stderr, so it is no longer producible.
 const CAPTURED_DEBUG_EARLY_EXIT_STDOUT = [
   'Godot Engine v4.6.2.stable.mono.official.71f334935 - https://godotengine.org',
   '',
@@ -1116,7 +1068,6 @@ const CAPTURED_DEBUG_EARLY_EXIT_STDOUT = [
   '[DEBUG] Loading scene from: res://_capture/target.tscn',
 ].join('\n');
 
-/** The result token of the captured run, which wrote no result line. */
 const CAPTURED_RUN_RESULT_TOKEN = '0123456789abcdef0123456789abcdef';
 
 const CAPTURED_DEBUG_EARLY_EXIT_STDERR = [
@@ -1128,10 +1079,7 @@ const CAPTURED_DEBUG_EARLY_EXIT_STDERR = [
 
 describe('executeSceneOp early-exit diagnosis against captured Godot output', () => {
   it('classifies a real DEBUG-mode early exit as such, not as a JSON emission bug', async () => {
-    // cleanStdout is what GodotRunner.executeOperation applies before a
-    // handler ever sees stdout, so applying it here keeps the fixture
-    // faithful to the production path rather than testing a shape that
-    // only a fake runner can produce.
+    // cleanStdout is applied as executeOperation does, so the fixture follows the production path.
     const fake = createFakeRunner({
       stdout: cleanStdout(CAPTURED_DEBUG_EARLY_EXIT_STDOUT, CAPTURED_RUN_RESULT_TOKEN),
       stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
@@ -1147,19 +1095,13 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
       { parseStdoutAsJson: true },
     );
     const message = unwrap(result).content[0]?.text ?? '';
-    // Every line of this stdout is banner or [DEBUG] status, which cleanStdout
-    // drops, so the run arrives as empty output and gets the same diagnosis
-    // the run produces without DEBUG: the operation's own [ERROR] line from
-    // stderr, with the handler's solutions. Pinned exactly, so a change that
-    // sends this case anywhere else (the no-payload message, or a JSON
-    // emission blame) fails here.
+    // Every line is banner or [DEBUG] status, which cleanStdout drops: same diagnosis as without DEBUG (stderr [ERROR] plus the handler's solutions).
+    // Pinned exactly, so a change that sends this case elsewhere fails here.
     expect(message).toBe(`${TEST_FAILURE_PREFIX}: Node not found: NoSuchNode`);
     expect(unwrap(result).content[1]?.text ?? '').toContain(EMPTY_SOLUTIONS[0]);
   });
 
-  // A project whose autoload prints to stdout sends every failed operation
-  // down the no-payload path. The operation's own reason is on stderr behind
-  // the engine's exit-time lines, and those used to be all that was shown.
+  // A project autoload printing to stdout sends every failed operation down the no-payload path; the reason sits on stderr behind exit-time lines.
   it("leads with the operation's own reason when engine diagnostics are also on stderr", async () => {
     const fake = createFakeRunner({
       stdout: '[Audio] ready',
@@ -1183,7 +1125,6 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
     const message = unwrap(result).content[0]?.text ?? '';
     expect(message).toContain('no JSON payload was emitted');
     expect(message).toContain('reason: Parent node not found: root/X');
-    // The engine line and the project's stdout are still shown, after it.
     expect(message.indexOf('Parent node not found')).toBeLessThan(
       message.indexOf('resources still in use'),
     );
@@ -1193,9 +1134,7 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
   });
 
   it('classifies the same captured stdout as no-payload when it reaches the parser uncleaned', async () => {
-    // Not a shape GodotRunner.executeOperation can hand over (it always
-    // cleans). This holds the interpreter itself to the rule: bracket-heavy
-    // text with no sentinel line is "no payload", never a parse attempt.
+    // Not a shape executeOperation can hand over (it always cleans): bracket-heavy text with no sentinel line is "no payload".
     const fake = createFakeRunner({
       stdout: CAPTURED_DEBUG_EARLY_EXIT_STDOUT,
       stderr: CAPTURED_DEBUG_EARLY_EXIT_STDERR,
@@ -1217,14 +1156,7 @@ describe('executeSceneOp early-exit diagnosis against captured Godot output', ()
   });
 });
 
-/**
- * stdout is the JSON channel for a headless operation and both validate check
- * paths strict-parse it, so a debug line there is not noise the parser skips:
- * it puts a `[` at column 0 of the very stream the payload shares, and nothing
- * but the sentinel framing keeps the two apart. Asserted against the script source
- * because only a real Godot run would otherwise catch it, and DEBUG=true is not
- * a mode the suite runs in.
- */
+/** Only the sentinel framing keeps a debug line's `[` at column 0 out of the payload stream; asserted on the script source because the suite never runs with DEBUG=true. */
 describe('godot_operations.gd logging channel', () => {
   const operationsSource = readFileSync(
     new URL('../../src/scripts/godot_operations.gd', import.meta.url),
@@ -1239,9 +1171,6 @@ describe('godot_operations.gd logging channel', () => {
   });
 });
 
-// Engine banner, the payload, and any print() from an autoload or a scene
-// script share stdout. Brackets in that noise used to make the payload
-// extraction pick the wrong span and report "invalid JSON".
 describe('executeSceneOp reads only the sentinel line as the payload', () => {
   const PAYLOAD = { results: [{ success: true }] };
   const PAYLOAD_LINE = `${OPERATION_RESULT_SENTINEL}${JSON.stringify(PAYLOAD)}`;
@@ -1380,11 +1309,7 @@ describe('executeSceneOp scene loss guard', () => {
   ].join('\n');
   const ADD_NODE_STDOUT = '{"nodeName":"Added","nodePath":"root/Added","nodeType":"Node2D"}';
 
-  /**
-   * A project holding SCENE, and a fake runner whose every executeOperation
-   * call writes the next entry of `sceneTexts` to it before answering, the way
-   * a headless save does.
-   */
+  /** A project holding SCENE, and a fake runner whose every executeOperation writes the next `sceneTexts` entry to it before answering. */
   function projectWithSavingRunner(
     sceneTexts: string[],
     options: Parameters<typeof createFakeRunner>[0] = { stdout: ADD_NODE_STDOUT },
@@ -1433,7 +1358,6 @@ describe('executeSceneOp scene loss guard', () => {
     expect(backup).not.toBeNull();
     expect(readFileSync(join(projectPath, ...backup![0].split('/')), 'utf8')).toBe(SCENE_BEFORE);
     expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
-    // The text block carries the same payload.
     expect(JSON.parse(unwrap(result).content[0]?.text ?? '')).toEqual(payload);
   });
 
@@ -1458,9 +1382,7 @@ describe('executeSceneOp scene loss guard', () => {
   });
 
   it('compares against the file as it was before the first attempt when the import retry runs', async () => {
-    // The first attempt writes a lossy file and asks for an import; the retry
-    // writes the same lossy file again. Measured against the first attempt's
-    // output the retry would look clean.
+    // The retry writes the same lossy file again; measured against the first attempt's output it would look clean.
     const { projectPath, fake } = projectWithSavingRunner([SCENE_LOSSY, SCENE_LOSSY], {
       responses: [
         { stdout: '', stderr: '[ERROR] [IMPORT_NEEDED] res://x.png' },
@@ -1540,11 +1462,7 @@ describe('executeSceneOp engine-newer-than-project warning', () => {
   /** Counts every save any runner of this suite made, so no two write the same bytes. */
   let saveCount = 0;
 
-  /**
-   * A fake runner whose every executeOperation call saves SCENE into the
-   * project it was called for, with new content each time, the way a headless
-   * save does. With `saves` false it leaves the project alone.
-   */
+  /** A fake runner whose every executeOperation saves SCENE into the project with new content; with `saves` false it leaves the project alone. */
   function savingRunner(options: Parameters<typeof createFakeRunner>[0], saves = true): FakeRunner {
     const fake = createFakeRunner(options);
     const runner = fake.asRunner;
@@ -1663,7 +1581,6 @@ describe('executeSceneOp engine-newer-than-project warning', () => {
       stdout: '{"results":[{"nodePath":"root/X","error":"not found"}]}',
       godotVersion: NEWER_ENGINE,
     };
-    // Every update failed: nothing was saved, so there is no save to describe.
     const idle = savingRunner(options, false);
     const payload = unwrap(await op(idle, projectPath)).structuredContent as Record<
       string,
@@ -1671,7 +1588,6 @@ describe('executeSceneOp engine-newer-than-project warning', () => {
     >;
     expect(payload.warnings).toBeUndefined();
 
-    // The note was not spent on the call that wrote nothing.
     const runner = idle.asRunner;
     const answer = runner.executeOperation.bind(runner);
     runner.executeOperation = async (...args: Parameters<GodotRunner['executeOperation']>) => {
@@ -1725,7 +1641,6 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
     '',
   ].join('\n');
 
-  /** A runner that writes `files[n]` (path -> content) into the project on its nth call. */
   function writingRunner(
     projectPath: string,
     files: Array<Record<string, string | Buffer>>,
@@ -1814,11 +1729,9 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
       ).warnings;
 
     expect(await warningsOf('level.scn')).toHaveLength(1);
-    // The second save of the same file, spelled another way, says nothing.
     expect(await warningsOf('./level.scn')).toBeUndefined();
     expect((await warningsOf('other.scn'))?.[0]).toMatch(/^Saved other\.scn, but the save was not/);
 
-    // Another runner is another server session and says it again.
     const second = writingRunner(projectPath, [{ 'level.scn': Buffer.from('RSRC\u00004') }]);
     const again = unwrap(await guarded(second, projectPath, inPlaceSceneWrite('level.scn')))
       .structuredContent as { warnings?: string[] };
@@ -1826,9 +1739,7 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
   });
 
   it('takes a deleted %Name from the path the operation reports, not from every node of that name', async () => {
-    // Two nodes are called Enemy and neither section stores the unique flag
-    // (it lives in the instanced scene). The operation deleted Squad/Enemy;
-    // the save also lost Reserve/Enemy, which nobody asked for.
+    // Two nodes are called Enemy and neither stores the unique flag (it lives in the instanced scene); the save also lost Reserve/Enemy.
     const before = [
       '[gd_scene format=3]',
       '',
@@ -1874,8 +1785,6 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
   });
 
   it('does not compare a file the operation set out to replace', async () => {
-    // create_scene over an existing path: everything the old file held is gone
-    // by request.
     const projectPath = tmp.makeProject('loss-guard-');
     writeFileSync(join(projectPath, 'main.tscn'), SCRIPTED, 'utf8');
     const fresh = '[gd_scene format=3]\n\n[node name="Fresh" type="Node3D"]\n';

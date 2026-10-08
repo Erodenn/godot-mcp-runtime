@@ -1,17 +1,3 @@
-/**
- * Headless result integrity, handler side.
- *
- * A call that reports success for something that did not happen is the failure
- * class under test. Two halves: a payload that carries a top-level error is an
- * error response whatever the exit path was, and an array item the caller got
- * wrong (a typo'd key, a missing value, a non-object) is refused before any
- * Godot process starts, naming the index, instead of being forwarded to a
- * script that would read the wrong node or abort.
- *
- * The modules under test are imported as namespaces so a missing export fails
- * the one case that uses it instead of the whole file.
- */
-
 import { describe, it, expect } from 'vitest';
 import * as headlessOp from '../../src/utils/headless-op.js';
 import * as nodeTools from '../../src/tools/node-tools.js';
@@ -28,7 +14,6 @@ const GOOD_UPDATE = { nodePath: 'root', property: 'visible', value: true };
 const UPDATE_WITHOUT_VALUE = { nodePath: 'root', property: 'visible' };
 const UPDATE_WITHOUT_PROPERTY = { nodePath: 'root' };
 
-/** Run an operation that parses its payload against a runner whose stdout is `stdout`. */
 async function interpret(stdout: string): Promise<unknown> {
   const fake = createFakeRunner({ stdout });
   return headlessOp.executeSceneOp(
