@@ -1,37 +1,5 @@
-/**
- * Integration test: statements Godot reads from project.godot but never writes.
- *
- * Godot 4.6 loads its main scene and its autoloads from several spellings the
- * editor never produces (a header and an assignment on one line, two
- * statements on one line, a blank inside a key, a quoted key, an autoload on
- * the header line, a `#` line under [autoload], a second entry trailing the
- * first). The launch scan has to see what the engine will load, so each form
- * is checked twice:
- *
- *   1. against the real engine, which must actually load the planted target
- *      (otherwise the form is not a real bypass and the next check proves
- *      nothing), and
- *   2. against the launch gate, which must count the statement as one it
- *      could not read reliably and refuse the launch under strict mode.
- *
- * One form is different. A junk line before a repeated header was expected to
- * plant a main scene and, on its first run against 4.6.2, did not: the engine
- * kept the benign one. Its engine check asserts that observed result, so a
- * version that starts reading the form the other way is noticed, and its gate
- * check is unchanged: the line is not one Godot writes, and the reader fails
- * closed on it whatever the engine makes of it.
- *
- * The engine check reads two things back from a headless run: a probe
- * autoload (registered on a canonical line, so it loads whatever the planted
- * line does) records the main scene the engine resolved, and the planted
- * autoload script writes a marker file when the engine instantiates it. Both
- * are plain files, so the assertions do not depend on any engine text format.
- *
- * The gate check needs no engine, but lives here so one table drives both.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
+// Each form Godot 4.6 reads but the editor never writes must load its planted target in the real engine and be refused by the launch gate under strict mode.
+// One junk-line-before-repeated-header form was observed on 4.6.2 to plant nothing; its engine check pins that, and the gate still fails closed.
 
 import { describe, beforeAll, expect } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
@@ -53,14 +21,9 @@ const PROBE_OUTPUT_FILE = 'probe_out.json';
 const PLANTED_AUTOLOAD_MARKER_FILE = 'evil_loaded.txt';
 
 const SCRIPTLESS_SCENE = '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n';
-/** A script the launch scan has nothing to say about. */
 const INERT_SCRIPT = 'extends Node\n';
 
-/**
- * Records, from inside the engine, what it resolved from project.godot. Runs
- * in `_init`, which is early enough to be in place before a headless
- * operation is dispatched.
- */
+/** Runs in `_init`, early enough to be in place before a headless operation is dispatched. */
 const PROBE_SCRIPT = [
   'extends Node',
   '',
@@ -81,7 +44,6 @@ const PROBE_SCRIPT = [
   '',
 ].join('\n');
 
-/** The planted autoload: proves, by writing a file, that the engine instantiated it. */
 const PLANTED_AUTOLOAD_SCRIPT = [
   'extends Node',
   '',
@@ -93,7 +55,6 @@ const PLANTED_AUTOLOAD_SCRIPT = [
   '',
 ].join('\n');
 
-/** The project.godot lines every form is appended to: canonical, and loading the probe. */
 const CANONICAL_HEAD = [
   'config_version=5',
   '',
@@ -107,20 +68,14 @@ const CANONICAL_HEAD = [
   '',
 ].join('\n');
 
-/**
- * `nothing_observed` is a form the engine was seen to load nothing from: the
- * main scene stays the benign one and no setting under `autoload/` is added.
- */
+/** `nothing_observed`: the engine was seen to load nothing from this form. */
 type Planted = 'main_scene' | 'autoload' | 'nothing_observed';
 
-/** The `autoload/` settings of a project whose only autoload is the probe. */
 const PROBE_ONLY_AUTOLOAD_SETTINGS = ['autoload/Probe'];
 
 interface NonCanonicalForm {
   name: string;
-  /** Appended to the canonical head. */
   extra: string;
-  /** What the form makes the engine load. */
   plants: Planted;
 }
 
@@ -172,12 +127,6 @@ const FORMS: ReadonlyArray<NonCanonicalForm> = [
   },
 ];
 
-/**
- * A project laid out around `projectGodot`. `instrumented` writes the probe
- * and the marker-writing planted autoload; otherwise both are inert scripts,
- * so a launch scan has no finding of its own and any refusal comes from the
- * unreadable statement.
- */
 function makeProject(projectGodot: string, instrumented: boolean): string {
   const dir = tmp.makeProject('godot-mcp-noncanonical-', projectGodot);
   writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
@@ -204,7 +153,6 @@ interface ProbeOutput {
   autoloadSettings: string[];
 }
 
-/** Run one headless operation, so the engine loads project.godot and its autoloads. */
 async function runEngineOver(dir: string): Promise<ProbeOutput> {
   const result = await handleGetSceneTree(runner, { projectPath: dir, scenePath: 'main.tscn' });
   const probePath = join(dir, PROBE_OUTPUT_FILE);

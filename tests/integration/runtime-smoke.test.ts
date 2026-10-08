@@ -1,19 +1,4 @@
-/**
- * Smoke tests for the runtime bridge (run_project → take_screenshot).
- *
- * These tests launch a real Godot window (or attempt to), verify the MCP
- * bridge initialises, and check that take_screenshot saves a PNG file.
- *
- * NOTE: take_screenshot requires a live display / rendering context. In
- * truly headless environments (no X server, no Wayland, no Windows desktop)
- * Godot's display server will fail to start and the test will time out or
- * error before the bridge is ready. If this is the case in your environment,
- * the test is marked it.skip with a comment: do not remove the test, flag
- * it to the team lead instead.
- *
- * Requires GODOT_PATH; skipped only when it is unset. CI sets it in the
- * dedicated `godot-integration` job, so these tests do run there.
- */
+/** take_screenshot needs a live display; in a truly headless environment the display server fails to start and the bridge never comes up. */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { existsSync } from 'fs';
@@ -42,15 +27,11 @@ describe('runtime bridge smoke', () => {
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
         removeTmpDir(tmpProject);
-      } catch {
-        // best-effort
-      }
+      } catch {}
       tmpProject = null;
     }
   });
@@ -58,27 +39,23 @@ describe('runtime bridge smoke', () => {
   itGodot(
     'take_screenshot saves a PNG file after run_project',
     async (ctx) => {
-      // Use a tmp copy so the injected McpBridge autoload does not pollute
-      // the committed fixture project.godot
+      // A tmp copy keeps the injected McpBridge autoload out of the committed project.godot.
       const id = randomBytes(6).toString('hex');
       tmpProject = join(tmpdir(), `godot-mcp-runtime-smoke-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
-      // Start the project: waitForBridge polls until the TCP ping responds
       await runProjectOrSkip(runner, ctx, tmpProject);
 
       const response = await runner.sendCommand('screenshot', {}, 15000);
       const parsed = JSON.parse(response) as { path?: string; error?: string };
 
       if (parsed.error) {
-        // Surface the error clearly rather than a confusing assertion failure
         throw new Error(`Screenshot bridge error: ${parsed.error}`);
       }
 
       expect(parsed).toHaveProperty('path');
       expect(typeof parsed.path).toBe('string');
 
-      // The path comes back as a forward-slash Godot path; normalise for Windows
       const screenshotPath =
         process.platform === 'win32'
           ? (parsed.path as string).replace(/\//g, '\\')
@@ -86,7 +63,6 @@ describe('runtime bridge smoke', () => {
 
       expect(existsSync(screenshotPath)).toBe(true);
 
-      // The file should live inside .mcp/godot-runtime/screenshots/ within the project dir
       const screenshotDir = screenshotsDir(tmpProject);
       expect(
         screenshotPath.startsWith(screenshotDir.replace(/\\/g, '/')) ||
@@ -105,7 +81,6 @@ describe('runtime bridge smoke', () => {
 
       await runProjectOrSkip(runner, ctx, tmpProject);
 
-      // Inject a LineEdit, focus it via run_script
       const setupScript = `
 extends RefCounted
 func execute(scene_tree: SceneTree) -> Variant:
@@ -122,7 +97,6 @@ func execute(scene_tree: SceneTree) -> Variant:
       expect(setupResp.error).toBeUndefined();
       expect(setupResp.result?.focused).toBe(true);
 
-      // Send "H" (shift+H gives uppercase) then "i" via simulate_input bridge
       await runner.sendCommand(
         'input',
         {
@@ -148,9 +122,7 @@ func execute(scene_tree: SceneTree) -> Variant:
         await runner.sendCommand('run_script', { source: readScript }, 10000),
       ) as { result?: { text?: string }; error?: string };
       expect(readResp.error).toBeUndefined();
-      // Expect "Hi": shift+H → 'H' (uppercase via auto-derive), then 'I' alone
-      // would be lowercase 'i' (no shift). The fix maps KEY_A..KEY_Z + shift to
-      // KEY_A..KEY_Z (uppercase), no-shift to lowercase.
+      // shift+H gives 'H'; a lone 'i' stays lowercase without shift (KEY_A..KEY_Z map to uppercase only with shift).
       expect(readResp.result?.text).toBe('Hi');
     },
     60000,
@@ -159,9 +131,7 @@ func execute(scene_tree: SceneTree) -> Variant:
   itGodot(
     'rejects a bridge frame with a wrong or missing session token',
     async (ctx) => {
-      // Regression coverage for the bridge auth gate: sendCommand always
-      // attaches the correct token, so exercising the rejection path requires
-      // talking to the bridge over a raw socket that bypasses GodotRunner.
+      // sendCommand always attaches the correct token, so the rejection path needs a raw socket that bypasses GodotRunner.
       const id = randomBytes(6).toString('hex');
       tmpProject = join(tmpdir(), `godot-mcp-runtime-auth-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
@@ -199,8 +169,6 @@ func execute(scene_tree: SceneTree) -> Variant:
       };
       expect(missingTokenResp.error).toMatch(/Unauthorized/);
 
-      // Sanity check: the runner's own authenticated ping still succeeds
-      // against the same live bridge.
       const okResp = JSON.parse(await runner.sendCommand('ping', {}, 5000)) as {
         status?: string;
       };

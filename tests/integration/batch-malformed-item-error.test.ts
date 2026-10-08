@@ -1,28 +1,4 @@
-/**
- * Integration test: batch_scene_operations error context for malformed items.
- *
- * Regression (observed in an agent-driven build session, 2026-09-11): an
- * operations[] item missing its `operation` key produced the bare error
- * "Unknown batch operation: ": empty operation name, no item index, no
- * hint. The agent (which cannot see the GDScript source) then retried the
- * same malformed batch twice before noticing the missing key, burning
- * three tool calls on an error message with no diagnostic content.
- *
- * The fix appends the offending item index and an inference hint when
- * `operation` is omitted: sibling keys (node_name/node_type, updates,
- * texture_path) identify the intended operation.
- *
- * Reachability note: although the tool's JSON schema declares
- * `required: ['operation']`, the MCP SDK does not validate arguments
- * server-side on this path: dispatch hands args straight through
- * conversion to the GDScript layer (a typo'd `Operation` key arrives as
- * `_operation`, `operation: null` as null). Non-schema-compliant callers
- *: the agent population this regression was observed on: reach the
- * guard, so the diagnostic is live code, not dead defense.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** The MCP SDK does not validate arguments server-side on this path, so a missing `operation` (a typo'd key arrives as `_operation`, `operation: null` as null) reaches the GDScript guard. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync } from 'fs';
@@ -59,9 +35,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -75,7 +49,6 @@ async function runBatch(operations: object[]): Promise<BatchResult[]> {
     tmpProject,
     30000,
   )) as { stdout: string };
-  // The GDScript layer prints {"results": [...]} to stdout.
   const parsed = JSON.parse(extractJson(stdout)) as {
     results: BatchResult[];
   };
@@ -87,9 +60,7 @@ describe('batch_scene_operations malformed-item error context', () => {
     'missing operation key reports the item index and an add_node hint',
     async () => {
       const results = await runBatch([
-        // Item 0: valid: proves later malformed items don't kill the run.
         { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Fine' },
-        // Item 1: nodeName/nodeType present but `operation` omitted.
         {
           scenePath: 'main.tscn',
           nodeName: 'Background',
@@ -101,8 +72,7 @@ describe('batch_scene_operations malformed-item error context', () => {
       const err = results[1].error ?? '';
       expect(err).toContain('operations[1]');
       expect(err).toContain("'operation' key");
-      // Precise: the inference hint, not the enumeration list text
-      // ("one of: add_node, ...") which both contain the op name.
+      // Asserts the inference hint, not the enumeration text ("one of: add_node, ...") which also contains the op name.
       expect(err).toContain("did you mean operation 'add_node'?");
     },
     60000,
@@ -112,9 +82,7 @@ describe('batch_scene_operations malformed-item error context', () => {
     'explicit null operation reports the item index and an add_node hint, without crashing the batch',
     async () => {
       const results = await runBatch([
-        // Item 0: valid: proves later malformed items don't kill the run.
         { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Fine' },
-        // Item 1: nodeName/nodeType present but `operation` is explicitly null.
         {
           operation: null,
           scenePath: 'main.tscn',

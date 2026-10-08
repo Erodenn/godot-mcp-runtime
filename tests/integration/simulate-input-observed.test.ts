@@ -1,27 +1,5 @@
-/**
- * Integration tests for simulate_input against a real Godot window.
- *
- * simulate_input reports what each action actually did: the Control it hit, the
- * signals that fired, the visible-Control delta, watch samples, and the runtime
- * errors a handler raised. Every claim in that list is observed inside the
- * engine rather than inferred from the request, so it can only be verified
- * against a live process. These tests drive the real handler over the real
- * bridge using the committed probe scene, `input_probe.tscn`.
- *
- * Requires GODOT_PATH; skipped when it is unset. CI sets it in the
- * `godot-integration` job and runs this file against Godot 4.5.1 and 4.6.2, so
- * nothing here may depend on an API that only one of them has.
- *
- * The `hit` field and the occlusion check both come from the viewport's hovered
- * control, which the bridge reaches through a `has_method` guard. Every
- * assertion that depends on them branches on the same engine probe
- * (`probeHoverApi`) so both engines pass, and each branch asserts the full
- * documented behavior for that engine rather than skipping the check.
- *
- * The probe scene is launched by rewriting `run/main_scene` in a disposable
- * copy of the fixture project. Each test gets its own launch: a toggled button
- * or a revealed panel would otherwise leak into a later UI-delta assertion.
- */
+// The `hit` field and occlusion check come from the viewport's hovered control behind a `has_method` guard; every assertion that depends on them branches on `probeHoverApi`.
+// The probe scene launches through a rewritten `run/main_scene` in a disposable project copy, one launch per test, so toggled or revealed UI cannot leak into a later UI-delta assertion.
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync, writeFileSync } from 'fs';
@@ -36,16 +14,13 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleSimulateInput } from '../../src/tools/runtime-tools.js';
 import type { HandlerResult } from '../../src/mcp.types.js';
 
-/** Absolute scene-tree path of the probe scene's root node. */
 const PROBE_ROOT = '/root/InputProbe';
 
 function p(sub: string): string {
   return `${PROBE_ROOT}/${sub}`;
 }
 
-/** `Mover.position.x` as authored in input_probe.tscn. */
 const MOVER_START_X = 400;
-/** Watch spec used by every test that measures the probe_move poll. */
 const MOVER_WATCH = `${p('Mover')}:position:x`;
 const WAIT_FRAMES_EXACT = 10;
 const WAIT_MS_MIN = 200;
@@ -53,19 +28,11 @@ const SHORT_WAIT_FRAMES = 2;
 const HOLD_WAIT_FRAMES = 3;
 const TEST_TIMEOUT_MS = 60000;
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
-/** Enough stderr lines to cover a whole batch's worth of engine output. */
 const RECENT_ERROR_LINES = 200;
-/**
- * How long the abandoned batch parks. Wall clock, not frames: a frame count
- * makes the whole test frame-rate dependent, and the window it has to outlast
- * is measured in seconds.
- */
+/** Wall clock, not frames: a frame count makes the test frame-rate dependent, and the window it must outlast is in seconds. */
 const STALE_BATCH_WAIT_MS = 6000;
-/** Client patience for the batch above: it times out almost immediately. */
 const STALE_CLIENT_TIMEOUT_MS = 300;
-/** Comfortably past the point where the abandoned batch would have resumed. */
 const STALE_RESUME_MARGIN_MS = STALE_BATCH_WAIT_MS + 3000;
-/** Drain window for the boundary poll; longer than the default for headroom. */
 const STALE_DRAIN_TIMEOUT_MS = 1000;
 
 type InputEntry = Record<string, unknown>;
@@ -80,13 +47,7 @@ const tmpDirs: string[] = [];
 
 let runner: GodotRunner;
 
-/**
- * A throwaway copy of the fixture project whose main scene is the probe scene.
- * Rewriting `run/main_scene` is deliberate: `runProject`'s positional scene
- * argument has no coverage anywhere in the suite, and making these tests its
- * first exerciser would make a bad scene argument indistinguishable from a bad
- * fixture.
- */
+/** Rewrites `run/main_scene` rather than using `runProject`'s positional scene argument, which no other test covers, so a bad scene argument stays distinguishable from a bad fixture. */
 function makeProbeProject(): string {
   const id = randomBytes(6).toString('hex');
   const dst = join(tmpdir(), `godot-mcp-input-${id}`);
@@ -96,7 +57,6 @@ function makeProbeProject(): string {
     'res://main.tscn',
     `res://${inputProbeScenePath}`,
   );
-  // Fails here rather than in every test below if the probe scene is renamed.
   expect(content, 'project.godot main scene must point at the probe scene').toContain(
     inputProbeScenePath,
   );
@@ -104,16 +64,10 @@ function makeProbeProject(): string {
   return dst;
 }
 
-/** The project the current test launched. */
 function currentProject(): string {
   return tmpDirs[tmpDirs.length - 1]!;
 }
 
-/**
- * Run GDScript in the live process through the bridge directly, which is the
- * out-of-band read these tests use to check state simulate_input does not
- * report. `bodyLines` are the tab-indented body of `execute`.
- */
 async function script(bodyLines: string[]): Promise<unknown> {
   const source =
     'extends RefCounted\n' +
@@ -127,11 +81,7 @@ async function script(bodyLines: string[]): Promise<unknown> {
   return parsed.result;
 }
 
-/**
- * Whether this engine exposes the viewport's hovered control. The bridge reads
- * `get_viewport()`, which for an autoload is the root `Window`, so this probes
- * the same object the bridge does.
- */
+/** The bridge reads `get_viewport()`, the root Window for an autoload, so this probes the same object. */
 async function probeHoverApi(): Promise<boolean> {
   const result = (await script([
     'return {"has_api": scene_tree.root.has_method("gui_get_hovered_control")}',
@@ -139,7 +89,6 @@ async function probeHoverApi(): Promise<boolean> {
   return result?.has_api === true;
 }
 
-/** The handler's success payload. Throws on an error response. */
 async function simulate(args: Record<string, unknown>): Promise<InputPayload> {
   const result = await handleSimulateInput(runner, args);
   if (!result.ok) {
@@ -150,7 +99,6 @@ async function simulate(args: Record<string, unknown>): Promise<InputPayload> {
   return structured as unknown as InputPayload;
 }
 
-/** The raw handler result, for the cases that assert on an error response. */
 function simulateExpectingError(args: Record<string, unknown>): Promise<HandlerResult> {
   return handleSimulateInput(runner, args);
 }
@@ -172,9 +120,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -221,8 +167,7 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(payload.results).toHaveLength(1);
       const entry = payload.results[0]!;
       expect(entry).toMatchObject({ index: 0, type: 'click_element', ok: true });
-      // A toggle Button emits pressed as well, so the exact array is not the
-      // contract; the presence of toggled is.
+      // A toggle Button also emits pressed, so the presence of toggled is the contract, not the exact array.
       expect(entry.signals, `toggled must be observed; entry=${JSON.stringify(entry)}`).toContain(
         'toggled',
       );
@@ -244,8 +189,6 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(entry).toMatchObject({ index: 0, type: 'click_element', ok: false });
       expect(entry.signals).toBeUndefined();
       expect(String(entry.error)).toMatch(/disabled/i);
-      // The refusal comes from the explicit disabled pre-check, before any
-      // injection, so this action hovered nothing either.
       expect(entry.hit).toBeUndefined();
       expect(payload.success).toBe(false);
     },
@@ -265,7 +208,6 @@ describe('simulate_input observed results (live bridge)', () => {
         ],
       });
 
-      // A partial batch is never an error response: the timeline is the value.
       expect(
         result.ok,
         `a partially failed batch must return a success-shaped response; result=${JSON.stringify(result)}`,
@@ -282,8 +224,7 @@ describe('simulate_input observed results (live bridge)', () => {
         expect(second).toMatchObject({ index: 1, type: 'wait', skipped: true });
         expect(payload.success).toBe(false);
       } else {
-        // Documented degradation: without the hovered-control API there is no
-        // occlusion signal at all, so the click reports plain success.
+        // Without the hovered-control API there is no occlusion signal, so the click reports plain success.
         expect(first).toMatchObject({ index: 0, type: 'click_element', ok: true });
         expect(first.error).toBeUndefined();
         expect(second.skipped).toBeUndefined();
@@ -310,8 +251,6 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(changes?.appeared, `the revealed Panel must appear; ${seen}`).toContain(
         p('HiddenPanel'),
       );
-      // Subtree collapse: an ancestor in the same list stands in for its
-      // descendants.
       expect(changes?.appeared, `PanelLabel must be collapsed away; ${seen}`).not.toContain(
         p('HiddenPanel/PanelLabel'),
       );
@@ -337,8 +276,6 @@ describe('simulate_input observed results (live bridge)', () => {
 
       expect(payload.results).toHaveLength(3);
       const [clean, failing, trailing] = payload.results as [InputEntry, InputEntry, InputEntry];
-      // A handler raising an error does not make the action itself fail: the
-      // click was delivered and the signal fired.
       expect(payload.success).toBe(true);
       expect(clean.errors).toBeUndefined();
       expect(trailing.errors).toBeUndefined();
@@ -349,9 +286,7 @@ describe('simulate_input observed results (live bridge)', () => {
       ).toBe(true);
       expect((errors ?? []).join('\n')).toContain('SCRIPT ERROR');
 
-      // The boundary sentinels are stripped at the single stderr ingestion
-      // site, so this one assertion covers get_debug_output and
-      // stop_project's finalErrors too: all three read the same buffer.
+      // Boundary sentinels are stripped at the single stderr ingestion site, so this covers get_debug_output and stop_project's finalErrors too.
       expect(runner.getRecentErrors(RECENT_ERROR_LINES).join('\n')).not.toContain(
         'MCP_ACTION_BOUNDARY',
       );
@@ -426,12 +361,9 @@ describe('simulate_input observed results (live bridge)', () => {
         ],
       });
       expect(released.results).toHaveLength(2);
-      // still_held is per call: this batch pressed nothing of its own.
       expect(released.still_held).toBeUndefined();
 
-      // Samples are only compared across a later call: the release event
-      // flushes on the following frame, so one more step of movement inside
-      // the release batch itself is legitimate.
+      // The release event flushes on the following frame, so one more step of movement inside the release batch is legitimate.
       const settled = await simulate({
         watch,
         actions: [
@@ -482,8 +414,6 @@ describe('simulate_input observed results (live bridge)', () => {
   itGodot(
     'text with nothing focused fails',
     async (ctx) => {
-      // The probe scene never calls grab_focus, which is what makes this
-      // launch's focus owner empty.
       await runProjectOrSkip(runner, ctx, currentProject());
 
       const result = await simulateExpectingError({ actions: [{ type: 'text', text: 'x' }] });
@@ -507,7 +437,6 @@ describe('simulate_input observed results (live bridge)', () => {
 
       const byFrames = await simulate({ actions: [{ type: 'wait', frames: WAIT_FRAMES_EXACT }] });
       expect(byFrames.results).toHaveLength(1);
-      // Exactly N: a wait injects nothing, so it adds no settle frame.
       expect(byFrames.results[0]!).toMatchObject({
         index: 0,
         type: 'wait',
@@ -548,8 +477,6 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(text).toContain('action 1');
       expect(text).toContain('NotARealKeyName');
 
-      // The whole batch is validated before anything is injected, so the
-      // action at index 0 must never have been pressed.
       const state = (await script([
         'return {',
         '\t"pressed": Input.is_action_pressed("probe_move"),',
@@ -582,8 +509,6 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(text).toContain('action 0');
       expect(text).toContain('double_click');
 
-      // Rejected in the bridge's own pre-validation, so nothing was injected:
-      // the panel the click would have revealed must still be hidden.
       const state = (await script([
         'return {',
         '\t"visible": scene_tree.root.get_node("InputProbe/HiddenPanel").visible,',
@@ -610,8 +535,6 @@ describe('simulate_input observed results (live bridge)', () => {
       expect(payload.results).toHaveLength(1);
       const entry = payload.results[0]!;
       expect(entry.ok).toBe(true);
-      // Exactly null, not merely falsy: an omitted key would mean the sample
-      // was skipped rather than attempted.
       expect(entry).toHaveProperty(['watch', missing], null);
       expect(
         typeof (entry.watch as Record<string, unknown>)[MOVER_WATCH],
@@ -634,10 +557,7 @@ describe('simulate_input observed results (live bridge)', () => {
       });
 
       expect(payload.results).toHaveLength(2);
-      // The load-bearing claim is that the post-action read survived the target
-      // being freed by its own handler. changes.disappeared is deliberately not
-      // asserted: queue_free's timing relative to the settle frame is exactly
-      // what this test cannot know.
+      // changes.disappeared is not asserted: queue_free's timing relative to the settle frame is unknowable here.
       expect(payload.results[0]!).toMatchObject({ index: 0, type: 'click_element', ok: true });
       expect(payload.results[1]!).toMatchObject({ index: 1, type: 'wait', ok: true });
 
@@ -663,9 +583,7 @@ describe('simulate_input observed results (live bridge)', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());
 
-      // Every one of these is read straight into a typed event property or a
-      // numeric cast at injection time, where a wrong type raises mid-batch and
-      // the peer never gets a response.
+      // Each is read into a typed event property or numeric cast at injection time, where a wrong type raises mid-batch and the peer never gets a response.
       const cases: Array<[Record<string, unknown>, RegExp]> = [
         [{ type: 'mouse_motion', x: 'nope', y: 0 }, /x must be a number/],
         [{ type: 'mouse_motion', x: 0, y: 0, relative_x: {} }, /relative_x must be a number/],
@@ -681,12 +599,9 @@ describe('simulate_input observed results (live bridge)', () => {
         expect(result.ok, `${JSON.stringify(bad)} must be refused`).toBe(false);
         const message = result.ok ? '' : (result.error.content[0]?.text ?? '');
         expect(message).toMatch(expected);
-        // Whole-batch pre-validation: the index is named and the leading action
-        // never ran.
         expect(message).toMatch(/action 1/);
       }
 
-      // The session is untouched by a refusal, so a valid batch still runs.
       const payload = await simulate({ actions: [{ type: 'wait', frames: 1 }] });
       expect(payload.results).toHaveLength(1);
     },
@@ -698,9 +613,7 @@ describe('simulate_input observed results (live bridge)', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());
 
-      // Park a batch in a wall-clock wait far longer than the patience its
-      // client allows, so the command times out - destroying the socket - while
-      // the batch is still parked.
+      // Park a batch in a wall-clock wait far past the client's patience, so the timeout destroys the socket while the batch is parked.
       await expect(
         runner.sendCommand(
           'input',
@@ -714,11 +627,8 @@ describe('simulate_input observed results (live bridge)', () => {
         ),
       ).rejects.toThrow(/timed out/);
 
-      // What an agent does next: retry. That reconnects and starts another
-      // batch, and either event is what tells the bridge the parked batch has
-      // nobody left to report to. Everything after this point is the guarantee
-      // under test - not whether the platform reports the destroyed peer, which
-      // it may never do while the client is idle.
+      // The retry reconnects and starts another batch; either event tells the bridge the parked batch has nobody to report to.
+      // The platform may never report the destroyed peer while the client is idle, so the guarantee below is what is tested.
       const capture = runner.beginActionErrorCapture();
       const raw = await runner.sendCommand(
         'input',
@@ -727,16 +637,11 @@ describe('simulate_input observed results (live bridge)', () => {
       );
       expect((JSON.parse(raw) as { success?: boolean }).success).toBe(true);
 
-      // Wait past the point where the abandoned batch would have resumed and
-      // printed its own boundaries into this window.
       await new Promise((resolve) => setTimeout(resolve, STALE_RESUME_MARGIN_MS));
       const collected = await runner.collectActionErrors(capture, 1, STALE_DRAIN_TIMEOUT_MS);
       expect(collected.sentinelTimedOut, 'this batch marked its own boundary').toBe(false);
 
-      // The decisive assertion: exactly one boundary in this window, index 0,
-      // belonging to the batch that opened it. An abandoned batch that kept
-      // running would have added its own action 0 and action 1 marks here, and
-      // the ingestion site cannot tell those from this batch's own.
+      // Exactly one boundary here: an abandoned batch that kept running would add its own marks, which the ingestion site cannot tell from this batch's.
       const boundaries = runner.activeProcess?.actionBoundaries ?? [];
       expect(
         boundaries.map((mark) => mark.index),

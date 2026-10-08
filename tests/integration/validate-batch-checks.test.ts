@@ -1,13 +1,4 @@
-/**
- * Integration tests for per-target checks inside the batch validate operation
- * (GDScript op validate_batch with a checks[] array on a targets[] item).
- *
- * These assert the two properties the wire shape exists for: the whole batch,
- * checks included, runs in one Godot process, and a target that cannot be
- * loaded reports on itself without costing the other targets their result.
- *
- * Requires GODOT_PATH.
- */
+/** The whole batch, checks included, runs in one Godot process, and a target that cannot be loaded reports on itself without costing the others their result. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync } from 'fs';
@@ -58,17 +49,14 @@ describe('validate - batch targets with checks', () => {
     for (const dir of tmpDirs) {
       try {
         removeTmpDir(dir);
-      } catch {
-        // best-effort cleanup
-      }
+      } catch {}
     }
   });
 
   itGodot(
     'runs checks for every target in one Godot process',
     async () => {
-      // input_probe.tscn's root is a Node, so the third target's Control
-      // schema is a deliberate mismatch and the only failing target.
+      // input_probe.tscn's root is a Node, so the third target's Control schema is a deliberate mismatch and the only failing target.
       const { stdout } = await runner.executeOperation(
         'validate_batch',
         {

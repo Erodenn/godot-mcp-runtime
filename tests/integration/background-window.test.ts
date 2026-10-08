@@ -1,18 +1,4 @@
-/**
- * Integration tests for background mode against a real Godot process.
- *
- * Background mode parks the game window off-screen after startup. Doing that
- * must not disturb the viewport: a window that grows when it goes borderless
- * shifts the viewport's final transform, and every injected click then lands
- * somewhere other than where it was aimed. These tests launch the probe scene
- * with `background: true` and check that the transform is still the identity,
- * the window still has the viewport's size, and a click at a button's centre
- * (by name and by coordinates) still presses that button.
- *
- * Requires GODOT_PATH; skipped when it is unset. `hit` depends on the
- * viewport's hovered-control API, so that assertion branches on the same
- * engine probe `simulate-input-observed.test.ts` uses.
- */
+/** A window that grows when it goes borderless shifts the viewport's final transform, so injected clicks miss; `hit` branches on the same engine probe simulate-input-observed uses. */
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync, writeFileSync } from 'fs';
@@ -29,13 +15,9 @@ import { handleSimulateInput } from '../../src/tools/runtime-tools.js';
 const PLAIN_BTN = '/root/InputProbe/PlainBtn';
 const TEST_TIMEOUT_MS = 60000;
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
-/**
- * The bridge applies the background flags in its `_ready`, and a window
- * manager can take a moment to settle the new size afterwards. The transform
- * is read after this many milliseconds so a late change would be seen.
- */
+/** The bridge applies the background flags in `_ready` and a window manager can take a moment to settle the size, so the transform is read after this delay. */
 const SETTLE_MS = 2500;
-/** Decimal places the transform must match the identity to: float noise only, far below the 0.8 percent the bug produced. */
+/** Float noise only, far below the 0.8 percent the bug produced. */
 const TRANSFORM_PRECISION_DIGITS = 4;
 
 interface InputEntry {
@@ -48,7 +30,6 @@ const tmpDirs: string[] = [];
 
 let runner: GodotRunner;
 
-/** A throwaway copy of the fixture project whose main scene is the probe scene. */
 function makeProbeProject(): string {
   const id = randomBytes(6).toString('hex');
   const dst = join(tmpdir(), `godot-mcp-background-${id}`);
@@ -69,7 +50,6 @@ function currentProject(): string {
   return tmpDirs[tmpDirs.length - 1]!;
 }
 
-/** Run GDScript in the live process through the bridge. `bodyLines` are the body of `execute`. */
 async function script(bodyLines: string[]): Promise<unknown> {
   const source =
     'extends RefCounted\n' +
@@ -90,7 +70,6 @@ async function probeHoverApi(): Promise<boolean> {
   return result?.has_api === true;
 }
 
-/** The handler's results[] for a batch. Throws on an error response. */
 async function simulate(actions: Record<string, unknown>[]): Promise<InputEntry[]> {
   const result = await handleSimulateInput(runner, { actions });
   if (!result.ok) {
@@ -121,9 +100,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -187,8 +164,7 @@ describe('background mode (live bridge)', () => {
         'return {"x": c.x, "y": c.y}',
       ])) as { x: number; y: number };
 
-      // Observe the press from inside the engine: a bare mouse_button action
-      // reports no signals, so count `pressed` on the button for the click.
+      // A bare mouse_button action reports no signals, so count `pressed` on the button from inside the engine.
       await script([
         `var btn := scene_tree.root.get_node("${PLAIN_BTN.replace('/root/', '')}") as Button`,
         'btn.set_meta("mcp_press_count", 0)',

@@ -1,14 +1,4 @@
-/**
- * Integration tests for how batch validate ties an engine diagnostic to the
- * target that caused it. Godot reports a script's parse error against its
- * simplified res:// path, so a target the caller wrote another way ("./a.gd",
- * a backslash, a directory containing a space) used to match no diagnostic and come back
- * valid. These run the real handler against a tmp copy of the fixture project
- * and assert on parsed payloads only.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
+/** Godot reports a script's parse error against its simplified res:// path, so a target written another way ("./a.gd", a backslash, a directory with a space) matched no diagnostic. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, mkdirSync, writeFileSync } from 'fs';
@@ -24,11 +14,8 @@ import { handleValidate } from '../../src/tools/validate-tools.js';
 
 const CASE_TIMEOUT_MS = 120000;
 
-/** A GDScript with a parse error: an unclosed parameter list. */
 const BROKEN_SCRIPT = 'extends Node\nfunc broken(\n\t# unclosed parameter list\n';
-/** An abstract script with no errors. It loads and instantiates, and is still valid. */
 const ABSTRACT_SCRIPT = '@abstract\nclass_name AttributionAbstractProbe\nextends Node\n';
-/** An abstract script with a parse error: an unclosed parameter list. */
 const ABSTRACT_BROKEN_SCRIPT =
   '@abstract\nclass_name AttributionAbstractBroken\nextends Node\nfunc broken(\n\t# unclosed parameter list\n';
 
@@ -57,13 +44,10 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** Validate one script target through the batch path and return its entry. */
 async function validateScriptTarget(scriptPath: string): Promise<BatchEntry> {
   const result = await handleValidate(runner, {
     projectPath,
@@ -124,8 +108,7 @@ describe('validate batch attribution against a real engine', () => {
     CASE_TIMEOUT_MS,
   );
 
-  // The verdict for an abstract script does not rest on whether this engine
-  // version lets one be instantiated, so a broken one must still be caught.
+  // The verdict for an abstract script does not rest on whether this engine version lets one be instantiated.
   itGodot(
     'an @abstract script with a parse error is invalid',
     async () => {
@@ -137,8 +120,7 @@ describe('validate batch attribution against a real engine', () => {
     CASE_TIMEOUT_MS,
   );
 
-  // A scriptPath that loads as something other than a GDScript was checked by
-  // nothing. "It loaded" used to be reported as valid: true.
+  // A scriptPath that loads as something other than a GDScript is checked by nothing; "it loaded" is not valid: true.
   itGodot(
     'a scriptPath that does not load as a GDScript is not reported valid, in a batch or alone',
     async () => {

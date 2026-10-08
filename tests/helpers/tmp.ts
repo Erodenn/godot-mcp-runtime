@@ -1,12 +1,3 @@
-/**
- * Shared tmp-directory helper for tests that need an isolated filesystem.
- *
- * Tests that mutate disk state (writing project.godot, copying fixtures, etc.)
- * should create their dirs through this helper. Pair with `useTmpDirs()`
- * inside a `describe` block: the returned `track()` registers the dir for
- * `afterEach` cleanup so a failing test doesn't leak orphans into later runs.
- */
-
 import { afterEach } from 'vitest';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -16,19 +7,12 @@ const REMOVE_BUDGET_MS = 10_000;
 const REMOVE_RETRY_DELAY_MS = 100;
 const RETRYABLE_REMOVE_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
 
-/** Block this thread for `ms` without spinning. */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/**
- * Remove a temp directory, retrying while something still holds it. On
- * Windows the suite starts Godot through a launcher exe, so killing a game
- * kills the launcher at once and the real Godot only dies a moment later (the
- * kill-on-close job object), still holding the directory: a bare `rmSync`
- * right after a stop fails with EBUSY. The retry is a loop of its own because
- * `rmSync`'s `maxRetries` did not wait this case out (measured on Node 22).
- */
+// On Windows the launcher dies at once but the real Godot only a moment later (kill-on-close job object), still holding the directory, so a bare rmSync fails with EBUSY.
+// The retry is its own loop because rmSync's maxRetries did not wait this out (measured on Node 22).
 export function removeTmpDir(dir: string): void {
   const deadline = Date.now() + REMOVE_BUDGET_MS;
   for (;;) {
@@ -45,13 +29,7 @@ export function removeTmpDir(dir: string): void {
   }
 }
 
-/**
- * Copy a committed fixture project into a fresh temp directory and return the
- * copy's path. A handler that writes into the project it is given (the
- * `.mcp/` namespace, a `.gitignore` entry, a scene) is never pointed at the
- * committed directory: the caller removes the copy with `removeTmpDir`, or
- * passes it to `useTmpDirs().track`.
- */
+/** Handlers that write into the project they are given never touch the committed fixture directory. */
 export function copyProjectToTmp(fixtureDir: string, prefix = 'mcp-fixture-copy-'): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   cpSync(fixtureDir, dir, { recursive: true });
@@ -59,11 +37,8 @@ export function copyProjectToTmp(fixtureDir: string, prefix = 'mcp-fixture-copy-
 }
 
 export interface TmpDirHandle {
-  /** Track an already-created dir so it gets cleaned up after each test. */
   track(dir: string): string;
-  /** mkdtemp + track in one call. */
   make(prefix?: string): string;
-  /** mkdtemp + write a minimal project.godot + track. */
   makeProject(prefix?: string, content?: string): string;
 }
 
@@ -71,25 +46,13 @@ const DEFAULT_PROJECT_GODOT = 'config_version=5\n';
 
 const FEATURES_LINE_REGEX = /^config\/features=.*\r?\n/m;
 
-/**
- * Remove the `config/features` line from a tmp copy's project.godot, so the
- * project states no engine version. Every scene mutation on a project whose
- * stated version is older than the running engine leads with a warning; a test
- * that asserts an exact payload, or the absence of `warnings`, calls this
- * right after copying a fixture so its assertions hold on every engine in the
- * CI matrix. Never call it on a committed fixture directory.
- */
+/** Every scene mutation on a project whose stated version is older than the running engine leads with a warning; call this on a tmp copy so exact-payload assertions hold on every CI engine. Never call it on a committed fixture. */
 export function dropProjectFeatureVersion(projectDir: string): void {
   const projectFile = join(projectDir, 'project.godot');
   const content = readFileSync(projectFile, 'utf8');
   writeFileSync(projectFile, content.replace(FEATURES_LINE_REGEX, ''), 'utf8');
 }
 
-/**
- * Register an `afterEach` cleanup hook for tmp dirs created during the
- * enclosing describe block. Returns a handle whose methods all push into the
- * same internal list.
- */
 export function useTmpDirs(): TmpDirHandle {
   const dirs: string[] = [];
 
@@ -97,9 +60,7 @@ export function useTmpDirs(): TmpDirHandle {
     for (const d of dirs) {
       try {
         removeTmpDir(d);
-      } catch {
-        // ignore cleanup errors
-      }
+      } catch {}
     }
     dirs.length = 0;
   });

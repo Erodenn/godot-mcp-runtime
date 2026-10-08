@@ -1,23 +1,5 @@
-/**
- * Integration tests for render_movie against a real movie-writer run.
- *
- * The tool measures PNG frames the engine actually wrote, so the only way to
- * know the movie writer's output decodes, that a rendered frame and an empty
- * one are told apart, and that an animated scene differs from a static one is
- * to run Godot. The scenes are the fixture's main scene and its siblings:
- * blank.tscn, motion_animated.tscn and motion_static.tscn.
- *
- * Requires GODOT_PATH; skipped when it is unset, and skipped on a Linux
- * machine with no display server (the movie writer needs the real renderer).
- * Assertions are on the parsed payload and the filesystem only. Every run goes
- * through the handler's own timeout-and-kill; no test spawns Godot itself.
- *
- * Sibling scenes are launched by rewriting `run/main_scene` in a disposable
- * copy of the fixture project, the same convention as simulate-input-observed,
- * except where a test is about the `scene` parameter itself.
- *
- * The movie-writer run flow is adapted from PR 63 by Mickael Canevet.
- */
+// Skipped on a Linux machine with no display server (the movie writer needs the real renderer).
+// Sibling scenes launch through a rewritten `run/main_scene` in a disposable project copy, except where a test is about the `scene` parameter itself.
 
 import { describe, beforeAll, afterAll, expect, type TestContext } from 'vitest';
 import { cpSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
@@ -73,11 +55,6 @@ const ctx = makeContext({ disableSecurity: true });
 
 let runner: GodotRunner;
 
-/**
- * A throwaway copy of the fixture project. With `mainScene`, `run/main_scene`
- * is rewritten to that scene so a sibling scene can be launched without
- * touching main.tscn.
- */
 function makeProject(mainScene?: string): string {
   const id = randomBytes(6).toString('hex');
   const dst = join(tmpdir(), `godot-mcp-render-movie-${id}`);
@@ -88,7 +65,6 @@ function makeProject(mainScene?: string): string {
       'res://main.tscn',
       `res://${mainScene}`,
     );
-    // Fails here rather than as a misleading result if the scene is renamed.
     expect(content, 'project.godot main scene must point at the requested scene').toContain(
       mainScene,
     );
@@ -102,7 +78,6 @@ function projectFileBytes(projectDir: string): Buffer {
   return readFileSync(join(projectDir, 'project.godot'));
 }
 
-/** The render_movie call never edits project.godot and never leaves the bridge behind. */
 function expectProjectUntouched(projectDir: string, before: Buffer): void {
   const after = projectFileBytes(projectDir);
   expect(after.equals(before), 'project.godot must be byte-identical after the call').toBe(true);
@@ -121,7 +96,6 @@ function skipWhenNoDisplay(testCtx: Pick<TestContext, 'skip'>, text: string): vo
   }
 }
 
-/** Call render_movie; skip for a missing display server, throw for any other error. */
 async function renderOrSkip(
   testCtx: Pick<TestContext, 'skip'>,
   args: Record<string, unknown>,
@@ -152,9 +126,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 

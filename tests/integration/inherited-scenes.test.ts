@@ -1,15 +1,5 @@
-/**
- * Integration tests for inherited scenes and edits inside instanced scenes.
- *
- * Scenes are loaded with an edit state, as the editor does, so PackedScene.pack
- * can tell an override from an inherited value. Without it a mutation of an
- * inherited scene (derived_unit.tscn extends base_unit.tscn) flattened it into
- * a plain scene with every base node written out, and an edit inside an
- * instanced child (host.tscn) pinned every non-default property of that child.
- *
- * Every assertion reads the .tscn text from disk. Requires GODOT_PATH. Skipped
- * locally when it is unset; CI sets it in the godot-integration job.
- */
+// Scenes load with an edit state, as the editor does, so PackedScene.pack can tell an override from an inherited value.
+// Every assertion reads the .tscn text from disk.
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync } from 'fs';
@@ -51,22 +41,14 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
 
-/**
- * The property lines under the first section whose header starts with
- * `headerPrefix`, up to the next blank line or section. Null when no such
- * section exists.
- */
 function sectionProperties(text: string, headerPrefix: string): string[] | null {
   const lines = text.split('\n');
   const start = lines.findIndex((line) => line.startsWith(headerPrefix));

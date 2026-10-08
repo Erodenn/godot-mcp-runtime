@@ -1,11 +1,4 @@
-/**
- * The private-desktop launcher passes the child's standard streams,
- * environment, arguments and exit code through, and ends the child with
- * itself. Uses node as the target through the launcher's target-variable mode,
- * so it needs no Godot. Windows only; skipped when the launcher does not
- * resolve (no compiler, show-windows opt-out). Nothing here asserts focus,
- * which cannot be tested reliably.
- */
+/** Uses node as the launcher target, so it needs no Godot; windows only, and focus itself cannot be tested reliably. */
 
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
@@ -23,7 +16,6 @@ const PROBE_ENV_VAR = 'GODOT_MCP_LAUNCHER_PROBE';
 const PROBE_ENV_VALUE = 'env value with spaces';
 const PID_MARKER = 'pid=';
 
-// The resolver needs GODOT_PATH set, but this test targets node, not Godot.
 const resolution = resolvePrivateDesktopLauncher({
   env: { ...process.env, GODOT_PATH: process.execPath },
 });

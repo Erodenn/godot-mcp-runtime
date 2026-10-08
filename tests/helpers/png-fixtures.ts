@@ -1,12 +1,5 @@
-/**
- * Shared PNG fixtures: the cold-import integration tests
- * (reactive-import.test.ts, batch-import-prepass.test.ts) and the pixel-statistics
- * tests (encodePng, solidRgba).
- */
-
 import { deflateSync } from 'zlib';
 
-/** 1x1 transparent PNG. */
 export function minimalPng(): Buffer {
   return Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
@@ -14,7 +7,7 @@ export function minimalPng(): Buffer {
   );
 }
 
-/** Garbage bytes with a .png extension -- import fails but writes an .import sidecar. */
+/** Garbage bytes with a .png extension: import fails but writes an .import sidecar. */
 export function invalidPng(): Buffer {
   return Buffer.from('this is not a png at all');
 }
@@ -30,7 +23,6 @@ const BYTE_MASK = 0xff;
 const CRC32_POLYNOMIAL = 0xedb88320;
 const BITS_PER_BYTE = 8;
 
-// Module-private copies of the helpers of the same names in tests/unit/png-decoder.test.ts.
 function crc32(buf: Buffer): number {
   let c: number = ~0;
   for (const byte of buf) {
@@ -60,7 +52,6 @@ function paeth(a: number, b: number, c: number): number {
   return pb <= pc ? b : c;
 }
 
-/** width*height copies of one RGBA pixel. */
 export function solidRgba(
   width: number,
   height: number,
@@ -72,13 +63,10 @@ export function solidRgba(
 }
 
 export interface EncodePngOptions {
-  /** PNG row filter applied to every row (0 None, 1 Sub, 2 Up, 3 Average, 4 Paeth). */
   filter?: 0 | 1 | 2 | 3 | 4;
-  /** 4 writes RGBA (color type 6); 3 drops alpha and writes RGB (color type 2). */
   channels?: 3 | 4;
 }
 
-/** Encode RGBA pixel data as an 8-bit PNG using one chosen filter for every row. */
 export function encodePng(
   width: number,
   height: number,

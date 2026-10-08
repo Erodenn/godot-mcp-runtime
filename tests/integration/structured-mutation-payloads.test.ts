@@ -1,13 +1,3 @@
-/**
- * Integration tests for the structured payloads of the headless mutation
- * tools. Each payload field is read back from the engine after the operation,
- * so these run the real handlers against a tmp copy of the fixture project and
- * assert on parsed payloads only, never on .tscn text.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, existsSync, writeFileSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
@@ -62,8 +52,7 @@ beforeAll(async () => {
 beforeEach(() => {
   projectPath = join(tmpdir(), `godot-mcp-payloads-${randomBytes(6).toString('hex')}`);
   cpSync(fixtureProjectPath, projectPath, { recursive: true });
-  // These tests assert exact payloads. Without a stated engine version the
-  // newer-engine warning stays out of them on every engine CI runs.
+  // Exact payloads are asserted; without a stated engine version the newer-engine warning stays out of them on every CI engine.
   dropProjectFeatureVersion(projectPath);
   tmpDirs.push(projectPath);
 });
@@ -72,13 +61,10 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** Read one node back through get_node_properties, by the path a payload reported. */
 async function readNode(nodePath: string): Promise<Record<string, unknown>> {
   const result = await handleGetNodeProperties(runner, {
     projectPath,
@@ -114,7 +100,6 @@ describe('add_node reports what Godot did', () => {
   itGodot(
     'returns the name Godot assigned when the requested name collides with a sibling',
     async () => {
-      // The fixture scene already has a child named Sprite2D.
       const result = await handleAddNode(runner, {
         projectPath,
         scenePath: SCENE,
@@ -129,8 +114,6 @@ describe('add_node reports what Godot did', () => {
       expect(Object.keys(payload)[0]).toBe('warnings');
       expect(payload.warnings).toHaveLength(1);
 
-      // The reported path addresses the new node in the saved scene, and the
-      // sibling that held the name is still there.
       const read = await readNode(String(payload.nodePath));
       expect(read).not.toHaveProperty('error');
       expect(read.nodeType).toBe('Sprite2D');
@@ -160,7 +143,6 @@ describe('duplicate_node reports where the duplicate is', () => {
       const payload = expectMatchesOutputSchema('duplicate_node', result);
       expect(payload.nodePath).toBe('root/Label');
       expect(payload.newNodePath).toBe('root/LabelCopy');
-      // Red when the script puts the constant success field back.
       expect(payload).not.toHaveProperty('success');
 
       const read = await readNode(String(payload.newNodePath));
@@ -175,7 +157,6 @@ describe('create_scene and attach_script carry no constant success field', () =>
   itGodot(
     'create_scene answers with the scenePath alone and attach_script with nodePath and scriptPath',
     async () => {
-      // Red when either script puts "success": true back into its payload.
       const created = await handleCreateScene(runner, {
         projectPath,
         scenePath: 'fresh.tscn',
@@ -208,7 +189,6 @@ describe('connect_signal and disconnect_signal read the connection back from the
     method: 'queue_free',
   };
 
-  /** Whether get_node_signals, a separate process, sees the connection in the scene file. */
   async function connectionExists(): Promise<boolean> {
     const result = await handleGetNodeSignals(runner, {
       projectPath,
@@ -289,8 +269,7 @@ describe('load_sprite reports the texture the node holds', () => {
   itGodot(
     'returns the node and the texture path read back from it',
     async () => {
-      // The committed placeholder.png is intentionally invalid; give the tmp
-      // copy a real one so the import step the handler triggers can succeed.
+      // The committed placeholder.png is intentionally invalid; give the copy a real one so the handler's import step can succeed.
       writeFileSync(join(projectPath, 'placeholder.png'), minimalPng());
 
       const result = await handleLoadSprite(runner, {
@@ -310,7 +289,6 @@ describe('load_sprite reports the texture the node holds', () => {
   );
 });
 
-/** A get_scene_tree node as the payload shapes it, with the depth-cut fields. */
 interface DepthTreeNode {
   name: string;
   type: string;
@@ -319,7 +297,6 @@ interface DepthTreeNode {
   childCount?: number;
 }
 
-/** Add a node under `parentNodePath` and fail the case when the add did not land. */
 async function addTreeNode(
   nodeType: string,
   nodeName: string,
@@ -335,12 +312,10 @@ async function addTreeNode(
   expect(hasError(result), JSON.stringify(result)).toBe(false);
 }
 
-/** Every node of a tree, the root first. */
 function flattenTree(node: DepthTreeNode): DepthTreeNode[] {
   return [node, ...(node.children ?? []).flatMap(flattenTree)];
 }
 
-/** Read several nodes in one get_node_properties call, entries in input order. */
 async function readNodes(nodePaths: string[]): Promise<Array<Record<string, unknown>>> {
   const result = await handleGetNodeProperties(runner, {
     projectPath,
@@ -351,14 +326,12 @@ async function readNodes(nodePaths: string[]): Promise<Array<Record<string, unkn
   return payload.results as Array<Record<string, unknown>>;
 }
 
-/** Read the scene tree through the handler, validated against its declared schema. */
 async function readTree(extra: Record<string, unknown> = {}): Promise<DepthTreeNode> {
   const result = await handleGetSceneTree(runner, { projectPath, scenePath: SCENE, ...extra });
   return expectMatchesOutputSchema('get_scene_tree', result) as unknown as DepthTreeNode;
 }
 
 describe('get_scene_tree reports paths that resolve and what it did not list', () => {
-  /** Main/Deep/Leaf/Inner on top of the fixture's Label and Sprite2D. */
   async function buildDeepScene(): Promise<void> {
     await addTreeNode('Node2D', 'Deep', 'root');
     await addTreeNode('Node2D', 'Leaf', 'root/Deep');
@@ -429,7 +402,6 @@ describe('get_scene_tree reports paths that resolve and what it did not list', (
       const deep = children.find((child) => child.name === 'Deep')!;
       expect(deep.children).toBeNull();
       expect(deep.childCount).toBe(1);
-      // A node at the limit that has no children is a leaf, not a cut.
       const label = children.find((child) => child.name === 'Label')!;
       expect(label.children).toEqual([]);
       expect(label).not.toHaveProperty('childCount');
@@ -440,7 +412,6 @@ describe('get_scene_tree reports paths that resolve and what it did not list', (
   itGodot(
     'a leaf at the depth limit has an empty children array',
     async () => {
-      // The fixture's Label and Sprite2D have no children, so nothing is cut.
       const result = await handleGetSceneTree(runner, {
         projectPath,
         scenePath: SCENE,
@@ -479,7 +450,6 @@ describe('abortOnError lists what it did not attempt', () => {
       expect(results[2]).toEqual({ nodePath: 'root/Sprite2D', property: 'visible', skipped: true });
       expect(results[3]).toEqual({ nodePath: 'root/Label', property: 'text', skipped: true });
 
-      // The work before the failure landed and the skipped updates did not.
       const [label] = await readNodes(['root/Label']);
       expect((label!.properties as Record<string, unknown>).text).toBe('first');
     },
@@ -545,7 +515,6 @@ describe('per-item entries report where a node path led', () => {
       const [batchEntry] = batchPayload.results as Array<Record<string, unknown>>;
       const updates = batchEntry!.updates as Array<Record<string, unknown>>;
       expect(updates[0]).toMatchObject({ nodePath: 'root/Label', resolvedNodePath: 'root/Label' });
-      // A node that was not found has nothing to resolve to.
       expect(updates[1]).not.toHaveProperty('resolvedNodePath');
 
       const deleted = await handleDeleteNodes(runner, {

@@ -1,25 +1,4 @@
-/**
- * Feature tests for ShaderMaterial inline construction with
- * shader_parameter/* overrides.
- *
- * Context: `{"type": "ShaderMaterial", "shader": "res://x.gdshader",
- * "shader_parameter/name": value}` failed the inner-property existence
- * gate in `_construct_inline_resource`: shader_parameter/* are VIRTUAL
- * properties that only exist on the instance after `shader` is assigned,
- * so `"prop" in instance` is false at check time even though `set()`
- * works and the persisted .tscn round-trips correctly (verified: pack()
- * emits the ext_resource for the shader plus one line per parameter).
- * Agents (observed in downstream pipelines) worked around by
- * hand-editing .tscn files, bypassing the validated tool path.
- *
- * The feature: keys of the form `shader_parameter/<name>` (and, after a
- * shader is assigned, any slash-key the instance can actually resolve)
- * skip the `in instance` existence gate and are assigned via set(), so
- * the typed-dict form covers ShaderMaterial end to end.
- *
- * Requires GODOT_PATH locally. CI runs this file on Godot 4.5.1 and 4.6.2
- * in the godot-integration job regardless of a local GODOT_PATH.
- */
+/** shader_parameter/* are virtual properties that exist on the instance only after `shader` is assigned, so `"prop" in instance` is false at check time though set() works. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
@@ -63,9 +42,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -110,12 +87,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
   itGodot(
     'key order inside the typed dict does not affect the result (virtual-only specs persist correctly)',
     async () => {
-      // Regression: an early implementation gated virtual keys on the `in`
-      // operator, whose result for shader_parameter/* depends on an internal
-      // cache that only refreshes after an unrelated set() -- so the same
-      // spec succeeded or silently persisted `null` depending on key order,
-      // and bypassed type coercion (a {r,g,b} dict stored raw instead of a
-      // Color). Both orders must persist the identical Color.
+      // The `in` operator's result for shader_parameter/* depends on a cache that refreshes only after an unrelated set(), so key order once decided success or a silent null; both orders must persist the identical Color.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
       const addWith = async (nodeName: string, params: Record<string, unknown>) => {
@@ -160,11 +132,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
   itGodot(
     'a spec with shader_parameter/* ordered before shader in the JSON still resolves',
     async () => {
-      // The PR's headline fix is the plain-before-virtual reorder inside
-      // _construct_inline_resource. addWith above always spreads `shader`
-      // first via `{ type, shader, ...params }`, so no existing test sends
-      // a virtual key ahead of its dependency in spec order. Build the
-      // dict by hand here so `shader_parameter/glow` precedes `shader`.
+      // addWith always spreads `shader` first, so build the dict by hand to put `shader_parameter/glow` ahead of `shader`.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       const scenePath = join(tmpProject, 'main.tscn');
 
@@ -225,8 +193,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
 
       const combined = `${stdout}\n${stderr}`;
       expect(combined).toContain('failed to compile or declares none');
-      // Nothing may be persisted for the failed construct: the node itself
-      // was never added (BrokenShaderSprite is freed before add_node returns).
+      // The node was never added (freed before add_node returns), so nothing may be persisted.
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toContain('BrokenShaderSprite');
     },
@@ -308,8 +275,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
       expect(combined).toContain(
         "Property 'shader_parameter/glow' does not resolve on resource of type 'ShaderMaterial'",
       );
-      // Nothing may be persisted for the failed construct: the node itself
-      // was never added (OrphanSprite is freed before add_node returns).
+      // The node was never added (freed before add_node returns), so nothing may be persisted.
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toContain('OrphanSprite');
     },
@@ -345,8 +311,7 @@ describe('inline ShaderMaterial with shader_parameter overrides', () => {
       expect(combined).toContain(
         "Property 'shader_parameter/undeclared_uniform' does not resolve on resource of type 'ShaderMaterial'",
       );
-      // Nothing may be persisted for the failed construct: the node itself
-      // was never added (TypoSprite is freed before add_node returns).
+      // The node was never added (freed before add_node returns), so nothing may be persisted.
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toContain('TypoSprite');
     },

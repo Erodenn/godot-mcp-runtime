@@ -1,17 +1,4 @@
-/**
- * Integration tests for scenes whose scripts name a project autoload.
- *
- * Headless operations run from MainLoop._initialize, after the engine has
- * registered autoload singletons as GDScript globals. Under _init they were
- * not yet visible, so player.gd (which reads GameState.score) failed to
- * compile and every save wrote the node without its script and exported
- * values. These tests run the real handlers on a tmp copy of the authored
- * fixture and assert on the .tscn text read back from disk, so they do not
- * depend on the tools' own read-back.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
+/** Headless operations run from MainLoop._initialize, after autoload singletons are registered as GDScript globals; under _init player.gd failed to compile and saves dropped its script. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync } from 'fs';
@@ -49,13 +36,10 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
@@ -131,16 +115,13 @@ describe('a scene script that names an autoload survives a headless save', () =>
 });
 
 const BROKEN_SCENE = 'broken_script.tscn';
-/** The backup location a loss warning names, project-relative with forward slashes. */
 const BACKUP_PATH_REGEX = /\.mcp\/godot-runtime\/scene-backups\/[^/\s]+\/[^\s]+\.tscn/;
 
 describe('a headless save that drops content says so and keeps the file as it was', () => {
   itGodot(
     'add_node on a scene whose script does not compile warns, backs the file up and still saves',
     async () => {
-      // broken_script.gd names an identifier that exists nowhere, so the engine
-      // cannot load it and the save drops the stored export (and, on 4.6, the
-      // script line with it).
+      // broken_script.gd names an identifier that exists nowhere, so the engine cannot load it and the save drops the stored export (on 4.6, the script line too).
       const before = sceneText(BROKEN_SCENE);
       const result = await handleAddNode(runner, {
         projectPath,
@@ -161,7 +142,6 @@ describe('a headless save that drops content says so and keeps the file as it wa
 
       expect(readFileSync(join(projectPath, ...backup![0].split('/')), 'utf8')).toBe(before);
       expect(existsSync(join(projectPath, '.mcp', '.gdignore'))).toBe(true);
-      // The save happened: the new node is in the file.
       expect(sceneText(BROKEN_SCENE)).toContain('[node name="Added" type="Node2D" parent="."');
     },
     CASE_TIMEOUT_MS,
@@ -178,8 +158,7 @@ describe('a headless save that drops content says so and keeps the file as it wa
       });
       const payload = expectMatchesOutputSchema('add_node', result);
 
-      // Not "no warnings": an engine newer than the project's config/features
-      // version adds its own entry.
+      // An engine newer than the project's config/features version adds its own warning, so this is not "no warnings".
       const warnings = (payload.warnings ?? []) as string[];
       expect(warnings.filter((entry) => /lost|no longer/.test(entry))).toEqual([]);
       expect(existsSync(join(projectPath, '.mcp', 'godot-runtime', 'scene-backups'))).toBe(false);
@@ -190,8 +169,6 @@ describe('a headless save that drops content says so and keeps the file as it wa
   itGodot(
     'edits on the inherited and the instancing scene report no loss',
     async () => {
-      // The shapes the comparison has to read as healthy: an inherited root,
-      // an override line, and an editable instance gaining its first override.
       const derived = await handleSetNodeProperties(runner, {
         projectPath,
         scenePath: 'derived_unit.tscn',
@@ -219,7 +196,6 @@ describe('a headless save that drops content says so and keeps the file as it wa
   );
 });
 
-/** The engine version the authored fixture's project.godot states in config/features. */
 const AUTHORED_FEATURE_VERSION = { major: 4, minor: 5 };
 
 describe('a scene mutation on a project an older engine saved says so', () => {
@@ -258,12 +234,10 @@ const DERIVED_SCENE = 'derived_unit.tscn';
 const DERIVED_SCENE_UID = 'uid://ud33laavt82f';
 const BASE_SCENE_UID = 'uid://76owar7af2bj';
 
-/** The first line of a scene file: its `[gd_scene ...]` header. */
 function headerLine(scene: string): string {
   return sceneText(scene).split('\n')[0] ?? '';
 }
 
-/** The `[ext_resource ...]` line that points at `path`. */
 function extResourceLine(scene: string, path: string): string {
   const line = sceneText(scene)
     .split('\n')
@@ -305,7 +279,6 @@ describe('a headless save keeps the scene uid and the reference uids', () => {
       expect(extResourceLine('player_copy.tscn', 'res://player.gd')).toContain(
         `uid="${PLAYER_SCRIPT_UID}"`,
       );
-      // The original is untouched by the save-as.
       expect(headerLine(PLAYER_SCENE)).toContain(`uid="${PLAYER_SCENE_UID}"`);
     },
     CASE_TIMEOUT_MS,

@@ -1,18 +1,3 @@
-/**
- * Integration tests for add_node inputs that used to abort the operation or
- * fail on the order of a JSON object, and for the exit code of the headless
- * operations script.
- *
- * - A nodeType that names a class which is not a Node is an error that says
- *   so, on add_node and on create_scene.
- * - `properties` applies `script` first, so a variable the script declares can
- *   sit before it in the object.
- * - A failed operation exits non-zero and a successful one exits zero.
- *
- * File assertions read the .tscn text from disk. Requires GODOT_PATH. Skipped
- * locally when it is unset; CI sets it in the godot-integration job.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { spawnSync } from 'child_process';
 import { cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
@@ -29,9 +14,7 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleAddNode, handleCreateScene } from '../../src/tools/scene-tools.js';
 
 const PLAYER_SCENE = 'player.tscn';
-/** A scene the layout test creates with a Control root. */
 const UI_SCENE = 'ui.tscn';
-/** Above the 32-bit signed integer range process_priority holds. */
 const ABOVE_INT32_MAX = 3000000000;
 const CASE_TIMEOUT_MS = 120000;
 const OPERATIONS_SCRIPT = join(
@@ -62,22 +45,14 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
 
-/**
- * The property lines under the first section whose header starts with
- * `headerPrefix`, up to the next blank line or section. Null when no such
- * section exists.
- */
 function sectionProperties(text: string, headerPrefix: string): string[] | null {
   const lines = text.split('\n');
   const start = lines.findIndex((line) => line.startsWith(headerPrefix));
@@ -90,7 +65,6 @@ function sectionProperties(text: string, headerPrefix: string): string[] | null 
   return properties;
 }
 
-/** Exit status of one direct run of the operations script. */
 function operationExitStatus(operation: string, params: object): number | null {
   const run = spawnSync(
     process.env.GODOT_PATH as string,
@@ -130,7 +104,6 @@ describe('a nodeType that is not a Node is reported, not raised', () => {
   itGodot(
     'add_node with a script that extends a non-Node class says what it extends, and never runs its _init',
     async () => {
-      // The _init leaves a file behind, so a run of it is visible afterwards.
       writeFileSync(
         join(projectPath, 'plain_resource.gd'),
         [
@@ -215,8 +188,7 @@ describe('add_node sets properties on a node that is already in the scene', () =
   itGodot(
     'a Control under a Control parent keeps layout_mode and anchors_preset',
     async () => {
-      // Control answers both properties from its parent. Read back on a node
-      // with no parent they differ from what was assigned.
+      // Control answers both properties from its parent, so on a node with no parent they differ from what was assigned.
       const created = await handleCreateScene(runner, {
         projectPath,
         scenePath: UI_SCENE,
@@ -285,9 +257,7 @@ describe('the operations script exits with the outcome of the operation', () => 
   itGodot(
     'an operation that stops before it emits a result exits non-zero, though nothing marked it failed',
     () => {
-      // A number where create_scene builds a string raises a script error on
-      // its first line. That aborts the function without reaching any failure
-      // path, so only the missing result can turn the exit code.
+      // A number where create_scene builds a string raises a script error on its first line, aborting without reaching any failure path, so only the missing result can turn the exit code.
       expect(operationExitStatus('create_scene', { scene_path: 7 })).toBe(1);
     },
     CASE_TIMEOUT_MS,

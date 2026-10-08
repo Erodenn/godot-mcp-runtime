@@ -1,30 +1,3 @@
-/**
- * Regression tests for type-invalid property assignments (silent-success gap).
- *
- * Context: `node.set()` casts the incoming value through the property's
- * typed setter with no validity return -- a type-incompatible value doesn't
- * fail, it silently stores the ZERO value for the declared type (e.g. a
- * String or Dictionary on an int property stores 0, a String on a Vector2
- * property stores (0, 0)) -- but the tool previously reported
- * `success: true`, so agents believed the write landed (observed in
- * Agent-driven scene builds: `properties={"shape": {"size": {...}}}` on
- * CollisionShape2D silently dropping).
- *
- * The fix checks the node's *declared* property type up front (via
- * get_property_list()) rather than inferring failure from post-set()
- * equality, against a declared-type compatibility table
- * (`_PROPERTY_TYPE_COMPAT` in godot_operations.gd) that allows the
- * legitimate widening conversions Godot performs on store -- float->int,
- * String->NodePath/StringName, bool<->int/float, Vector2<->Vector2i,
- * Vector3<->Vector3i, Array->Packed*Array -- while rejecting everything
- * else. A non-Object value assigned to an Object-typed property (Resource
- * or Node) is rejected outright; a `res://` string assigned to an
- * Object-typed property is auto-loaded instead.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync, writeFileSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
@@ -62,9 +35,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -75,7 +46,6 @@ describe('set_node_properties type validation (silent-success gap)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       const scenePath = join(tmpProject, 'main.tscn');
 
-      // Create a CollisionShape2D node to mutate.
       await runner.executeOperation(
         'add_node',
         {
@@ -88,8 +58,7 @@ describe('set_node_properties type validation (silent-success gap)', () => {
         30000,
       );
 
-      // Attempt to set the `shape` property (Shape2D, a Resource) to a bare
-      // dictionary: the classic silent-drop case from agent-driven builds.
+      // The classic silent-drop case: a bare dictionary on a Shape2D Resource property.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -103,7 +72,6 @@ describe('set_node_properties type validation (silent-success gap)', () => {
       const parsed = JSON.parse(extractJson(stdout));
       expect(parsed.results[0].error).toMatch(/cannot|fail|invalid|mismatch|type/i);
       expect(parsed.results[0].success).toBeUndefined();
-      // And nothing was persisted for this property.
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toMatch(/shape\s*=/);
     },
@@ -610,12 +578,7 @@ describe('set_node_properties type validation against a scripted node', () => {
   );
 });
 
-// --- Packed*Array properties (e.g. Polygon2D polygon) ---
-// JSON sends a PackedVector2Array as an array of {x, y} dicts. node.set()
-// casts each dict element to the zero Vector2, the compat table accepts
-// TYPE_ARRAY, and the tool reported success:true while the array was
-// silently zeroed (observed in agent-driven builds: Polygon2D geometry
-// wiped by a later write, caught only on read-back).
+// JSON sends a PackedVector2Array as {x, y} dicts; node.set() once zeroed each element while the compat table accepted TYPE_ARRAY and success:true was reported.
 describe('packed-array element coercion', () => {
   itGodot(
     'round-trips PackedVector2Array from array-of-dicts (was silent zero-write)',
@@ -658,9 +621,7 @@ describe('packed-array element coercion', () => {
       const parsed = JSON.parse(extractJson(stdout));
       expect(parsed.results[0].success).toBe(true);
 
-      // Read back via get_node_properties: the zeroed-array tell.
-      // The read path stringifies Vector arrays ("[(10.0, 20.0), ...]"),
-      // so assert on the serialized form.
+      // The read path stringifies Vector arrays ("[(10.0, 20.0), ...]"), so assert on the serialized form.
       const { stdout: rb } = await runner.executeOperation(
         'get_node_properties',
         { scenePath: 'main.tscn', nodes: [{ node_path: 'Poly' }] },
@@ -752,8 +713,7 @@ describe('packed-array element coercion', () => {
         30000,
       );
 
-      // RichTextLabel.tab_stops is a PackedFloat32Array; JSON ints are
-      // the natural wire form and must land as floats, not zeros.
+      // JSON ints are the natural wire form and must land as floats, not zeros.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -863,8 +823,7 @@ describe('packed-array element coercion', () => {
         30000,
       );
 
-      // String elements cannot become Vector2s: must be an explicit
-      // error, never a zero write with success:true.
+      // Must be an explicit error, never a zero write with success:true.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -907,8 +866,6 @@ describe('packed-array element coercion', () => {
         30000,
       );
 
-      // Read back: the CollisionPolygon2D polygon (PackedVector2Array)
-      // must carry the supplied points, not zeros.
       const { stdout: rb } = await runner.executeOperation(
         'get_node_properties',
         { scenePath: 'main.tscn', nodes: [{ node_path: 'Collider' }] },
@@ -922,8 +879,7 @@ describe('packed-array element coercion', () => {
         /\(0(\.0)?, 0(\.0)?\), \(20(\.0)?, 0(\.0)?\), \(20(\.0)?, 10(\.0)?\)/,
       );
 
-      // And the bad-element rule fires through the add_node path too
-      // (reported via stderr, matching other add_node property errors).
+      // The bad-element rule fires through add_node too, reported via stderr like other add_node property errors.
       let stdoutSeen = '';
       let stderrSeen = '';
       try {
@@ -949,13 +905,8 @@ describe('packed-array element coercion', () => {
   );
 });
 
-// --- Script-declared typed arrays (Array[T]) ---
-// A typed array's declared type is plain TYPE_ARRAY, so it passes the
-// declared-type check untouched and the raw {x, y} dicts reach node.set().
-// Godot's typed assign refuses the whole array rather than zero-filling it,
-// so the symptom is a success:true with nothing written. The element type is
-// recovered from the live value (Array.get_typed_builtin()) or, failing that,
-// from the property descriptor's PROPERTY_HINT_ARRAY_TYPE hint.
+// A typed array's declared type is plain TYPE_ARRAY, and Godot's typed assign refuses the whole array rather than zero-filling, so the symptom is success:true with nothing written.
+// The element type comes from the live value (get_typed_builtin()) or the PROPERTY_HINT_ARRAY_TYPE hint.
 const TYPED_ARRAY_SCRIPT = [
   'extends Node2D',
   '@export var points: Array[Vector2] = []',
@@ -1130,9 +1081,7 @@ describe('typed Array[T] element coercion', () => {
   itGodot(
     'keeps {x,y,z} a Vector3 and a color dict a Color after the Vector4 case',
     async () => {
-      // Ordering guard: every Vector4 dict is also a valid Vector3 dict, so the
-      // w branch has to be tested before the z branch and neither may capture
-      // the {r,g,b} form.
+      // Every Vector4 dict is also a valid Vector3 dict, so the w branch must be tested before z, and neither may capture the {r,g,b} form.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
       await runner.executeOperation(
@@ -1158,7 +1107,6 @@ describe('typed Array[T] element coercion', () => {
       expect(results[1].success).toBe(true);
 
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
-      // A Node3D saves its position as the origin column of `transform`, not as `position`.
       expect(sceneText).toMatch(
         /transform\s*=\s*Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3\)/,
       );
@@ -1193,8 +1141,7 @@ describe('typed Array[T] element coercion', () => {
       );
       expect(JSON.parse(extractJson(stdout)).results[0].success).toBe(true);
 
-      // The persisted scene is the proof the elements survived: a refused
-      // assignment writes an empty typed array and reports nothing.
+      // The persisted scene is the proof: a refused assignment writes an empty typed array and reports nothing.
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toMatch(/cells\s*=\s*Array\[Vector2i\]\(/);
       expect(sceneText).toMatch(/Vector2i\(1,\s*2\)/);
@@ -1253,9 +1200,7 @@ describe('typed Array[T] element coercion', () => {
   itGodot(
     'errors instead of silently dropping a non-empty Array[Texture2D] value',
     async () => {
-      // The element type is TYPE_OBJECT, which has no element rule. Passing the
-      // raw untyped Array to set() would leave an empty Array[Texture2D] behind
-      // and still report success, so the refusal has to be explicit.
+      // TYPE_OBJECT has no element rule; passing the raw Array to set() would leave an empty Array[Texture2D] and still report success, so the refusal must be explicit.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       await attachTypedArrayScript(tmpProject, 'main.tscn');
 
@@ -1313,11 +1258,7 @@ describe('typed Array[T] element coercion', () => {
       );
       expect(JSON.parse(extractJson(goodStdout)).results[0].success).toBe(true);
 
-      // A non-exported script variable carries no storage usage, so
-      // get_node_properties cannot read it back. The element error on a
-      // rejected value is the observable proof that the element type
-      // resolved: had it stayed unresolved, this write would pass the
-      // declared-type check and report success with nothing stored.
+      // A non-exported script variable carries no storage usage, so it cannot be read back; the element error on a rejected value proves the element type resolved.
       const { stdout: badStdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -1371,11 +1312,10 @@ describe('typed Array[T] element coercion', () => {
 });
 
 const INVENTORY_SCENE = 'inventory.tscn';
-/** Dictionary[K, V] exists from this Godot minor (major 4) onward. */
+/** Dictionary[K, V] exists from Godot 4.4. */
 const TYPED_DICTIONARY_MIN_MINOR = 4;
 const AUTHORED_CASE_TIMEOUT_MS = 120000;
 
-/** A tmp copy of the editor-authored fixture, tracked for cleanup. */
 function makeAuthoredProject(): string {
   const dst = join(tmpdir(), `godot-mcp-authored-${randomBytes(6).toString('hex')}`);
   cpSync(authoredFixtureProjectPath, dst, { recursive: true });
@@ -1383,7 +1323,6 @@ function makeAuthoredProject(): string {
   return dst;
 }
 
-/** Set one property on the inventory root and return that update's result entry. */
 async function setInventoryProperty(
   project: string,
   property: string,
@@ -1483,8 +1422,7 @@ describe('typed Dictionary[K, V] properties', () => {
   );
 });
 
-// inventory.gd declares Dictionary[K, V] exports, so the script (and with it
-// every case below) needs an engine that has them.
+// inventory.gd declares Dictionary[K, V] exports, so every case below needs an engine that has them.
 describe('integer vectors and packed integer arrays', () => {
   itGodot(
     'rejects a fractional component on a Vector2i',

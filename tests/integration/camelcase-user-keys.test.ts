@@ -1,19 +1,4 @@
-/**
- * Feature test for the parameter converter's opaque-value-key boundary.
- *
- * Context: `convertCamelToSnakeCase` used to recurse unconditionally into
- * every nested object, including user-authored dicts under `properties`
- * (add_node) and `value` (set_node_properties). A camelCase key the user
- * chose -- a script-exported variable, a `shader_parameter/<uniform>`
- * uniform name, a `metadata/<key>` entry -- got silently rewritten to
- * snake_case on the way to GDScript and never resolved. `OPAQUE_VALUE_KEYS`
- * in src/utils/parameter-conversion.ts stops the walk at those two keys in
- * both directions; this test proves the fix end to end through the
- * add_node, set_node_properties, and batch_scene_operations paths.
- *
- * Requires GODOT_PATH locally. CI runs this file on Godot 4.5.1 and 4.6.2
- * in the godot-integration job regardless of a local GODOT_PATH.
- */
+/** User-authored dicts under `properties` and `value` (script exports, `shader_parameter/<uniform>`, `metadata/<key>`) must not be rewritten to snake_case: `OPAQUE_VALUE_KEYS` stops the converter's walk at those keys. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
@@ -56,9 +41,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 

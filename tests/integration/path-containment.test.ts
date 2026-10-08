@@ -1,17 +1,4 @@
-/**
- * Regression tests: project-root containment for every path-taking operation.
- *
- * Godot resolves `res://../x` outward to a real file on disk, so a path that
- * escapes the project root is not merely invalid -- it reads and writes real
- * files outside the project. The Node-side validators (resolveProjectPath and
- * friends) cover the standalone handlers, but batch_scene_operations forwards
- * its operations to the GDScript layer raw, so containment has to hold there
- * too. normalize_scene_path is the single choke point every path funnels
- * through, and it rejects escaping paths by returning "".
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+/** Godot resolves `res://../x` outward to a real file, and batch_scene_operations forwards operations to GDScript raw, so containment must hold in normalize_scene_path (it returns "" for an escaping path). */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs';
@@ -50,13 +37,10 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The per-update entries of a set_node_properties payload. */
 function parseUpdateResults(stdout: string): Array<{ success?: boolean; error?: string }> {
   const payload = JSON.parse(extractJson(stdout)) as {
     results: Array<{ success?: boolean; error?: string }>;
@@ -64,7 +48,6 @@ function parseUpdateResults(stdout: string): Array<{ success?: boolean; error?: 
   return payload.results;
 }
 
-/** Drop a file just outside the project root; returns its bare filename. */
 function plantOutside(projectDir: string, name: string, body: string): string {
   writeFileSync(join(dirname(projectDir), name), body);
   return name;
@@ -74,9 +57,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
   itGodot(
     'batch load_sprite rejects a texturePath that escapes the project root',
     async () => {
-      // The batch path reaches _apply_load_sprite without passing through
-      // handleLoadSprite's resolveProjectPath call, so the guard must be
-      // engine-side.
+      // The batch path reaches _apply_load_sprite without handleLoadSprite's resolveProjectPath, so the guard must be engine-side.
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       const outside = plantOutside(tmpProject, 'outside.png', 'not-a-real-png');
 
@@ -128,10 +109,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      // Red when the batch stops refusing the path, and when the operation never
-      // ran (a misspelled operation name reports nothing about the path).
       expect(stdout).toContain(ESCAPE_MESSAGE);
-      // The external scene must be neither read into nor written back out.
       expect(readFileSync(join(dirname(tmpProject), outside), 'utf-8')).toBe(before);
     },
     60000,
@@ -160,9 +138,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       plantOutside(tmpProject, 'outside.gd', 'extends Node\n');
 
-      // A refused operation exits nonzero and still resolves with its output.
-      // Anything thrown here (an engine that died before dispatch, a timeout)
-      // is a failure of the test, not a refusal.
+      // A refused operation resolves with its output; a throw means the engine died or timed out.
       const { stdout, stderr } = await runner.executeOperation(
         'attach_script',
         { scenePath: 'main.tscn', nodePath: 'root', scriptPath: '../outside.gd' },
@@ -170,8 +146,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      // Red when the refusal is gone, and when the operation never ran: a
-      // misspelled operation name prints no such line.
+      // Also red when the operation never ran: a misspelled operation name prints no such line.
       expect(stderr).toContain(ESCAPE_MESSAGE);
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).not.toContain('outside.gd');
@@ -193,7 +168,6 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
         30000,
       );
 
-      // Red when the refusal is gone, and when the operation never ran.
       expect(stderr).toContain(ESCAPE_MESSAGE);
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(existsSync(target)).toBe(false);
@@ -201,8 +175,7 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
     60000,
   );
 
-  // A property value is the one path that does not arrive as a path parameter:
-  // no Node-side validator inspects it, so the script is the only guard.
+  // A property value is the one path that arrives with no Node-side validator, so the script is the only guard.
   itGodot(
     'set_node_properties rejects a res:// property value that escapes the project root',
     async () => {
@@ -223,7 +196,6 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
       const [entry] = parseUpdateResults(stdout);
       expect(entry).not.toHaveProperty('success');
       expect(String(entry?.error)).toContain(ESCAPE_MESSAGE);
-      // Nothing was set, so the scene is not rewritten with an outside reference.
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
     },
     60000,
@@ -315,7 +287,6 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
 
-      // Nested, dot-segmented, and res://-prefixed forms all normalize cleanly.
       const { stdout } = await runner.executeOperation(
         'add_node',
         { scenePath: './main.tscn', nodeType: 'Node2D', nodeName: 'Plain' },

@@ -1,11 +1,4 @@
-/**
- * Assert a handler result against the tool's declared outputSchema.
- *
- * Every tool returns one JSON object, as `structuredContent` and repeated as
- * JSON in a text block. This checks all three at once: the result is a
- * success, the payload validates against the schema the tool declares, and the
- * text block carries the same payload.
- */
+/** Every tool returns one JSON object as `structuredContent`, repeated as JSON in a text block; this checks the success, the schema and that both carry the same payload. */
 
 import Ajv from 'ajv';
 import { expect } from 'vitest';

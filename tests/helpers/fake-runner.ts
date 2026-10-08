@@ -1,23 +1,4 @@
-/**
- * Spy-capable fake GodotRunner for handler unit tests.
- *
- * Handler tests should *not* mock the real GodotRunner internals or the
- * Godot binary. They want to assert: "given this validated input, did the
- * handler call executeOperation with the right (operation, params,
- * projectPath), and did it shape the result correctly?"
- *
- * Build a FakeRunner with `createFakeRunner({ stdout, stderr })` for the
- * happy path, or `createFakeRunner({ throws: new Error(...) })` to exercise
- * the catch branch. Pass `godotVersion` to control what `getVersion()`
- * returns for handlers that read it (e.g. handleCheckProject). Pass
- * `importThrows` to make `importAssets()` reject, for tests of the
- * cold-import retry's failure path in `executeSceneOp`.
- *
- * `runner.calls` is a spy surface: use it sparingly. The default rubric is
- * "assert outputs, not internal calls." Reach for `calls` only to confirm a
- * boundary contract that the result shape cannot: e.g. that a batch handler
- * actually invoked the batch operation rather than the single-target one.
- */
+/** Spy-capable fake GodotRunner for handler tests; assert outputs, and use `runner.calls` only for a boundary contract the result shape cannot show. */
 
 import { GodotRunner, sessionKey, type OperationResult } from '../../src/utils/godot-runner.js';
 import type { OperationParams } from '../../src/mcp.types.js';
@@ -26,15 +7,7 @@ import { OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 import { SessionQueue } from '../../src/utils/session-queue.js';
 import { fakeSessionApi, liveSessionInfo } from './fake-sessions.js';
 
-/**
- * What the real runner hands back for an operation that emitted a JSON
- * result: the sentinel line godot_operations.gd prints. A fixture whose whole
- * stdout is one bare JSON object or array is framed the same way, so a test
- * can write the payload without repeating the framing. Anything else (noise,
- * several lines, text that is not valid JSON, text already carrying the
- * sentinel) passes through untouched, which is how a test expresses "no
- * payload line" or a payload that is not valid JSON.
- */
+/** Frames a bare JSON stdout with the sentinel line godot_operations.gd prints; anything else passes through untouched, which is how a test expresses no payload line or invalid JSON. */
 function frameBareJsonResult(stdout: string): string {
   const trimmed = stdout.trim();
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return stdout;
@@ -55,54 +28,30 @@ export interface FakeRunnerCall {
 }
 
 export interface FakeRunnerOptions {
-  /** Stdout the runner returns. Default: empty string. */
   stdout?: string;
-  /** Stderr the runner returns. Default: empty string. */
   stderr?: string;
-  /** If set, executeOperation throws this instead of returning. */
   throws?: Error;
-  /** Override per call by index. Each entry shadows the defaults above. */
   responses?: Array<Partial<Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'>>>;
-  /**
-   * Godot version string returned by getVersion() (e.g. "4.4.1.stable").
-   * Default: "4.3.stable".
-   */
   godotVersion?: string;
-  /**
-   * Path returned by getGodotPath() for handlers that need the executable
-   * (e.g. render_movie). Default: "/fake/godot". Set to null to simulate an
-   * undetected Godot.
-   */
+  /** Null simulates an undetected Godot. */
   godotPath?: string | null;
-  /** If set, importAssets() rejects with this error instead of resolving. */
   importThrows?: Error;
-  /**
-   * If set, importAssets() returns this promise, the same one to every caller,
-   * the way the real runner hands a second caller the import in flight.
-   */
+  /** The same promise goes to every caller, like the real runner's import in flight. */
   importPending?: Promise<void>;
-  /** If set, runExclusive() rejects with this error and runs nothing. */
   exclusiveThrows?: Error;
 }
 
-/** One `beginMovieRun` call on the fake. */
 export interface FakeMovieRun {
   projectPath: string;
-  /** Label of the operation holding the session queue when the run was registered, or null. */
   queueHeldBy: string | null;
   ended: boolean;
 }
 
 export interface FakeRunner {
-  /** Recorded calls to executeOperation, in order. */
   calls: FakeRunnerCall[];
-  /** Project paths passed to importAssets(), in order. */
   importCalls: string[];
-  /** Movie runs registered through beginMovieRun(), in order. */
   movieRuns: FakeMovieRun[];
-  /** The real queue behind runExclusive(), so a test can read who holds it. */
   queue: SessionQueue;
-  /** The runner cast to GodotRunner: pass directly to handlers. */
   asRunner: GodotRunner;
 }
 
@@ -124,15 +73,10 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const fake = {
     calls,
     importCalls,
-    // No live runtime session by default -- tests that need one (e.g. the
-    // executeSceneOp guard tests) set these fields directly on `asRunner`.
-    // They model the current session; `extraLiveSessionPaths` below models
-    // live sessions on other projects.
+    // No live runtime session by default; tests needing one set these fields on `asRunner`.
     activeSessionMode: null as 'spawned' | 'attached' | null,
     activeProjectPath: null as string | null,
     activeProcess: null as { hasExited: boolean } | null,
-    // No other MCP session on this project by default -- the cross-server
-    // edit guard test sets this directly on `asRunner`.
     ...fakeSessionApi(() => ({
       current: {
         mode: fake.activeSessionMode,
@@ -163,7 +107,6 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       if (importThrows) return Promise.reject(importThrows);
       return options.importPending ?? Promise.resolve();
     },
-    // The real queue, so a handler's exclusive step is one for real.
     runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
       if (options.exclusiveThrows) return Promise.reject(options.exclusiveThrows);
       return queue.run(label, operation);
@@ -184,14 +127,10 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     getGodotPath(): string | null {
       return godotPath;
     },
-    async detectGodotPath(): Promise<void> {
-      // Detection is a no-op: godotPath is fixed by the option.
-    },
-    // The real filter, which reads no instance state.
+    async detectGodotPath(): Promise<void> {},
     extractRuntimeErrors: (lines: string[]): string[] =>
       GodotRunner.prototype.extractRuntimeErrors.call(undefined, lines),
-    // Mirrors the real GodotRunner.hasActiveRuntimeSession() predicate so
-    // guard tests exercise the same liveness logic production code does.
+    // Mirrors the real hasActiveRuntimeSession() predicate.
     hasActiveRuntimeSession(): boolean {
       if (!fake.activeSessionMode || !fake.activeProjectPath) return false;
       if (fake.activeSessionMode === 'spawned') {
@@ -199,12 +138,8 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       }
       return true;
     },
-    // Projects with a live session that is not the current one. The fields
-    // above model the current session only; a test of the per-project guard
-    // lists the others here.
     extraLiveSessionPaths: [] as string[],
-    // Mirrors GodotRunner.hasLiveSessionOnProject(): any live session on the
-    // project counts, current or not, under the runner's own path key.
+    // Mirrors the real hasLiveSessionOnProject(): any live session on the project counts, under the runner's own path key.
     hasLiveSessionOnProject(projectPath: string): boolean {
       const key = sessionKey(projectPath);
       if (

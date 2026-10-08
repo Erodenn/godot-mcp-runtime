@@ -1,14 +1,4 @@
-/**
- * End-to-end profiling against a real engine: `run_project({ profiling: true })`
- * has to bind the debugger port, survive Godot's own `--remote-debug` handshake,
- * and come back with the fixture's hot function ranked at the top.
- *
- * The frame layout the receiver parses is the engine's, not ours, so this is
- * the only test that can catch a layout change in a future Godot release.
- *
- * Requires GODOT_PATH and a display server. CI supplies both in the
- * godot-integration job (xvfb) and runs this file on every Godot version in its matrix.
- */
+/** The frame layout the receiver parses is the engine's, so this is the only test that can catch a layout change in a future Godot release. */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import type { TestContext } from 'vitest';
@@ -79,15 +69,11 @@ describe('profiler smoke', () => {
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
         removeTmpDir(tmpProject);
-      } catch {
-        // best-effort
-      }
+      } catch {}
       tmpProject = null;
     }
   });
@@ -125,11 +111,9 @@ describe('profiler smoke', () => {
       expect(burn!.line).toBeGreaterThan(0);
       expect(burn!.calls).toBeGreaterThan(0);
       expect(burn!.selfMs).toBeGreaterThan(0);
-      // Own time dominates the frame, so the default ranking puts it first.
       expect(capture.rows[0]!.function).toBe('burn');
       expect(burn!.percentOfFrame).toBeGreaterThan(0);
 
-      // The editor's "Frame Time" category and its server rows.
       expect(capture.frame.frameMs.avg).toBeGreaterThan(0);
       expect(capture.frame.frameMs.max).toBeGreaterThanOrEqual(capture.frame.frameMs.avg);
       expect(capture.frame.scriptMs.avg).toBeGreaterThan(0);
@@ -139,7 +123,6 @@ describe('profiler smoke', () => {
         `no server categories in ${JSON.stringify(capture.servers)}`,
       ).toBeGreaterThan(0);
       expect(capture.servers[0]!.functions.length).toBeGreaterThan(0);
-      // A plain capture leaves the render-stage timestamps off.
       expect(capture.visual).toBeNull();
     },
     90000,
@@ -154,14 +137,12 @@ describe('profiler smoke', () => {
       const result = await handleProfileProject(runner, { seconds: 3, top: 50, visual: true });
       expect(hasError(result)).toBe(false);
       expectMatchesOutputSchema('profile_project', result);
-      // The engine must still send its closing totals with the visual profiler on.
       expect((unwrap(result).structuredContent as { complete: boolean }).complete).toBe(true);
       const capture = unwrap(result).structuredContent as unknown as CaptureShape;
 
       expect(capture.fps).toBeGreaterThan(0);
       expect(capture.monitors, 'no monitor sample in a 3 s window').not.toBeNull();
       expect(capture.monitors!.samples).toBeGreaterThan(0);
-      // The fixture's scene tree: root, the autoloaded bridge, and Main.
       expect(capture.monitors!.nodes.avg).toBeGreaterThan(0);
 
       const visual = capture.visual;
@@ -169,7 +150,6 @@ describe('profiler smoke', () => {
       expect(visual!.frames).toBeGreaterThan(0);
       expect(visual!.frames).toBeLessThanOrEqual(visual!.framesReceived);
       expect(visual!.cpuMs.avg).toBeGreaterThan(0);
-      // Every renderer brackets its viewport pass in the same group.
       const paths = visual!.areas.map((area) => area.path);
       expect(paths, paths.join(', ')).toContain('Render Viewports');
       expect(visual!.areas.find((area) => area.path === 'Render Viewports')!.group).toBe(true);
@@ -189,7 +169,6 @@ describe('profiler smoke', () => {
       });
       expect(hasError(started)).toBe(false);
       expectMatchesOutputSchema('start_profiler', started);
-      // Another command holds the bridge while the game keeps sampling.
       await runner.sendCommand('get_ui_elements', {});
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
@@ -207,7 +186,6 @@ describe('profiler smoke', () => {
       expect(buckets[0]!.top.map((item) => item.name).join(', ')).toContain('burn');
       const tracked = buckets.filter((bucket) => bucket.track !== null);
       expect(tracked.length).toBeGreaterThan(0);
-      // Main is a Node2D at the origin.
       expect(tracked[0]!.track!['/root/Main:position']).toEqual({ x: 0, y: 0 });
     },
     90000,
@@ -223,7 +201,6 @@ describe('profiler smoke', () => {
       expectMatchesOutputSchema('start_profiler', started);
       expect(unwrap(started).structuredContent).toMatchObject({ active: true });
 
-      // A capture must survive normal bridge traffic in the middle of it.
       await runner.sendCommand('get_ui_elements', {});
 
       const stopped = await handleStopProfiler(runner, { top: 5, sort: 'calls' });

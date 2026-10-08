@@ -5,10 +5,8 @@ import {
   type RuntimeSessionStatus,
 } from '../../src/utils/godot-runner.js';
 
-/** Path a fake reports for a retained current record whose test never named one. */
 export const FAKE_RETAINED_PROJECT_PATH = '/fake/retained-project';
 
-/** The plain fields the handler fakes already model for the current session. */
 export interface FakeCurrentSession {
   mode: RuntimeSessionMode | null;
   projectPath: string | null;
@@ -50,7 +48,6 @@ function describeFakeCurrent(c: FakeCurrentSession): RuntimeSessionInfo | null {
   };
 }
 
-/** GodotRunner's session read API, derived from a fake's plain fields. Spread into the fake object. */
 export function fakeSessionApi(
   read: () => { current: FakeCurrentSession; others?: RuntimeSessionInfo[] },
 ) {

@@ -1,21 +1,5 @@
-/**
- * Integration tests for two silent-success gaps in property writes.
- *
- * Integers: a JSON number headed for an int has to be a whole number the
- * target can hold. A property declared int is not always 64 bits wide in the
- * engine, and set() wraps or drops a value that does not fit, so the stored
- * value is read back and compared. Integer vectors are built from the JSON
- * numbers, not through the 32-bit float vector.
- *
- * Empty containers: [] on a script-declared Array[T] has to empty it. set()
- * refuses an untyped array on a typed property, empty or not, and keeps the old
- * elements.
- *
- * typed_values.tscn stores `nums = Array[int]([1, 2])`, `ids =
- * PackedInt32Array(1, 2)` and `count = 3`. Every assertion reads the .tscn
- * text from disk. Requires GODOT_PATH. Skipped locally when it is unset; CI
- * sets it in the godot-integration job.
- */
+// A property declared int is not always 64 bits wide in the engine and set() wraps or drops a value that does not fit, so the stored value is read back and compared.
+// set() refuses an untyped array on a typed property, empty or not, and keeps the old elements.
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readFileSync } from 'fs';
@@ -34,15 +18,10 @@ const TYPED_SCENE = 'typed_values.tscn';
 const INVENTORY_SCENE = 'inventory.tscn';
 const PLAYER_SCENE = 'player.tscn';
 const CASE_TIMEOUT_MS = 120000;
-/** Dictionary[K, V] arrived in Godot 4.4, and inventory.gd declares two. */
 const TYPED_DICTIONARY_MIN_MINOR = 4;
-/** Above the 32-bit signed integer range, inside the 32-bit unsigned one. */
 const ABOVE_INT32_MAX = 3000000000;
-/** Inside the 32-bit range, above the largest z_index a CanvasItem accepts (4096). */
 const ABOVE_Z_INDEX_LIMIT = 5000;
-/** Far beyond any integer a JSON number carries exactly. */
 const HUGE_NUMBER = 1e30;
-/** A whole number a 32-bit float cannot hold exactly (2^24 + 1). */
 const ABOVE_FLOAT32_EXACT = 16777217;
 
 interface UpdateEntry {
@@ -69,18 +48,14 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
 
-/** Set one property and return that update's result entry. */
 async function setProperty(
   scenePath: string,
   nodePath: string,
@@ -106,7 +81,6 @@ describe('an empty JSON array or object empties a typed container', () => {
       expect(entry.success).toBe(true);
       const text = sceneText(TYPED_SCENE);
       expect(text).not.toContain('Array[int]([1, 2])');
-      // The other stored values are untouched.
       expect(text).toContain('ids = PackedInt32Array(1, 2)');
       expect(text).toContain('count = 3');
     },
@@ -204,9 +178,7 @@ describe('an integer that does not fit its target is an error', () => {
   itGodot(
     'a value that fits 32 bits and reads back differently is kept, with a warning naming both numbers',
     async () => {
-      // CanvasItem.z_index refuses a value above its own limit and keeps what
-      // it had. That is the setter's answer, not a truncation: the update
-      // succeeds and the warning says what the property reads.
+      // CanvasItem.z_index refuses a value above its limit and keeps what it had: the update succeeds and the warning says what the property reads.
       const result = await handleSetNodeProperties(runner, {
         projectPath,
         scenePath: PLAYER_SCENE,

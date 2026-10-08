@@ -1,12 +1,4 @@
-/**
- * Fakes for runtime-session handler tests (simulate_input, check_project's
- * runtime probe, ...).
- *
- * Unlike the generic fake-runner.ts (headless executeOperation), these model
- * the live-bridge command path: sendCommandWithErrors + the public session
- * fields handlers guard on (activeSessionMode, activeProjectPath,
- * activeProcess).
- */
+/** Models the live-bridge command path (sendCommandWithErrors and the public session fields handlers guard on), unlike the headless fake-runner.ts. */
 
 import type {
   GodotRunner,
@@ -34,16 +26,11 @@ export interface RuntimeFake {
     process?: Partial<GodotProcess> | null;
     hasExited?: boolean;
   }): void;
-  /** Sessions on projects other than the fake's current one, as the runner reports them. */
   setOtherSessions(infos: RuntimeSessionInfo[]): void;
   setBridgeResponse(response: unknown, runtimeErrors?: string[]): void;
   setSendCommandError(error: Error | null): void;
   setBridgeHook(hook: (() => void) | null): void;
-  /**
-   * Stand in for the per-action stderr attribution the real runner derives from
-   * boundary sentinels, so handler tests can drive the attachment logic without
-   * a process. Defaults to no errors and no timeout.
-   */
+  /** Stands in for the per-action stderr attribution the real runner derives from boundary sentinels. */
   setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
 }
 
@@ -104,8 +91,7 @@ export function createRuntimeFake(): RuntimeFake {
       },
       others,
     })),
-    // The session queue: the fake has nothing to serialize, so the operation
-    // runs at once.
+    // The fake has nothing to serialize, so the operation runs at once.
     runExclusive: <T>(_label: string, operation: () => Promise<T>): Promise<T> => operation(),
     queueTurn: () => null,
     detectGodotPath: async () => '/usr/local/bin/godot',

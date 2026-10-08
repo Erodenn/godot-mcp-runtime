@@ -1,15 +1,3 @@
-/**
- * Integration tests for the structure check of the validate tool
- * (GDScript op validate_checks with checks: [{ type: "structure" }]).
- *
- * Validates a scene against a structural schema (node types, children hierarchy,
- * required properties). Tests cover:
- * - Valid scenes matching schema
- * - Missing nodes (wrong type at expected path)
- * - Missing properties (property not set or null/empty)
- * - Nested children validation
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
@@ -45,9 +33,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -102,7 +88,6 @@ describe('validate: structure checks', () => {
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
-      // Add a CollisionShape2D with shape to the scene first
       await runner.executeOperation(
         'add_node',
         {
@@ -118,7 +103,6 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      // Now validate
       const { stdout } = await runner.executeOperation(
         'validate_checks',
         {
@@ -149,7 +133,6 @@ describe('validate: structure checks', () => {
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
-      // Add CollisionShape2D WITHOUT shape
       await runner.executeOperation(
         'add_node',
         {
@@ -162,7 +145,6 @@ describe('validate: structure checks', () => {
         30000,
       );
 
-      // Validate expecting shape property
       const { stdout } = await runner.executeOperation(
         'validate_checks',
         {
@@ -252,9 +234,7 @@ describe('validate: structure checks', () => {
   itGodot(
     'reports a malformed children entry instead of crashing',
     async () => {
-      // Sent straight to the operation, bypassing the handler's own schema
-      // recursion on purpose: this is the state a batch sub-operation reaches
-      // the GDScript layer in.
+      // Sent straight to the operation, bypassing the handler's schema recursion: the state a batch sub-operation reaches the GDScript layer in.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
       const { stdout } = await runner.executeOperation(
@@ -291,7 +271,6 @@ describe('validate: structure checks', () => {
       );
 
       const result = JSON.parse(extractJson(stdout));
-      // Should not fail on root type since we didn't specify it
       expect(result.errors).toEqual([]);
     },
     60000,

@@ -1,18 +1,5 @@
-/**
- * Test-suite-only resolver for the private-desktop launcher.
- *
- * Godot's startup calls SetForegroundWindow on its main window, so even a
- * hidden game window takes keyboard focus. A process started on a private Win32
- * desktop cannot. Node's `spawn` cannot choose a desktop, so on Windows the
- * suite compiles `private-desktop-launcher.cs` once (cached under
- * node_modules/.cache) and substitutes the launcher for the Godot executable:
- * `GODOT_PATH` becomes the launcher and `GODOT_MCP_TEST_LAUNCH_TARGET` carries
- * the real Godot path (see `private-desktop-global-setup.ts`). Product code
- * never learns about any of this.
- *
- * Nothing here throws: every failure is a `null` launcher plus a reason, and
- * the suite then runs exactly as it did before.
- */
+// Godot's startup calls SetForegroundWindow, so even a hidden game window takes keyboard focus; a process on a private Win32 desktop cannot.
+// On Windows the suite substitutes a compiled launcher for `GODOT_PATH`, with the real Godot in `GODOT_MCP_TEST_LAUNCH_TARGET`. Nothing here throws: a failure is a null launcher plus a reason.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -91,10 +78,6 @@ function cacheDirectory(deps: PrivateDesktopDeps): string {
   return hasNodeModules ? join(deps.repoRoot, CACHE_SUBDIR) : deps.tmpdir();
 }
 
-/**
- * The launcher exe to put in `GODOT_PATH`, or null with the reason it is not
- * used. `deps` is for tests; callers pass nothing (or a partial override).
- */
 export function resolvePrivateDesktopLauncher(
   overrides: Partial<PrivateDesktopDeps> = {},
 ): LauncherResolution {
@@ -148,9 +131,7 @@ export function resolvePrivateDesktopLauncher(
         }
         try {
           deps.unlinkSync(tempExe);
-        } catch {
-          // Best effort: a stray temp file in the cache is harmless.
-        }
+        } catch {}
       }
     }
 

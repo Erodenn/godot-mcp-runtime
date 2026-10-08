@@ -1,18 +1,3 @@
-/**
- * Engine-side behavior of the bridge that a Node test can only read as text:
- *
- * - a run_script result that contains itself is answered at once, with the
- *   recursion cut by a marker, instead of walking 4^32 steps on the game's
- *   main thread;
- * - a result too large to frame is answered with an error naming its size,
- *   instead of with silence and a command timeout;
- * - a wait longer than the batch ceiling is refused by the bridge itself;
- * - a spawned game quits when its connection to the server is lost, which is
- *   what a hard-killed server looks like from the game.
- *
- * Requires GODOT_PATH.
- */
-
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { cpSync } from 'fs';
 import { join } from 'path';
@@ -29,9 +14,8 @@ import { hasError, unwrap } from '../helpers/assertions.js';
 
 const BRIDGE_WAIT_MS = 20000;
 const CASE_TIMEOUT_MS = 60000;
-/** A script that answers at all answers well inside this. A walk of 4^32 steps never would. */
+/** A script that answers at all answers well inside this; a 4^32-step walk never would. */
 const SCRIPT_TIMEOUT_MS = 15000;
-/** How many times the test array holds itself. */
 const SELF_REFERENCES = 4;
 /** Strings of this length, this many of them, serialize past the 16 MiB frame limit. */
 const BIG_STRING_CHARS = 1_000_000;
@@ -88,19 +72,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     await runner.detectGodotPath();
   });
 
-  // Runs even when an assertion above threw, so no Godot is stranded.
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
         removeTmpDir(tmpProject);
-      } catch {
-        // best-effort
-      }
+      } catch {}
       tmpProject = null;
     }
   });
@@ -179,7 +158,6 @@ describe('bridge serialization bounds and the parent watch', () => {
       expect(text).not.toMatch(/timed out/);
       expect(Date.now() - started).toBeLessThan(SCRIPT_TIMEOUT_MS);
 
-      // The peer is not left waiting: the next command is answered.
       const next = await handleRunScript(runner, {
         script: 'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 7\n',
         timeout: SCRIPT_TIMEOUT_MS,
@@ -194,7 +172,6 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('batchwait'), { waitMs: BRIDGE_WAIT_MS });
 
-      // Straight to the bridge, past the handler's own check.
       const { response } = await runner.sendCommandWithErrors('input', {
         actions: [
           { type: 'wait', ms: MAX_INPUT_BATCH_BUDGET_MS },
@@ -225,8 +202,7 @@ describe('bridge serialization bounds and the parent watch', () => {
         });
       });
 
-      // What a hard-killed server looks like from the game: every socket it
-      // held is closed, and nothing else is said.
+      // What a hard-killed server looks like from the game: every socket it held is closed, nothing else is said.
       (runner as unknown as { parentWatch: { close(): void } }).parentWatch.close();
 
       await exited;

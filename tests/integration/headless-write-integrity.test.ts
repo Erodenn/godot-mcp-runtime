@@ -1,21 +1,4 @@
-/**
- * Integration tests for headless writes that used to report success for work
- * that did not happen: an unloadable or unsaveable scene returned as a success,
- * a batch that discarded the result of its final save, two spellings of one
- * scene overwriting each other, a scene instanced into itself, and values a
- * scene file cannot store (a script constant, null or a fraction on an int
- * property, and a non-exported script variable, which is set and reported in a
- * leading warning). Node-level slash keys (`metadata/<name>` and keys the
- * node itself declares) are covered here too.
- *
- * The real handlers run against a tmp copy of the fixture project and every
- * assertion reads a parsed payload, except the one that a scene was not
- * rewritten, which compares the file's text byte for byte. Read-only scenes are made
- * with chmod and restored in a finally block so cleanup can delete them.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
+/** Read-only scenes are made with chmod and restored in a finally block so cleanup can delete them. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { chmodSync, cpSync, readFileSync, writeFileSync } from 'fs';
@@ -52,7 +35,6 @@ const CASE_TIMEOUT_MS = 120000;
 const READ_ONLY_MODE = 0o444;
 const WRITABLE_MODE = 0o644;
 
-/** A scene whose Sprite2D names a texture that is not on disk. */
 const MISSING_DEPENDENCY_SCENE = [
   '[gd_scene load_steps=2 format=3]',
   '',
@@ -65,7 +47,6 @@ const MISSING_DEPENDENCY_SCENE = [
   '',
 ].join('\n');
 
-/** One exported and one non-exported variable, a constant, and an int array of each flavor. */
 const STORED_VALUES_SCRIPT = [
   'extends Node2D',
   '',
@@ -96,8 +77,7 @@ beforeAll(async () => {
 beforeEach(() => {
   projectPath = join(tmpdir(), `godot-mcp-integrity-${randomBytes(6).toString('hex')}`);
   cpSync(fixtureProjectPath, projectPath, { recursive: true });
-  // These tests assert exact warnings. Without a stated engine version the
-  // newer-engine warning stays out of them on every engine CI runs.
+  // These tests assert exact warnings; without a stated engine version the newer-engine warning stays out of them on every engine CI runs.
   dropProjectFeatureVersion(projectPath);
   tmpDirs.push(projectPath);
 });
@@ -106,9 +86,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -126,7 +104,6 @@ async function addNode(scenePath: string, nodeType: string, nodeName: string): P
   expect(hasError(result), String(errorText(result))).toBe(false);
 }
 
-/** Run `body` with a scene file made read-only, restoring it afterwards. */
 async function withReadOnly<T>(scenePath: string, body: () => Promise<T>): Promise<T> {
   const file = join(projectPath, scenePath);
   chmodSync(file, READ_ONLY_MODE);
@@ -372,9 +349,7 @@ describe('node-level slash keys', () => {
     CASE_TIMEOUT_MS,
   );
 
-  // Metadata is untyped: nothing declares what a key should hold, so the value
-  // is stored as it was sent. A dictionary used to be turned into a vector when
-  // it had x and y keys, which dropped its other keys under a success.
+  // Metadata is untyped, so a dictionary is stored as sent; it once became a vector when it had x and y keys, dropping its other keys under a success.
   itGodot(
     'a dictionary written to a metadata key is stored as that dictionary, vector-shaped or not',
     async () => {
@@ -393,9 +368,7 @@ describe('node-level slash keys', () => {
     CASE_TIMEOUT_MS,
   );
 
-  // A vector-shaped dictionary whose components are not numbers cannot become
-  // a vector. It reaches the type check as the dictionary it is and is refused
-  // there, instead of a failed conversion standing in for null.
+  // A vector-shaped dictionary with non-numeric components reaches the type check as a dictionary and is refused there.
   itGodot(
     'a vector-shaped dictionary with non-numeric components is an error on a typed property',
     async () => {
@@ -407,7 +380,6 @@ describe('node-level slash keys', () => {
       expect(onObject).not.toHaveProperty('success');
       expect(String(onObject.error)).toContain('Object-typed');
 
-      // The well-formed vector still converts.
       expect((await setProp('root', 'position', { x: 12, y: 34 })).success).toBe(true);
       const props = await readProps(SCENE, 'root');
       expect(props.position).toEqual({ x: 12, y: 34 });
@@ -644,10 +616,7 @@ describe('values a scene file cannot store are refused or reported', () => {
 });
 
 describe('a dictionary becomes a vector or color only with exactly that key set', () => {
-  // GDScript refuses `@export` on a variable with neither a type nor an
-  // initializer, and a variable without `@export` is not written to the scene
-  // file. So the untyped variable's setter records what it was handed in two
-  // exported strings, and those are what the scene file holds.
+  // GDScript refuses `@export` on a variable with neither type nor initializer, and a non-exported variable is not saved, so the setter records its input in two exported strings.
   const UNTYPED_HOLDER_SCRIPT = [
     'extends Node2D',
     '',
@@ -664,8 +633,7 @@ describe('a dictionary becomes a vector or color only with exactly that key set'
   itGodot(
     'an {x, y, name} dictionary on an untyped script variable is stored as a dictionary',
     async () => {
-      // Red when _coerce_property_value tests has("x") and has("y") alone: the
-      // dictionary then becomes a Vector2 and its name key is dropped.
+      // Red when _coerce_property_value tests has("x") and has("y") alone: the dictionary becomes a Vector2.
       writeFileSync(join(projectPath, 'untyped_holder.gd'), UNTYPED_HOLDER_SCRIPT, 'utf-8');
       const attached = await handleAttachScript(runner, {
         projectPath,
@@ -688,7 +656,6 @@ describe('a dictionary becomes a vector or color only with exactly that key set'
   itGodot(
     'an {x, y, name} dictionary on a typed Vector2 is an error, and the exact shapes still convert',
     async () => {
-      // Red when extra keys are ignored: the dictionary then lands as a Vector2.
       const mixed = await setProp('root', 'position', { x: 4, y: 2, name: 'gate' });
       expect(mixed).not.toHaveProperty('success');
       expect(String(mixed.error)).toMatch(/expected Vector2, got Dictionary/);
@@ -708,8 +675,7 @@ describe('a dictionary becomes a vector or color only with exactly that key set'
   itGodot(
     'an integer vector follows the same rule: extra or mixed keys are an error, {x, y} converts',
     async () => {
-      // Red when _int_vector_from_json builds a Vector2i from any dictionary
-      // that has x and y: the name key is then dropped and the write succeeds.
+      // Red when _int_vector_from_json builds a Vector2i from any dictionary with x and y.
       writeFileSync(
         join(projectPath, 'cell_holder.gd'),
         'extends Node2D\n\n@export var cell: Vector2i = Vector2i.ZERO\n',
@@ -731,7 +697,6 @@ describe('a dictionary becomes a vector or color only with exactly that key set'
       expect(noZ).not.toHaveProperty('success');
 
       expect((await setProp('root', 'cell', { x: 5, y: 6 })).success).toBe(true);
-      // Prediction, not observed: the text form of a stored Vector2i.
       expect(readFileSync(join(projectPath, SCENE), 'utf-8')).toContain('cell = Vector2i(5, 6)');
     },
     CASE_TIMEOUT_MS,

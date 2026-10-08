@@ -1,20 +1,4 @@
-/**
- * Integration test: a headless operation's payload survives stdout noise.
- *
- * Regression (issue 68): the engine banner, the operation's one-line JSON
- * payload and any print() from an autoload share stdout. A noise line that
- * contained a bracket or a brace made the payload extraction pick the wrong
- * span and the call failed with "GDScript returned invalid JSON", on some
- * projects and not others. Here the temp project copy gains an autoload whose
- * _init prints a bracketed tag, a printed dictionary and a JSON-looking line;
- * a real set_node_properties call must still return its own payload.
- *
- * The autoload is added to the temp copy only; the committed fixture is never
- * touched.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job.
- */
+/** The temp copy gains an autoload whose _init prints a bracketed tag, a printed dictionary and a JSON-looking line; the payload extraction must still pick the operation's own result. */
 
 import { describe, beforeAll, afterAll, expect } from 'vitest';
 import { spawnSync } from 'child_process';
@@ -44,8 +28,7 @@ const NOISY_AUTOLOAD_SOURCE = [
 ].join('\n');
 const SET_TEXT_TIMEOUT_MS = 60000;
 const NOISE_PROBE_TIMEOUT_MS = 30000;
-// The probe is synchronous and bounds itself; the test budget only has to sit
-// above it so the probe's own timeout is the one that reports.
+// The probe bounds itself; the test budget sits above it so the probe's own timeout reports.
 const NOISE_PROBE_TEST_MARGIN_MS = 15000;
 const NOISE_PROBE_TEST_TIMEOUT_MS = NOISE_PROBE_TIMEOUT_MS + NOISE_PROBE_TEST_MARGIN_MS;
 const NOISE_PROBE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -68,37 +51,29 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     removeTmpDir(tmpProject);
-  } catch {
-    // best-effort cleanup
-  }
+  } catch {}
 });
 
 describe('headless operation payload with a noisy autoload', () => {
   itGodot(
     'the autoload really prints bracketed and JSON-object lines on headless stdout',
     () => {
-      // Guards the test below against passing vacuously: boots the same temp
-      // project headless (autoloads initialize) and reads the raw stdout the
-      // parser would otherwise have to survive.
+      // Guards against passing vacuously: boots the same project headless and reads the raw stdout the parser has to survive.
       const probe = spawnSync(
         process.env.GODOT_PATH as string,
         ['--headless', '--path', tmpProject, '--quit'],
         {
           encoding: 'utf8',
           timeout: NOISE_PROBE_TIMEOUT_MS,
-          // Not catchable, so a wedged engine cannot outlive the timeout.
           killSignal: 'SIGKILL',
           maxBuffer: NOISE_PROBE_MAX_BUFFER_BYTES,
         },
       );
-      // A spawn failure or a timeout reports here, by name, instead of as a
-      // confusing mismatch on empty stdout below.
+      // A spawn failure or timeout reports here by name, not as a mismatch on empty stdout.
       expect(probe.error).toBeUndefined();
-      // The two string prints are literal text the engine passes through.
       expect(probe.stdout).toContain('[Audio] ready');
       expect(probe.stdout).toContain('{"looks_like": ["a payload"]}');
-      // How the engine renders a printed Dictionary varies by version, so the
-      // line is found by its key and only asked to carry an opening brace.
+      // A printed Dictionary renders differently by version, so the line is found by its key and only needs an opening brace.
       const dictionaryLine = probe.stdout.split('\n').find((line) => line.includes('unrelated'));
       expect(dictionaryLine).toBeDefined();
       expect(dictionaryLine).toContain('{');
@@ -128,18 +103,15 @@ describe('headless operation payload with a noisy autoload', () => {
 
 const FORGER_AUTOLOAD_NAME = 'ForgerAutoload';
 const FORGER_AUTOLOAD_FILE = 'forger_autoload.gd';
-/** A result line no real operation emits; a payload carrying it came from the autoload. */
 const FORGED_MARKER = 'forged-by-exit-tree';
 const FORGED_PAYLOAD = JSON.stringify({ results: [{ nodePath: FORGED_MARKER, success: true }] });
-/** The same forgery printed before the operation is dispatched. */
 const EARLY_FORGED_MARKER = 'forged-by-init';
 const EARLY_FORGED_PAYLOAD = JSON.stringify({
   results: [{ nodePath: EARLY_FORGED_MARKER, success: true }],
 });
 const forgingPrint = (payload: string): string =>
   `\tprint("${OPERATION_RESULT_SENTINEL}${payload.replace(/"/g, '\\"')}")`;
-// One forged line on each side of the real one, so neither "the last sentinel
-// line" nor "the first" is the operation's.
+// One forged line on each side of the real one, so neither the first nor the last sentinel line is the operation's.
 const FORGER_AUTOLOAD_SOURCE = [
   'extends Node',
   '',
@@ -167,17 +139,13 @@ describe('headless operation payload with an autoload that prints a forged resul
   afterAll(() => {
     try {
       removeTmpDir(forgedProject);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   });
 
   itGodot(
     'the autoload really prints the forged line on headless stdout',
     () => {
-      // Guards the test below against passing vacuously: if the engine never
-      // runs the autoload's _exit_tree, nothing was forged and the next test
-      // proves nothing.
+      // Guards against passing vacuously: if the engine never runs _exit_tree, nothing was forged.
       const probe = spawnSync(
         process.env.GODOT_PATH as string,
         ['--headless', '--path', forgedProject, '--quit'],
@@ -198,8 +166,7 @@ describe('headless operation payload with an autoload that prints a forged resul
   itGodot(
     'get_scene_tree returns the scene tree, not the line the autoload printed at exit',
     async () => {
-      // If this fails with a schema error or a tree without "Main", a forged
-      // line was taken for the result: src is wrong, not this test.
+      // A schema error or a tree without "Main" here means a forged line was taken for the result.
       const result = await handleGetSceneTree(runner, {
         projectPath: forgedProject,
         scenePath: 'main.tscn',

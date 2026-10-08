@@ -1,15 +1,4 @@
-/**
- * Integration tests for what batch_scene_operations leaves on disk when its
- * items interact through the per-batch scene cache.
- *
- * One file has one tree for the whole batch: an explicit `save` keeps the tree
- * cached, a save-as onto a path the batch also holds replaces that tree (and is
- * refused when the tree carries unwritten work), two spellings of one file are
- * one scene, and a failing item does not take the batch down with it.
- *
- * Every assertion reads the .tscn text from disk. Requires GODOT_PATH. Skipped
- * locally when it is unset; CI sets it in the godot-integration job.
- */
+/** Every assertion reads the .tscn text from disk, because the batch's per-scene cache decides what reaches it. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { copyFileSync, cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
@@ -30,7 +19,6 @@ const HOST_SCENE = 'host.tscn';
 const PLAYER_SCENE = 'player.tscn';
 const SPAWNER_SCENE = 'spawner.tscn';
 const CASE_TIMEOUT_MS = 120000;
-/** The cold-asset case also runs an asset import and a second batch run. */
 const IMPORT_CASE_TIMEOUT_MS = 240000;
 
 interface BatchResult {
@@ -60,18 +48,14 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
 
-/** How many node sections of the scene carry this node name. */
 function nodeCount(scene: string, nodeName: string): number {
   return sceneText(scene).split(`[node name="${nodeName}"`).length - 1;
 }
@@ -112,10 +96,7 @@ describe('a batch keeps one tree per scene file', () => {
   itGodot(
     'a scene first loaded after a save of the scene it instances sees the saved nodes',
     async () => {
-      // derived_unit.tscn inherits base_unit.tscn. host.tscn is loaded first and
-      // keeps the base's PackedScene alive in the resource cache. Loaded after
-      // the base was saved in the same process, the derived scene must be built
-      // on the saved base: N1 exists in it and can be overridden.
+      // Loaded after the base was saved in the same process, the derived scene must be built on the saved base so N1 can be overridden.
       const results = await runBatch([
         addNode(HOST_SCENE, 'Marker'),
         addNode(BASE_SCENE, 'N1'),
@@ -135,8 +116,7 @@ describe('a batch keeps one tree per scene file', () => {
       ]);
       expect(nodeCount(BASE_SCENE, 'N1')).toBe(1);
       const derived = sceneText(DERIVED_SCENE);
-      // N1 belongs to the base: the derived scene writes an override section
-      // for it, not a node of its own.
+      // N1 belongs to the base: the derived scene writes an override section, not a node of its own.
       expect(derived).toMatch(/\[node name="N1" parent="\."[^\]]*\]\nposition = Vector2\(9, 9\)/);
       expect(derived).not.toContain('[node name="N1" type="Node2D"');
     },
@@ -145,11 +125,7 @@ describe('a batch keeps one tree per scene file', () => {
 });
 
 describe('a scene another loaded tree holds as a property value', () => {
-  // spawner.tscn stores base_unit.tscn in a PackedScene export and in an
-  // Array[PackedScene] export. While its tree is loaded, the PackedScene of
-  // base_unit.tscn stays in the resource cache. Saving base_unit.tscn must not
-  // take that object's path away: without a path it is written into
-  // spawner.tscn as a whole sub_resource.
+  // While the spawner's tree is loaded, base_unit.tscn's PackedScene stays in the resource cache; saving the base must not take its path away, or it is written into spawner.tscn as a whole sub_resource.
   function expectSpawnerKeepsItsReferences(): void {
     const spawner = sceneText(SPAWNER_SCENE);
     expect(spawner).not.toContain('[sub_resource type="PackedScene"');
@@ -181,8 +157,7 @@ describe('a scene another loaded tree holds as a property value', () => {
   itGodot(
     'is still an ExtResource when the closing auto-save writes both scenes',
     async () => {
-      // The base is loaded first. The closing auto-save writes the spawner
-      // before it all the same, because the spawner references the base.
+      // The closing auto-save writes the spawner before the base all the same, because it references the base.
       const results = await runBatch([addNode(BASE_SCENE, 'N1'), addNode(SPAWNER_SCENE, 'A')]);
 
       expect(results.map((entry) => entry.error)).toEqual([undefined, undefined]);
@@ -205,7 +180,6 @@ describe('a batch save-as onto a scene the batch also holds', () => {
       expect(results[1]?.success).toBeUndefined();
       expect(String(results[1]?.error)).toMatch(/save-as would discard/);
 
-      // The closing auto-save wrote the host with X, not the derived scene.
       const host = sceneText(HOST_SCENE);
       expect(host).toContain('[node name="Host" type="Node2D"');
       expect(nodeCount(HOST_SCENE, 'X')).toBe(1);
@@ -218,7 +192,6 @@ describe('a batch save-as onto a scene the batch also holds', () => {
     'wins over an unchanged cached tree, and a later operation works on the saved file',
     async () => {
       const results = await runBatch([
-        // Fails, and leaves the host tree cached and unchanged.
         {
           operation: 'set_node_properties',
           scenePath: HOST_SCENE,
@@ -233,7 +206,6 @@ describe('a batch save-as onto a scene the batch also holds', () => {
       expect(results[1]?.savedScenePath).toBe(HOST_SCENE);
       expect(results[2]?.success).toBe(true);
 
-      // The file is the derived scene plus Y, not the old host plus Y.
       const host = sceneText(HOST_SCENE);
       expect(host).toContain('[node name="Derived"');
       expect(host).toContain('[node name="Extra"');
@@ -245,7 +217,6 @@ describe('a batch save-as onto a scene the batch also holds', () => {
 });
 
 describe('a batch identifies a scene by its file, not by the spelling of its path', () => {
-  /** True when this file system opens a wrong-case spelling of an existing file. */
   function fileSystemIgnoresCase(): boolean {
     return existsSync(join(projectPath, PLAYER_SCENE.toUpperCase()));
   }
@@ -312,7 +283,6 @@ describe('an add_node that fails on a property leaves nothing behind', () => {
   itGodot(
     'the node is not in the file the closing auto-save writes',
     async () => {
-      /** Above the 32-bit signed integer range process_priority holds. */
       const aboveInt32Max = 3000000000;
       const results = await runBatch([
         addNode(PLAYER_SCENE, 'Good'),
@@ -339,10 +309,7 @@ describe('the batch pre-pass probes a value whose property is not declared yet',
   itGodot(
     'a cold texture on an export of the script the same add_node attaches is imported before anything is applied',
     async () => {
-      // icon is declared by the script, so the bare Node2D the pre-pass builds
-      // does not have it. Read as "not an asset", the cold texture is found
-      // only while the second item is applied, after the first one succeeded,
-      // where the import-and-retry is refused.
+      // icon is declared by the script, so the bare Node2D the pre-pass builds lacks it; read as "not an asset", the cold texture is found only after the first item succeeded, where the retry is refused.
       writeFileSync(
         join(projectPath, 'icon_holder.gd'),
         'extends Node2D\n\n@export var icon: Texture2D\n',

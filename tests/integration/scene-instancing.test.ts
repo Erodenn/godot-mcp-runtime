@@ -1,27 +1,3 @@
-/**
- * Feature tests for scene instancing via add_node.
- *
- * Context: composing scenes by instancing a child scene (`[node ... instance=ExtResource(...)]`)
- * was not expressible through the MCP node tools: agents had to hand-edit the
- * parent .tscn to add `instance=` entries and the matching ext_resource header.
- *
- * The feature: `add_node` accepts a scene path as `nodeType` (e.g. "sub.tscn" or
- * "res://sub.tscn"). The child is `load()`ed and `instantiate()`d; on save,
- * PackedScene.pack() serializes it as `instance=ExtResource(...)`.
- *
- * Rules:
- * - a nonexistent scene path produces an explicit error, adding nothing
- * - a path that exists but is not a scene (wrong suffix) is never treated as one
- * - a path escaping the project root is rejected on both the standalone and
- *   batch paths (Godot resolves `res://../x.tscn` to a real file on disk)
- * - the saved parent scene references the child via instance= ExtResource
- * - ordinary class names keep working unchanged
- * - `create_scene`'s rootNodeType still means a Godot class, not a scene
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
@@ -62,9 +38,7 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
@@ -135,9 +109,7 @@ describe('scene instancing via add_node', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       const before = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
 
-      // A refused operation exits nonzero and still resolves with its output.
-      // Anything thrown here (an engine that died before dispatch, a timeout)
-      // is a failure of the test, not a refusal.
+      // A refused operation resolves with its output; a throw means the engine died or timed out.
       const { stdout, stderr } = await runner.executeOperation(
         'add_node',
         {
@@ -149,8 +121,7 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      // Red when the refusal is gone, and when the operation never ran: a
-      // misspelled operation name prints no such line.
+      // Also red when the operation never ran: a misspelled operation name prints no such line.
       expect(stderr).toContain('Scene file does not exist');
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       const after = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
@@ -207,7 +178,6 @@ describe('scene instancing via add_node', () => {
         rmSync(outside, { force: true });
       }
 
-      // Red when the refusal is gone, and when the operation never ran.
       expect(stderr).toContain('escapes the project root');
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(readFileSync(join(tmpProject, 'main.tscn'), 'utf-8')).toBe(before);
@@ -218,8 +188,7 @@ describe('scene instancing via add_node', () => {
   itGodot(
     'rejects an escaping scene path through batch_scene_operations too',
     async () => {
-      // The batch path forwards operations to GDScript without passing through
-      // the Node-side path validators, so containment must hold engine-side.
+      // The batch path skips the Node-side path validators, so containment must hold engine-side.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
       const { stdout } = await runner.executeOperation(
@@ -239,8 +208,7 @@ describe('scene instancing via add_node', () => {
       );
 
       expect(stdout).toContain('escapes the project root');
-      // The batch re-saves surviving scenes, so assert on the node rather than
-      // byte-equality: nothing was instanced and no ext_resource was added.
+      // The batch re-saves surviving scenes, so assert on the node rather than byte-equality.
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).not.toContain('BatchEscaped');
       expect(saved).not.toContain('outside.tscn');
@@ -251,8 +219,7 @@ describe('scene instancing via add_node', () => {
   itGodot(
     'rejects a second scheme smuggled into the scene path',
     async () => {
-      // simplify_path() leaves an embedded "res://" intact, so containment
-      // would otherwise rest on how the engine rewrites the path later.
+      // simplify_path() leaves an embedded "res://" intact.
       const tmpProject = tmpDirs[tmpDirs.length - 1];
 
       const { stdout } = await runner.executeOperation(
@@ -317,8 +284,6 @@ describe('scene instancing via add_node', () => {
         30000,
       );
 
-      // Red when a scene path starts being accepted as a root type, and when
-      // the operation never ran.
       expect(stderr).toContain('Failed to instantiate node of type: child.tscn');
       expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(existsSync(join(tmpProject, 'made.tscn'))).toBe(false);
@@ -326,26 +291,6 @@ describe('scene instancing via add_node', () => {
     60000,
   );
 });
-
-// ---------------------------------------------------------------------------
-// Reproduction: instanced children lose their scene provenance when a script
-// is attached to them through attach_script.
-//
-// attach_script (godot_operations.gd) loads the scene, calls node.set_script()
-// on the instanced child, then packs+saves via PackedScene.pack(). A plain
-// Node.set_script() on an instanced scene child is legal in the Godot editor
-// (it serializes as a script override next to instance=ExtResource), but the
-// pack path used here drops the instance provenance entirely: the child node
-// is re-serialized as a bare class node WITHOUT its inherited children and
-// WITHOUT the instance=ExtResource attribute. Consumers of the scene see a
-// structurally different tree (missing sub-nodes, missing collision shapes)
-// after what appears to be a successful operation.
-//
-// Invariants pinned below:
-// 1. ext_resource ids remain unique per resource across save round-trips
-// 2. an instanced child survives attach_script + further save cycles with
-//    its instance= link intact AND pointing at the correct PackedScene
-// ---------------------------------------------------------------------------
 
 function writeEntitiesScenes(projectDir: string): void {
   writeFileSync(
@@ -366,26 +311,12 @@ function writeScriptFile(projectDir: string, name: string): void {
   writeFileSync(join(projectDir, name), 'extends Node2D\n');
 }
 
-// Position written onto the node inside the instanced child. Deliberately
-// distinct from every position already present in the fixture scene (its
-// Sprite2D sits at Vector2(50, 50)): a value that collides with one makes the
-// serialized-text assertion below unfalsifiable, because the string is found
-// whether or not the override actually persisted.
+// Distinct from every fixture position (its Sprite2D sits at Vector2(50, 50)): a collision makes the text assertion unfalsifiable.
 const OVERRIDE_POSITION = { x: 123, y: 456 };
 const OVERRIDE_POSITION_TSCN = 'position = Vector2(123, 456)';
 
-/**
- * Structural assertion for the editable-children override form.
- *
- * A corrupt save (owner reassigned to the root instead of editable-instance
- * flags) serializes a second, shadowing node:
- *   [node name="Inner" type="Node2D" parent="A"]
- * A correct override serializes without a type, next to the instance= link:
- *   [node name="Inner" parent="A" index="0"]
- * The corrupted output would leave the loaded scene with TWO Inner children
- * under root/A, so file-text greps alone cannot distinguish them: hence the
- * get_scene_tree check and the idempotency probe below.
- */
+// A corrupt save serializes a second shadowing `[node name="Inner" type="Node2D" parent="A"]`; the correct override has no type.
+// File-text greps cannot tell them apart, hence the get_scene_tree check and the idempotency probe.
 async function assertInstancedOverrideRoundTrips(
   tmpProject: string,
   reapplyUpdate: () => Promise<void>,
@@ -393,12 +324,9 @@ async function assertInstancedOverrideRoundTrips(
   const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
   expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
   expect(saved).toContain(OVERRIDE_POSITION_TSCN);
-  // Override form: name + parent, no type, serialized alongside the instance.
   expect(saved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
-  // Forbidden: a second shadowing node for Inner.
   expect(saved).not.toMatch(/\[node name="Inner" parent="A" type="/);
 
-  // Reload the saved scene: A must have exactly one Inner, at the override position.
   const { stdout } = await runner.executeOperation(
     'get_scene_tree',
     { scenePath: 'main.tscn' },
@@ -412,8 +340,7 @@ async function assertInstancedOverrideRoundTrips(
   const inners = (a!.children ?? []).filter((n: { name: string }) => n.name === 'Inner');
   expect(inners).toHaveLength(1);
 
-  // Idempotency: a repeat write to the same path must not destroy the
-  // override (the corrupted form degrades to two nodes here, then loses it).
+  // A repeat write to the same path must not destroy the override (the corrupt form degrades to two nodes, then loses it).
   await reapplyUpdate();
   const resaved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
   expect(resaved).toMatch(/\[node name="Inner" parent="A" index="\d+"\]/);
@@ -443,7 +370,6 @@ describe('set_node_properties on nodes inside instanced children', () => {
         tmpProject,
         30000,
       );
-      // Target a node that lives INSIDE the instanced child scene.
       const reapply = () =>
         runner.executeOperation(
           'set_node_properties',
@@ -469,7 +395,6 @@ describe('set_node_properties on nodes inside instanced children', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       writeEntitiesScenes(tmpProject);
 
-      // Seed: add the instanced child, apply the override, save: one batch.
       await runner.executeOperation(
         'batch_scene_operations',
         {
@@ -527,7 +452,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
       writeEntitiesScenes(tmpProject);
 
-      // Two instanced children plus script attachment: the observed trigger mix.
       await runner.executeOperation(
         'add_node',
         { scenePath: 'main.tscn', nodeType: 'child_a.tscn', nodeName: 'A' },
@@ -548,7 +472,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
         30000,
       );
 
-      // Re-save via a benign mutation to force another pack/save cycle.
       await runner.executeOperation(
         'add_node',
         { scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Benign' },
@@ -559,7 +482,7 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       const ids = [...saved.matchAll(/\[ext_resource[^\]]*\bid="([^"]+)"/g)].map((m) => m[1]);
       const uniqueIds = new Set(ids);
-      expect(uniqueIds.size).toBe(ids.length); // no two ext_resources share an id
+      expect(uniqueIds.size).toBe(ids.length);
     },
     120000,
   );
@@ -576,8 +499,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
         tmpProject,
         30000,
       );
-      // Overriding the script on an instanced child is legal in the editor;
-      // the survival of instance= + inherited children is the invariant.
       writeScriptFile(tmpProject, 'override.gd');
       await runner.executeOperation(
         'attach_script',
@@ -586,7 +507,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
         30000,
       );
 
-      // Further save cycles (delete another node, then re-add) must not strip it.
       await runner.executeOperation(
         'add_node',
         { scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'Temp' },
@@ -602,7 +522,6 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
 
       const saved = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(saved).toMatch(/\[node name="A"[^\]]*instance=ExtResource\(/);
-      // The ext_resource the instance points at must be the right PackedScene.
       const instanceMatch = saved.match(/\[node name="A"[^\]]*instance=ExtResource\("([^"]+)"\)/);
       expect(instanceMatch).not.toBeNull();
       const id = instanceMatch![1];
@@ -617,26 +536,8 @@ describe('ext_resource stability across repeated MCP round-trips', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// Mutations on nodes inside an instanced child.
-//
-// Nodes inside an instanced scene are not owned by the scene root, so pack()
-// drops a change made on them unless the instance is marked editable from the
-// scene root. set_node_properties already did that; load_sprite, attach_script,
-// add_node and duplicate_node now do too, and delete_nodes refuses a node that
-// belongs to an instance (the instance re-creates it on every load, so a
-// deletion cannot persist).
-//
-// A node added or duplicated directly under the instance's own root needs no
-// mark (the root is owned by the scene that instances it), so those cases must
-// leave the instance unmarked.
-//
-// Assertions are made on a reload of the saved scene through get_scene_tree or
-// get_node_properties. The one exception is the editable mark itself, which a
-// reload does not report: it is read from the .tscn text, once as present and
-// elsewhere as absent, so a wrong spelling fails the first instead of passing
-// the others.
-// ---------------------------------------------------------------------------
+// Nodes inside an instanced scene are not owned by the scene root, so pack() drops edits unless the instance is marked editable.
+// The editable mark is read from .tscn text (a reload does not report it), once present and elsewhere absent.
 
 const INSTANCE_CASE_TIMEOUT_MS = 180000;
 const INSTANCE_OP_TIMEOUT_MS = 30000;
@@ -646,7 +547,6 @@ interface ReloadedNode {
   children: ReloadedNode[] | null;
 }
 
-/** Run one headless operation and parse its payload. */
 async function runOperation(
   project: string,
   operation: string,
@@ -658,8 +558,7 @@ async function runOperation(
     project,
     INSTANCE_OP_TIMEOUT_MS,
   );
-  // An operation that failed emitted no payload. Say what it printed, so the
-  // case fails on the operation's own reason and not on a JSON syntax error.
+  // A failed operation emitted no payload; say what it printed so the case fails on that reason, not a JSON syntax error.
   const payload = extractOperationPayload(stdout);
   if (payload === null) {
     throw new Error(`${operation} emitted no payload.\nstdout: ${stdout}\nstderr: ${stderr}`);
@@ -667,14 +566,12 @@ async function runOperation(
   return JSON.parse(payload) as Record<string, unknown>;
 }
 
-/** The saved main scene, reloaded in a fresh process. */
 async function reloadTree(project: string): Promise<ReloadedNode> {
   return (await runOperation(project, 'get_scene_tree', {
     scenePath: 'main.tscn',
   })) as unknown as ReloadedNode;
 }
 
-/** Child names of the node at `names` (a chain from the root's children down) after a reload. */
 async function reloadedChildNames(project: string, names: string[]): Promise<string[]> {
   let node = await reloadTree(project);
   for (const name of names) {
@@ -685,7 +582,6 @@ async function reloadedChildNames(project: string, names: string[]): Promise<str
   return (node.children ?? []).map((child) => child.name);
 }
 
-/** One node's properties after a reload, or its error entry. */
 async function reloadedNode(project: string, nodePath: string): Promise<Record<string, unknown>> {
   const payload = await runOperation(project, 'get_node_properties', {
     scenePath: 'main.tscn',
@@ -694,16 +590,13 @@ async function reloadedNode(project: string, nodePath: string): Promise<Record<s
   return (payload.results as Array<Record<string, unknown>>)[0]!;
 }
 
-/** How a scene file records that instance A is editable from the scene that holds it. */
 const EDITABLE_INSTANCE_MARK_PREFIX = '[editable ';
 const EDITABLE_INSTANCE_A_MARK = `${EDITABLE_INSTANCE_MARK_PREFIX}path="A"]`;
 
-/** The saved main scene as text, for the one fact a reload cannot show: the editable mark. */
 function savedMainScene(project: string): string {
   return readFileSync(join(project, 'main.tscn'), 'utf-8');
 }
 
-/** Add `child_a.tscn` (one Inner node) to main.tscn as A. */
 async function addInstanceA(project: string): Promise<void> {
   writeEntitiesScenes(project);
   const added = await runOperation(project, 'add_node', {
@@ -726,8 +619,7 @@ describe('mutations inside instanced children persist or are refused', () => {
           '[node name="Pic" type="Sprite2D" parent="."]\n',
       );
       writeFileSync(join(tmpProject, 'pic.png'), minimalPng());
-      // The committed placeholder.png is intentionally invalid; give the tmp
-      // copy a real one so the import step does not report it as an error.
+      // The committed placeholder.png is intentionally invalid; give the copy a real one so import does not report an error.
       writeFileSync(join(tmpProject, 'placeholder.png'), minimalPng());
       await runner.importAssets(tmpProject);
       await runOperation(tmpProject, 'add_node', {
@@ -791,9 +683,7 @@ describe('mutations inside instanced children persist or are refused', () => {
       expect(await reloadedChildNames(tmpProject, ['A', 'Inner'])).toEqual(['Grown']);
       const grown = await reloadedNode(tmpProject, 'root/A/Inner/Grown');
       expect(grown).not.toHaveProperty('error');
-      // The mark that made it persist. This is the positive twin of the
-      // "leaves the instance unmarked" case below, so that one cannot pass on a
-      // marker spelling that never occurs.
+      // Positive twin of the "leaves the instance unmarked" case, so that one cannot pass on a marker spelling that never occurs.
       expect(savedMainScene(tmpProject)).toContain(EDITABLE_INSTANCE_A_MARK);
     },
     INSTANCE_CASE_TIMEOUT_MS,
@@ -815,8 +705,7 @@ describe('mutations inside instanced children persist or are refused', () => {
 
       const names = await reloadedChildNames(tmpProject, ['A']);
       expect([...names].sort()).toEqual(['Beside', 'Inner']);
-      // The instance root is owned by this scene, so its new child saves as it
-      // is. Marking the instance editable here would change the scene for nothing.
+      // The instance root is owned by this scene, so it needs no editable mark.
       expect(savedMainScene(tmpProject)).not.toContain(EDITABLE_INSTANCE_MARK_PREFIX);
     },
     INSTANCE_CASE_TIMEOUT_MS,
@@ -839,7 +728,6 @@ describe('mutations inside instanced children persist or are refused', () => {
       expect(names).toHaveLength(2);
       expect(names).toContain('Inner');
       expect(names).toContain('InnerCopy');
-      // The copy sits directly under the instance root, which needs no mark.
       expect(savedMainScene(tmpProject)).not.toContain(EDITABLE_INSTANCE_MARK_PREFIX);
     },
     INSTANCE_CASE_TIMEOUT_MS,
@@ -851,8 +739,7 @@ describe('mutations inside instanced children persist or are refused', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       await addInstanceA(tmpProject);
 
-      // The copy lands under Inner, a node the instance owns. pack() never
-      // reaches a child of such a node unless the instance is editable.
+      // pack() never reaches a child of an instance-owned node unless the instance is editable.
       const duplicated = await runOperation(tmpProject, 'duplicate_node', {
         scenePath: 'main.tscn',
         nodePath: 'root/A/Inner',
@@ -882,7 +769,6 @@ describe('mutations inside instanced children persist or are refused', () => {
       expect(String(entry!.error)).toMatch(/belongs to an instanced scene/);
       expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
 
-      // The instance's own root is owned by this scene, so it can still be deleted.
       const removed = await runOperation(tmpProject, 'delete_nodes', {
         scenePath: 'main.tscn',
         nodePaths: ['root/A'],
@@ -908,9 +794,7 @@ describe('mutations inside instanced children persist or are refused', () => {
       });
       expect(duplicated.newNodePath).toBe('root/A2');
 
-      // Re-owning the instance's inner nodes to the scene root made pack() write
-      // them as nodes of their own beside the instance, so the copy reloaded
-      // with two Inner children.
+      // Two Inner children here means the instance's inner nodes were re-owned to the scene root.
       expect(await reloadedChildNames(tmpProject, ['A2'])).toEqual(['Inner']);
       expect(await reloadedChildNames(tmpProject, ['A'])).toEqual(['Inner']);
     },
@@ -936,9 +820,7 @@ describe('mutations inside instanced children persist or are refused', () => {
       });
       expect(duplicated.newNodePath).toBe('root/A2');
 
-      // Extra belongs to this scene, not to the instance, so duplicate() copies
-      // it without an owner. Left that way, pack() drops it and the copy
-      // reloads without the node the call reported as duplicated.
+      // duplicate() copies Extra without an owner, so pack() drops it unless it is re-owned.
       const copied = await reloadedChildNames(tmpProject, ['A2']);
       expect([...copied].sort()).toEqual(['Extra', 'Inner']);
       const original = await reloadedChildNames(tmpProject, ['A']);

@@ -1,17 +1,4 @@
-/**
- * Two projects running at once on one GodotRunner (one MCP server), against
- * real Godot processes: switch_project, per-project UI content, the edit guard
- * on a project that is live but not current, stop and self-exit without any
- * fallback to the other session.
- *
- * Each project is a temp copy of the committed fixture plus a sibling marker
- * scene whose label names the project, so what get_ui_elements returns shows
- * which session answered. The committed fixture and its main.tscn are never
- * touched.
- *
- * Requires GODOT_PATH; skipped when it is unset, same as every other file
- * under tests/integration/.
- */
+/** Each project is a temp copy plus a sibling marker scene whose label names the project, so get_ui_elements shows which session answered. */
 
 import { describe, beforeEach, afterEach, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
@@ -36,17 +23,13 @@ import { handleAddNode } from '../../src/tools/scene-tools.js';
 
 const BRIDGE_WAIT_MS = 20000;
 const EXIT_WAIT_MS = 15000;
-// Two sequential launches, several bridge round trips, a stop and a kill. The
-// case budget has to exceed the budgets inside it.
+// Two sequential launches, bridge round trips, a stop and a kill: the case budget must exceed the budgets inside it.
 const CASE_TIMEOUT_MS = 180000;
 const MARKER_SCENE = 'marker.tscn';
 const LABEL_A = 'project-a';
 const LABEL_B = 'project-b';
 const MAIN_SCENE = 'main.tscn';
-// switch_project gives its probe ping a few seconds. With two software-rendered
-// games on a loaded CI runner one probe can miss that budget with nothing
-// wrong, so the idempotent switch is asked again before the bridge is called
-// unresponsive. It still has to answer within these attempts.
+// On a loaded CI runner with two software-rendered games a probe can miss the ping budget with nothing wrong, so the idempotent switch is retried before the bridge is called unresponsive.
 const SWITCH_PROBE_ATTEMPTS = 3;
 
 const tmpDirs: string[] = [];
@@ -99,11 +82,6 @@ function labels(result: unknown): string[] {
   return elements.map((element) => element.text).filter((text): text is string => !!text);
 }
 
-/**
- * True once switch_project's probe has seen a pong from the selected session.
- * `first` is the payload of the switch already made; later attempts repeat the
- * switch, which changes nothing but the probe result.
- */
 async function probeAnswers(projectPath: string, first: Record<string, unknown>): Promise<boolean> {
   let payload = first;
   for (let attempt = 1; attempt < SWITCH_PROBE_ATTEMPTS; attempt += 1) {
@@ -122,8 +100,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Bounded and never throws, so it runs after a skip or a failed assertion
-  // and no Godot process outlives the test.
+  // Bounded and never throws, so no Godot process outlives a skipped or failed test.
   await runner.stopAllSessions();
   for (const dir of tmpDirs.splice(0)) {
     removeTmpDir(dir);
@@ -139,32 +116,27 @@ describe('two projects on one runner', () => {
       const a = resolve(projectA);
       const b = resolve(projectB);
 
-      // 1. Start A, then B: both live, B current.
       await startSession(ctx, projectA);
       await startSession(ctx, projectB);
       expect(liveProjectPaths()).toEqual([a, b]);
       expect(runner.getCurrentSessionInfo()?.projectPath).toBe(b);
 
-      // 2. The runtime tools act on B.
       const uiB = await handleGetUiElements(runner, {});
       expect(payloadOf(uiB).projectPath).toBe(b);
       expect(labels(uiB)).toContain(LABEL_B);
       expect(labels(uiB)).not.toContain(LABEL_A);
 
-      // 3. Switch to A.
       const switched = payloadOf(await handleSwitchProject(runner, { projectPath: projectA }));
       expect(switched.projectPath).toBe(a);
       expect(switched.previousProjectPath).toBe(b);
       expect(switched.live).toBe(true);
       expect(await probeAnswers(projectA, switched)).toBe(true);
 
-      // 4. Now they act on A.
       const uiA = await handleGetUiElements(runner, {});
       expect(payloadOf(uiA).projectPath).toBe(a);
       expect(labels(uiA)).toContain(LABEL_A);
       expect(labels(uiA)).not.toContain(LABEL_B);
 
-      // 5. check_project: A is current, B's own session is reported too.
       const checked = payloadOf(await handleCheckProject(runner, { projectPath: projectB }));
       const runtime = checked.runtime as {
         activeSession: boolean;
@@ -183,7 +155,6 @@ describe('two projects on one runner', () => {
         sessionMode: 'spawned',
       });
 
-      // 6. A headless edit on B is refused while B is live and not current.
       const mainSceneB = join(projectB, MAIN_SCENE);
       const before = readFileSync(mainSceneB);
       const refused = await handleAddNode(runner, {
@@ -197,14 +168,12 @@ describe('two projects on one runner', () => {
       expect(fullText(refused)).toContain('switch_project');
       expect(readFileSync(mainSceneB).equals(before)).toBe(true);
 
-      // 7. stop_project stops A only; B keeps running and its bridge stays.
       const stopped = payloadOf(await handleStopProject(runner));
       expect(stopped.projectPath).toBe(a);
       expect(stopped.message as string).toContain(b);
       expect(existsSync(bridgeDir(projectA))).toBe(false);
       expect(existsSync(bridgeDir(projectB))).toBe(true);
 
-      // 8. Nothing is current now, and no tool falls back to B.
       const noFallback = await handleGetUiElements(runner, {});
       expect(hasError(noFallback)).toBe(true);
       expect(errorText(noFallback)).toMatch(/No current runtime session/);
@@ -213,7 +182,6 @@ describe('two projects on one runner', () => {
       expect(runner.hasLiveSessionOnProject(projectB)).toBe(true);
       expect(runner.getCurrentSessionInfo()).toBeNull();
 
-      // 9. Switch to B, use it, stop it.
       payloadOf(await handleSwitchProject(runner, { projectPath: projectB }));
       expect(labels(await handleGetUiElements(runner, {}))).toContain(LABEL_B);
       expect(payloadOf(await handleStopProject(runner)).projectPath).toBe(b);
@@ -230,8 +198,6 @@ describe('two projects on one runner', () => {
       const a = resolve(projectA);
       const b = resolve(projectB);
 
-      // 1. Start A, then B, and kill B's process from outside, the way a crash
-      //    or a closed window would.
       await startSession(ctx, projectA);
       await startSession(ctx, projectB);
       const spawned = runner.activeProcess!;
@@ -248,7 +214,6 @@ describe('two projects on one runner', () => {
       spawned.process.kill('SIGKILL');
       await exited;
 
-      // 2. The next runtime call says the game exited and lists A; it does not use A.
       const afterExit = await handleGetUiElements(runner, {});
       expect(hasError(afterExit)).toBe(true);
       expect(errorText(afterExit)).toMatch(/spawned Godot process has exited/);
@@ -258,17 +223,14 @@ describe('two projects on one runner', () => {
       expect(exitText).toContain('switch_project');
       expect(runner.getCurrentSessionInfo()?.projectPath).toBe(b);
 
-      // 3. The exited game's logs are still readable.
       const logs = payloadOf(handleGetDebugOutput(runner, {}));
       expect(logs.running).toBe(false);
       expect(logs.projectPath).toBe(b);
 
-      // 4. A is still live and reachable through switch_project.
       const toA = payloadOf(await handleSwitchProject(runner, { projectPath: projectA }));
       expect(toA.live).toBe(true);
       expect(labels(await handleGetUiElements(runner, {}))).toContain(LABEL_A);
 
-      // 5. Switching back to the exited session works and says it is not live.
       const back = payloadOf(await handleSwitchProject(runner, { projectPath: projectB }));
       expect(back.live).toBe(false);
       expect(back.bridgeResponsive).toBeNull();
@@ -278,7 +240,6 @@ describe('two projects on one runner', () => {
       expect(logsAgain.projectPath).toBe(b);
       expect(logsAgain.exitCode).not.toBeUndefined();
 
-      // 6. stop_project frees the exited session and leaves A running.
       const stopped = payloadOf(await handleStopProject(runner));
       expect(stopped.alreadyExited).toBe(true);
       expect(stopped.projectPath).toBe(b);

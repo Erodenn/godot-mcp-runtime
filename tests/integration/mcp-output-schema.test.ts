@@ -1,18 +1,5 @@
-/**
- * Integration test for issue #18.
- *
- * The MCP spec (revision 2025-06-18) requires tools that declare
- * `outputSchema` to return a matching `structuredContent` field on success.
- * The @modelcontextprotocol/sdk Client validator at
- * `node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js:500`
- * enforces this: strict clients (LM Studio, Open Code, AnythingLLM) reject
- * responses that omit it.
- *
- * This test wires the real lower-level `Server` (matching production in
- * `src/index.ts`) to a real `Client` over an in-memory transport and calls
- * filesystem-only tools through the actual dispatch table to verify
- * `structuredContent` is emitted with the schema-declared shape.
- */
+// The MCP spec requires tools declaring `outputSchema` to return matching `structuredContent`; strict clients reject responses that omit it.
+// Wires the real `Server` to a real `Client` over an in-memory transport and calls filesystem-only tools through the dispatch table.
 import { describe, it, expect } from 'vitest';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -59,9 +46,7 @@ async function makeLinkedPair() {
 
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  // Populate the client's per-tool outputSchema validator cache. The strict
-  // check in client/index.js:500 only runs for tools whose schemas the client
-  // has seen, so listTools() must be called before callTool() to reproduce.
+  // The client's strict outputSchema check runs only for tools whose schemas it has seen, so listTools() must precede callTool().
   await client.listTools();
 
   return { client, server };
@@ -76,8 +61,7 @@ describe('MCP outputSchema contract (issue #18)', () => {
         name: 'search_project',
         arguments: {
           projectPath: fixtureProjectPath,
-          // A pattern guaranteed to match content in fixture's main.tscn
-          // (default fileTypes excludes the .godot extension).
+          // Guaranteed to match content in main.tscn (default fileTypes excludes the .godot extension).
           pattern: 'Sprite2D',
         },
       })) as { structuredContent?: { matches?: unknown[]; truncated?: boolean } };

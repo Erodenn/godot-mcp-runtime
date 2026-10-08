@@ -1,18 +1,4 @@
-/**
- * Behaviour that depends on what the engine itself does, observed on a real
- * Godot: where a path the Node side never resolves is contained, what a scene
- * save writes when scenes are built from each other, which property values
- * the engine stores, and how the bridge answers while a game is running.
- *
- * Each case first checks, with its own message, that the operation really ran
- * (a control call of the same shape succeeded, a file exists, a payload
- * parsed), so a case cannot pass because the engine did nothing. An assertion
- * whose message starts with "precondition:" failing means the case itself is
- * wrong, not the code under test.
- *
- * The comment at the top of each case names the change to the code that turns
- * it red.
- */
+/** A failing assertion whose message starts with "precondition:" means the case itself is wrong, not the code under test. */
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
@@ -72,13 +58,10 @@ afterEach(async () => {
   await runner.stopProject().catch(() => undefined);
 });
 
-// ---------------------------------------------------------------- helpers
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** A parent directory holding a copy of the authored fixture at `parent/project`. */
 function authoredCopy(): { parent: string; project: string } {
   const parent = tmp.make('godot-mcp-engine-');
   const project = join(parent, PROJECT_DIR);
@@ -87,11 +70,6 @@ function authoredCopy(): { parent: string; project: string } {
   return { parent, project };
 }
 
-/**
- * A copy of the minimal fixture that launches `mainScene` (the fixture's own
- * main scene, or a sibling of it), with `extraFiles` (path relative to the
- * project -> text) written beside it.
- */
 function runtimeCopy(mainScene: string, extraFiles: Record<string, string> = {}): string {
   const project = tmp.make('godot-mcp-engine-rt-');
   cpSync(fixtureProjectPath, project, { recursive: true });
@@ -114,7 +92,6 @@ function describeResult(result: HandlerResult): string {
   return JSON.stringify(unwrap(result).content);
 }
 
-/** The success payload; throws with the error text when the call failed. */
 function payloadOf(result: HandlerResult, what: string): Record<string, unknown> {
   if (!result.ok) throw new Error(`precondition: ${what} failed: ${describeResult(result)}`);
   const payload = result.value.structuredContent;
@@ -127,7 +104,6 @@ interface UpdateEntry {
   error?: string;
 }
 
-/** Whether the call, or any of its per-update entries, reported a failure. */
 function wasRejected(result: HandlerResult): boolean {
   if (!result.ok) return true;
   const results = result.value.structuredContent?.results as UpdateEntry[] | undefined;
@@ -146,7 +122,6 @@ function forwardSlashes(path: string): string {
   return path.replace(/\\/g, '/');
 }
 
-/** A script whose `_init` writes `markerPath`: proof the engine instantiated it. */
 function markerScript(markerPath: string): string {
   return [
     'extends Node',
@@ -160,7 +135,6 @@ function markerScript(markerPath: string): string {
   ].join('\n');
 }
 
-/** Run GDScript in the live game through the bridge directly, bypassing the policy gate. */
 async function bridgeScript(
   bodyLines: string[],
   timeoutMs: number = BRIDGE_CMD_TIMEOUT_MS,
@@ -192,14 +166,11 @@ async function simulate(actions: Array<Record<string, unknown>>): Promise<InputP
   return payloadOf(result, 'simulate_input') as unknown as InputPayload;
 }
 
-// ------------------------------------------------------------------ cases
-
 describe('paths the Node side does not resolve', () => {
   itGodot(
     'add_node refuses a node type that names a script outside the project via a leading slash',
     async () => {
-      // Red when normalize_scene_path lets "res:///../outside.gd" through: the
-      // outside script is loaded and its _init runs.
+      // Red when normalize_scene_path lets "res:///../outside.gd" through and its _init runs.
       const { parent, project } = authoredCopy();
       const insideMarker = join(parent, 'marker-inside.txt');
       const outsideMarker = join(parent, 'marker-outside.txt');
@@ -277,8 +248,7 @@ describe('headless scene saves', () => {
   itGodot(
     'a batch that edits a base scene then adds to a derived scene does not pin the old base value',
     async () => {
-      // Red when the closing save order lets derived_unit.tscn write the
-      // pre-batch Leg text as an override.
+      // Red when the closing save order writes the pre-batch Leg text as an override.
       const { project } = authoredCopy();
       expect(
         text(project, 'derived_unit.tscn'),
@@ -321,9 +291,7 @@ describe('headless scene saves', () => {
   itGodot(
     'a batch that saves a base scene while a derived scene holds unwritten operations writes the derived scene first',
     async () => {
-      // Red when the save item writes the base and leaves the derived tree
-      // cached: its closing save then pins the old Leg text, or its first
-      // operation is lost with the tree.
+      // Red when the save item leaves the derived tree cached, so its closing save pins the old Leg text.
       const { project } = authoredCopy();
       expect(
         text(project, 'derived_unit.tscn'),
@@ -500,8 +468,7 @@ describe('headless scene saves', () => {
   itGodot(
     'a batch item whose script cannot be instantiated reports its own error and keeps the payload',
     async () => {
-      // Red when script.new() raising inside add_node aborts the whole batch
-      // with no results after an earlier save already landed.
+      // Red when script.new() raising inside add_node aborts the batch after an earlier save landed.
       const { project } = authoredCopy();
       writeFileSync(join(project, 'bad_init.gd'), 'extends Node\n\nfunc _init(hp):\n\tpass\n');
 
@@ -543,8 +510,7 @@ describe('headless scene saves', () => {
   itGodot(
     'connect_signal from a node inside an instanced child saves the connection',
     async () => {
-      // Red when connect_signal never claims the instanced ancestors, so the
-      // saved scene has no [connection] and the read-back fails.
+      // Red when connect_signal never claims the instanced ancestors, so the saved scene has no [connection].
       const { project } = authoredCopy();
       writeFileSync(
         join(project, 'conn_host.gd'),
@@ -597,8 +563,7 @@ describe('headless scene saves', () => {
   itGodot(
     'a stale ext_resource path with a valid uid is not reported as lost content',
     async () => {
-      // Red when the loss guard compares references by path only and the
-      // engine re-resolves the uid to the current path on save.
+      // Red when the loss guard compares references by path only and the engine re-resolves the uid on save.
       const { project } = authoredCopy();
       writeFileSync(
         join(project, 'stale_host.tscn'),
@@ -667,7 +632,6 @@ describe('headless scene saves', () => {
       expect(withSaver, 'precondition: the Saver autoload line was inserted').not.toBe(original);
       writeFileSync(projectFile, withSaver, 'utf8');
 
-      // Any headless operation loads the autoload, whose _init saves the setting.
       const tree = await handleGetSceneTree(runner, {
         projectPath: project,
         scenePath: 'player.tscn',
@@ -688,9 +652,7 @@ describe('headless scene saves', () => {
   itGodot(
     'run_script returning an infinite float answers null with a non-finite warning',
     async (ctx) => {
-      // Red when the bridge stops replacing a non-finite float with null (the
-      // frame then stops parsing on an engine that writes it as a bare word),
-      // or when the reply loses the count the Node side turns into the warning.
+      // Red when the bridge stops replacing a non-finite float with null, or the reply loses the count behind the warning.
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
@@ -707,7 +669,6 @@ describe('headless scene saves', () => {
       expect(claim.ok, `an infinite float broke the response; ${describeResult(claim)}`).toBe(true);
       const claimed = payloadOf(claim, 'run_script returning 1.0 / 0.0');
       expect(claimed.result).toBeNull();
-      // Prediction, not observed: the warning text and its position first.
       const warnings = claimed.warnings as string[];
       expect(warnings[0]).toMatch(/1 non-finite numbers \(INF, NAN\) were returned as null/);
       expect(claimed).not.toHaveProperty('success');
@@ -718,9 +679,7 @@ describe('headless scene saves', () => {
   itGodot(
     'get_node_properties on a script variable holding INF returns null and a warning',
     async () => {
-      // Red when emit_result stops replacing a non-finite float with null (the
-      // result line is then invalid JSON on an engine that writes a bare word)
-      // or stops naming its path in a warning.
+      // Red when emit_result stops replacing a non-finite float with null or stops naming its path in a warning.
       const { project } = authoredCopy();
       writeFileSync(join(project, 'inf_holder.gd'), 'extends Node\n\n@export var x := INF\n');
       writeFileSync(
@@ -753,8 +712,6 @@ describe('headless scene saves', () => {
         .results as UpdateEntry[];
       expect(entries[0]?.error).toBeUndefined();
       expect((entries[0] as { properties?: Record<string, unknown> }).properties?.x).toBeNull();
-      // Prediction, not observed: the exact path the warning names, and that the
-      // exported variable appears in the unfiltered property list.
       const warnings = (payloadOf(claim, 'inf_holder.tscn').warnings ?? []) as string[];
       expect(warnings.some((w) => /non-finite numbers.*results\[0\]\.properties\.x/.test(w))).toBe(
         true,
@@ -763,7 +720,6 @@ describe('headless scene saves', () => {
     CASE_TIMEOUT_MS,
   );
 
-  /** A one-node scene whose root carries `script`, and its properties as get_node_properties reads them. */
   async function readScriptedRoot(
     name: string,
     script: string,
@@ -800,9 +756,7 @@ describe('headless scene saves', () => {
   itGodot(
     'get_node_properties nulls INF inside a typed Array[float], which refuses a null in place',
     async () => {
-      // Red when the non-finite walk edits the node's own array: Array[float]
-      // refuses the null, INF stays, and the result line is not JSON on an
-      // engine that writes it as a bare word. Prediction, not observed.
+      // Red when the non-finite walk edits the node's own array: Array[float] refuses the null and INF stays.
       const { properties, warnings } = await readScriptedRoot(
         'typed_inf',
         'extends Node\n\n@export var xs: Array[float] = [INF, 1.5]\n',
@@ -818,8 +772,7 @@ describe('headless scene saves', () => {
   itGodot(
     'get_node_properties marks an array that holds itself instead of walking it without end',
     async () => {
-      // Red when the non-finite walk follows a container into itself: it then
-      // recurses to the engine's stack limit. Prediction, not observed.
+      // Red when the non-finite walk follows a container into itself and recurses to the stack limit.
       const { properties } = await readScriptedRoot(
         'self_holder',
         'extends Node\n\n@export var loop: Array = []\n\nfunc _init() -> void:\n\tloop.append(loop)\n',
@@ -834,8 +787,7 @@ describe('bridge and runtime', () => {
   itGodot(
     'run_script whose execute takes no parameter answers with an error quickly',
     async (ctx) => {
-      // Red when the bridge raises in the handler and never answers, so the
-      // client sits out the command timeout.
+      // Red when the bridge raises in the handler and never answers, so the client sits out the command timeout.
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
@@ -867,8 +819,7 @@ describe('bridge and runtime', () => {
   itGodot(
     'an unauthenticated connection to the bridge port does not cancel a running input batch',
     async (ctx) => {
-      // Red when the cancellation generation moves at accept: the batch loses
-      // the settled action and reports success false with the rest skipped.
+      // Red when the cancellation generation moves at accept: the batch loses the settled action.
       const project = runtimeCopy(INPUT_PROBE_SCENE);
       await runProjectOrSkip(runner, ctx, project);
       const port = runner.activeBridgePort;
@@ -903,8 +854,7 @@ describe('bridge and runtime', () => {
   itGodot(
     'click_element on a Control declaring signal pressed(index) reports no bridge-caused errors',
     async (ctx) => {
-      // Red when the observer is built for the table's arity regardless of the
-      // signal's declared arity, so the emit logs a call-arity error.
+      // Red when the observer is built for the table's arity regardless of the signal's declared arity.
       const project = runtimeCopy(SIGNAL_PROBE_SCENE, {
         'sig_probe.gd': [
           'extends Control',
@@ -980,8 +930,7 @@ describe('bridge and runtime', () => {
   itGodot(
     'run_script returning a Node outside the tree adds no engine error line',
     async (ctx) => {
-      // Red when serializing a detached node calls get_path() and the engine
-      // prints an error that get_debug_output then shows.
+      // Red when serializing a detached node calls get_path() and the engine prints an error.
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
       await sleep(STDERR_SETTLE_MS);

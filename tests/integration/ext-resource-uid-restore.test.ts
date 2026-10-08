@@ -1,15 +1,4 @@
-/**
- * Integration tests for the uids a headless save writes on ext_resource lines.
- *
- * ResourceSaver.save outside the editor writes every reference path-only. The
- * save puts back the uid the old file text had for a path, and gives a
- * reference the operation added the uid the project records for that file (a
- * scene's own header, a script's .uid sidecar). A file with no recorded uid
- * stays path-only: no uid is ever made up.
- *
- * Every assertion reads the .tscn text from disk. Requires GODOT_PATH. Skipped
- * locally when it is unset; CI sets it in the godot-integration job.
- */
+/** ResourceSaver.save outside the editor writes references path-only; the save restores the old text's uid, or the project's recorded uid for a new reference, and never makes one up. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { cpSync, readdirSync, readFileSync } from 'fs';
@@ -27,11 +16,8 @@ import { handleAttachScript } from '../../src/tools/node-tools.js';
 const PLAYER_SCENE = 'player.tscn';
 const BASE_SCENE = 'base_unit.tscn';
 const INVENTORY_SCENE = 'inventory.tscn';
-/** The uid player.gd.uid records for player.gd. */
 const PLAYER_SCRIPT_UID = 'uid://cp6gyxwwwr27j';
-/** The uid base_unit.tscn carries in its own header. */
 const BASE_SCENE_UID = 'uid://76owar7af2bj';
-/** The uid player.tscn carries in its own header. */
 const PLAYER_SCENE_UID = 'uid://clomui4eibwiq';
 const CASE_TIMEOUT_MS = 120000;
 
@@ -54,18 +40,14 @@ afterAll(() => {
   for (const dir of tmpDirs) {
     try {
       removeTmpDir(dir);
-    } catch {
-      // best-effort cleanup
-    }
+    } catch {}
   }
 });
 
-/** The scene file's text as it is on disk right now. */
 function sceneText(scene: string): string {
   return readFileSync(join(projectPath, scene), 'utf8');
 }
 
-/** The ext_resource line that references `resPath`, or undefined. */
 function extResourceLine(text: string, resPath: string): string | undefined {
   return text
     .split('\n')
@@ -86,7 +68,6 @@ describe('a reference an operation adds gets the uid the project records for it'
 
       const text = sceneText(BASE_SCENE);
       expect(extResourceLine(text, 'res://player.gd')).toContain(`uid="${PLAYER_SCRIPT_UID}"`);
-      // The scene keeps its own uid as well.
       expect(text.split('\n')[0]).toContain(`uid="${BASE_SCENE_UID}"`);
     },
     CASE_TIMEOUT_MS,
@@ -114,7 +95,6 @@ describe('a reference an operation adds gets the uid the project records for it'
   itGodot(
     'a referenced file with no recorded uid stays path-only',
     async () => {
-      // inventory.gd has no .uid sidecar and inventory.tscn names it by path.
       const result = await handleAddNode(runner, {
         projectPath,
         scenePath: INVENTORY_SCENE,
@@ -145,7 +125,6 @@ describe('the uid rewrite leaves a whole file and nothing else', () => {
       const text = sceneText('player_copy.tscn');
       expect(text.split('\n')[0]).not.toContain('uid=');
       expect(extResourceLine(text, 'res://player.gd')).toContain(`uid="${PLAYER_SCRIPT_UID}"`);
-      // The rewritten file is complete: the body is still there after the header.
       expect(text).toContain('[node name="Player" type="Node2D"');
       expect(text).toContain('[node name="Body" type="Sprite2D" parent="."');
       expect(readdirSync(projectPath).filter((name) => name.endsWith('.tmp'))).toEqual([]);

@@ -1,15 +1,4 @@
-/**
- * Integration tests for GodotRunner.executeOperation and validation/project handlers.
- *
- * The validate handler merges GDScript stdout (valid/invalid signal) with Godot's
- * stderr (detailed parse errors). Testing through the handler gives us the correct
- * end-to-end contract. Tests for executeOperation directly use the scene-validate
- * path where stdout JSON is the sole signal.
- *
- * Requires a real Godot binary. Set GODOT_PATH to run these locally.
- * They skip locally when GODOT_PATH is unset. CI sets it in the
- * godot-integration job and runs them on Godot 4.5.1 and 4.6.2.
- */
+/** The validate handler merges GDScript stdout (valid/invalid) with Godot's stderr parse errors; direct executeOperation tests use the scene-validate path where stdout JSON is the sole signal. */
 
 import { describe, beforeAll, afterAll, expect } from 'vitest';
 import { resolve } from 'path';
@@ -42,8 +31,6 @@ describe('GodotRunner.executeOperation', () => {
     itGodot(
       'executeOperation returns valid:true for the committed fixture scene',
       async () => {
-        // Test executeOperation directly for the scene-validate path -
-        // stdout JSON is the sole signal for scene files.
         const { stdout } = await runner.executeOperation(
           'validate_resource',
           { scenePath: fixtureScenePath },
@@ -60,13 +47,8 @@ describe('GodotRunner.executeOperation', () => {
     itGodot(
       'handleValidate surfaces parse errors in the errors array for a broken GDScript',
       async () => {
-        // The validate handler uses the `source` field: it writes a tmp file,
-        // runs validate_resource, then merges stderr parse errors into the result.
-        // Godot 4.x reports parse errors to stderr ("SCRIPT ERROR: Parse Error: ...").
-        // Depending on whether load() returns non-null, `valid` may be true in some
-        // Godot versions: but the errors must always be surfaced in the errors array.
-        // An inline source is written under the project's .mcp/, so this runs
-        // on a copy and the committed fixture stays as it is.
+        // `valid` may be true on some Godot versions, but parse errors must always surface in the errors array.
+        // An inline source is written under the project's .mcp/, so this runs on a copy.
         const projectPath = copyProjectToTmp(fixtureProjectPath, 'mcp-validate-source-');
         tmpProjects.push(projectPath);
         const result = await handleValidate(runner, {
@@ -78,7 +60,6 @@ describe('GodotRunner.executeOperation', () => {
         const text = unwrap(result).content[0]?.text;
         expect(text).toBeDefined();
         const parsed = JSON.parse(text);
-        // The errors array must contain at least one entry describing the parse problem
         expect(Array.isArray(parsed.errors)).toBe(true);
         expect(parsed.errors.length).toBeGreaterThan(0);
         const errorMessages: string[] = parsed.errors.map((e: { message: string }) => e.message);
@@ -99,13 +80,10 @@ describe('GodotRunner.executeOperation', () => {
         const text = unwrap(result).content[0]?.text;
         expect(text).toBeDefined();
         const info = JSON.parse(text);
-        // The fixture's project.godot has: config/name="godot-mcp-runtime test fixture"
         expect(info).toHaveProperty('name', 'godot-mcp-runtime test fixture');
         expect(info).toHaveProperty('projectPath', resolve(fixtureProjectPath));
         expect(info).toHaveProperty('godotVersion');
         expect(typeof info.godotVersion).toBe('string');
-        // No run_project was called against this runner, so
-        // the always-present runtime block reports no active session.
         expect(info.runtime).toEqual({
           activeSession: false,
           projectPath: null,
