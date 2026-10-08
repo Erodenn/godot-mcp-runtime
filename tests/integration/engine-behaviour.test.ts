@@ -752,12 +752,79 @@ describe('headless scene saves', () => {
       const entries = payloadOf(claim, 'get_node_properties on inf_holder.tscn')
         .results as UpdateEntry[];
       expect(entries[0]?.error).toBeUndefined();
+      expect((entries[0] as { properties?: Record<string, unknown> }).properties?.x).toBeNull();
       // Prediction, not observed: the exact path the warning names, and that the
       // exported variable appears in the unfiltered property list.
       const warnings = (payloadOf(claim, 'inf_holder.tscn').warnings ?? []) as string[];
       expect(warnings.some((w) => /non-finite numbers.*results\[0\]\.properties\.x/.test(w))).toBe(
         true,
       );
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  /** A one-node scene whose root carries `script`, and its properties as get_node_properties reads them. */
+  async function readScriptedRoot(
+    name: string,
+    script: string,
+  ): Promise<{ properties: Record<string, unknown>; warnings: string[] }> {
+    const { project } = authoredCopy();
+    writeFileSync(join(project, `${name}.gd`), script);
+    writeFileSync(
+      join(project, `${name}.tscn`),
+      [
+        '[gd_scene load_steps=2 format=3]',
+        '',
+        `[ext_resource type="Script" path="res://${name}.gd" id="1_s"]`,
+        '',
+        '[node name="Holder" type="Node"]',
+        'script = ExtResource("1_s")',
+        '',
+      ].join('\n'),
+    );
+    const read = await handleGetNodeProperties(runner, {
+      projectPath: project,
+      scenePath: `${name}.tscn`,
+      nodes: [{ nodePath: 'root' }],
+    });
+    expect(read.ok, `the read of ${name}.tscn failed; ${describeResult(read)}`).toBe(true);
+    const payload = payloadOf(read, `get_node_properties on ${name}.tscn`);
+    const [entry] = payload.results as { error?: string; properties?: Record<string, unknown> }[];
+    expect(entry?.error).toBeUndefined();
+    return {
+      properties: entry?.properties ?? {},
+      warnings: (payload.warnings ?? []) as string[],
+    };
+  }
+
+  itGodot(
+    'get_node_properties nulls INF inside a typed Array[float], which refuses a null in place',
+    async () => {
+      // Red when the non-finite walk edits the node's own array: Array[float]
+      // refuses the null, INF stays, and the result line is not JSON on an
+      // engine that writes it as a bare word. Prediction, not observed.
+      const { properties, warnings } = await readScriptedRoot(
+        'typed_inf',
+        'extends Node\n\n@export var xs: Array[float] = [INF, 1.5]\n',
+      );
+      expect(properties.xs).toEqual([null, 1.5]);
+      expect(
+        warnings.some((w) => /non-finite numbers.*results\[0\]\.properties\.xs\[0\]/.test(w)),
+      ).toBe(true);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'get_node_properties marks an array that holds itself instead of walking it without end',
+    async () => {
+      // Red when the non-finite walk follows a container into itself: it then
+      // recurses to the engine's stack limit. Prediction, not observed.
+      const { properties } = await readScriptedRoot(
+        'self_holder',
+        'extends Node\n\n@export var loop: Array = []\n\nfunc _init() -> void:\n\tloop.append(loop)\n',
+      );
+      expect(properties.loop).toEqual(['<truncated: this container contains itself>']);
     },
     CASE_TIMEOUT_MS,
   );

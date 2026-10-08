@@ -57,12 +57,20 @@ var result_warnings: Array = []
 # Most paths named in the warning for non-finite numbers; the rest are counted.
 const _NON_FINITE_PATH_CAP := 8
 
-# JSON has no INF or NAN, and JSON.stringify writes them as bare words no parser
-# accepts. Replaces every non-finite float anywhere in `value` (Dictionary values
-# and Array elements, at any depth) with null, in place, and appends the path of
-# each to `found`. A float that is not a number is a value nobody measured, so
-# it is reported rather than written as a zero.
-func _null_non_finite(value, path: String, found: Array):
+# What a container that holds itself is written as, at the place it recurs.
+const _SELF_CONTAINING_MARKER := "<truncated: this container contains itself>"
+
+# True when `container` is one the walk is already inside. Compared by identity:
+# == on a container that holds itself is the recursion this stops.
+func _encloses(enclosing: Array, container) -> bool:
+	for outer in enclosing:
+		if is_same(outer, container):
+			return true
+	return false
+
+# A copy of `value` with each non-finite float (JSON has none) as null and its path in `found`.
+# Never an edit in place: a payload can hold a node's own typed container, which refuses a null.
+func _null_non_finite(value, path: String, found: Array, enclosing: Array):
 	match typeof(value):
 		TYPE_FLOAT:
 			if not is_finite(value):
@@ -70,36 +78,55 @@ func _null_non_finite(value, path: String, found: Array):
 				return null
 		TYPE_DICTIONARY:
 			var dict: Dictionary = value
+			if _encloses(enclosing, dict):
+				return _SELF_CONTAINING_MARKER
+			enclosing.append(dict)
+			var cleaned_dict: Dictionary = {}
 			for key in dict.keys():
 				var child_path: String = str(key) if path == "" else path + "." + str(key)
-				dict[key] = _null_non_finite(dict[key], child_path, found)
+				cleaned_dict[key] = _null_non_finite(dict[key], child_path, found, enclosing)
+			enclosing.pop_back()
+			return cleaned_dict
 		TYPE_ARRAY:
 			var arr: Array = value
+			if _encloses(enclosing, arr):
+				return _SELF_CONTAINING_MARKER
+			enclosing.append(arr)
+			var cleaned_array: Array = []
 			for i in range(arr.size()):
-				arr[i] = _null_non_finite(arr[i], path + "[" + str(i) + "]", found)
+				cleaned_array.append(_null_non_finite(arr[i], path + "[" + str(i) + "]", found, enclosing))
+			enclosing.pop_back()
+			return cleaned_array
+		TYPE_PACKED_FLOAT32_ARRAY:
+			var packed32: PackedFloat32Array = value
+			return _null_non_finite(Array(packed32), path, found, enclosing)
+		TYPE_PACKED_FLOAT64_ARRAY:
+			var packed64: PackedFloat64Array = value
+			return _null_non_finite(Array(packed64), path, found, enclosing)
 	return value
 
 # Called from emit_result only. The warning goes into a Dictionary payload's own
 # `warnings`; an Array payload has nowhere to put one.
-func _sanitize_non_finite(payload) -> void:
+func _sanitize_non_finite(payload):
 	var found: Array = []
-	_null_non_finite(payload, "", found)
-	if found.is_empty() or not (payload is Dictionary):
-		return
+	var cleaned = _null_non_finite(payload, "", found, [])
+	if found.is_empty() or not (cleaned is Dictionary):
+		return cleaned
 	var shown: Array = found.slice(0, _NON_FINITE_PATH_CAP)
 	var text := "%d non-finite numbers (INF, NAN) were returned as null at: %s" % [found.size(), ", ".join(PackedStringArray(shown))]
 	if found.size() > shown.size():
 		text += " (and %d more)" % (found.size() - shown.size())
-	var existing = payload.get("warnings", [])
+	var existing = cleaned.get("warnings", [])
 	var combined: Array = existing.duplicate() if existing is Array else []
 	combined.append(text)
-	payload["warnings"] = combined
+	cleaned["warnings"] = combined
+	return cleaned
 
 # The one emitter for an operation's JSON result. Every operation that returns
 # a JSON payload goes through here; never print a result line directly.
 func emit_result(payload) -> void:
 	result_emitted = true
-	_sanitize_non_finite(payload)
+	payload = _sanitize_non_finite(payload)
 	if payload is Dictionary and not result_warnings.is_empty():
 		var combined: Array = result_warnings.duplicate()
 		combined.append_array(payload.get("warnings", []))
@@ -2792,11 +2819,8 @@ const _INT_VECTOR_COMPONENT_RANGE: Array = [-2147483648, 2147483647]
 func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
 	var not_built := {"built": false, "value": null, "problem": ""}
 	var keys: Array = _INT_VECTOR_COMPONENTS[vector_type]
-	# The same widest-form-first rule _coerce_property_value applies.
-	var shape_size := 2
-	if raw.has("z"):
-		shape_size = 4 if raw.has("w") else 3
-	if not (raw.has("x") and raw.has("y")) or shape_size != keys.size():
+	# Exactly this vector's keys: the rule _coerce_property_value applies.
+	if raw.size() != keys.size() or not raw.has_all(keys):
 		return not_built
 	var components: Array = []
 	for key in keys:

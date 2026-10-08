@@ -704,4 +704,36 @@ describe('a dictionary becomes a vector or color only with exactly that key set'
     },
     CASE_TIMEOUT_MS,
   );
+
+  itGodot(
+    'an integer vector follows the same rule: extra or mixed keys are an error, {x, y} converts',
+    async () => {
+      // Red when _int_vector_from_json builds a Vector2i from any dictionary
+      // that has x and y: the name key is then dropped and the write succeeds.
+      writeFileSync(
+        join(projectPath, 'cell_holder.gd'),
+        'extends Node2D\n\n@export var cell: Vector2i = Vector2i.ZERO\n',
+        'utf-8',
+      );
+      const attached = await handleAttachScript(runner, {
+        projectPath,
+        scenePath: SCENE,
+        nodePath: 'root',
+        scriptPath: 'cell_holder.gd',
+      });
+      expect(hasError(attached), String(errorText(attached))).toBe(false);
+
+      const mixed = await setProp('root', 'cell', { x: 4, y: 2, name: 'gate' });
+      expect(mixed).not.toHaveProperty('success');
+      expect(String(mixed.error)).toMatch(/expected Vector2i, got Dictionary/);
+
+      const noZ = await setProp('root', 'cell', { x: 4, y: 2, w: 1 });
+      expect(noZ).not.toHaveProperty('success');
+
+      expect((await setProp('root', 'cell', { x: 5, y: 6 })).success).toBe(true);
+      // Prediction, not observed: the text form of a stored Vector2i.
+      expect(readFileSync(join(projectPath, SCENE), 'utf-8')).toContain('cell = Vector2i(5, 6)');
+    },
+    CASE_TIMEOUT_MS,
+  );
 });
