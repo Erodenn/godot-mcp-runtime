@@ -37,12 +37,6 @@ describe('Utf8StreamDecoder', () => {
     expect(text + decoder.end()).toBe('a\u{1F600}b');
   });
 
-  it('shows that decoding each chunk alone is what corrupts the character', () => {
-    const bytes = Buffer.from('é', 'utf8');
-    const perChunk = bytes.subarray(0, 1).toString() + bytes.subarray(1).toString();
-    expect(perChunk).toContain(REPLACEMENT_CHARACTER);
-  });
-
   it('returns what an incomplete sequence at the end of the stream decodes to', () => {
     const decoder = new Utf8StreamDecoder();
     const bytes = Buffer.from('é', 'utf8');
