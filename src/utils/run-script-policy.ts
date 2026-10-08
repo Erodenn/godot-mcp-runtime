@@ -1298,11 +1298,14 @@ function methodNameOf(argument: readonly Token[]): string | null {
 
 /**
  * The elements of an argument that is exactly one array literal, or null when
- * it is anything else (a variable, `[a] + b`, no argument at all).
+ * it is anything else (a variable, `[a] + b`, no argument at all). The literal
+ * is looked for from `callOpenParen` on: a search from the start of the script
+ * would cost its whole length at every call.
  */
 function arrayLiteralElements(
   tokens: readonly Token[],
   argument: readonly Token[],
+  callOpenParen: number,
   budget: ScanBudget,
 ): Token[][] | null {
   const first = argument[0];
@@ -1317,7 +1320,7 @@ function arrayLiteralElements(
     if (depth === 0 && k < argument.length - 1) return null;
   }
   if (depth !== 0) return null;
-  return argumentsOfArray(tokens, tokens.indexOf(first), budget);
+  return argumentsOfArray(tokens, tokens.indexOf(first, callOpenParen), budget);
 }
 
 /**
@@ -1364,7 +1367,7 @@ function resolveReflectiveCall(
     const forwardedArray = args[1] ?? [];
     const forwarded =
       dispatch === ARRAY_DISPATCH_METHOD
-        ? arrayLiteralElements(tokens, forwardedArray, budget)
+        ? arrayLiteralElements(tokens, forwardedArray, openParen, budget)
         : args.slice(1);
 
     if (REFLECTIVE_DISPATCH_METHODS.has(method)) {

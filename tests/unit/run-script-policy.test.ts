@@ -1578,6 +1578,9 @@ describe('evaluateScript: the scan work is bounded', () => {
   // The unbounded re-scan is quadratic in the nesting (minutes at this depth);
   // the bounded scan is linear (a second or two).
   const BOUNDED_SCAN_TIMEOUT_MS = 8_000;
+  // Looking each array literal up from the start of the script is quadratic in
+  // the line count (about half a minute at this size).
+  const ARRAY_DISPATCH_LINES = 80_000;
 
   it(
     'evaluates 60000 nested dispatch calls inside the test timeout and fails closed',
@@ -1589,6 +1592,23 @@ describe('evaluateScript: the scan work is bounded', () => {
       // nonliteral, so the literal is reported: the fail-closed side.
       expect(decision.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(
         true,
+      );
+      expect(decision.decision).toBe('hard_block');
+    },
+    BOUNDED_SCAN_TIMEOUT_MS,
+  );
+
+  it(
+    'evaluates 80000 array dispatch lines inside the test timeout with their findings intact',
+    () => {
+      const source =
+        VALID_PREFIX +
+        'a.callv("tick", [1])\n\t'.repeat(ARRAY_DISPATCH_LINES) +
+        'OS.callv("execute", ["ls"])\n';
+      const decision = evaluateScript(source);
+      // The last line is still read as the call it makes, however far in it sits.
+      expect(decision.matches.map((m) => m.ruleId)).toEqual(
+        evalLine('OS.execute("ls")').matches.map((m) => m.ruleId),
       );
       expect(decision.decision).toBe('hard_block');
     },

@@ -218,8 +218,9 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 # connection or started another batch, an abandoned batch injects nothing
 # further and prints no further boundary. NOT guaranteed: a batch parked in a
 # long wait while the client does nothing at all may still run to completion on
-# a platform whose poll() stays CONNECTED. Its boundaries then land between capture windows, where
-# beginActionErrorCapture clears them before the next batch reads any.
+# a platform whose poll() stays CONNECTED. Its boundaries then land between
+# capture windows, where beginActionErrorCapture clears them before the next
+# batch reads any.
 var _input_batch_generation: int = 0
 
 # Active profiler track: the specs to sample, the sampling clock, and the
@@ -1496,9 +1497,15 @@ func _script_method_info(script: Script, method_name: String) -> Dictionary:
 	return {}
 
 # How many arguments a call to `method` has to pass: those with no default.
+# Default values are listed by editor builds only, so any other build answers 0
+# rather than count an optional argument as a required one.
 func _required_argument_count(method: Dictionary) -> int:
-	var declared: Array = method.get("args", [])
-	var defaults: Array = method.get("default_args", [])
+	if not OS.has_feature("editor"):
+		return 0
+	var declared = method.get("args", [])
+	var defaults = method.get("default_args", [])
+	if typeof(declared) != TYPE_ARRAY or typeof(defaults) != TYPE_ARRAY:
+		return 0
 	return maxi(declared.size() - defaults.size(), 0)
 
 # Why a compiled run_script source cannot be instantiated with no argument and
@@ -1517,7 +1524,9 @@ func _run_script_signature_problem(script: GDScript) -> String:
 		# Not declared by the script or its base scripts. has_method on the
 		# instance answers for a native method of that name.
 		return ""
-	var declared: Array = entry.get("args", [])
+	var declared = entry.get("args", null)
+	if typeof(declared) != TYPE_ARRAY:
+		return ""
 	var required := _required_argument_count(entry)
 	if declared.size() < RUN_SCRIPT_ENTRY_ARGUMENT_COUNT or required > RUN_SCRIPT_ENTRY_ARGUMENT_COUNT:
 		return "execute is called with exactly one argument, the SceneTree, and this script's execute declares %d parameter(s), %d of them required. %s" % [declared.size(), required, RUN_SCRIPT_ENTRY_MISSING_ERROR]

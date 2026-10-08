@@ -734,6 +734,42 @@ describe('handleStopProfiler', () => {
     expect(fake.bridge.map((b) => b.command)).toEqual(['track_stop', 'track_start', 'track_stop']);
   });
 
+  // Breaks if profile_project leaves a held track in place: the capture its
+  // failed window left behind would be handed another capture's samples.
+  it('does not hand a held track to a profile_project capture that is read afterwards', async () => {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      stop: (...args: unknown[]) => Promise<unknown>;
+      captureWindow: (...args: unknown[]) => Promise<unknown>;
+    };
+    let attempts = 0;
+    profiler.stop = async (...args: unknown[]) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ProfilerError('profile_timeout', 'Godot sent no profiler totals');
+      }
+      await (args[2] as TrackCollector)();
+      return captureResult;
+    };
+    profiler.captureWindow = async () => {
+      throw new ProfilerError('profile_disconnected', 'The debugger connection dropped');
+    };
+
+    expectErrorMatching(await handleStopProfiler(fake.asRunner, {}), /no profiler totals/);
+    expectErrorMatching(
+      await handleProfileProject(fake.asRunner, { seconds: 1, track: ['/root/Main:position'] }),
+      /connection dropped/,
+    );
+    unwrap(await handleStopProfiler(fake.asRunner, {}));
+
+    expect(fake.bridge.map((b) => b.command)).toEqual([
+      'track_stop',
+      'track_start',
+      'track_stop',
+      'track_stop',
+    ]);
+  });
+
   it('returns the top 20 by own time by default', async () => {
     const fake = createProfilerFake();
     const result = await handleStopProfiler(fake.asRunner, {});

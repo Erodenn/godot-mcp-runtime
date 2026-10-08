@@ -851,9 +851,9 @@ const ELICITATION_OPT_OUT_SOLUTION =
  * the session ended or changed, or the call gave up waiting for its turn,
  * between the policy decision and the send, or the send itself failed before
  * its frame was written (the admitted record is then rewritten in place).
- * `admitted_as` then holds what the
- * decision would have been (`ok`, `warn`, `elicit_accepted`,
- * `elicit_bypassed`), so a confirmation a person gave is still on record.
+ * `admitted_as` then holds what the decision would have been (`ok`, `warn`,
+ * `elicit_accepted`, `elicit_bypassed`), so a confirmation a person gave is
+ * still on record.
  */
 type AdmittedAuditDecision = 'elicit_accepted' | 'elicit_bypassed' | 'warn' | 'ok';
 type AuditDecision =
@@ -1179,7 +1179,6 @@ async function startSpawnedSession(
     resolvedScene = resolved;
   }
 
-  // Every argument is read before the gate (see below).
   const bridgePort = parseBridgePortArg(args);
   if (!bridgePort.ok) return bridgePort;
 
@@ -1555,6 +1554,8 @@ async function attachSession(
 
     const bridgeResult = await runner.waitForBridgeAttached(undefined, undefined, started);
     const session = runner.describeSessionRef(started);
+    const startWarnings = session.startWarnings ?? [];
+    const startWarningsLine = startWarnings.length > 0 ? `\n${startWarnings.join(' ')}` : '';
 
     if (bridgeResult.stopped === true) {
       return err(startCutOffByStop(projectPath, 'run_project with attach: true'));
@@ -1581,7 +1582,7 @@ async function attachSession(
         : '\nproject.godot has no McpBridge autoload entry, so the game started without the bridge (something removed it after inject - another tool, a git checkout, or an older server version sharing this project).';
       return err(
         createErrorResponse(
-          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}${registeredLine}`,
+          `Project attached but the MCP bridge is not ready.\n${bridgeResult.error || ''}${registeredLine}${startWarningsLine}`,
           solutions,
         ),
       );
@@ -1593,7 +1594,7 @@ async function attachSession(
     if (readyPort === null) {
       await runner.stopSessionRef(started);
       return err(
-        createErrorResponse(SESSION_ENDED_AT_READY_MESSAGE, [
+        createErrorResponse(`${SESSION_ENDED_AT_READY_MESSAGE}${startWarningsLine}`, [
           'Retry run_project with attach: true and launch Godot while that call is waiting: the bridge was removed, so a Godot already running cannot be attached to',
           'If Godot closed right after it started, check its own output for the reason',
         ]),
@@ -1604,7 +1605,7 @@ async function attachSession(
       projectPath,
       sessionMode: 'attached',
       bridgePort: readyPort,
-      warnings,
+      warnings: [...startWarnings, ...warnings],
       message:
         'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
     });

@@ -41,6 +41,8 @@ const LOOPBACK_HOST = '127.0.0.1';
 const ABANDONED_COMMAND_TIMEOUT_MS = 20;
 /** Long enough that the second command is still in flight when the stale event lands. */
 const LIVE_COMMAND_TIMEOUT_MS = 2000;
+/** Long enough that the connect lands first, so the command times out on a connected socket. */
+const CONNECTED_COMMAND_TIMEOUT_MS = 250;
 const PONG = '{"status":"pong"}';
 
 interface FakeSocket extends EventEmitter {
@@ -252,10 +254,11 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
 
     // A command to the game connects and then times out unanswered.
     const timedOut = runner
-      .sendCommand('run_script', {}, ABANDONED_COMMAND_TIMEOUT_MS)
+      .sendCommand('run_script', {}, CONNECTED_COMMAND_TIMEOUT_MS)
       .catch((error: unknown) => error);
     await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(1));
     firstSock.emit('connect');
+    expect(firstSock.write).toHaveBeenCalledTimes(1);
     expect(await timedOut).toMatchObject({ message: expect.stringMatching(/timed out/) });
 
     // The attach probes the other project's session; its connect is pending

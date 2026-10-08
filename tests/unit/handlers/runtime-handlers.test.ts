@@ -4292,4 +4292,48 @@ describe('run_project reports what its start could not confirm', () => {
     expect(Object.keys(payload)[0]).toBe('warnings');
     expect((payload.warnings as string[])[0]).toBe(unconfirmed);
   });
+
+  // Breaks when attachSession stops reading the started record's startWarnings.
+  describe('an attach that replaced a session whose bridge cleanup was incomplete', () => {
+    const incomplete =
+      'Bridge cleanup for the session this start replaced (C:/Game) was incomplete: the McpBridge autoload entry is still in project.godot';
+
+    function fakeWithStartWarning(): RuntimeFake {
+      const fake = createRuntimeFake();
+      const runner = fake.asRunner as unknown as {
+        getSessionInfo: (projectPath: string) => unknown;
+      };
+      const original = runner.getSessionInfo.bind(runner);
+      runner.getSessionInfo = (projectPath: string) => ({
+        ...(original(projectPath) as object),
+        startWarnings: [incomplete],
+      });
+      return fake;
+    }
+
+    it('leads the attached payload with that warning', async () => {
+      const result = await handleRunProject(fakeWithStartWarning().asRunner, {
+        projectPath: fixtureProjectPath,
+        attach: true,
+      });
+
+      const payload = expectMatchesOutputSchema('run_project', result);
+      expect(payload.sessionMode).toBe('attached');
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      expect((payload.warnings as string[])[0]).toBe(incomplete);
+    });
+
+    it('says so in the error when the bridge never became ready', async () => {
+      const fake = fakeWithStartWarning();
+      fake.setBridgeReady(false, 'timeout after 20s');
+
+      const result = await handleRunProject(fake.asRunner, {
+        projectPath: fixtureProjectPath,
+        attach: true,
+      });
+
+      expect(hasError(result)).toBe(true);
+      expect(allText(result)).toContain(incomplete);
+    });
+  });
 });

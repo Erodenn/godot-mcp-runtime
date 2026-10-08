@@ -42,9 +42,10 @@ import { scanProjectFile } from '../../src/utils/project-godot.js';
 
 /**
  * Godot writes an infinite float into JSON as a number a JSON reader accepts
- * from this minor (major 4) onward. Before it the text is a bare `inf`, which
- * is not JSON, and what a tool should answer there is not settled.
+ * from this version onward. Before it the text is a bare `inf`, which is not
+ * JSON, and what a tool should answer there is not settled.
  */
+const NON_FINITE_JSON_MIN_MAJOR = 4;
 const NON_FINITE_JSON_MIN_MINOR = 6;
 const FIXTURE_MAIN_SCENE = 'main.tscn';
 
@@ -79,6 +80,13 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------- helpers
+
+/** Whether the engine under test writes a non-finite float as parseable JSON. */
+async function writesNonFiniteAsJson(): Promise<boolean> {
+  const { major, minor } = await engineMajorMinor();
+  if (major !== NON_FINITE_JSON_MIN_MAJOR) return major > NON_FINITE_JSON_MIN_MAJOR;
+  return minor >= NON_FINITE_JSON_MIN_MINOR;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -198,7 +206,7 @@ async function simulate(actions: Array<Record<string, unknown>>): Promise<InputP
   return payloadOf(result, 'simulate_input') as unknown as InputPayload;
 }
 
-// ----------------------------------------------------------------- probes
+// ------------------------------------------------------------------ cases
 
 describe('paths the Node side does not resolve', () => {
   itGodot(
@@ -696,7 +704,7 @@ describe('headless scene saves', () => {
     async (ctx) => {
       // Red when the bridge frame of a result holding an infinite float stops
       // parsing on an engine that writes it as a JSON number.
-      if ((await engineMajorMinor()).minor < NON_FINITE_JSON_MIN_MINOR) ctx.skip();
+      if (!(await writesNonFiniteAsJson())) ctx.skip();
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
@@ -720,7 +728,7 @@ describe('headless scene saves', () => {
     async (ctx) => {
       // Red when a non-finite float in a read-back makes the result line
       // invalid JSON on an engine that writes it as a JSON number.
-      if ((await engineMajorMinor()).minor < NON_FINITE_JSON_MIN_MINOR) ctx.skip();
+      if (!(await writesNonFiniteAsJson())) ctx.skip();
       const { project } = authoredCopy();
       writeFileSync(join(project, 'inf_holder.gd'), 'extends Node\n\n@export var x := INF\n');
       writeFileSync(

@@ -81,11 +81,13 @@ function readFirstLine(absPath: string): string | null {
  * Every file in the project that carries this `uid://`: a `.tscn` whose header
  * names it, or the target of a `*.uid` sidecar whose content is it. The lookup
  * reads the text the engine writes, not `.godot/uid_cache.bin`, so it needs no
- * import to have run. Dot-directories (`.godot`, `.mcp`) are not entered. Linked directories are entered (the launch scan follows links
- * out of the project), once per real path so a link cycle ends; a link that
- * cannot be resolved makes the search incomplete. After `maxFiles` opens it stops and says the search is
- * incomplete; a directory, scene header or sidecar that could not be read
- * makes it incomplete too, since any of them may carry the uid.
+ * import to have run. Dot-directories (`.godot`, `.mcp`) are not entered.
+ * Linked directories are entered (the launch scan follows links out of the
+ * project), once per real path so a link cycle ends; a link that cannot be
+ * resolved makes the search incomplete. After `maxFiles` opens it stops and
+ * says the search is incomplete; a directory, scene header or sidecar that
+ * could not be read makes it incomplete too, since any of them may carry the
+ * uid.
  */
 export function findFilesByUid(
   projectDir: string,

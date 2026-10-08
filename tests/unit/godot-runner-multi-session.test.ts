@@ -1388,6 +1388,21 @@ describe('multi-project runtime sessions', () => {
     await runner.stopProject();
     expect(commandWasNotSent(await cut)).toBe(false);
 
+    // A frame that was written before this server closed the channel itself.
+    const held = await startLoopback({ unanswered: ['run_script'] });
+    installSession(runner, {
+      mode: 'spawned',
+      projectPath: projectB,
+      bridgePort: held.port,
+      token: TOKEN_B,
+    });
+    const closed = send();
+    await vi.waitFor(() => expect(held.frames).toHaveLength(1));
+    runner.closeConnection();
+    const closedError = await closed;
+    expect((closedError as Error).name).toBe('BridgeDisconnectedError');
+    expect(commandWasNotSent(closedError)).toBe(false);
+
     expect(commandWasNotSent(new Error("Command 'run_script' timed out"))).toBe(false);
   });
 

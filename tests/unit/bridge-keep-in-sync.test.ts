@@ -32,6 +32,7 @@ import {
 } from '../../src/utils/output-parsing.js';
 import {
   MAX_INPUT_BATCH_BUDGET_MS,
+  runtimeToolDefinitions,
   SCREENSHOT_DEFAULT_TIMEOUT_MS,
   SCREENSHOT_FRAME_RENDER_BUDGET_MS,
 } from '../../src/tools/runtime-tools.js';
@@ -109,6 +110,23 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(gdConst('MAX_BATCH_WAIT_MS')).toBe(String(MAX_INPUT_BATCH_BUDGET_MS));
     const validation = gdFunctionBody('_validate_input_batch');
     expect(validation).toContain('if total_wait_ms > float(MAX_BATCH_WAIT_MS):');
+  });
+
+  it('states the action cap of one input batch as the bridge enforces it', () => {
+    // Red when MAX_BATCH_ACTIONS is retuned and the simulate_input schema text
+    // keeps the old figure, or when the bridge stops enforcing the cap.
+    const cap = gdConst('MAX_BATCH_ACTIONS');
+    expect(cap).toMatch(/^\d+$/);
+    expect(gdFunctionBody('_validate_input_batch')).toContain(
+      'if actions.size() > MAX_BATCH_ACTIONS:',
+    );
+    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
+    expect(simulateInput, 'runtime-tools.ts must define simulate_input').toBeDefined();
+    const properties = simulateInput!.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties.actions?.description).toContain(`At most ${cap} actions per call`);
   });
 
   it('reads the parent-watch port from the variable the server sets', () => {
