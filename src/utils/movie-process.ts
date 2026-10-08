@@ -16,7 +16,7 @@ import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 import { normalizeExitCode } from './output-parsing.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
-import { killProcessTree, type KillTreeDeps } from './process-tree.js';
+import { killProcessTree } from './process-tree.js';
 
 /** Each captured stream keeps only its last this many characters. */
 export const MOVIE_OUTPUT_CAPTURE_MAX_CHARS = 64 * 1024;
@@ -56,10 +56,6 @@ export type RunMovieProcess = (
   timeoutMs: number,
   hooks?: MovieRunHooks,
 ) => Promise<MovieProcessResult>;
-
-// The tree kill lives in process-tree.ts, shared with the session games.
-// Re-exported so this module stays the one import for the movie run.
-export { killProcessTree, type KillTreeDeps };
 
 export interface MovieProcessDeps {
   spawn: typeof spawn;

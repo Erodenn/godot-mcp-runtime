@@ -57,20 +57,14 @@ export const HEADLESS_RESPONSE_MARGIN_MS = 5000;
 export const IMPORT_RETRY_RESERVE_MS = 10000;
 
 /**
- * Stderr marker godot_operations.gd prints when a scene-load probe finds a
- * dependency that exists on disk but was never imported. `executeSceneOp`
- * reacts by running the import step and retrying the operation once, capped
- * structurally at one retry (see `executeSceneOp`).
- */
-export const IMPORT_NEEDED_MARKER = '[IMPORT_NEEDED]';
-
-/**
- * The marker as godot_operations.gd prints it: at the start of a stderr line,
- * through `log_error`, so behind an `[ERROR] ` prefix. Matching the text
- * anywhere in stderr would also match a line that merely quotes it, and those
- * exist: with DEBUG=true the script echoes its params to stderr, so a Label
- * text or node name holding the marker text would ask for a replay of an
- * operation that asked for none.
+ * The `[IMPORT_NEEDED]` marker godot_operations.gd prints when a scene-load
+ * probe finds a dependency that exists on disk but was never imported, as the
+ * script prints it: at the start of a stderr line, through `log_error`, so
+ * behind an `[ERROR] ` prefix. Matching the text anywhere in stderr would also
+ * match a line that merely quotes it, and those exist: with DEBUG=true the
+ * script echoes its params to stderr, so a Label text or node name holding the
+ * marker text would ask for a replay of an operation that asked for none.
+ * KEEP IN SYNC with `_report_import_needed` in src/scripts/godot_operations.gd.
  */
 const IMPORT_NEEDED_LINE = /^(?:\[ERROR\] )?\[IMPORT_NEEDED\] /m;
 
@@ -413,7 +407,7 @@ async function engineNewerWarning(
  * call. Returns the canonical `Result<ToolSuccessPayload, ToolResponse>` shape;
  * the dispatch edge maps it back to the MCP wire envelope.
  *
- * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `IMPORT_NEEDED_MARKER`)
+ * Reacts to the `[IMPORT_NEEDED]` stderr marker (see `stderrRequestsImport`)
  * by running `runner.importAssets` and retrying the operation exactly once,
  * capped structurally rather than by a loop — a marker on the retried run
  * falls through to normal error handling instead of importing again. A run

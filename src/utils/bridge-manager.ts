@@ -529,7 +529,7 @@ export class BridgeManager {
     // the write above just registered it if this call is the attach one).
     let attachOwner: BridgeOwnerInfo | undefined;
     try {
-      attachOwner = this.liveAttachOwner(projectPath, false);
+      attachOwner = this.liveAttachOwner(projectPath);
     } catch (err) {
       // The registry became unreadable after the owner file went in. Nothing
       // else has been written yet, so withdraw the claim before failing, or it
@@ -959,17 +959,9 @@ export class BridgeManager {
     return this.readLiveOwners(projectPath).filter((e) => !this.isSelfOwnerFile(e.fileName));
   }
 
-  /**
-   * The live attach-mode owner on this project, or undefined. `excludeSelf`
-   * is true for the conflict check in `inject` (self has not written its own
-   * file yet at that point, but excluding is still correct if it somehow
-   * had), and false when rendering the script, since after `inject` writes
-   * its own owner file self may legitimately be the attach owner to bake.
-   */
-  private liveAttachOwner(projectPath: string, excludeSelf: boolean): BridgeOwnerInfo | undefined {
-    return this.readLiveOwners(projectPath)
-      .filter((e) => !excludeSelf || !this.isSelfOwnerFile(e.fileName))
-      .find((e) => e.info.mode === 'attached')?.info;
+  /** The live attach-mode owner on this project, this instance included, or undefined. */
+  private liveAttachOwner(projectPath: string): BridgeOwnerInfo | undefined {
+    return this.readLiveOwners(projectPath).find((e) => e.info.mode === 'attached')?.info;
   }
 
   /**

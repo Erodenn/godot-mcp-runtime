@@ -140,6 +140,7 @@ describe('killProcessTree outcome', () => {
     proc.kill.mockReturnValue(false);
 
     expect(killProcessTree(proc, deps)).toBe('not-running');
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   it('reports a process that never started as not running, without signalling anything', () => {

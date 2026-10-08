@@ -367,7 +367,7 @@ describe('multi-project runtime sessions', () => {
 
     endSecond();
     await startProject(projectA, PORT_A);
-    expect(runner.hasMovieRunOnProject(projectA)).toBe(false);
+    expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
   });
 
   it('a start that queued behind the step a movie run registers in is refused when its turn comes', async () => {
@@ -629,7 +629,6 @@ describe('multi-project runtime sessions', () => {
       await runner.stopProject();
 
       expect(runner.getRuntimeSessionStatus().state).toBe('none');
-      expect(() => runner.requireLiveCurrentSession()).toThrow(NoLiveCurrentSessionError);
       expect(runner.activeProcess).toBeNull();
       expect(runner.activeProjectPath).toBeNull();
 
@@ -638,7 +637,10 @@ describe('multi-project runtime sessions', () => {
         live: true,
         current: true,
       });
-      expect(runner.requireLiveCurrentSession().projectPath).toBe(projectA);
+      expect(runner.getRuntimeSessionStatus()).toMatchObject({
+        state: 'live',
+        current: { projectPath: projectA },
+      });
       expect(runner.activeProjectPath).toBe(projectA);
     },
     STOP_CASE_TIMEOUT_MS,
@@ -690,19 +692,10 @@ describe('multi-project runtime sessions', () => {
 
     childB.emit('exit', 3);
 
-    let failure: unknown = null;
-    try {
-      runner.requireLiveCurrentSession();
-    } catch (err) {
-      failure = err;
-    }
-    expect(failure).toBeInstanceOf(NoLiveCurrentSessionError);
-    const { status, message } = failure as NoLiveCurrent;
+    const status = runner.getRuntimeSessionStatus();
     expect(status.state).toBe('exited');
     expect(status.current).toMatchObject({ projectPath: projectB, exitCode: 3, live: false });
     expect(status.otherLiveSessions.map((info) => info.projectPath)).toEqual([projectA]);
-    expect(message).toContain('exited with code 3');
-    expect(message).toContain(projectA);
     // The exited session is still the current one, so its logs read at once.
     expect(runner.activeProcess?.output.join('')).toContain('last words from B');
     expect(runner.activeSessionMode).toBeNull();

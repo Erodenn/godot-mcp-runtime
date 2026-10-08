@@ -173,7 +173,7 @@ export const BRIDGE_CONNECTED_PING_FAILURE_LIMIT = 8;
 // attached ceilings above.
 export const BRIDGE_WAIT_ATTACHED_INTERVAL_MS = 500;
 // After this much waiting, pollBridge backs off from the fast early cadence
-// to BRIDGE_WAIT_MAX_INTERVAL_MS - a flat interval across a 60s ceiling would
+// to BRIDGE_WAIT_MAX_INTERVAL_MS - a flat interval across a 45 s ceiling would
 // otherwise open a socket every intervalMs for the whole wait. Exported for
 // the same reason as BRIDGE_WAIT_ATTACHED_INTERVAL_MS above.
 export const BRIDGE_WAIT_BACKOFF_AFTER_MS = 5000;
@@ -1384,11 +1384,6 @@ export class GodotRunner {
     };
   }
 
-  /** True while a `render_movie` run this server started is using the project. */
-  hasMovieRunOnProject(projectPath: string): boolean {
-    return this.movieRuns.has(sessionKey(resolve(projectPath)));
-  }
-
   /**
    * Refuse a start on a project a movie run is using. First phase of both
    * starts: nothing has been stopped, written or spawned.
@@ -1578,6 +1573,7 @@ export class GodotRunner {
       logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
       const spawnOptions: SpawnOptions = {
         ...godotSpawnOptions(background ? 'run-background' : 'run'),
+        // KEEP IN SYNC: the three MCP_* names below with `_ready` in src/scripts/mcp_bridge.gd.
         env: {
           ...process.env,
           MCP_SESSION_TOKEN: sessionToken,
@@ -2541,9 +2537,8 @@ export class GodotRunner {
 
   /**
    * Stop every session, for server shutdown. Bounded: each stop spends at
-   * most its shutdown-command timeout plus BRIDGE_PROCESS_EXIT_TIMEOUT_MS and
-   * SESSION_KILL_CONFIRM_TIMEOUT_MS. One session failing to stop does not keep
-   * the others running.
+   * most SPAWNED_STOP_WORST_CASE_MS or ATTACHED_STOP_WORST_CASE_MS. One
+   * session failing to stop does not keep the others running.
    *
    * Does not wait in the queue, as no stop does: the client is gone, and a
    * start parked in a 45 s bridge wait must not hold the shutdown up. Terminal:
@@ -2605,18 +2600,6 @@ export class GodotRunner {
       current: this.describeSession(current),
       otherLiveSessions,
     };
-  }
-
-  /**
-   * The current session, or a `NoLiveCurrentSessionError` when there is none
-   * or it is no longer live. Never falls back to another live session.
-   */
-  requireLiveCurrentSession(): RuntimeSessionInfo {
-    const status = this.getRuntimeSessionStatus();
-    if (status.state !== 'live' || status.current === null) {
-      throw new NoLiveCurrentSessionError(status);
-    }
-    return status.current;
   }
 
   /** True when this runner has a live session on the project, current or not. */
@@ -3169,9 +3152,10 @@ export class GodotRunner {
    * disconnect-means-session-end probe.
    *
    * WIDEST INPUT of the disconnect predicate: `BridgeDisconnectedError` has
-   * seven producers in `sendCommandTo` — connect failure, socket unavailable,
-   * oversized frame header, framing parse error, socket `'error'`, peer
-   * `'close'`, and `closeConnection`'s in-flight rejection. A per-command
+   * seven producers in `sendCommandTo` — no bridge port, connect failure,
+   * socket unavailable, oversized frame header, framing parse error, socket
+   * `'error'`, peer `'close'` — and an eighth in `closeConnection`'s
+   * in-flight rejection. A per-command
    * timeout is a plain `Error` and never reaches here, so a wedged-but-alive
    * game is not mistaken for a dead one, and neither does a
    * `SessionStoppedError`: a session that was stopped is not retried, probed

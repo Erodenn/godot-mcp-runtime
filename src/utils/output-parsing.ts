@@ -29,32 +29,6 @@ export function normalizeForCompare(p: string): string {
   return normalize(p).replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
-const TRAILING_CARRIAGE_RETURN = /\r+$/;
-
-/**
- * Split one chunk of a process's output stream into lines, given the partial
- * line the previous chunk ended on (or null).
- *
- * `complete` holds every line the chunk finished, with the line terminator
- * removed: the `\n` it was split on and the `\r` Windows writes before it.
- * `partial` is the text after the last newline, which the next chunk may
- * continue, or null when the chunk ended on a line boundary. The empty string
- * `split('\n')` yields after a final newline is not a line and is never
- * returned as one. Blank lines are still in `complete`; whether to keep them
- * is the caller's decision.
- */
-export function splitOutputChunk(
-  text: string,
-  carriedPartial: string | null,
-): { complete: string[]; partial: string | null } {
-  const segments = ((carriedPartial ?? '') + text).split('\n');
-  const tail = (segments.pop() ?? '').replace(TRAILING_CARRIAGE_RETURN, '');
-  return {
-    complete: segments.map((line) => line.replace(TRAILING_CARRIAGE_RETURN, '')),
-    partial: tail === '' ? null : tail,
-  };
-}
-
 /**
  * One key per project directory, whichever way its path was spelled: resolved
  * to absolute, separators and trailing slash folded, case folded. The session
