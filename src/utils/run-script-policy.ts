@@ -149,18 +149,42 @@ interface PolicyRule {
 export type ArgumentClassification = 'literal' | 'nonliteral' | 'none';
 
 /**
+ * Token visits one `evaluateScript` call may spend on scanning argument lists,
+ * per token of the script. Each reflective call scans forward to its closing
+ * `)`, so nested calls (`a.call(a.call(...))`) re-scan the whole inner region
+ * at every level; the budget keeps the total linear in the script. An ordinary
+ * script spends a small multiple of its token count.
+ */
+const SCAN_BUDGET_PER_TOKEN = 64;
+
+/** The token visits left for argument scanning in one `evaluateScript` call. */
+interface ScanBudget {
+  remaining: number;
+}
+
+function newScanBudget(tokenCount: number): ScanBudget {
+  return { remaining: tokenCount * SCAN_BUDGET_PER_TOKEN };
+}
+
+/**
  * The tokens of each top-level argument of the call whose `(` is at
  * `openParenIndex`. Bracket depth is tracked so a nested `(...)` or `[...]`
  * (e.g. `foo(bar(x), y)`) does not end an argument early: a top-level `,`
  * ends one argument and a top-level `)` ends the call. Newline tokens carry no
  * argument content and are skipped. A call with no arguments has one empty
- * argument.
+ * argument. Null when the scan budget ran out before the call's end: the
+ * arguments are then unknown.
  */
-function argumentsOf(tokens: readonly Token[], openParenIndex: number): Token[][] {
+function argumentsOf(
+  tokens: readonly Token[],
+  openParenIndex: number,
+  budget: ScanBudget,
+): Token[][] | null {
   const args: Token[][] = [[]];
   let depth = 0;
 
   for (let j = openParenIndex + 1; j < tokens.length; j++) {
+    if (budget.remaining-- <= 0) return null;
     const tok = tokens[j]!;
     if (tok.kind === 'newline') continue;
     const current = args[args.length - 1]!;
@@ -191,6 +215,9 @@ function argumentsOf(tokens: readonly Token[], openParenIndex: number): Token[][
  * - Exactly one token and it is a string literal → 'literal'.
  * - Anything else (an identifier, an operator, multiple tokens) → 'nonliteral'.
  */
+/** The classification of an argument list the scan budget cut short. */
+const UNREADABLE_ARGUMENT: ArgumentClassification = 'nonliteral';
+
 function classifyArgument(argument: readonly Token[]): ArgumentClassification {
   if (argument.length === 0) return 'none';
   if (argument.length === 1 && argument[0]!.kind === 'string') return 'literal';
@@ -206,8 +233,12 @@ function classifyArgument(argument: readonly Token[]): ArgumentClassification {
 export function classifyFirstArgument(
   tokens: readonly Token[],
   openParenIndex: number,
+  budget: ScanBudget = newScanBudget(tokens.length),
 ): ArgumentClassification {
-  return classifyArgument(argumentsOf(tokens, openParenIndex)[0] ?? []);
+  const args = argumentsOf(tokens, openParenIndex, budget);
+  // An argument list the budget cut short is one the policy cannot read.
+  if (args === null) return UNREADABLE_ARGUMENT;
+  return classifyArgument(args[0] ?? []);
 }
 
 // ---------------------------------------------------------------------------
@@ -1272,6 +1303,7 @@ function methodNameOf(argument: readonly Token[]): string | null {
 function arrayLiteralElements(
   tokens: readonly Token[],
   argument: readonly Token[],
+  budget: ScanBudget,
 ): Token[][] | null {
   const first = argument[0];
   if (first === undefined || first.kind !== 'punct' || first.text !== '[') return null;
@@ -1285,7 +1317,7 @@ function arrayLiteralElements(
     if (depth === 0 && k < argument.length - 1) return null;
   }
   if (depth !== 0) return null;
-  return argumentsOfArray(tokens, tokens.indexOf(first));
+  return argumentsOfArray(tokens, tokens.indexOf(first), budget);
 }
 
 /**
@@ -1310,13 +1342,16 @@ function resolveReflectiveCall(
   tokens: readonly Token[],
   i: number,
   openParen: number,
+  budget: ScanBudget,
 ): DispatchResolution | null {
   const tok = tokens[i]!;
   const chain = tok.kind === 'memberChain' && tok.chain ? tok.chain : [tok.text];
   let dispatch = chain[chain.length - 1]!;
   if (!REFLECTIVE_DISPATCH_METHODS.has(dispatch)) return null;
 
-  let args = argumentsOf(tokens, openParen);
+  const firstScan = argumentsOf(tokens, openParen, budget);
+  if (firstScan === null) return OPAQUE_DISPATCH;
+  let args: Token[][] = firstScan;
   if ((args[0] ?? []).length === 0) return null;
 
   const names: string[] = [];
@@ -1329,7 +1364,7 @@ function resolveReflectiveCall(
     const forwardedArray = args[1] ?? [];
     const forwarded =
       dispatch === ARRAY_DISPATCH_METHOD
-        ? arrayLiteralElements(tokens, forwardedArray)
+        ? arrayLiteralElements(tokens, forwardedArray, budget)
         : args.slice(1);
 
     if (REFLECTIVE_DISPATCH_METHODS.has(method)) {
@@ -1356,10 +1391,15 @@ function resolveReflectiveCall(
 }
 
 /** The tokens of each top-level element of the array literal whose `[` is at `openBracketIndex`. */
-function argumentsOfArray(tokens: readonly Token[], openBracketIndex: number): Token[][] {
+function argumentsOfArray(
+  tokens: readonly Token[],
+  openBracketIndex: number,
+  budget: ScanBudget,
+): Token[][] | null {
   const elements: Token[][] = [[]];
   let depth = 0;
   for (let j = openBracketIndex + 1; j < tokens.length; j++) {
+    if (budget.remaining-- <= 0) return null;
     const tok = tokens[j]!;
     if (tok.kind === 'newline') continue;
     if (tok.kind === 'punct') {
@@ -1461,6 +1501,7 @@ const UNREADABLE_METHOD_NAME: ArgumentClassification = 'nonliteral';
 
 export function evaluateScript(source: string, strict = false): PolicyDecision {
   const tokens = tokenize(source);
+  const budget = newScanBudget(tokens.length);
   const valueReferences = valueReferencePositions(tokens);
   const matches: PolicyMatch[] = [];
   let promotedByStrict = false;
@@ -1479,7 +1520,7 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
     // name cannot be read is evaluated as written too, as dispatch by a
     // non-literal name, whatever its first argument looks like.
     let matched: { rule: PolicyRule; text: string } | undefined;
-    const dispatch = openParen === -1 ? null : resolveReflectiveCall(tokens, i, openParen);
+    const dispatch = openParen === -1 ? null : resolveReflectiveCall(tokens, i, openParen, budget);
     if (dispatch?.kind === 'target') {
       const { target } = dispatch;
       const rule = firstMatchingRule(target.token, openParen, target.firstArgument, false);
@@ -1491,7 +1532,7 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
       const firstArgument =
         dispatch?.kind === 'opaque'
           ? (): ArgumentClassification => UNREADABLE_METHOD_NAME
-          : (): ArgumentClassification => classifyFirstArgument(tokens, openParen);
+          : (): ArgumentClassification => classifyFirstArgument(tokens, openParen, budget);
       const rule = firstMatchingRule(tok, openParen, firstArgument, valueReferences[i] === true);
       if (rule !== undefined) matched = { rule, text: tok.text };
     }

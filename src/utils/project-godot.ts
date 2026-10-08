@@ -118,8 +118,12 @@ const REASON_KEY = 'the key is not written the way Godot writes one';
 const REASON_NO_VALUE = 'no value follows the = on its line';
 const REASON_VALUE = 'the value is not one complete value with nothing after it';
 
-/** A header as Godot writes it, on a trimmed line: `[name]`, then only blanks or a comment. */
-const CANONICAL_HEADER_REGEX = /^\[[^\s[\]"=;#\\]+\][ \t\r]*(?:;.*)?$/;
+/**
+ * A header as Godot writes it, on a trimmed line: `[name]`, then only blanks or
+ * a comment. The name is the raw first segment of a setting path, so it may hold
+ * a blank (`[My Addon]` for `My Addon/enabled`); it may not start with one.
+ */
+const CANONICAL_HEADER_REGEX = /^\[(?=[^\s[\]"=;#\\])[^\r\n[\]"=;#\\]+\][ \t\r]*(?:;.*)?$/;
 /** Characters that make Godot quote a key when it writes one; so does a blank or control character. */
 const KEY_QUOTING_CHARACTERS: ReadonlySet<string> = new Set(['=', '"', ';', '[', ']']);
 /** The highest character code Godot treats as blank in a key. */

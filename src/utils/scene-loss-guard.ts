@@ -476,9 +476,30 @@ function describeRefs(model: SceneModel, exts: string[], subIds: string[]): stri
 }
 
 /**
+ * True when an external reference to `beforePath` in `beforeModel` and one to
+ * `afterPath` in `afterModel` are the same resource: the same path, or two
+ * paths that carry the same uid on their own side. The engine resolves a
+ * reference by its uid and writes the current path on save, so a stale path
+ * under an unchanged uid is canonicalization. A uid on one side only, or two
+ * different uids, leaves the paths to decide.
+ */
+function sameExternalRef(
+  beforeModel: SceneModel,
+  beforePath: string | undefined,
+  afterModel: SceneModel,
+  afterPath: string | undefined,
+): boolean {
+  if (beforePath === afterPath) return true;
+  if (beforePath === undefined || afterPath === undefined) return false;
+  const beforeUid = beforeModel.extUids.get(beforePath);
+  return beforeUid !== undefined && beforeUid === afterModel.extUids.get(afterPath);
+}
+
+/**
  * The references `before` holds that `after` no longer does, described, or
  * null when all of them are still there. External references are matched by
- * path and inline ones by resource type, since neither keeps its id.
+ * uid when both sides carry one, else by path; inline ones by resource type,
+ * since neither keeps its id.
  */
 function lostRefs(
   beforeModel: SceneModel,
@@ -488,7 +509,10 @@ function lostRefs(
 ): string | null {
   if (before.exts.length === 0 && before.subs.length === 0) return null;
   if (after === undefined) return describeRefs(beforeModel, before.exts, before.subs);
-  const missingExts = before.exts.filter((path) => !after.exts.includes(path));
+  const missingExts = before.exts.filter(
+    (path) =>
+      !after.exts.some((afterPath) => sameExternalRef(beforeModel, path, afterModel, afterPath)),
+  );
   const afterTypes = after.subs.map((id) => afterModel.subs.get(id)?.type ?? '?');
   const missingSubs: string[] = [];
   for (const id of before.subs) {
@@ -732,7 +756,8 @@ export function compareSceneText(
 
     if (
       node.hasInstance &&
-      (!afterNode.hasInstance || afterNode.instancePath !== node.instancePath)
+      (!afterNode.hasInstance ||
+        !sameExternalRef(context.before, node.instancePath, context.after, afterNode.instancePath))
     ) {
       const was = node.instancePath ?? 'another scene';
       items.push(

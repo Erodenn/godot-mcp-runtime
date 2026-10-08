@@ -469,6 +469,45 @@ describe('DebuggerProfiler capture quality signals', () => {
   });
 });
 
+describe('DebuggerProfiler a capture the receiver itself gave up on', () => {
+  it('names the unreadable frame, not a game exit, and says the session needs a relaunch', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(3, 0.016, [[0, 1, 0.001, 0.002]]),
+    ]);
+    // A string where a timing belongs: the game keeps running, the stream is not trusted.
+    const malformed = frame(4, 0.016, []);
+    malformed[1] = 'not a timing';
+    fake.send(['servers:profile_frame', THREAD, malformed]);
+    await waitUntil(() => !p.connected, 'receiver giving up on the stream');
+
+    const result = await p.stop(10, 'selfMs');
+    expect(result.complete).toBe(false);
+    expect(result.warnings).toHaveLength(1);
+    const warning = result.warnings![0]!;
+    expect(warning).toContain('Unrecognized profiler frame layout');
+    expect(warning).toMatch(/relaunch/i);
+    expect(warning).not.toMatch(/exited|crashed/);
+  });
+
+  it('still says the game exited when the connection dropped', async () => {
+    const { profiler: p, peer: fake } = await connectedProfiler();
+    const running = p.start(5, 512);
+    await feedStart(fake, running, [
+      frame(1, 0.016, [[0, 1, 0.001, 0.002]]),
+      frame(2, 0.016, [[0, 1, 0.001, 0.002]]),
+    ]);
+    fake.close();
+    await waitUntil(() => !p.connected, 'peer disconnect');
+
+    const result = await p.stop(10, 'selfMs');
+    expect(result.warnings![0]).toContain('the game exited or crashed');
+  });
+});
+
 describe('DebuggerProfiler readability after the engine goes away', () => {
   it('keeps a finished capture readable and re-rankable', async () => {
     const { profiler: p, peer: fake } = await connectedProfiler();
@@ -1456,6 +1495,28 @@ describe('DebuggerProfiler monitors', () => {
     );
 
     expect(result.monitors!.custom).toHaveLength(64);
+    expect(result.warnings).toEqual([
+      'Only the first 64 custom monitors are tracked; 6 more were dropped (game/m64, game/m65, game/m66, ...).',
+    ]);
+  });
+
+  it('gives no dropped-monitor warning at exactly the limit', async () => {
+    const names = Array.from({ length: 64 }, (_, i) => `game/m${i}`);
+    const result = await monitorCapture(
+      [
+        monitorSample(
+          {},
+          59,
+          names.map((_, i) => i),
+        ),
+      ],
+      async (fake) => {
+        fake.send(['performance:profile_names', THREAD, names]);
+      },
+    );
+
+    expect(result.monitors!.custom).toHaveLength(64);
+    expect(result.warnings).toBeUndefined();
   });
 });
 
@@ -1522,20 +1583,25 @@ describe('DebuggerProfiler timeline', () => {
       frame(1, 0.004, []),
       frame(2, 0.004, [[0, 1, 0.001, 0.002]], [['physics_3d', ['Finalize Islands', 0.0005]]]),
     ]);
-    await sendAt(fake, 1_000_200, ['servers:profile_frame', THREAD, frame(3, 0.004, [])]);
+    // Frame numbers advance as the engine's own frame times say the clock did:
+    // 50 frames of 4 ms across the 200 ms to the next packet.
+    await sendAt(fake, 1_000_200, ['servers:profile_frame', THREAD, frame(52, 0.004, [])]);
     // Over the 10 ms budget of 100 fps, in the second interval.
     await sendAt(fake, 1_000_600, [
       'servers:profile_frame',
       THREAD,
-      frame(4, 0.02, [[0, 5, 0.015, 0.016]]),
+      frame(72, 0.02, [[0, 5, 0.015, 0.016]]),
     ]);
-    // Nothing for a whole interval: a freeze. The next frame lands after it.
-    await sendAt(fake, 1_001_600, ['servers:profile_frame', THREAD, frame(5, 0.004, [])]);
+    // Nothing for a whole interval: a freeze. The next frame lands after it, and
+    // the engine's own frame time says it was the frame that took the second.
+    await sendAt(fake, 1_001_600, ['servers:profile_frame', THREAD, frame(73, 1.0, [])]);
     const result = await stopCapture(p, fake);
 
-    expect(result.slowFrames).toBe(1);
+    expect(result.slowFrames).toBe(2);
     const timeline = result.timeline!;
     expect(timeline).toMatchObject({ bucketMs: 500, track: [], trackError: null });
+    // The engine accounts for the whole second, so this is a real freeze, not a stall here.
+    expect(result.warnings).toBeUndefined();
     const buckets = timeline.buckets;
     expect(buckets.map((b) => b.t)).toEqual([0, 0.5, 1, 1.5]);
     expect(buckets.map((b) => b.frames)).toEqual([2, 1, 0, 1]);
@@ -1553,6 +1619,62 @@ describe('DebuggerProfiler timeline', () => {
     expect(buckets[2]).toMatchObject({ frames: 0, fps: 0, frameMs: null, top: [] });
     // The capture ended 100 ms into its last interval: too short to divide by.
     expect(buckets[3]!.fps).toBeNull();
+  });
+
+  describe('a stall of the server event loop is not read as game behaviour', () => {
+    // 30 frames of 16 ms across the first 480 ms, then this process is busy for a second.
+    async function stalledTimeline(): Promise<Awaited<ReturnType<DebuggerProfiler['stop']>>> {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(1_000_000);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const running = p.start(5, 512, { timelineMs: 250 });
+      await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [])]);
+      for (let n = 3; n <= 31; n++) {
+        await sendAt(fake, 1_000_000 + (n - 2) * 16, [
+          'servers:profile_frame',
+          THREAD,
+          frame(n, 0.016, []),
+        ]);
+      }
+      // The backlog arrives together, a second late, with consecutive frame numbers.
+      vi.setSystemTime(1_001_500);
+      for (let n = 32; n <= 91; n++) {
+        fake.send(['servers:profile_frame', THREAD, frame(n, 0.016, [])]);
+      }
+      await drain(fake);
+      return stopCapture(p, fake);
+    }
+
+    it('reports no unwarned empty interval and no inflated rate', async () => {
+      const result = await stalledTimeline();
+
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings![0]).toMatch(/event loop/);
+      const buckets = result.timeline!.buckets;
+      expect(buckets.length).toBeGreaterThan(3);
+      for (const bucket of buckets) {
+        // Any interval from the last good frame to the late one has no rate.
+        if (bucket.frames === 0 || (bucket.fps ?? 0) > 70) expect(bucket.fps).toBeNull();
+      }
+      expect(buckets.some((b) => b.frames === 0 && b.fps === null)).toBe(true);
+    });
+
+    it('keeps the empty intervals of a real hitch the engine accounts for', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(1_000_000);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const running = p.start(5, 512, { timelineMs: 250 });
+      await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [])]);
+      await sendAt(fake, 1_000_016, ['servers:profile_frame', THREAD, frame(3, 0.016, [])]);
+      // One frame that took the whole second, as its own frame time says.
+      await sendAt(fake, 1_001_016, ['servers:profile_frame', THREAD, frame(4, 1.0, [])]);
+      const result = await stopCapture(p, fake);
+
+      expect(result.warnings).toBeUndefined();
+      const buckets = result.timeline!.buckets;
+      expect(buckets.map((b) => b.frames)).toEqual([2, 0, 0, 0, 1]);
+      expect(buckets.slice(1, 4).map((b) => b.fps)).toEqual([0, 0, 0]);
+    });
   });
 
   it('folds a monitor sample arriving after the last frame into the last interval', async () => {

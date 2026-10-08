@@ -4,7 +4,15 @@
  * grammar under whichever section split the file spells it with.
  */
 
-import { closeSync, openSync, readdirSync, readFileSync, readSync } from 'fs';
+import {
+  closeSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from 'fs';
 import { join } from 'path';
 import { projectGodotPath, resolveProjectPath } from './path-validation.js';
 import { findSetting, scanProjectFile } from './project-godot.js';
@@ -73,8 +81,9 @@ function readFirstLine(absPath: string): string | null {
  * Every file in the project that carries this `uid://`: a `.tscn` whose header
  * names it, or the target of a `*.uid` sidecar whose content is it. The lookup
  * reads the text the engine writes, not `.godot/uid_cache.bin`, so it needs no
- * import to have run. Dot-directories (`.godot`, `.mcp`) and symbolic links
- * are not entered. After `maxFiles` opens it stops and says the search is
+ * import to have run. Dot-directories (`.godot`, `.mcp`) are not entered. Linked directories are entered (the launch scan follows links
+ * out of the project), once per real path so a link cycle ends; a link that
+ * cannot be resolved makes the search incomplete. After `maxFiles` opens it stops and says the search is
  * incomplete; a directory, scene header or sidecar that could not be read
  * makes it incomplete too, since any of them may carry the uid.
  */
@@ -87,10 +96,14 @@ export function findFilesByUid(
   let opened = 0;
   let complete = true;
   let capped = false;
+  const walkedRealPaths = new Set<string>();
 
   const walk = (dir: string): void => {
     let entries;
     try {
+      const realDir = realpathSync.native(dir);
+      if (walkedRealPaths.has(realDir)) return;
+      walkedRealPaths.add(realDir);
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       complete = false;
@@ -99,13 +112,25 @@ export function findFilesByUid(
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       if (capped) return;
-      if (entry.name.startsWith(DOT_ENTRY_PREFIX) || entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(DOT_ENTRY_PREFIX)) continue;
       const abs = join(dir, entry.name);
-      if (entry.isDirectory()) {
+      let isDirectory = entry.isDirectory();
+      let isFile = entry.isFile();
+      if (entry.isSymbolicLink()) {
+        try {
+          const target = statSync(abs);
+          isDirectory = target.isDirectory();
+          isFile = target.isFile();
+        } catch {
+          complete = false;
+          continue;
+        }
+      }
+      if (isDirectory) {
         walk(abs);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!isFile) continue;
       const isScene = entry.name.endsWith(SCENE_EXTENSION);
       const isSidecar = entry.name.endsWith(UID_SIDECAR_EXTENSION);
       if (!isScene && !isSidecar) continue;

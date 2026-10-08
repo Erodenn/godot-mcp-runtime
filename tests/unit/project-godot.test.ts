@@ -404,6 +404,18 @@ describe('anything that is not in the form Godot writes is flagged', () => {
     }
   });
 
+  it('a section name with a blank, as the engine writes it for "My Addon/enabled", is canonical', () => {
+    for (const eol of ['\n', '\r\n']) {
+      const scan = scanProjectFile(`[My Addon]${eol}enabled=true${eol}`);
+      expect(scan.nonCanonical).toEqual([]);
+      expect(scan.statements[0]).toMatchObject({
+        section: 'My Addon',
+        path: 'My Addon/enabled',
+        canonical: true,
+      });
+    }
+  });
+
   it('reads a quoted key as the name inside the quotes', () => {
     const scan = scanProjectFile('[input]\n"move left"=1\n"a=b"=2\n');
     expect(scan.statements.map((s) => [s.path, s.value])).toEqual([

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, symlinkSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   findFilesByUid,
@@ -168,18 +168,53 @@ describe('findFilesByUid', () => {
     expect(findFilesByUid(dir, UID_B).paths).toEqual([join(dir, 'auto.gd'), join(dir, 'b.tscn')]);
   });
 
-  it('does not enter dot directories or follow symlinks', () => {
+  it('does not enter dot directories', () => {
     const dir = tmp.makeProject();
     mkdirSync(join(dir, '.godot'));
     writeFileSync(join(dir, '.godot', 'hidden.tscn'), sceneWithUid(UID_A));
-    const outside = tmp.make('uid-outside-');
-    writeFileSync(join(outside, 'linked.tscn'), sceneWithUid(UID_A));
-    try {
-      symlinkSync(outside, join(dir, 'link'), 'junction');
-    } catch {
-      // Link creation can be refused; the dot-directory half still holds.
-    }
     expect(findFilesByUid(dir, UID_A).paths).toEqual([]);
+  });
+
+  describe('linked directories', () => {
+    const tryLink = (target: string, path: string): boolean => {
+      try {
+        symlinkSync(target, path, 'junction');
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    it('enters a linked directory and returns the file under the link', (ctx) => {
+      const dir = tmp.makeProject();
+      const shared = tmp.make('uid-shared-');
+      writeFileSync(join(shared, 'linked.tscn'), sceneWithUid(UID_A));
+      mkdirSync(join(dir, 'addons'));
+      if (!tryLink(shared, join(dir, 'addons', 'shared'))) ctx.skip();
+      expect(findFilesByUid(dir, UID_A)).toEqual({
+        paths: [join(dir, 'addons', 'shared', 'linked.tscn')],
+        complete: true,
+      });
+    });
+
+    it('terminates on a link cycle and still reports the search complete', (ctx) => {
+      const dir = tmp.makeProject();
+      mkdirSync(join(dir, 'a'));
+      writeFileSync(join(dir, 'a', 'scene.tscn'), sceneWithUid(UID_A));
+      if (!tryLink(dir, join(dir, 'a', 'back'))) ctx.skip();
+      expect(findFilesByUid(dir, UID_A)).toEqual({
+        paths: [join(dir, 'a', 'scene.tscn')],
+        complete: true,
+      });
+    });
+
+    it('reports an unresolvable link as an incomplete search', (ctx) => {
+      const dir = tmp.makeProject();
+      const gone = tmp.make('uid-gone-');
+      if (!tryLink(gone, join(dir, 'broken'))) ctx.skip();
+      rmSync(gone, { recursive: true, force: true });
+      expect(findFilesByUid(dir, UID_A)).toEqual({ paths: [], complete: false });
+    });
   });
 
   it('reads only the first line of the header bytes', () => {

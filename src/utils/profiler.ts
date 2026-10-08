@@ -143,6 +143,18 @@ const OTHER_AREA_MIN_MS = 1e-9;
 const MIB = 1024 * 1024;
 /** Custom monitors tracked per capture; the peer decides how many exist. */
 const MAX_CUSTOM_MONITORS = 64;
+/** Names of dropped custom monitors remembered, so a hostile peer cannot grow the set. */
+const MAX_DROPPED_MONITOR_NAMES = 256;
+/** Dropped custom monitor names a warning spells out. */
+const DROPPED_MONITOR_NAMES_SHOWN = 3;
+/**
+ * How much longer than the engine's own frame times a frame may arrive after
+ * the one before it before this process is blamed: the wall time between two
+ * arrivals, minus the frame time the engine reports for the frames between
+ * them. Network batching stays well under it; a synchronous stretch on this
+ * server (a screenshot compare, a process kill) does not.
+ */
+const UNACCOUNTED_ARRIVAL_GAP_MS = 100;
 /**
  * Things of each kind a timeline bucket keeps totals for; its top few are
  * picked from these. Per kind, so a game with hundreds of script functions
@@ -564,6 +576,13 @@ interface Capture {
   targetFps: number;
   slowFrames: number;
   timeline: TimelineCapture | null;
+  /** Frames that arrived later than the engine's frame times account for; see `UNACCOUNTED_ARRIVAL_GAP_MS`. */
+  arrivalStalls: number;
+  /**
+   * Why the receiver itself closed the capture as `disconnect` (a stream it
+   * could not read), or null when the connection ended on the game's side.
+   */
+  receiverFault: string | null;
 }
 
 interface BucketItem {
@@ -607,6 +626,12 @@ interface Bucket {
   renderCpuSum: number;
   renderGpuSum: number;
   drawCalls: number | null;
+  /**
+   * True when this server's event loop was busy for part of the interval, so
+   * frames were read later than they arrived and the count over the interval's
+   * length says nothing about the game.
+   */
+  stalled: boolean;
 }
 
 interface TimelineCapture {
@@ -637,6 +662,8 @@ interface MonitorCapture {
   samples: number;
   named: Map<MonitorName, Accumulator>;
   custom: Map<string, Accumulator>;
+  /** Names of custom monitors past `MAX_CUSTOM_MONITORS` that were not tracked. */
+  droppedCustom: Set<string>;
   /**
    * Pipeline compilations at the last sample before the capture opened: the
    * baseline that lets even a one-sample capture report what compiled.
@@ -1167,9 +1194,17 @@ function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): 
       renderCpuSum: 0,
       renderGpuSum: 0,
       drawCalls: null,
+      stalled: false,
     });
   }
   return timeline.buckets[index] ?? null;
+}
+
+/** Mark every bucket from `fromMs` to `toMs` (after the capture's first frame) as stalled. */
+function markStalled(timeline: TimelineCapture, fromMs: number, toMs: number): void {
+  const first = Math.max(0, Math.floor(fromMs / timeline.bucketMs));
+  const last = Math.min(Math.floor(toMs / timeline.bucketMs), timeline.buckets.length - 1);
+  for (let index = first; index <= last; index++) timeline.buckets[index]!.stalled = true;
 }
 
 function bump(item: BucketItem, ms: number): void {
@@ -1282,7 +1317,7 @@ function summarizeTimeline(
     // frame, it is too short to divide by when the capture ended just inside it.
     const durationMs = index === last ? spanMs - startMs : timeline.bucketMs;
     const fps =
-      durationMs >= timeline.bucketMs * TRAILING_BUCKET_MIN_SHARE
+      !bucket.stalled && durationMs >= timeline.bucketMs * TRAILING_BUCKET_MIN_SHARE
         ? bucket.frames / (durationMs / MS_PER_SECOND)
         : null;
     const perFrame = (sum: number): number | null =>
@@ -1330,6 +1365,7 @@ function newMonitorCapture(baselineCompilations: number | null): MonitorCapture 
     samples: 0,
     named: new Map(),
     custom: new Map(),
+    droppedCustom: new Set(),
     baselineCompilations,
     firstCompilations: null,
     lastCompilations: null,
@@ -1405,7 +1441,10 @@ function foldMonitorSample(
   customNames.forEach((name, i) => {
     const value = sample.custom[i];
     if (value === null || value === undefined) return;
-    if (!monitors.custom.has(name) && monitors.custom.size >= MAX_CUSTOM_MONITORS) return;
+    if (!monitors.custom.has(name) && monitors.custom.size >= MAX_CUSTOM_MONITORS) {
+      if (monitors.droppedCustom.size < MAX_DROPPED_MONITOR_NAMES) monitors.droppedCustom.add(name);
+      return;
+    }
     accumulate(monitors.custom, name, value);
   });
 }
@@ -1685,6 +1724,8 @@ export class DebuggerProfiler {
       visual: visual ? newVisualCapture() : null,
       targetFps: options.targetFps ?? DEFAULT_TARGET_FPS,
       slowFrames: 0,
+      arrivalStalls: 0,
+      receiverFault: null,
       timeline:
         timelineMs === null
           ? null
@@ -1883,11 +1924,19 @@ export class DebuggerProfiler {
         this.byteAt(2) * 0x10000 +
         this.byteAt(3) * 0x1000000;
       if (size === 0) {
-        this.fail('Debugger sent a zero-length packet (framing desync)');
+        this.fail(
+          'Debugger sent a zero-length packet (framing desync)',
+          'profile_disconnected',
+          true,
+        );
         return;
       }
       if (size > MAX_PACKET_BYTES) {
-        this.fail(`Debugger packet of ${size} bytes exceeds the ${MAX_PACKET_BYTES}-byte limit`);
+        this.fail(
+          `Debugger packet of ${size} bytes exceeds the ${MAX_PACKET_BYTES}-byte limit`,
+          'profile_disconnected',
+          true,
+        );
         return;
       }
       if (this.rxLength < 4 + size) return;
@@ -1929,7 +1978,7 @@ export class DebuggerProfiler {
         // A frame we cannot parse is a stream we cannot trust, but it is not a
         // dropped connection — report it as what it is.
         const code = err instanceof ProfilerError ? err.code : 'profile_disconnected';
-        this.fail(err instanceof Error ? err.message : String(err), code);
+        this.fail(err instanceof Error ? err.message : String(err), code, true);
         return;
       }
       this.notify();
@@ -2109,7 +2158,10 @@ export class DebuggerProfiler {
 
     const frame = sample.frame;
     capture.frames += 1;
-    capture.lastFrameAt = Date.now();
+    const arrivedAt = Date.now();
+    const previousArrivalAt = capture.frames === 1 ? null : capture.lastFrameAt;
+    const previousFrame = capture.lastFrame;
+    capture.lastFrameAt = arrivedAt;
     if (capture.frames === 1) {
       // Measure the window from real data, not from the enable round trip: the
       // handshake and first-frame latency are not time the game was profiled.
@@ -2125,6 +2177,19 @@ export class DebuggerProfiler {
     if (slow) capture.slowFrames += 1;
     const bucket = this.timelineBucket(capture, true);
     if (bucket !== null) foldTimelineFrame(bucket, sample, slow);
+    if (capture.timeline !== null && previousArrivalAt !== null && previousFrame !== null) {
+      // The engine says how long the frames since the last arrival took. Wall
+      // time beyond that is time this process did not read its socket.
+      const engineMs = sample.timings.frameMs * Math.max(1, frame - previousFrame);
+      if (arrivedAt - previousArrivalAt - engineMs > UNACCOUNTED_ARRIVAL_GAP_MS) {
+        capture.arrivalStalls += 1;
+        markStalled(
+          capture.timeline,
+          previousArrivalAt - capture.startedAt,
+          arrivedAt - capture.startedAt,
+        );
+      }
+    }
 
     for (const key of Object.keys(capture.timingSums) as Array<keyof FrameTimings>) {
       capture.timingSums[key] += sample.timings[key];
@@ -2203,13 +2268,31 @@ export class DebuggerProfiler {
     servers.sort((a, b) => b.msPerFrame - a.msPerFrame);
 
     const warnings: string[] = [];
+    if (capture.arrivalStalls > 0) {
+      warnings.push(
+        `This server's event loop was busy while ${capture.arrivalStalls} frame packet(s) waited, so the timeline intervals covering that time report fps: null and may hold no frames; the game was not measured as slow there.`,
+      );
+    }
     if (capture.closedBy === 'timeout') {
       warnings.push(
         'The capture is incomplete: Godot did not send its closing totals, so this covers only the frames received and seconds is measured to the last of them.',
       );
+    } else if (capture.closedBy === 'disconnect' && capture.receiverFault !== null) {
+      warnings.push(
+        `The capture is incomplete: the profiler stopped reading the debugger stream (${capture.receiverFault}), so this covers only the frames received before that. The game may still be running; relaunch the session with run_project (profiling: true) to profile again.`,
+      );
     } else if (capture.closedBy === 'disconnect') {
       warnings.push(
         'The capture is incomplete: the debugger connection dropped before Godot closed it (the game exited or crashed), so this covers only the frames received before that.',
+      );
+    }
+    const dropped = capture.monitors.droppedCustom;
+    if (dropped.size > 0) {
+      const shown = [...dropped].slice(0, DROPPED_MONITOR_NAMES_SHOWN).join(', ');
+      const more = dropped.size > DROPPED_MONITOR_NAMES_SHOWN ? ', ...' : '';
+      const atLeast = dropped.size >= MAX_DROPPED_MONITOR_NAMES ? 'at least ' : '';
+      warnings.push(
+        `Only the first ${MAX_CUSTOM_MONITORS} custom monitors are tracked; ${atLeast}${dropped.size} more were dropped (${shown}${more}).`,
       );
     }
     const rows: ProfileRow[] = [];
@@ -2341,10 +2424,15 @@ export class DebuggerProfiler {
    * later `start` as busy while `stop` kept timing out, and the advice on that
    * error points straight back at `stop`.
    */
-  private finalize(capture: Capture, closedBy: NonNullable<Capture['closedBy']>): void {
+  private finalize(
+    capture: Capture,
+    closedBy: NonNullable<Capture['closedBy']>,
+    receiverFault: string | null = null,
+  ): void {
     if (capture.result === null) {
       capture.result = [...capture.totals.values()];
       capture.closedBy = closedBy;
+      capture.receiverFault = receiverFault;
       // Without the engine's closing packet the window ends at the last frame
       // folded, not at this call, which may be a whole timeout later. Never
       // below zero: the first folded frame is stamped a moment before it
@@ -2360,7 +2448,11 @@ export class DebuggerProfiler {
     this.clearAutoStop();
   }
 
-  private fail(reason: string, code: ProfilerErrorCode = 'profile_disconnected'): void {
+  private fail(
+    reason: string,
+    code: ProfilerErrorCode = 'profile_disconnected',
+    receiverFault = false,
+  ): void {
     // A clean teardown destroys the socket, which fires `close` — that is not a
     // disconnect worth reporting or logging.
     if (this.error !== null || this.closed) return;
@@ -2377,7 +2469,7 @@ export class DebuggerProfiler {
     // A capture nobody is waiting on (`start_profiler`) would otherwise stay
     // open forever: its totals can no longer arrive, `finalize` has no other
     // caller, and the frames folded so far would be unreadable.
-    this.finalizeOpenCapture();
+    this.finalizeOpenCapture(receiverFault ? reason : null);
     this.rejectWaiters(new ProfilerError(code, reason));
   }
 
@@ -2386,13 +2478,13 @@ export class DebuggerProfiler {
    * what it folded stays readable as an incomplete capture. One that folded no
    * frame closes empty: `summarize` reports it as `profile_no_frames`.
    */
-  private finalizeOpenCapture(): void {
+  private finalizeOpenCapture(receiverFault: string | null = null): void {
     const capture = this.capture;
     if (capture === null || capture.result !== null) return;
     if (this.state !== 'starting' && this.state !== 'capturing' && this.state !== 'stopping') {
       return;
     }
-    this.finalize(capture, 'disconnect');
+    this.finalize(capture, 'disconnect', receiverFault);
   }
 
   // --- waiting ---

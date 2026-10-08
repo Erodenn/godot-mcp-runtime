@@ -629,3 +629,65 @@ describe('batchSceneWrites', () => {
     ]);
   });
 });
+
+describe('diffSceneText: a reference the engine re-resolved by uid', () => {
+  const TEXTURE_BEFORE = scene(
+    '[gd_scene load_steps=2 format=3 uid="uid://scene"]',
+    '',
+    '[ext_resource type="Texture2D" uid="uid://tex" path="res://old/tex.png" id="1"]',
+    '',
+    '[node name="Root" type="Node2D"]',
+    '',
+    '[node name="Sprite" type="Sprite2D" parent="."]',
+    'texture = ExtResource("1")',
+  );
+  const INSTANCE_BEFORE = scene(
+    '[gd_scene load_steps=2 format=3 uid="uid://scene"]',
+    '',
+    '[ext_resource type="PackedScene" uid="uid://enemy" path="res://old/enemy.tscn" id="1"]',
+    '',
+    '[node name="Root" type="Node2D"]',
+    '',
+    '[node name="Enemy" parent="." instance=ExtResource("1")]',
+  );
+
+  it('does not report a stale path the save rewrote to the current one for the same uid', () => {
+    const after = TEXTURE_BEFORE.replace('res://old/tex.png', 'res://art/tex.png');
+    expect(diffSceneText(TEXTURE_BEFORE, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([]);
+  });
+
+  it('does not report an instanced scene whose path changed under the same uid', () => {
+    const after = INSTANCE_BEFORE.replace('res://old/enemy.tscn', 'res://actors/enemy.tscn');
+    expect(diffSceneText(INSTANCE_BEFORE, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([]);
+  });
+
+  it('still reports the texture when the uid changed with the path', () => {
+    const after = TEXTURE_BEFORE.replace('res://old/tex.png', 'res://art/tex.png').replace(
+      'uid://tex',
+      'uid://other',
+    );
+    expect(diffSceneText(TEXTURE_BEFORE, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([
+      '"root/Sprite" lost texture (was res://old/tex.png)',
+    ]);
+  });
+
+  it('still reports the instance when the uid changed with the path', () => {
+    const after = INSTANCE_BEFORE.replace(
+      'res://old/enemy.tscn',
+      'res://actors/enemy.tscn',
+    ).replace('uid://enemy', 'uid://other');
+    expect(diffSceneText(INSTANCE_BEFORE, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([
+      '"root/Enemy" no longer instances res://old/enemy.tscn',
+    ]);
+  });
+
+  it('still reports a path change when only one side carries a uid', () => {
+    const after = INSTANCE_BEFORE.replace(
+      'res://old/enemy.tscn',
+      'res://actors/enemy.tscn',
+    ).replace(' uid="uid://enemy"', '');
+    expect(diffSceneText(INSTANCE_BEFORE, after, NOTHING_ASKED, NO_FAILED_SCRIPTS)).toEqual([
+      '"root/Enemy" no longer instances res://old/enemy.tscn',
+    ]);
+  });
+});

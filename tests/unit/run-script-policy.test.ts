@@ -1572,3 +1572,37 @@ describe('evaluateScript: DirAccess writes on an instance', () => {
     expect(tiers('DirAccess.remove("x")')).toEqual([['tier2.fs.DirAccess.remove', 2]]);
   });
 });
+
+describe('evaluateScript: the scan work is bounded', () => {
+  const NESTING = 60_000;
+  // The unbounded re-scan is quadratic in the nesting (minutes at this depth);
+  // the bounded scan is linear (a second or two).
+  const BOUNDED_SCAN_TIMEOUT_MS = 8_000;
+
+  it(
+    'evaluates 60000 nested dispatch calls inside the test timeout and fails closed',
+    () => {
+      const source =
+        `${VALID_PREFIX}` + 'a.call('.repeat(NESTING) + 'load("x")' + ')'.repeat(NESTING) + '\n';
+      const decision = evaluateScript(source);
+      // Past the budget the first argument of the innermost load("x") answers
+      // nonliteral, so the literal is reported: the fail-closed side.
+      expect(decision.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(
+        true,
+      );
+      expect(decision.decision).toBe('hard_block');
+    },
+    BOUNDED_SCAN_TIMEOUT_MS,
+  );
+
+  it('an ordinary script keeps its findings: a literal load is only noted', () => {
+    expect(evalLine('load("res://x.tres")').matches.map((m) => m.ruleId)).toEqual([
+      'tier3.literal.load',
+    ]);
+    expect(evalLine('a.call("set_script", s)').matches.map((m) => m.ruleId)).toEqual([
+      'tier2.reflection.set_script.bareIdentifier',
+    ]);
+    expect(evalLine('OS.call("execute", "ls")').decision).toBe('hard_block');
+    expect(evalLine('OS.callv("execute", ["ls"])').decision).toBe('hard_block');
+  });
+});
