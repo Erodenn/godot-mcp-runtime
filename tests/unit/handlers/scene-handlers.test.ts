@@ -504,6 +504,30 @@ describe('handleBatchSceneOperations', () => {
     { operation: 'add_node', scenePath: fixtureScenePath, nodeType: 'Node2D', nodeName: 'Foo' },
   ];
 
+  // Red when a batch item's updates are checked as spelled and forwarded raw.
+  it('checks and forwards one spelling of a nested update whose nodePath is spelled both ways', async () => {
+    const SET = { operation: 'set_node_properties', scenePath: fixtureScenePath };
+    const refused = createFakeRunner({ stdout: '{"results":[]}' });
+    const result = await handleBatchSceneOperations(refused.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: [
+        { ...SET, updates: [{ nodePath: 'root', node_path: '../Out', property: 'p', value: 1 }] },
+      ],
+    });
+    expectErrorMatching(result, /Invalid operations\[0\]\.updates\[0\]\.nodePath/);
+    expect(refused.calls).toHaveLength(0);
+
+    const forwarded = createFakeRunner({ stdout: '{"results":[]}' });
+    await handleBatchSceneOperations(forwarded.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: [
+        { ...SET, updates: [{ node_path: 'root/A', nodePath: 'root/B', property: 'p', value: 1 }] },
+      ],
+    });
+    const operations = forwarded.calls[0]?.params.operations as Array<{ updates: unknown }>;
+    expect(operations[0]?.updates).toEqual([{ nodePath: 'root/B', property: 'p', value: 1 }]);
+  });
+
   it('rejects missing projectPath', async () => {
     const fake = createFakeRunner();
     const result = await handleBatchSceneOperations(fake.asRunner, { operations: validOps });

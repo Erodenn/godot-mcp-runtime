@@ -15,6 +15,7 @@ import type { OperationParams, ToolResponse } from '../mcp.types.js';
 import { createErrorResponse } from './error-response.js';
 import { ok, err, type Result } from './result.js';
 import type { NodePath, ProjectPath, ScenePath } from './branded.js';
+import { normalizeParameters } from './parameter-conversion.js';
 import {
   validatePath,
   isSceneFileNodeType,
@@ -369,11 +370,9 @@ export function parseOptionalNodePath(
 //
 // `normalizeParameters` does not descend into arrays, so the items of `nodes`,
 // `updates` and `operations` reach a handler spelled however the caller wrote
-// them: camelCase from the tool schema, or snake_case from a client that
-// mirrors the engine's names. Each validator accepts both spellings and refuses
-// what the script would otherwise read as a different request (a mistyped key
-// defaulting to the scene root) or abort on (a missing key). The error names
-// the index, and nothing reaches Godot.
+// them. Each validator normalizes an item's keys once, checks that object and
+// returns it for the handler to forward: an item checked in one spelling and
+// forwarded raw lets a key spelled both ways run as the value nobody checked.
 
 type ItemRecord = Record<string, unknown>;
 
@@ -382,17 +381,12 @@ function asItemRecord(item: unknown): ItemRecord | null {
   return item as ItemRecord;
 }
 
-/** Read a key an item may spell in camelCase or snake_case. */
-function itemField(item: ItemRecord, camelKey: string, snakeKey: string): unknown {
-  return item[camelKey] !== undefined ? item[camelKey] : item[snakeKey];
-}
-
 function itemError(message: string, solution: string): Result<never, ToolResponse> {
   return err(createErrorResponse(message, [solution]));
 }
 
 function checkItemNodePath(item: ItemRecord, where: string): Result<void, ToolResponse> {
-  const raw = itemField(item, 'nodePath', 'node_path');
+  const raw = item.nodePath;
   if (typeof raw !== 'string' || raw === '') {
     return itemError(
       `${where}.nodePath is required and must be a non-empty string`,
@@ -404,38 +398,48 @@ function checkItemNodePath(item: ItemRecord, where: string): Result<void, ToolRe
   return ok(undefined);
 }
 
-/** Validate the items of get_node_properties `nodes`: { nodePath, changedOnly? }. */
-export function checkNodeReadItems(items: unknown[], field = 'nodes'): Result<void, ToolResponse> {
+/** Validate the items of get_node_properties `nodes`: { nodePath, changedOnly? }. Returns the items to forward. */
+export function checkNodeReadItems(
+  items: unknown[],
+  field = 'nodes',
+): Result<ItemRecord[], ToolResponse> {
+  const checked: ItemRecord[] = [];
   for (let i = 0; i < items.length; i++) {
     const where = `${field}[${i}]`;
-    const item = asItemRecord(items[i]);
-    if (!item) {
+    const rawItem = asItemRecord(items[i]);
+    if (!rawItem) {
       return itemError(`${where} must be an object with a nodePath`, 'Each item is { nodePath }');
     }
+    const item: ItemRecord = normalizeParameters(rawItem);
     const nodePath = checkItemNodePath(item, where);
     if (!nodePath.ok) return nodePath;
-    const changedOnly = itemField(item, 'changedOnly', 'changed_only');
-    if (changedOnly !== undefined && typeof changedOnly !== 'boolean') {
+    if (item.changedOnly !== undefined && typeof item.changedOnly !== 'boolean') {
       return itemError(
         `${where}.changedOnly must be a boolean when provided`,
         'Provide true or false for changedOnly, or omit it',
       );
     }
+    checked.push(item);
   }
-  return ok(undefined);
+  return ok(checked);
 }
 
-/** Validate the items of set_node_properties `updates`: { nodePath, property, value }. */
-export function checkUpdateItems(items: unknown[], field = 'updates'): Result<void, ToolResponse> {
+/** Validate the items of set_node_properties `updates`: { nodePath, property, value }. Returns the items to forward. */
+export function checkUpdateItems(
+  items: unknown[],
+  field = 'updates',
+): Result<ItemRecord[], ToolResponse> {
+  const checked: ItemRecord[] = [];
   for (let i = 0; i < items.length; i++) {
     const where = `${field}[${i}]`;
-    const item = asItemRecord(items[i]);
-    if (!item) {
+    const rawItem = asItemRecord(items[i]);
+    if (!rawItem) {
       return itemError(
         `${where} must be an object with nodePath, property and value`,
         'Each update is { nodePath, property, value }',
       );
     }
+    const item: ItemRecord = normalizeParameters(rawItem);
     const nodePath = checkItemNodePath(item, where);
     if (!nodePath.ok) return nodePath;
     if (typeof item.property !== 'string' || item.property === '') {
@@ -450,23 +454,24 @@ export function checkUpdateItems(items: unknown[], field = 'updates'): Result<vo
         'Provide a value for the property, or null to clear an Object-typed one',
       );
     }
+    checked.push(item);
   }
-  return ok(undefined);
+  return ok(checked);
 }
 
 /**
- * The string-valued fields of a batch operation item, in both spellings. The
- * script reads each of them into a typed parameter or a string comparison, so
- * a value of another type raises inside the script and takes every other
- * operation in the batch down with it, with no per-operation result.
+ * The string-valued fields of a batch operation item. The script reads each of
+ * them into a typed parameter or a string comparison, so a value of another
+ * type raises inside the script and takes every other operation in the batch
+ * down with it, with no per-operation result.
  */
-const BATCH_ITEM_STRING_FIELDS: ReadonlyArray<readonly [camel: string, snake: string]> = [
-  ['nodeType', 'node_type'],
-  ['nodeName', 'node_name'],
-  ['parentNodePath', 'parent_node_path'],
-  ['nodePath', 'node_path'],
-  ['texturePath', 'texture_path'],
-  ['newPath', 'new_path'],
+const BATCH_ITEM_STRING_FIELDS: readonly string[] = [
+  'nodeType',
+  'nodeName',
+  'parentNodePath',
+  'nodePath',
+  'texturePath',
+  'newPath',
 ];
 
 /**
@@ -477,22 +482,20 @@ const BATCH_ITEM_STRING_FIELDS: ReadonlyArray<readonly [camel: string, snake: st
  * is a path for some values only.
  */
 const BATCH_ITEM_PATH_FIELDS: ReadonlyArray<{
-  camel: string;
-  snake: string;
+  key: string;
   access: PathAccess;
   applies?: (value: string) => boolean;
 }> = [
-  { camel: 'scenePath', snake: 'scene_path', access: 'write' },
-  { camel: 'newPath', snake: 'new_path', access: 'write' },
-  { camel: 'texturePath', snake: 'texture_path', access: 'read' },
-  { camel: 'nodeType', snake: 'node_type', access: 'read', applies: isSceneFileNodeType },
+  { key: 'scenePath', access: 'write' },
+  { key: 'newPath', access: 'write' },
+  { key: 'texturePath', access: 'read' },
+  { key: 'nodeType', access: 'read', applies: isSceneFileNodeType },
 ];
 
 /**
  * Resolve every path field of one batch item by the rules a single call
  * applies. Returns the item with each path replaced by its project-relative
- * form, under the key the caller spelled it with, or the refusal naming the
- * item and the field.
+ * form, or the refusal naming the item and the field.
  */
 function resolveBatchItemPaths(
   item: ItemRecord,
@@ -501,19 +504,18 @@ function resolveBatchItemPaths(
 ): Result<ItemRecord, ToolResponse> {
   const resolved: ItemRecord = { ...item };
   for (const field of BATCH_ITEM_PATH_FIELDS) {
-    const key = item[field.camel] !== undefined ? field.camel : field.snake;
-    const value = item[key];
+    const value = item[field.key];
     if (typeof value !== 'string' || value === '') continue;
     if (field.applies !== undefined && !field.applies(value)) continue;
     const path = resolveProjectPath(projectPath, value, field.access);
     if (path === null) {
       return err(
-        createErrorResponse(projectSubPathError(`${where}.${field.camel}`, value), [
+        createErrorResponse(projectSubPathError(`${where}.${field.key}`, value), [
           ...PROJECT_SUB_PATH_SOLUTIONS,
         ]),
       );
     }
-    resolved[key] = path.relPath;
+    resolved[field.key] = path.relPath;
   }
   return ok(resolved);
 }
@@ -525,16 +527,11 @@ const BATCH_OPERATION_NAMES = ['add_node', 'load_sprite', 'set_node_properties',
 function batchOperationHint(item: Record<string, unknown>): string {
   const didYouMean = (keys: string, operation: string): string =>
     ` (${keys} present: did you mean operation '${operation}'?)`;
-  if (
-    itemField(item, 'nodeName', 'node_name') !== undefined ||
-    itemField(item, 'nodeType', 'node_type') !== undefined
-  ) {
+  if (item.nodeName !== undefined || item.nodeType !== undefined) {
     return didYouMean('nodeName/nodeType', 'add_node');
   }
   if (item.updates !== undefined) return didYouMean('updates', 'set_node_properties');
-  if (itemField(item, 'texturePath', 'texture_path') !== undefined) {
-    return didYouMean('texturePath', 'load_sprite');
-  }
+  if (item.texturePath !== undefined) return didYouMean('texturePath', 'load_sprite');
   return '';
 }
 
@@ -549,8 +546,12 @@ function batchOperationHint(item: Record<string, unknown>): string {
  * Every path an item carries (`BATCH_ITEM_PATH_FIELDS`) goes through
  * `resolveProjectPath` with the intent a single call gives it, so a batch
  * accepts and refuses exactly the paths the single tools do. The value
- * returned is the operations to forward: the same items with each path in its
- * resolved project-relative form.
+ * returned is the operations to forward: the same items with camelCase keys
+ * and each path in its resolved project-relative form.
+ *
+ * Keys are normalized before anything is checked: with one key spelled both
+ * ways, one spelling would be checked and the other could be the one the
+ * script reads, since the runner folds both to the same snake_case key.
  */
 export function checkBatchOperationItems(
   items: unknown[],
@@ -561,13 +562,14 @@ export function checkBatchOperationItems(
   const resolvedItems: ItemRecord[] = [];
   for (let i = 0; i < items.length; i++) {
     const where = `${field}[${i}]`;
-    const item = asItemRecord(items[i]);
-    if (!item) {
+    const rawItem = asItemRecord(items[i]);
+    if (!rawItem) {
       return itemError(
         `${where} must be an object`,
         'Each operation is an object with an operation key',
       );
     }
+    const item: ItemRecord = normalizeParameters(rawItem);
     if (item.operation === undefined || item.operation === null || item.operation === '') {
       return itemError(
         `${where} is missing the required 'operation' key (one of: ${operationList}).${batchOperationHint(item)}`,
@@ -583,19 +585,17 @@ export function checkBatchOperationItems(
         `Use one of: ${operationList}`,
       );
     }
-    const scenePath = itemField(item, 'scenePath', 'scene_path');
-    if (scenePath !== undefined && typeof scenePath !== 'string') {
+    if (item.scenePath !== undefined && typeof item.scenePath !== 'string') {
       return itemError(
         `${where}.scenePath must be a string when provided`,
         'Provide the path of the scene file inside the project',
       );
     }
-    for (const [camelKey, snakeKey] of BATCH_ITEM_STRING_FIELDS) {
-      const value = itemField(item, camelKey, snakeKey);
-      if (value !== undefined && typeof value !== 'string') {
+    for (const key of BATCH_ITEM_STRING_FIELDS) {
+      if (item[key] !== undefined && typeof item[key] !== 'string') {
         return itemError(
-          `${where}.${camelKey} must be a string when provided`,
-          `Provide a string for ${camelKey}, or omit it`,
+          `${where}.${key} must be a string when provided`,
+          `Provide a string for ${key}, or omit it`,
         );
       }
     }
@@ -605,8 +605,7 @@ export function checkBatchOperationItems(
         'Provide a JSON object of property values, or omit properties',
       );
     }
-    const abortOnError = itemField(item, 'abortOnError', 'abort_on_error');
-    if (abortOnError !== undefined && typeof abortOnError !== 'boolean') {
+    if (item.abortOnError !== undefined && typeof item.abortOnError !== 'boolean') {
       return itemError(
         `${where}.abortOnError must be a boolean when provided`,
         'Provide true or false for abortOnError, or omit it',
@@ -618,6 +617,7 @@ export function checkBatchOperationItems(
       }
       const updates = checkUpdateItems(item.updates, `${where}.updates`);
       if (!updates.ok) return updates;
+      item.updates = updates.value;
     }
     const resolved = resolveBatchItemPaths(item, where, projectPath);
     if (!resolved.ok) return resolved;

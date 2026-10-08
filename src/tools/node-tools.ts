@@ -486,7 +486,7 @@ export async function handleSetNodeProperties(
 
   const params = {
     scenePath: parsed.value.scenePath,
-    updates: updates.value,
+    updates: checkedUpdates.value,
     abortOnError: abortOnError.value ?? false,
   };
   return executeSceneOp(
@@ -500,7 +500,7 @@ export async function handleSetNodeProperties(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, updateTouches(updates.value)),
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, updateTouches(checkedUpdates.value)),
     },
   );
 }
@@ -518,7 +518,7 @@ export async function handleGetNodeProperties(
   const checkedNodes = checkNodeReadItems(nodes.value);
   if (!checkedNodes.ok) return checkedNodes;
 
-  const params = { scenePath: parsed.value.scenePath, nodes: nodes.value };
+  const params = { scenePath: parsed.value.scenePath, nodes: checkedNodes.value };
   return executeSceneOp(
     runner,
     'get_node_properties',

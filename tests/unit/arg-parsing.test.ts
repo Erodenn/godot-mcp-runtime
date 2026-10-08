@@ -394,7 +394,7 @@ describe('checkBatchOperationItems resolves every path an item carries', () => {
     return projectDir;
   }
 
-  it('forwards each path in its project-relative form, under the key it was spelled with', () => {
+  it('forwards each path in its project-relative form, under camelCase keys', () => {
     const result = checkBatchOperationItems(
       [
         {
@@ -418,11 +418,11 @@ describe('checkBatchOperationItems resolves every path an item carries', () => {
       { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'parts/a.tscn', nodeName: 'A' },
       {
         operation: 'load_sprite',
-        scene_path: 'scenes/b.tscn',
-        node_path: 'root/S',
-        texture_path: 'art/t.png',
+        scenePath: 'scenes/b.tscn',
+        nodePath: 'root/S',
+        texturePath: 'art/t.png',
       },
-      { operation: 'save', scenePath: 'main.tscn', new_path: 'copies/main.tscn' },
+      { operation: 'save', scenePath: 'main.tscn', newPath: 'copies/main.tscn' },
       { operation: 'add_node', scenePath: 'main.tscn', nodeType: 'Node2D', nodeName: 'B' },
     ]);
   });
@@ -464,6 +464,29 @@ describe('checkBatchOperationItems resolves every path an item carries', () => {
       projectDir,
     );
     expect(messageOf(copy)).toContain('Invalid operations[0].newPath:');
+  });
+
+  // Red when the items are checked as spelled: `newPath` is then the one
+  // resolved, and `new_path`, which the runner folds onto the same key after
+  // it, reaches the script unchecked.
+  it('a key spelled both ways is checked as the one value that is forwarded', () => {
+    const projectDir = projectWithLinkedFolder();
+    const SAVE = { operation: 'save', scenePath: 'main.tscn' };
+    const outside = checkBatchOperationItems(
+      [{ ...SAVE, newPath: 'copy.tscn', new_path: 'linked/copy.tscn' }],
+      projectDir,
+    );
+    expect(messageOf(outside)).toContain('Invalid operations[0].newPath: "linked/copy.tscn"');
+    const inside = checkBatchOperationItems(
+      [{ ...SAVE, newPath: 'linked/copy.tscn', new_path: 'res://copy.tscn' }],
+      projectDir,
+    );
+    expect(inside.ok && inside.value).toEqual([{ ...SAVE, newPath: 'copy.tscn' }]);
+    const mistyped = checkBatchOperationItems(
+      [{ ...SAVE, scenePath: 'main.tscn', scene_path: 5 }],
+      projectDir,
+    );
+    expect(messageOf(mistyped)).toContain('operations[0].scenePath must be a string');
   });
 
   it('a texture or an instanced scene behind such a link is only read, and is accepted', () => {

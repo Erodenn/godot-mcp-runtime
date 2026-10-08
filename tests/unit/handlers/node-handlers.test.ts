@@ -238,6 +238,32 @@ describe('handleSetNodeProperties', () => {
     expect(declaredResultFields('set_node_properties')).toContain('resolvedNodePath');
   });
 
+  // Red when an update is checked as spelled and forwarded raw: the runner folds
+  // nodePath and node_path onto one key, so the unchecked spelling is the one run.
+  it('checks and forwards one spelling of an update whose nodePath is spelled both ways', async () => {
+    const SET = { property: 'visible', value: true };
+    const refused = createFakeRunner({ stdout: '{"results":[]}' });
+    const result = await handleSetNodeProperties(refused.asRunner, {
+      ...validBase,
+      updates: [{ nodePath: 'root/A', node_path: '../Outside', ...SET }],
+    });
+    expectErrorMatching(result, /Invalid updates\[0\]\.nodePath/);
+    expect(refused.calls).toHaveLength(0);
+
+    const forwarded = createFakeRunner({ stdout: '{"results":[]}' });
+    await handleSetNodeProperties(forwarded.asRunner, {
+      ...validBase,
+      updates: [
+        { node_path: 'root/A', nodePath: 'root/B', ...SET },
+        { node_path: 'root/C', property: 'meta', value: { node_path: 'kept' } },
+      ],
+    });
+    expect(forwarded.calls[0]?.params.updates).toEqual([
+      { nodePath: 'root/B', ...SET },
+      { nodePath: 'root/C', property: 'meta', value: { node_path: 'kept' } },
+    ]);
+  });
+
   it('handles multi-element updates array', async () => {
     const fake = createFakeRunner({
       stdout:
@@ -331,6 +357,29 @@ describe('handleGetNodeProperties', () => {
     expect(parsed.results[0].nodePath).toBe('root');
     expect(parsed.results[0].nodeType).toBe('Node2D');
     expectMatchesOutputSchema('get_node_properties', result);
+  });
+
+  // Red when a node item is checked as spelled and forwarded raw.
+  it('checks and forwards one spelling of a node item whose keys are spelled both ways', async () => {
+    const refused = createFakeRunner({ stdout: '{"results":[]}' });
+    const badPath = await handleGetNodeProperties(refused.asRunner, {
+      ...validBase,
+      nodes: [{ nodePath: 'root', node_path: '../Outside' }],
+    });
+    expectErrorMatching(badPath, /Invalid nodes\[0\]\.nodePath/);
+    const badFlag = await handleGetNodeProperties(refused.asRunner, {
+      ...validBase,
+      nodes: [{ nodePath: 'root', changedOnly: true, changed_only: 'yes' }],
+    });
+    expectErrorMatching(badFlag, /nodes\[0\]\.changedOnly must be a boolean/);
+    expect(refused.calls).toHaveLength(0);
+
+    const forwarded = createFakeRunner({ stdout: '{"results":[]}' });
+    await handleGetNodeProperties(forwarded.asRunner, {
+      ...validBase,
+      nodes: [{ node_path: 'root/A', nodePath: 'root/B', changed_only: true }],
+    });
+    expect(forwarded.calls[0]?.params.nodes).toEqual([{ nodePath: 'root/B', changedOnly: true }]);
   });
 
   it('returns an error response for a payload that carries a load failure', async () => {
