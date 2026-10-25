@@ -122,6 +122,14 @@ A headless scene-editing call also checks for another server's live session on t
 
 Accepted gaps: two servers racing a read-modify-write on `project.godot` in the same instant can still lose one edit (writing the owner file first keeps the window tiny, and the next inject from either side restores the entry); and an older server version sharing a project writes no owner file, so it is invisible to this registry.
 
+### GDScript warning settings
+
+Both GDScript files compile under the user's project settings: `mcp_bridge.gd` as the autoload, and `godot_operations.gd` because every headless operation runs `godot --path <project> --script <file>`. A project that raises a warning to an error (strict typing sets `debug/gdscript/warnings/untyped_declaration=2`) would otherwise fail to load the bridge and fail every operation. A `directory_rules` entry can't help the operations script, which lives outside `res://`.
+
+So each file opens with the same `@warning_ignore_start(...)` list: every warning Godot 4.5 knows, except the four that are errors by default (`inference_on_variant`, `native_method_override`, `get_node_default_without_onready`, `onready_with_export`), which keep guarding the files. Godot rejects an unknown warning name as a parse error, so a warning added after 4.5 (`missing_await` in 4.6, `confusable_temporary_modification` in 4.7) can join the list only once the floor passes it. Until then the code avoids tripping them: the bridge dispatches commands through `Callable.call`, so its deliberate fire-and-forget gives `missing_await` nothing to flag.
+
+`tests/integration/strict-warnings.test.ts` asks the running engine for every warning it knows and raises all of them to error, so a new warning that fires in either file fails there. `tests/unit/warning-ignore-sync.test.ts` keeps the two lists identical.
+
 ## Input Batches
 
 `simulate_input` sends one `input` command carrying the whole batch, and the bridge drives it one action at a time. The shape of that loop is what makes the per-action results trustworthy.
