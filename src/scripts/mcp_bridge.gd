@@ -1,5 +1,53 @@
 extends Node
 
+# Loads inside the user's project, so its warning settings apply: see "GDScript warning settings" in docs/architecture.md.
+# KEEP IN SYNC: the same list opens src/scripts/godot_operations.gd.
+@warning_ignore_start(
+	"assert_always_false",
+	"assert_always_true",
+	"confusable_capture_reassignment",
+	"confusable_identifier",
+	"confusable_local_declaration",
+	"confusable_local_usage",
+	"constant_used_as_function",
+	"deprecated_keyword",
+	"empty_file",
+	"enum_variable_without_default",
+	"function_used_as_property",
+	"incompatible_ternary",
+	"inferred_declaration",
+	"int_as_enum_without_cast",
+	"int_as_enum_without_match",
+	"integer_division",
+	"missing_tool",
+	"narrowing_conversion",
+	"property_used_as_function",
+	"redundant_await",
+	"redundant_static_unload",
+	"return_value_discarded",
+	"shadowed_global_identifier",
+	"shadowed_variable",
+	"shadowed_variable_base_class",
+	"standalone_expression",
+	"standalone_ternary",
+	"static_called_on_instance",
+	"unassigned_variable",
+	"unassigned_variable_op_assign",
+	"unreachable_code",
+	"unreachable_pattern",
+	"unsafe_call_argument",
+	"unsafe_cast",
+	"unsafe_method_access",
+	"unsafe_property_access",
+	"unsafe_void_return",
+	"untyped_declaration",
+	"unused_local_constant",
+	"unused_parameter",
+	"unused_private_class_variable",
+	"unused_signal",
+	"unused_variable",
+)
+
 # KEEP IN SYNC: src/utils/bridge-protocol.ts implements the same framing on the
 # Node side. Any change here MUST be mirrored there (and vice versa).
 #
@@ -209,7 +257,8 @@ func _poll_peer(peer: PeerState) -> void:
 
 		var data := frame_bytes.get_string_from_utf8().strip_edges()
 		peer.handling = true
-		_dispatch_command(peer, data)
+		# Through call() so this deliberate fire-and-forget doesn't trip missing_await in a strict project.
+		_dispatch_command.call(peer, data)
 		# _dispatch_command awaits internally on async branches (input, run_script,
 		# screenshot, shutdown), so control returns here at the first inner await.
 		# `peer.handling` is the gate that blocks re-entry; it is cleared by
