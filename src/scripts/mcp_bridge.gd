@@ -840,12 +840,14 @@ func _inject_mouse_motion(action: Dictionary) -> void:
 	event.relative = Vector2(action.get("relative_x", 0), action.get("relative_y", 0))
 	Input.parse_input_event(event)
 
+# Flushed at once: a tap's release lands after the hold's physics_frame, and left buffered it would still read as pressed after the settle frame.
 func _inject_action(action: Dictionary, pressed: bool) -> void:
-	var action_name := str(action.get("action", ""))
-	if pressed:
-		Input.action_press(action_name, float(action.get("strength", 1.0)))
-	else:
-		Input.action_release(action_name)
+	var event := InputEventAction.new()
+	event.action = StringName(str(action.get("action", "")))
+	event.pressed = pressed
+	event.strength = float(action.get("strength", 1.0)) if pressed else 0.0
+	Input.parse_input_event(event)
+	Input.flush_buffered_events()
 
 func _inject_click_element(action: Dictionary, target: Control, pressed: bool) -> void:
 	var button_result := _resolve_button_name(str(action.get("button", "left")))

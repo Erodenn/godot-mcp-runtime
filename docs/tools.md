@@ -122,6 +122,8 @@ One call executes the batch in `actions`, in order, and returns one result entry
 
 **Action types.** `key`, `mouse_button`, `mouse_motion`, `click_element`, `action`, `text`, `wait`.
 
+**`action`** sends an `InputEventAction`, so it behaves like the bound key: `_input`, `_unhandled_input` and `_gui_input` handlers see it, and `Input.is_action_pressed` polls see it too. That includes the UI: a `ui_accept` action presses the focused `Button`, as Enter would.
+
 **The press rule.** For `key`, `mouse_button` and `action`, omitting `pressed` taps: the input presses and releases itself inside the one action. `pressed: true` presses and holds across later actions in the batch and across later calls; `pressed: false` releases an earlier hold. This replaces the old behavior, where omitting `pressed` pressed without ever releasing and left the input stuck down.
 
 `hold_ms` replaces the default tap gap with a real-time hold, for game code that polls `is_action_pressed` over time. It applies to `key`, `mouse_button` and `action` only, and is rejected when `pressed` is set as well: a hold with an explicit press has no end to time. The default gap is one `process_frame` plus one `physics_frame` for `key` and `action` (so a `_physics_process` poll cannot miss the press) and zero gap for `mouse_button` and `click_element`, which is what a real click looks like.

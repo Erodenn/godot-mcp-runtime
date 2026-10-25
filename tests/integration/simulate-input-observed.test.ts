@@ -329,6 +329,68 @@ describe('simulate_input observed results (live bridge)', () => {
   );
 
   itGodot(
+    'an action tap reaches _input handlers as well as the is_action_pressed poll',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const payload = await simulate({
+        watch: [MOVER_WATCH],
+        actions: [
+          { type: 'wait', frames: SHORT_WAIT_FRAMES },
+          { type: 'action', action: 'probe_move' },
+        ],
+      });
+
+      expect(payload.results).toHaveLength(2);
+      const [baseline, tap] = payload.results as [InputEntry, InputEntry];
+      const before = (baseline.watch as Record<string, unknown> | undefined)?.[MOVER_WATCH];
+      const after = (tap.watch as Record<string, unknown> | undefined)?.[MOVER_WATCH];
+      const seen = `results=${JSON.stringify(payload.results)}`;
+      expect(before, `the Mover must start where the scene places it; ${seen}`).toBe(MOVER_START_X);
+      expect(after as number, `the polled action must move the Mover; ${seen}`).toBeGreaterThan(
+        before as number,
+      );
+      expect(tap.pressed, `a tap releases itself; ${seen}`).toBe(false);
+
+      // An action that only sets the polled state leaves the probe's _input counter at 0.
+      const state = (await script([
+        'return {"events": scene_tree.root.get_node("InputProbe").move_events}',
+      ])) as { events?: number } | null;
+      expect(state?.events, `one tap must reach _input once; state=${JSON.stringify(state)}`).toBe(
+        1,
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a ui_accept action presses the focused Button, as Enter would',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const focused = (await script([
+        'var btn := scene_tree.root.get_node("InputProbe/PanelBtn") as Button',
+        'btn.grab_focus()',
+        'return {"focused": btn.has_focus()}',
+      ])) as { focused?: boolean } | null;
+      expect(focused?.focused, `PanelBtn must take focus; got ${JSON.stringify(focused)}`).toBe(
+        true,
+      );
+
+      const payload = await simulate({ actions: [{ type: 'action', action: 'ui_accept' }] });
+      expect(payload.results).toHaveLength(1);
+      const state = (await script([
+        'return {"visible": scene_tree.root.get_node("InputProbe/HiddenPanel").visible}',
+      ])) as { visible?: boolean } | null;
+      expect(
+        state?.visible,
+        `ui_accept must press PanelBtn, which shows HiddenPanel; results=${JSON.stringify(payload.results)}`,
+      ).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
     'an explicit key press reports still_held and a later call releases it',
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, currentProject());
