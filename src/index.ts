@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 // Lower-level `Server` is deliberate; see CONTRIBUTING.md "MCP SDK: Server vs McpServer".
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Server, type CallToolResult, type ListToolsResult } from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { startProgressHeartbeat } from './utils/progress-heartbeat.js';
 
 import type { GodotServerConfig } from './utils/godot-runner.js';
@@ -74,7 +73,7 @@ function createContextFromServer(server: Server): McpContext {
   const elicitor = createElicitor({
     getClientCapabilities: () => server.getClientCapabilities(),
     elicitInput: async (params, options) => {
-      // The SDK's param type is a strict zod-inferred shape; the request matches the protocol at runtime.
+      // The SDK's param type is a strict inferred shape; the request matches the protocol at runtime.
       const result = await server.elicitInput(
         params as unknown as Parameters<typeof server.elicitInput>[0],
         options,
@@ -165,20 +164,21 @@ class GodotMcpServer {
   }
 
   private setupToolHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: allToolDefinitions,
+    // The SDK's wire types are mutable and literal-typed; the definitions are `as const` and ToolResponse is looser, so both are cast at this one edge.
+    this.server.setRequestHandler('tools/list', async () => ({
+      tools: allToolDefinitions as unknown as ListToolsResult['tools'],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    this.server.setRequestHandler('tools/call', async (request, ctx) => {
       const toolName = request.params.name;
       const args = request.params.arguments || {};
 
       console.error(`[SERVER] Handling tool request: ${toolName}`);
 
       // Heartbeat progress notifications keep clients that set `resetTimeoutOnProgress` alive past the SDK's 60 s default on long calls.
-      const stopHeartbeat = startProgressHeartbeat(extra, request);
+      const stopHeartbeat = startProgressHeartbeat(ctx, request);
       try {
-        return await dispatchToolCall(this.runner, toolName, args, this.ctx);
+        return (await dispatchToolCall(this.runner, toolName, args, this.ctx)) as CallToolResult;
       } finally {
         stopHeartbeat();
       }

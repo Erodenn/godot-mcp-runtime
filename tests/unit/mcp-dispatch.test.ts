@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 import { allToolDefinitions, serverInstructions } from '../../src/index.js';
 import { toolDispatch, dispatchToolCall } from '../../src/dispatch.js';
@@ -25,9 +25,9 @@ describe('tool definition ↔ dispatch parity', () => {
 });
 
 describe('unknown tool dispatch', () => {
-  it('rejects with McpError(MethodNotFound) naming the offending tool', async () => {
+  it('rejects with ProtocolError(MethodNotFound) naming the offending tool', async () => {
     await expect(dispatchToolCall(dummyRunner, 'no_such_tool', {})).rejects.toMatchObject({
-      code: ErrorCode.MethodNotFound,
+      code: ProtocolErrorCode.MethodNotFound,
       message: expect.stringContaining('no_such_tool'),
     });
   });
@@ -36,15 +36,15 @@ describe('unknown tool dispatch', () => {
     'rejects the Object.prototype name "%s" with MethodNotFound',
     async (name) => {
       await expect(dispatchToolCall(dummyRunner, name, {})).rejects.toMatchObject({
-        code: ErrorCode.MethodNotFound,
+        code: ProtocolErrorCode.MethodNotFound,
         message: expect.stringContaining(name),
       });
     },
   );
 
-  it('throws an instance of McpError', async () => {
+  it('throws an instance of ProtocolError', async () => {
     await expect(dispatchToolCall(dummyRunner, 'no_such_tool', {})).rejects.toBeInstanceOf(
-      McpError,
+      ProtocolError,
     );
   });
 });

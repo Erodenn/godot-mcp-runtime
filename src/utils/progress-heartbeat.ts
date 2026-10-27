@@ -1,5 +1,4 @@
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { CallToolRequest, Notification } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolRequest, ServerContext } from '@modelcontextprotocol/server';
 
 import { logDebug } from './logger.js';
 
@@ -15,7 +14,7 @@ function progressTokenFrom(request: CallToolRequest): string | number | undefine
 
 /** Starts progress heartbeats for an in-flight tools/call; the returned stop function MUST be called when the handler settles, is idempotent, and is a no-op without a token. */
 export function startProgressHeartbeat(
-  extra: RequestHandlerExtra<never, Notification>,
+  ctx: { mcpReq: Pick<ServerContext['mcpReq'], 'notify'> },
   request: CallToolRequest,
   intervalMs: number = DEFAULT_HEARTBEAT_INTERVAL_MS,
 ): () => void {
@@ -31,8 +30,8 @@ export function startProgressHeartbeat(
   const beat = (): void => {
     if (stopped) return;
     progress += 1;
-    extra
-      .sendNotification({
+    ctx.mcpReq
+      .notify({
         method: 'notifications/progress',
         params: {
           progressToken: token,

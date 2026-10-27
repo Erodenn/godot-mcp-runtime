@@ -47,9 +47,10 @@
   },
   "mcpName": "io.github.Erodenn/godot-mcp-runtime",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2"
+    "@modelcontextprotocol/server": "^2.4.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@eslint-community/eslint-plugin-eslint-comments": "^4.7.1",
     "@types/node": "^25.0.9",
     "@typescript-eslint/eslint-plugin": "^8.59.1",

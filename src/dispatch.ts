@@ -1,6 +1,6 @@
-// Unknown tool names throw McpError(MethodNotFound) in `dispatchToolCall`.
+// Unknown tool names throw ProtocolError(MethodNotFound) in `dispatchToolCall`.
 
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 import type { GodotRunner } from './utils/godot-runner.js';
 import type { OperationParams, ToolHandler, ToolName, ToolResponse } from './mcp.types.js';
@@ -125,7 +125,7 @@ export async function dispatchToolCall(
     ? (toolDispatch[toolName as ToolName] as ToolHandler)
     : undefined;
   if (!handler) {
-    throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
+    throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }
   const result = await handler(runner, args, ctx);
   // The only edge where the wire envelope is emitted; handlers stay Result-shaped end to end.

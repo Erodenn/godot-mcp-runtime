@@ -2,10 +2,8 @@
 // Wires the real `Server` to a real `Client` over an in-memory transport and calls filesystem-only tools through the dispatch table.
 import { describe, it, expect } from 'vitest';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Server, type CallToolResult, type ListToolsResult } from '@modelcontextprotocol/server';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 
 import { dispatchToolCall } from '../../src/dispatch.js';
 import { runtimeToolDefinitions } from '../../src/tools/runtime-tools.js';
@@ -34,11 +32,15 @@ async function makeLinkedPair() {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: allToolDefinitions,
+  server.setRequestHandler('tools/list', async () => ({
+    tools: allToolDefinitions as unknown as ListToolsResult['tools'],
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return await dispatchToolCall(runner, request.params.name, request.params.arguments || {});
+  server.setRequestHandler('tools/call', async (request) => {
+    return (await dispatchToolCall(
+      runner,
+      request.params.name,
+      request.params.arguments || {},
+    )) as CallToolResult;
   });
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

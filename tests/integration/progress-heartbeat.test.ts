@@ -2,17 +2,10 @@
 // Wires the real `Server` and the production CallToolRequest handler shape to a real `Client` over an in-memory transport.
 import { describe, it, expect, vi } from 'vitest';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import {
-  CallToolRequestSchema,
-  CallToolResultSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { Server, type CallToolResult } from '@modelcontextprotocol/server';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 
 import { startProgressHeartbeat } from '../../src/utils/progress-heartbeat.js';
-import type { ToolResponse } from '../../src/mcp.types.js';
 
 const TICK = 25;
 
@@ -21,12 +14,12 @@ function makeServer(handler: (args: Record<string, unknown>) => Promise<unknown>
     { name: 'heartbeat-test-server', version: '0.0.0' },
     { capabilities: { tools: {} } },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const stop = startProgressHeartbeat(extra, request, TICK);
+  server.setRequestHandler('tools/list', async () => ({ tools: [] }));
+  server.setRequestHandler('tools/call', async (request, ctx) => {
+    const stop = startProgressHeartbeat(ctx, request, TICK);
     try {
       const result = await handler(request.params.arguments || {});
-      return result as ToolResponse;
+      return result as CallToolResult;
     } finally {
       stop();
     }
@@ -55,7 +48,6 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
     try {
       const result = await client.callTool(
         { name: 'slow_tool', arguments: {} },
-        CallToolResultSchema,
         {
           timeout: TICK * 2,
           resetTimeoutOnProgress: true,
@@ -79,9 +71,12 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
     const client = await link(server);
 
     await expect(
-      client.callTool({ name: 'slow_tool', arguments: {} }, CallToolResultSchema, {
-        timeout: TICK * 2,
-      }),
+      client.callTool(
+        { name: 'slow_tool', arguments: {} },
+        {
+          timeout: TICK * 2,
+        },
+      ),
     ).rejects.toThrow(/timed out/i);
 
     await client.close();
@@ -99,9 +94,12 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
     const onError = vi.fn();
     client.onerror = onError;
     try {
-      await client.callTool({ name: 'slow_tool', arguments: {} }, CallToolResultSchema, {
-        timeout: TICK * 10,
-      });
+      await client.callTool(
+        { name: 'slow_tool', arguments: {} },
+        {
+          timeout: TICK * 10,
+        },
+      );
       expect(onprogress).not.toHaveBeenCalled();
       expect(onError).not.toHaveBeenCalled();
     } finally {
@@ -122,11 +120,7 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
     const server = makeServer(async () => ({ content: [{ type: 'text', text: 'ok' }] }));
     const client = await link(server);
     try {
-      const result = await client.callTool(
-        { name: 'fast_tool', arguments: {} },
-        CallToolResultSchema,
-        { timeout: 1000 },
-      );
+      const result = await client.callTool({ name: 'fast_tool', arguments: {} }, { timeout: 1000 });
       expect(JSON.stringify(result)).toContain('ok');
     } finally {
       await client.close();
@@ -137,7 +131,9 @@ describe('progress heartbeat keeps long tool calls alive (issue: -32001 on run_s
 
 const fakeExtra = (): Parameters<typeof startProgressHeartbeat>[0] =>
   ({
-    sendNotification: () => {
-      throw new Error('unexpected notification: no token means no heartbeat');
+    mcpReq: {
+      notify: () => {
+        throw new Error('unexpected notification: no token means no heartbeat');
+      },
     },
   }) as Parameters<typeof startProgressHeartbeat>[0];

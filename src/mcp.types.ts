@@ -26,7 +26,7 @@ export interface ToolDefinition {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: {
-    readonly type: string;
+    readonly type: 'object';
     readonly properties: Readonly<Record<string, unknown>>;
     readonly required: readonly string[];
   };
