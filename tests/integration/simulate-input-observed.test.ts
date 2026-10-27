@@ -379,6 +379,13 @@ describe('simulate_input observed results (live bridge)', () => {
 
       const payload = await simulate({ actions: [{ type: 'action', action: 'ui_accept' }] });
       expect(payload.results).toHaveLength(1);
+      const entry = payload.results[0]!;
+      expect(entry.ok).toBe(true);
+      const changes = entry.changes as { appeared?: string[] } | undefined;
+      expect(
+        changes?.appeared,
+        `the result must report HiddenPanel appearing; changes=${JSON.stringify(entry.changes)}`,
+      ).toContain(p('HiddenPanel'));
       const state = (await script([
         'return {"visible": scene_tree.root.get_node("InputProbe/HiddenPanel").visible}',
       ])) as { visible?: boolean } | null;
