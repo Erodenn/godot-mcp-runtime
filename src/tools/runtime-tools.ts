@@ -506,7 +506,7 @@ export const runtimeToolDefinitions = [
               action: {
                 type: 'string',
                 description:
-                  '[action] Godot input action name (as defined in Project Settings > Input Map)',
+                  '[action] Godot input action name (as defined in Project Settings > Input Map). Sent as an InputEventAction: input handlers see it like its bound key, and ui_* actions act on the focused Control (ui_text_* editing actions do not; use key or text).',
               },
               strength: {
                 type: 'number',

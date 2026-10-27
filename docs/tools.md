@@ -122,7 +122,7 @@ One call executes the batch in `actions`, in order, and returns one result entry
 
 **Action types.** `key`, `mouse_button`, `mouse_motion`, `click_element`, `action`, `text`, `wait`.
 
-**`action`** sends an `InputEventAction`, so it behaves like the bound key: `_input`, `_unhandled_input` and `_gui_input` handlers see it, and `Input.is_action_pressed` polls see it too. That includes the UI: a `ui_accept` action presses the focused `Button`, as Enter would.
+**`action`** sends an `InputEventAction`, so it behaves like the bound key: `_input`, `_unhandled_input` and `_gui_input` handlers see it, and `Input.is_action_pressed` polls see it too. The bridge flushes it at once, so its handlers run during the injection, not at the next frame. That includes the UI: the built-in `ui_*` actions act on the focused Control as their keys would. A `ui_accept` action presses the focused `Button`, as Enter would, and `ui_up`, `ui_down`, `ui_left`, `ui_right`, `ui_focus_next` and `ui_focus_prev` move focus. The `ui_text_*` editing actions are the exception: `LineEdit` and `TextEdit` read them only from key events, so edit text with `key` or `text`.
 
 **The press rule.** For `key`, `mouse_button` and `action`, omitting `pressed` taps: the input presses and releases itself inside the one action. `pressed: true` presses and holds across later actions in the batch and across later calls; `pressed: false` releases an earlier hold. This replaces the old behavior, where omitting `pressed` pressed without ever releasing and left the input stuck down.
 
