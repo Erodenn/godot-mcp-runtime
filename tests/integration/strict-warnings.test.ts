@@ -4,11 +4,12 @@
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { itGodot } from '../helpers/godot-skip.js';
 import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
 
@@ -17,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const BRIDGE_WAIT_MS = 20000;
 const BRIDGE_COMMAND_TIMEOUT_MS = 15000;
 const CASE_TIMEOUT_MS = 60000;
+const HEADLESS_RUN_TIMEOUT_MS = 30000;
 const LIST_MARKER = 'STRICT_WARNING ';
 
 const LIST_WARNINGS_SCRIPT = [
@@ -39,14 +41,14 @@ async function engineWarnings(godotPath: string): Promise<string[]> {
     const { stdout } = await execFileAsync(
       godotPath,
       ['--headless', '--path', dir, '--script', 'res://list_warnings.gd'],
-      { timeout: 30000 },
+      { timeout: HEADLESS_RUN_TIMEOUT_MS },
     );
     return stdout
       .split(/\r?\n/)
       .filter((line) => line.startsWith(LIST_MARKER))
       .map((line) => line.slice(LIST_MARKER.length).trim());
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 }
 
@@ -97,13 +99,9 @@ describe('a project that raises every GDScript warning to error', () => {
   });
 
   afterEach(async () => {
-    try {
-      await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    await runner.stopProject().catch(() => undefined);
     if (project) {
-      rmSync(project, { recursive: true, force: true });
+      removeTmpDir(project);
       project = null;
     }
   });
@@ -120,7 +118,7 @@ describe('a project that raises every GDScript warning to error', () => {
         'validate_resource',
         { scenePath: 'main.tscn' },
         project,
-        30000,
+        HEADLESS_RUN_TIMEOUT_MS,
       );
       expect(stderr).not.toMatch(/Parse Error/);
       const json = JSON.parse(extractJson(stdout));
