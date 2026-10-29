@@ -206,6 +206,7 @@ The three security-gate flags below share one axis (see [`docs/security.md`](doc
 - [`docs/tool-authoring.md`](docs/tool-authoring.md): standards for adding or modifying tools
 - [`docs/architecture.md`](docs/architecture.md): source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
 - [`docs/security.md`](docs/security.md): `run_script` / `run_project` security model, full rule catalogue, strict-mode behavior
+- [`docs/migration-4.0.md`](docs/migration-4.0.md): every breaking change from 3.8.1 to 4.0, with its before and after
 
 ## Acknowledgments
 

@@ -131,5 +131,5 @@ For any PR that adds or changes a tool definition:
 - [ ] Consolidation check: is there already a sibling tool with the same outcome at different cardinality? If so, fold (§5)
 - [ ] If discriminator: documented as load-bearing exception with rationale (§5)
 - [ ] `docs/tools.md` updated with the new/changed tool entry
-- [ ] If breaking (rename, drop, schema change): migration table entry in CHANGELOG / release notes
+- [ ] If breaking (rename, drop, schema change): before-and-after entry in the major version's `docs/migration-X.0.md`, and a line in the release notes
 - [ ] `npm run verify` passes (typecheck → lint → format → test → build; `format` writes, so review the resulting diff)
