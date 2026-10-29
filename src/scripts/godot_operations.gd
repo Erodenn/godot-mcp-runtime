@@ -2871,6 +2871,57 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	return {"ok": true, "value": coerced, "error": ""}
 
+# Packed arrays whose elements read as the plain array set_node_properties takes (_PACKED_ARRAY_ELEMENT_TYPE); a type absent from both stays text.
+const _PACKED_READ_TYPES: Array = [
+	TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY,
+	TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY,
+	TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_VECTOR4_ARRAY,
+	TYPE_PACKED_COLOR_ARRAY,
+]
+
+# Reads a value in the shapes _coerce_property_value and the element paths take back: {x,y}, {x,y,z}, {x,y,z,w}, {r,g,b,a}, plain arrays. A type the write side does not accept stays text.
+# `enclosing` holds the containers being walked; one met again is _SELF_CONTAINING_MARKER, which emit_result leaves in place.
+func _variant_to_json(value, enclosing: Array):
+	match typeof(value):
+		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
+			return value
+		TYPE_VECTOR2, TYPE_VECTOR2I:
+			return {"x": value.x, "y": value.y}
+		TYPE_VECTOR3, TYPE_VECTOR3I:
+			return {"x": value.x, "y": value.y, "z": value.z}
+		TYPE_VECTOR4, TYPE_VECTOR4I:
+			return {"x": value.x, "y": value.y, "z": value.z, "w": value.w}
+		TYPE_COLOR:
+			return {"r": value.r, "g": value.g, "b": value.b, "a": value.a}
+		TYPE_OBJECT:
+			if is_instance_valid(value):
+				return value.get_class()
+			return null
+		TYPE_ARRAY:
+			if _encloses(enclosing, value):
+				return _SELF_CONTAINING_MARKER
+			enclosing.append(value)
+			var converted: Array = []
+			for item in value:
+				converted.append(_variant_to_json(item, enclosing))
+			enclosing.pop_back()
+			return converted
+		TYPE_DICTIONARY:
+			if _encloses(enclosing, value):
+				return _SELF_CONTAINING_MARKER
+			enclosing.append(value)
+			var converted_dict: Dictionary = {}
+			for key in value:
+				converted_dict[key] = _variant_to_json(value[key], enclosing)
+			enclosing.pop_back()
+			return converted_dict
+	if typeof(value) in _PACKED_READ_TYPES:
+		var elements: Array = []
+		for item in value:
+			elements.append(_variant_to_json(item, enclosing))
+		return elements
+	return str(value)
+
 # changed_only compares against a default instance per class kept in defaults_cache; the caller frees the cache.
 func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Dictionary) -> Dictionary:
 	var default_node = null
@@ -2895,25 +2946,7 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 			if default_node and default_node.get(prop_name) == value:
 				continue
 
-			if value is Vector2:
-				properties[prop_name] = {"x": value.x, "y": value.y}
-			elif value is Vector3:
-				properties[prop_name] = {"x": value.x, "y": value.y, "z": value.z}
-			elif value is Color:
-				properties[prop_name] = {"r": value.r, "g": value.g, "b": value.b, "a": value.a}
-			elif value is Transform2D:
-				properties[prop_name] = str(value)
-			elif value is Transform3D:
-				properties[prop_name] = str(value)
-			elif value is Object:
-				if value:
-					properties[prop_name] = value.get_class()
-				else:
-					properties[prop_name] = null
-			elif typeof(value) in [TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_ARRAY, TYPE_DICTIONARY]:
-				properties[prop_name] = value
-			else:
-				properties[prop_name] = str(value)
+			properties[prop_name] = _variant_to_json(value, [])
 
 	return properties
 

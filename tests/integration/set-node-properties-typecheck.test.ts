@@ -621,7 +621,6 @@ describe('packed-array element coercion', () => {
       const parsed = JSON.parse(extractJson(stdout));
       expect(parsed.results[0].success).toBe(true);
 
-      // The read path stringifies Vector arrays ("[(10.0, 20.0), ...]"), so assert on the serialized form.
       const { stdout: rb } = await runner.executeOperation(
         'get_node_properties',
         { scenePath: 'main.tscn', nodes: [{ node_path: 'Poly' }] },
@@ -630,9 +629,11 @@ describe('packed-array element coercion', () => {
       );
       const rbp = JSON.parse(extractJson(rb));
       const poly = rbp.results?.[0]?.properties?.polygon;
-      expect(poly).toBeDefined();
-      expect(String(poly)).toMatch(/\(10(\.0)?, 20(\.0)?\)/);
-      expect(String(poly)).not.toMatch(/\(0(\.0)?, 0(\.0)?\)/);
+      expect(poly).toEqual([
+        { x: 10, y: 20 },
+        { x: 30, y: 40 },
+        { x: 50, y: 60 },
+      ]);
 
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toMatch(
@@ -689,9 +690,10 @@ describe('packed-array element coercion', () => {
       );
       const rbp = JSON.parse(extractJson(rb));
       const colors = rbp.results?.[0]?.properties?.vertex_colors;
-      expect(colors).toBeDefined();
-      expect(String(colors)).toMatch(/\(1(\.0)?, 0(\.0)?, 0(\.0)?, 1(\.0)?\)/);
-      expect(String(colors)).not.toMatch(/\(0(\.0)?, 0(\.0)?, 0(\.0)?, 0(\.0)?\)/);
+      expect(colors).toEqual([
+        { r: 1, g: 0, b: 0, a: 1 },
+        { r: 0, g: 0, b: 1, a: 1 },
+      ]);
     },
     60000,
   );
@@ -735,7 +737,7 @@ describe('packed-array element coercion', () => {
       );
       const rbp = JSON.parse(extractJson(rb));
       const stops = rbp.results?.[0]?.properties?.tab_stops;
-      expect(String(stops)).toMatch(/\[4(\.0)?, 8(\.0)?, 12(\.0)?\]/);
+      expect(stops).toEqual([4, 8, 12]);
     },
     60000,
   );
@@ -798,7 +800,7 @@ describe('packed-array element coercion', () => {
       );
       const rbp = JSON.parse(extractJson(rb));
       const poly = rbp.results?.[0]?.properties?.polygon;
-      expect(String(poly)).toBe('[]');
+      expect(poly).toEqual([]);
 
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).not.toMatch(/polygon\s*=\s*PackedVector2Array\(10/);
@@ -874,10 +876,11 @@ describe('packed-array element coercion', () => {
       );
       const rbp = JSON.parse(extractJson(rb));
       const poly = rbp.results?.[0]?.properties?.polygon;
-      expect(poly).toBeDefined();
-      expect(String(poly)).toMatch(
-        /\(0(\.0)?, 0(\.0)?\), \(20(\.0)?, 0(\.0)?\), \(20(\.0)?, 10(\.0)?\)/,
-      );
+      expect(poly).toEqual([
+        { x: 0, y: 0 },
+        { x: 20, y: 0 },
+        { x: 20, y: 10 },
+      ]);
 
       // The bad-element rule fires through add_node too, reported via stderr like other add_node property errors.
       let stdoutSeen = '';
@@ -970,9 +973,10 @@ describe('typed Array[T] element coercion', () => {
         30000,
       );
       const points = JSON.parse(extractJson(rb)).results?.[0]?.properties?.points;
-      expect(points).toBeDefined();
-      expect(JSON.stringify(points)).not.toBe('[]');
-      expect(String(points)).toMatch(/\(10(\.0)?, 20(\.0)?\)/);
+      expect(points).toEqual([
+        { x: 10, y: 20 },
+        { x: 30, y: 40 },
+      ]);
 
       const sceneText = readFileSync(join(tmpProject, 'main.tscn'), 'utf-8');
       expect(sceneText).toMatch(/points\s*=\s*Array\[Vector2\]\(/);
