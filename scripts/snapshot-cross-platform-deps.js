@@ -44,7 +44,7 @@ if (existsSync(snapshotPath)) {
     const old = readJson(snapshotPath);
     oldKeys = Object.keys(old.entries ?? {});
   } catch {
-    // ignore — treat as no prior snapshot
+    // ignore: treat as no prior snapshot
   }
 }
 

@@ -116,7 +116,7 @@ npm run test:coverage # v8 coverage report (no enforcement, just visibility)
 
 ## Godot-required tests
 
-Tests that need a real Godot process gate themselves with the `itGodot` wrapper from `tests/helpers/godot-skip.ts` (which is `it.skipIf(!process.env.GODOT_PATH)`). Set `GODOT_PATH` to your Godot 4.x executable to run them locally:
+Tests that need a real Godot process gate themselves with the `itGodot` wrapper from `tests/helpers/godot-skip.ts` (which is `it.skipIf(!process.env.GODOT_PATH)`). Set `GODOT_PATH` to your Godot 4.5 or later executable to run them locally:
 
 ```
 # bash / git bash
