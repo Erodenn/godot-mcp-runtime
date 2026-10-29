@@ -157,7 +157,7 @@ Tool descriptions ship on every handshake - they are the entire UI an agent sees
 
 1. Bump version in `package.json`, `src/index.ts` and `server.json` (both its top-level `version` and `packages[].version`)
 2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
-3. Write `.github/release-notes/vX.Y.Z.md` when the release has something a human should read (new tools, changed behavior, a migration). The publish job prepends it above the generated notes.
+3. Write `.github/release-notes/vX.Y.Z.md` when the release has something a human should read (new tools, changed behavior, a migration). Keep it to the important changes, grouped, and link a major release's full before-and-after list in `docs/migration-X.0.md` instead of inlining it. The publish job prepends the notes above the generated notes and fails before `npm publish` if the combined body exceeds GitHub's 125,000-character limit; a unit test caps each notes file at 25,000.
 4. Commit and push to `main`
 5. Push a `vX.Y.Z` tag: `.github/workflows/publish.yml` runs `npm publish --provenance --access public` and auto-creates the GitHub release with generated notes.
 
