@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { handleValidate } from '../../../src/tools/validate-tools.js';
+import { attributeDiagnostics, handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
@@ -150,7 +150,11 @@ describe('handleValidate', () => {
     // GDScript _validate_single returns valid: resource != null, but load() returns a placeholder for
     // malformed scripts: the handler must force `valid` false when stderr produced parse errors.
     const fake = createFakeRunner({
-      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stdout: JSON.stringify({
+        valid: true,
+        resolvedPath: 'res://.mcp/validate_temp_x.gd',
+        errors: [],
+      }),
       stderr:
         'SCRIPT ERROR: Parse Error: Unexpected token: Identifier:foo\n   at: res://.mcp/validate_temp_x.gd:3',
     });
@@ -169,7 +173,11 @@ describe('handleValidate', () => {
     // Scripts referencing autoload singletons print "Compile Error: Identifier not found" on stderr, which the
     // handler must overlay (message + line) instead of a bare invalid.
     const fake = createFakeRunner({
-      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stdout: JSON.stringify({
+        valid: true,
+        resolvedPath: 'res://scripts/uses_autoload.gd',
+        errors: [],
+      }),
       stderr: [
         'SCRIPT ERROR: Compile Error: Identifier not found: GameState',
         '          at: GDScript::reload (res://scripts/uses_autoload.gd:3)',
@@ -193,7 +201,7 @@ describe('handleValidate', () => {
     // The engine echo "ERROR: Failed to load script ..." carries an at: line into Godot's C++ source
     // (e.g. gdscript_resource_format.cpp:46), not a line of anyone's script.
     const fake = createFakeRunner({
-      stdout: JSON.stringify({ valid: true, errors: [] }),
+      stdout: JSON.stringify({ valid: true, resolvedPath: 'res://scripts/a.gd', errors: [] }),
       stderr: [
         'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
         '          at: GDScript::reload (res://scripts/a.gd:7)',
@@ -209,6 +217,70 @@ describe('handleValidate', () => {
     expect(parsed.valid).toBe(false);
     expect(parsed.errors).toHaveLength(1);
     expect(parsed.errors[0].line).toBe(7);
+  });
+});
+
+describe('handleValidate single-target attribution', () => {
+  const AUTOLOAD_STDERR = [
+    'SCRIPT ERROR: Parse Error: Expected closing ")" after function parameters.',
+    '          at: GDScript::reload (res://bad_auto.gd:2)',
+    "ERROR: Failed to instantiate an autoload, script 'res://bad_auto.gd' does not inherit from 'Node'.",
+  ].join('\n');
+
+  it('keeps a valid script valid and lists diagnostics that name a different file as warnings', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ valid: true, resolvedPath: 'res://good.gd', errors: [] }),
+      stderr: AUTOLOAD_STDERR,
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      scriptPath: 'main.tscn',
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(payload.valid).toBe(true);
+    expect(payload.errors).toEqual([]);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.warnings as string[]).toContain(
+      'res://bad_auto.gd:2: Expected closing ")" after function parameters.',
+    );
+  });
+
+  it('charges a diagnostic to the target only when it names the resolved path', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ valid: true, resolvedPath: 'res://bad_auto.gd', errors: [] }),
+      stderr: AUTOLOAD_STDERR,
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      scriptPath: 'main.tscn',
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(payload.valid).toBe(false);
+    expect((payload.errors as Array<{ line?: number }>)[0]?.line).toBe(2);
+  });
+});
+
+describe('attributeDiagnostics', () => {
+  const STDERR = [
+    'SCRIPT ERROR: Parse Error: Unexpected token.',
+    '          at: GDScript::reload (res://other.gd:4)',
+  ].join('\n');
+
+  it('leaves a target valid and lists a diagnostic that names a different file', () => {
+    const { results, warnings } = attributeDiagnostics(STDERR, [
+      { target: 'a.gd', resolvedPath: 'res://a.gd', valid: true },
+    ]);
+    expect(results).toEqual([{ target: 'a.gd', valid: true, errors: [] }]);
+    expect(warnings).toEqual(['res://other.gd:4: Unexpected token.']);
+  });
+
+  it('invalidates the target a diagnostic names and raises no warning', () => {
+    const { results, warnings } = attributeDiagnostics(STDERR, [
+      { target: 'other.gd', resolvedPath: 'res://other.gd', valid: true },
+    ]);
+    expect(results[0]?.valid).toBe(false);
+    expect(results[0]?.errors).toEqual([{ message: 'Unexpected token.', line: 4 }]);
+    expect(warnings).toEqual([]);
   });
 });
 

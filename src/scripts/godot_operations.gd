@@ -1945,7 +1945,7 @@ func validate_resource(params):
 		_fail_operation()
 		return
 	var result = _validate_single(params)
-	emit_result({"valid": result.valid, "errors": result.errors})
+	emit_result({"valid": result.valid, "resolvedPath": result.get("resolvedPath", ""), "errors": result.errors})
 
 func validate_checks(params):
 	var outcome = _run_scene_checks(str(params.scene_path), params.checks if params.has("checks") else [])

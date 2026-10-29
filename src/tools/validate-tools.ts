@@ -105,7 +105,7 @@ export const validateToolDefinitions = [
   {
     name: 'validate',
     description:
-      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script. Give exactly one of scriptPath, source or scenePath, or a targets array (one process); an unknown key is an error. checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets; an invalid result always has an error.",
+      "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script. Give exactly one of scriptPath, source or scenePath, or a targets array (one process); an unknown key is an error. checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { warnings?, valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets; an invalid result always has an error.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -170,7 +170,7 @@ export const validateToolDefinitions = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'targets only. Engine diagnostics that matched no target, as "<file>:<line>: <message>", capped with a "+N more" tail.',
+            'Engine diagnostics that matched no validated file (an autoload, a script attached inside a scene), as "<file>:<line>: <message>", capped with a "+N more" tail. They do not change valid.',
         },
         valid: { type: 'boolean', description: 'Single target only.' },
         errors: { type: 'array', description: 'Single target only.', items: VALIDATE_ERROR_SCHEMA },
@@ -201,14 +201,6 @@ interface CheckError {
   check?: string;
   message: string;
   [key: string]: unknown;
-}
-
-function parseGodotErrors(stderr: string): ValidationError[] {
-  return parseScriptDiagnostics(stderr).map(({ message, line }) => {
-    const err: ValidationError = { message };
-    if (line !== undefined) err.line = line;
-    return err;
-  });
 }
 
 // Deleted per call at the two unlinkSync sites; no orphan sweep. `ensureArtifactRoot` runs first so `.mcp/.gdignore` exists before any `.gd` lands.
@@ -265,6 +257,62 @@ function capUnattributedWarnings(lines: string[]): string[] {
   if (lines.length <= MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN) return lines;
   const hidden = lines.length - MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN;
   return [...lines.slice(0, MAX_UNATTRIBUTED_DIAGNOSTICS_SHOWN), `+${hidden} more`];
+}
+
+interface EngineTargetResult {
+  target: string;
+  resolvedPath?: string | undefined;
+  valid: boolean;
+  errors?: ValidationError[];
+  checkErrors?: CheckError[];
+}
+
+interface AttributedResults {
+  results: Array<{ target: string; valid: boolean; errors: Array<ValidationError | CheckError> }>;
+  warnings: string[];
+}
+
+// The one attribution path for single and batch: a diagnostic belongs to the target whose `resolvedPath` (the engine's spelling, never the caller's) it names; the rest lead as warnings.
+// Godot's stderr diagnostics supersede GDScript parse errors; checks[] findings are additive.
+export function attributeDiagnostics(
+  stderr: string,
+  engineResults: readonly EngineTargetResult[],
+): AttributedResults {
+  const { byPath: errorsByPath, unpathed } = parseGodotErrorsByPath(stderr);
+  const claimedPaths = new Set<string>();
+  // Targets the engine called invalid with nothing to explain it; their entry is written once the unattributed diagnostics are known.
+  const unexplainedFailures: Array<Array<ValidationError | CheckError>> = [];
+  const results = engineResults.map((r) => {
+    const key = r.resolvedPath ?? (r.target.startsWith('res://') ? r.target : `res://${r.target}`);
+    claimedPaths.add(key);
+    claimedPaths.add(r.target);
+    const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
+    const parseErrors = stderrErrors.length > 0 ? stderrErrors : (r.errors ?? []);
+    const checkErrors = Array.isArray(r.checkErrors) ? r.checkErrors : [];
+    const errors = [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>;
+    // Invalid with nothing to explain it: say so rather than valid:false with an empty errors array.
+    if (r.valid === false && errors.length === 0) unexplainedFailures.push(errors);
+    return {
+      target: r.target,
+      valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
+      errors,
+    };
+  });
+
+  // Diagnostics for no target (a script attached inside a validated scene, an autoload, an `at:` line naming no file) lead the payload.
+  const unattributed: string[] = [];
+  for (const [file, errors] of errorsByPath) {
+    if (claimedPaths.has(file)) continue;
+    for (const error of errors) unattributed.push(formatUnattributedDiagnostic(file, error));
+  }
+  for (const error of unpathed) {
+    unattributed.push(formatUnattributedDiagnostic(undefined, error));
+  }
+  const unexplainedMessage =
+    unattributed.length > 0 ? UNATTRIBUTED_FAILURE_MESSAGE : UNEXPLAINED_FAILURE_MESSAGE;
+  for (const errors of unexplainedFailures) errors.push({ message: unexplainedMessage });
+
+  return { results, warnings: capUnattributedWarnings(unattributed) };
 }
 
 // Retries once after the asset import on [IMPORT_NEEDED]; skipped while a game is or may be running on this project (importAssets writes .godot/, a second writer).
@@ -615,43 +663,11 @@ export async function handleValidate(
         );
       }
 
-      const { byPath: errorsByPath, unpathed } = parseGodotErrorsByPath(stderr || '');
-
-      // Godot's stderr diagnostics supersede GDScript parse errors; checks[] findings are additive. Attribution keys on `resolvedPath`,
-      // the engine's spelling: a raw "./a.gd", a backslash path or a path with a space never equals it.
-      const claimedPaths = new Set<string>();
-      // Targets the engine called invalid with nothing to explain it; their entry is written once the unattributed diagnostics are known.
-      const unexplainedFailures: Array<Array<ValidationError | CheckError>> = [];
-      const godotResults = batchParsed.results.map((r, resultIndex) => {
-        const key =
-          r.resolvedPath ?? (r.target.startsWith('res://') ? r.target : `res://${r.target}`);
-        claimedPaths.add(key);
-        claimedPaths.add(r.target);
-        const stderrErrors = errorsByPath.get(key) || errorsByPath.get(r.target) || [];
-        const parseErrors = stderrErrors.length > 0 ? stderrErrors : (r.errors ?? []);
-        const checkErrors = Array.isArray(r.checkErrors) ? r.checkErrors : [];
-        const errors = [...parseErrors, ...checkErrors] as Array<ValidationError | CheckError>;
-        // Invalid with nothing to explain it: say so rather than valid:false with an empty errors array.
-        if (r.valid === false && errors.length === 0) unexplainedFailures.push(errors);
-        return {
-          target: targetEchoes[resultIndex] ?? r.target,
-          valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
-          errors,
-        };
-      });
-
-      // Diagnostics for no target (a script attached inside a validated scene, an `at:` line naming no file) lead the payload.
-      const unattributed: string[] = [];
-      for (const [file, errors] of errorsByPath) {
-        if (claimedPaths.has(file)) continue;
-        for (const error of errors) unattributed.push(formatUnattributedDiagnostic(file, error));
-      }
-      for (const error of unpathed) {
-        unattributed.push(formatUnattributedDiagnostic(undefined, error));
-      }
-      const unexplainedMessage =
-        unattributed.length > 0 ? UNATTRIBUTED_FAILURE_MESSAGE : UNEXPLAINED_FAILURE_MESSAGE;
-      for (const errors of unexplainedFailures) errors.push({ message: unexplainedMessage });
+      const attributed = attributeDiagnostics(stderr || '', batchParsed.results);
+      const godotResults = attributed.results.map((r, resultIndex) => ({
+        ...r,
+        target: targetEchoes[resultIndex] ?? r.target,
+      }));
 
       // Pre-validation failures are ours, not Godot's: merged back by input position, bypassing the stderr overlay.
       const results: Array<{
@@ -681,9 +697,7 @@ export async function handleValidate(
         }
       }
 
-      return createStructuredResponse(
-        leadWithWarnings({ warnings: capUnattributedWarnings(unattributed), results }),
-      );
+      return createStructuredResponse(leadWithWarnings({ warnings: attributed.warnings, results }));
     } catch (error: unknown) {
       return err(validateExceptionResponse('Batch validation failed', error));
     } finally {
@@ -810,9 +824,8 @@ export async function handleValidate(
       ));
     }
 
-    let valid = false;
-    let gdErrors: ValidationError[] = [];
-    let checkErrors: CheckError[] = [];
+    const singleTarget = resolvedScriptPath ?? resolvedScenePath ?? '';
+    let engineRow: EngineTargetResult = { target: singleTarget, valid: false };
     if (combined) {
       if (!stdout.trim()) {
         return err(
@@ -831,6 +844,7 @@ export async function handleValidate(
       let batchParsed: {
         results?: Array<{
           valid?: boolean;
+          resolvedPath?: string;
           errors?: ValidationError[];
           checkErrors?: CheckError[];
         }>;
@@ -849,16 +863,20 @@ export async function handleValidate(
           ),
         );
       }
-      valid = target.valid === true;
-      if (Array.isArray(target.errors) && target.errors.length > 0) gdErrors = target.errors;
-      if (Array.isArray(target.checkErrors)) checkErrors = target.checkErrors;
+      engineRow = {
+        target: singleTarget,
+        resolvedPath: target.resolvedPath || undefined,
+        valid: target.valid === true,
+        errors: Array.isArray(target.errors) ? target.errors : [],
+        checkErrors: Array.isArray(target.checkErrors) ? target.checkErrors : [],
+      };
     } else {
       // No payload, or a non-object, means nothing was validated: a failed call, never a verdict.
-      let parsed: { valid?: unknown; errors?: unknown } | null = null;
+      let parsed: { valid?: unknown; resolvedPath?: unknown; errors?: unknown } | null = null;
       try {
         const candidate: unknown = JSON.parse(extractOperationPayload(stdout) ?? '');
         if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
-          parsed = candidate as { valid?: unknown; errors?: unknown };
+          parsed = candidate as { valid?: unknown; resolvedPath?: unknown; errors?: unknown };
         }
       } catch {
         parsed = null;
@@ -868,35 +886,25 @@ export async function handleValidate(
           createErrorResponse(noResultMessage('Validation failed', stderr), NO_RESULT_SOLUTIONS),
         );
       }
-      valid = parsed.valid === true;
-      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-        gdErrors = parsed.errors as ValidationError[];
-      }
-    }
-
-    const stderrErrors = parseGodotErrors(stderr || '');
-
-    const allErrors: ValidationError[] = stderrErrors.length > 0 ? stderrErrors : gdErrors;
-
-    // The GDScript `valid` flag is unreliable: load() returns a non-null placeholder Resource on a parse failure, so stderr errors decide.
-    let result: { valid: boolean; errors: Array<ValidationError | CheckError> } = {
-      valid: valid && allErrors.length === 0,
-      errors: allErrors,
-    };
-
-    if (checkErrors.length > 0) {
-      result = {
-        valid: false,
-        errors: [...result.errors, ...checkErrors],
+      engineRow = {
+        target: singleTarget,
+        resolvedPath:
+          typeof parsed.resolvedPath === 'string' && parsed.resolvedPath !== ''
+            ? parsed.resolvedPath
+            : undefined,
+        valid: parsed.valid === true,
+        errors: Array.isArray(parsed.errors) ? (parsed.errors as ValidationError[]) : [],
       };
     }
 
-    // An invalid verdict always carries a reason; valid:false with no errors leaves the caller nothing to act on.
-    if (!result.valid && result.errors.length === 0) {
-      result = { valid: false, errors: [{ message: UNEXPLAINED_FAILURE_MESSAGE }] };
-    }
+    // The GDScript `valid` flag is unreliable: load() returns a non-null placeholder Resource on a parse failure, so the stderr diagnostics
+    // that name this file decide. Diagnostics naming other files (an autoload, a script attached inside the scene) are warnings.
+    const attributed = attributeDiagnostics(stderr || '', [engineRow]);
+    const { valid, errors } = attributed.results[0]!;
 
-    return createStructuredResponse(result);
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: attributed.warnings, valid, errors }),
+    );
   } catch (error: unknown) {
     return err(validateExceptionResponse('Validation failed', error));
   } finally {

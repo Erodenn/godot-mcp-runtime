@@ -1,7 +1,7 @@
 /** Godot reports a script's parse error against its simplified res:// path, so a target written another way ("./a.gd", a backslash, a directory with a space) matched no diagnostic. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, mkdirSync, writeFileSync } from 'fs';
+import { appendFileSync, cpSync, mkdirSync, writeFileSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -13,6 +13,9 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
 
 const CASE_TIMEOUT_MS = 120000;
+
+const VALID_SCRIPT = 'extends Node\n';
+const AUTOLOAD_SECTION = '\n[autoload]\n\nBrokenAuto="*res://bad_auto.gd"\n';
 
 const BROKEN_SCRIPT = 'extends Node\nfunc broken(\n\t# unclosed parameter list\n';
 const ABSTRACT_SCRIPT = '@abstract\nclass_name AttributionAbstractProbe\nextends Node\n';
@@ -136,6 +139,47 @@ describe('validate batch attribution against a real engine', () => {
       expect(single.valid).toBe(false);
       const singleErrors = single.errors as Array<{ message: string }>;
       expect(singleErrors[0]?.message).toMatch(/^Not validated: main\.tscn loaded as PackedScene/);
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('validate single-target attribution against a real engine', () => {
+  // A broken autoload prints its parse error on every headless start; it belongs to no file the caller asked about.
+  itGodot(
+    'a valid script stays valid when another file, an autoload, fails to load',
+    async () => {
+      writeFileSync(join(projectPath, 'good.gd'), VALID_SCRIPT);
+      writeFileSync(join(projectPath, 'bad_auto.gd'), BROKEN_SCRIPT);
+      appendFileSync(join(projectPath, 'project.godot'), AUTOLOAD_SECTION);
+
+      const single = expectMatchesOutputSchema(
+        'validate',
+        await handleValidate(runner, { projectPath, scriptPath: 'good.gd' }),
+      );
+      expect(single.valid).toBe(true);
+      expect(single.errors).toEqual([]);
+      const warnings = single.warnings as string[];
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings.some((line) => line.includes('bad_auto.gd'))).toBe(true);
+
+      const entry = await validateScriptTarget('good.gd');
+      expect(entry.valid).toBe(true);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a script with its own parse error is still invalid alone, with no warning for it',
+    async () => {
+      writeFileSync(join(projectPath, 'broken.gd'), BROKEN_SCRIPT);
+      const single = expectMatchesOutputSchema(
+        'validate',
+        await handleValidate(runner, { projectPath, scriptPath: './broken.gd' }),
+      );
+      expect(single.valid).toBe(false);
+      expect((single.errors as unknown[]).length).toBeGreaterThan(0);
+      expect(single.warnings).toBeUndefined();
     },
     CASE_TIMEOUT_MS,
   );
