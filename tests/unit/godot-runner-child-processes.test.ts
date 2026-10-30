@@ -218,6 +218,29 @@ describe('a headless run returns its own result, not a sentinel line a project s
     await expect(pending).rejects.toThrow(/failed before the operation could run/);
   });
 
+  // Red when the parse-error branch is removed from executeOperation: the failure is blamed on an autoload again.
+  it('names a script parse error as such, not as an autoload initialization error', async () => {
+    const stderr =
+      'SCRIPT ERROR: Parse Error: The variable "x" is never used.\n   at: GDScript::reload (res://.mcp/godot_operations.gd:12)\n';
+    const message = await runWithStdout(() => '', stderr).then(
+      () => '',
+      (error: Error) => error.message,
+    );
+
+    expect(message).toMatch(/failed before the operation could run: a script did not parse/);
+    expect(message).toContain('godot_operations.gd:12');
+    expect(message).not.toMatch(/autoload initialization error/);
+  });
+
+  it('still blames an autoload when the early failure is not a parse error', async () => {
+    const message = await runWithStdout(() => '', 'ERROR: autoload McpBridge failed\n').then(
+      () => '',
+      (error: Error) => error.message,
+    );
+
+    expect(message).toMatch(/likely an autoload initialization error/);
+  });
+
   it("does not accept one run's result line in the next run", async () => {
     const first = await runWithStdout((token) => resultLine(token, REAL_PAYLOAD));
     const second = await runWithStdout(() => resultLine(first.token, REAL_PAYLOAD));

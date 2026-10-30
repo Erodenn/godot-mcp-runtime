@@ -115,6 +115,8 @@ const __dirname = dirname(__filename);
 // First stderr line godot_operations.gd prints once dispatching.
 // KEEP IN SYNC with the log_info("Operation: ...") call in _run_from_cmdline (godot_operations.gd).
 const OPERATION_STARTED_MARKER = '[INFO] Operation:';
+/** The engine's wording for a script that failed to parse or compile, which stops a headless run before it dispatches. */
+const SCRIPT_PARSE_ERROR_PATTERN = /Parse Error|Compile Error/i;
 
 const BRIDGE_WAIT_SPAWNED_INTERVAL_MS = 300;
 // Ceiling on how long attach mode waits with no evidence the bridge is listening. Exported for the budget tests.
@@ -856,6 +858,13 @@ export class GodotRunner {
     const operationRan =
       stderr.includes(OPERATION_STARTED_MARKER) ||
       extractTokenFramedPayload(stdout, resultToken) !== null;
+    if (!operationRan && SCRIPT_PARSE_ERROR_PATTERN.test(stderr)) {
+      throw new Error(
+        `Headless Godot failed before the operation could run: a script did not parse.\n` +
+          `Stderr:\n${stderr.trim()}\n\n` +
+          `If the script named above is godot_operations.gd, a GDScript warning the project raises to an error (debug/gdscript/warnings in project.godot) is the usual cause. If it is one of the project's own scripts, fix it (validate reports its errors); for an autoload, list_autoloads and remove_autoload can take it out.`,
+      );
+    }
     if (!operationRan && (stderr.includes('ERROR:') || stderr.includes('SCRIPT ERROR:'))) {
       throw new Error(
         `Headless Godot failed before the operation could run - likely an autoload initialization error.\n` +
