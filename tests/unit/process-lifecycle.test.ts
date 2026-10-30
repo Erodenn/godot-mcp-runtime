@@ -137,6 +137,42 @@ describe('a graceful shutdown with a headless run in flight', () => {
   });
 });
 
+describe('a second SIGINT during the shutdown wait', () => {
+  it('exits at once instead of waiting out the bound, and a second SIGTERM still does not', async () => {
+    vi.useFakeTimers();
+    try {
+      const runner = new GodotRunner({ godotPath: 'godot' });
+      const proc = makeFakeProcess();
+      const exits: number[] = [];
+      const child = Object.assign(new EventEmitter(), { pid: HEADLESS_RUN_PID });
+      (runner as unknown as { headlessChildren: Set<unknown> }).headlessChildren.add(child);
+      registerProcessLifecycle({
+        runner,
+        cleanup: () => shutDownRunner(runner, TEST_HEADLESS_WAIT_MS),
+        proc,
+        exit: (code) => {
+          exits.push(code);
+        },
+      });
+
+      proc.emit('SIGINT');
+      await vi.advanceTimersByTimeAsync(TEST_HEADLESS_WAIT_MS / 2);
+      await flushMicrotasks();
+      expect(exits).toEqual([]);
+      proc.emit('SIGTERM');
+      expect(exits).toEqual([]);
+
+      // Red when the SIGINT listener is the plain shutdown starter: the second signal is swallowed until the bound.
+      proc.emit('SIGINT');
+      expect(exits).toEqual([0]);
+
+      (runner as unknown as { headlessChildren: Set<unknown> }).headlessChildren.delete(child);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('registerProcessLifecycle', () => {
   let runner: GodotRunner;
   let proc: FakeProcess;

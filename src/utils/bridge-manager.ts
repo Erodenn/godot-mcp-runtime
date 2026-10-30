@@ -252,7 +252,8 @@ export class BridgeManager {
     this.processStartIdentityFn =
       options.processStartIdentity ?? ((pid) => readProcessStartIdentity(pid));
     this.cacheProcessStartIdentity =
-      options.cacheProcessStartIdentity ?? startIdentityQuerySpawns(process.platform);
+      options.cacheProcessStartIdentity ??
+      startIdentityQuerySpawns(options.platform ?? process.platform);
     this.nowFn = options.now ?? (() => Date.now());
     this.unlinkFn = options.unlink ?? unlinkSync;
     this.platform = options.platform ?? process.platform;
@@ -674,6 +675,10 @@ export class BridgeManager {
       logDebug('Restored the shared bridge artifacts for a session that registered during removal');
     } catch (err) {
       logDebug(`Non-fatal: could not restore the shared bridge artifacts: ${err}`);
+      // The sibling holds an owner file and no bridge: said, so stop_project does not report a clean stop.
+      return [
+        `a session registered on this project during the removal and the shared bridge script and ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be restored for it (${describeFailure(err)}); that session has no bridge, so stop it and run run_project again`,
+      ];
     }
     return [];
   }

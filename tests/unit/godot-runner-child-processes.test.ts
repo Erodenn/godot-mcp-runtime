@@ -668,6 +668,38 @@ describe('a Godot path whose version probe failed', () => {
   });
 });
 
+describe('the engine version of an accepted Godot path', () => {
+  let savedGodotPath: string | undefined;
+
+  beforeEach(() => {
+    savedGodotPath = process.env.GODOT_PATH;
+    process.env.GODOT_PATH = process.execPath;
+  });
+
+  afterEach(() => {
+    if (savedGodotPath === undefined) delete process.env.GODOT_PATH;
+    else process.env.GODOT_PATH = savedGodotPath;
+  });
+
+  it('is taken from the path probe: detecting the path and asking its version spawn the engine once', async () => {
+    const child = makeFakeChild(HEADLESS_PID);
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(child);
+    const runner = new GodotRunner();
+
+    const detecting = runner.detectGodotPath();
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    child.stdout.emit('data', Buffer.from('4.6.stable.official.abc123\n'));
+    child.emit('close', 0);
+    await detecting;
+
+    // Red when getVersion spawns its own `--version`: it would wait on a second child.
+    await expect(runner.getVersion()).resolves.toBe('4.6.stable.official.abc123');
+    await expect(runner.getVersion()).resolves.toBe('4.6.stable.official.abc123');
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('the parent-watch port', () => {
   let savedDisplay: string | undefined;
 

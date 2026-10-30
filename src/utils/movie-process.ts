@@ -53,18 +53,21 @@ const defaultMovieProcessDeps: MovieProcessDeps = {
 const activeMovieChildren = new Map<ChildProcess, (proc: ChildProcess) => void>();
 let exitHookRegistered = false;
 
+/** Kills the tree of every child still running; the body of the exit hook. Never throws. */
+export function killActiveMovieChildren(): void {
+  for (const [child, killTree] of activeMovieChildren) {
+    try {
+      killTree(child);
+    } catch {
+      // Exit handlers must not throw.
+    }
+  }
+}
+
 function registerExitHook(): void {
   if (exitHookRegistered) return;
   exitHookRegistered = true;
-  process.once('exit', () => {
-    for (const [child, killTree] of activeMovieChildren) {
-      try {
-        killTree(child);
-      } catch {
-        // Exit handlers must not throw.
-      }
-    }
-  });
+  process.once('exit', killActiveMovieChildren);
 }
 
 function appendTail(current: string, chunk: unknown): string {
@@ -95,6 +98,7 @@ export function runMovieProcess(
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let exited = false;
     const timers: { timeout?: NodeJS.Timeout; grace?: NodeJS.Timeout } = {};
 
     const finish = (result: MovieProcessResult): void => {
@@ -140,6 +144,13 @@ export function runMovieProcess(
       reportClosed();
       finish({ exitCode: null, stdout, stderr, timedOut: false, spawnError: error.message });
     });
+    child.on('exit', () => {
+      exited = true;
+      // After the timeout's tree kill nothing of the run is left to hold a pipe open, so an exit without a close is a dead child, not one still using the project; before it, a launcher can exit while the engine it started runs on.
+      if (!timedOut) return;
+      activeMovieChildren.delete(child);
+      reportClosed();
+    });
     child.on('close', (code: number | null) => {
       activeMovieChildren.delete(child);
       reportClosed();
@@ -150,7 +161,13 @@ export function runMovieProcess(
       timedOut = true;
       deps.killTree(child);
       timers.grace = setTimeout(() => {
-        finish({ exitCode: null, stdout, stderr, timedOut: true, killUnconfirmed: true });
+        finish({
+          exitCode: null,
+          stdout,
+          stderr,
+          timedOut: true,
+          ...(exited ? {} : { killUnconfirmed: true }),
+        });
       }, MOVIE_KILL_GRACE_MS);
     }, timeoutMs);
   });

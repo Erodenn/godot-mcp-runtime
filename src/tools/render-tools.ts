@@ -526,8 +526,8 @@ function findServerOwnedBridgeEntry(projectRoot: string): string | null {
   }
 }
 
-// Reads only, via `BridgeManager.peekOtherLiveOwners` (no upkeep): a movie run never registers as an owner, and a refusal leaves the project exactly as it was.
-function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse | null {
+// Reads only, via `BridgeManager.peekOtherLiveOwners` (no upkeep): a movie run never registers as an owner, and a refusal leaves the project exactly as it was. The stranded-entry check is not here: it follows the repair, inside the launch step (`refuseIfBridgeEntryStranded`).
+function refuseIfSessionLiveOnProject(runner: GodotRunner, root: string): ToolResponse | null {
   let live: LiveSessionOnProject | null;
   try {
     live = findLiveSessionOnProject(runner, root, 'read-only');
@@ -542,11 +542,14 @@ function refuseIfBridgeMayLoad(runner: GodotRunner, root: string): ToolResponse 
       ],
     );
   }
-  if (live !== null) {
-    return live.owner === 'self'
-      ? refuseOwnSession(runner, root)
-      : refuseOtherSession(live.info, root);
-  }
+  if (live === null) return null;
+  return live.owner === 'self'
+    ? refuseOwnSession(runner, root)
+    : refuseOtherSession(live.info, root);
+}
+
+/** The refusal for a server-owned `McpBridge` entry still in `project.godot`; asked after `repairStrandedBridge`, so it stands only for an entry the repair could not clear (a user's own is never ours to remove). */
+function refuseIfBridgeEntryStranded(root: string): ToolResponse | null {
   const strandedPath = findServerOwnedBridgeEntry(root);
   return strandedPath !== null ? refuseStrandedBridge(strandedPath) : null;
 }
@@ -584,6 +587,30 @@ function runDirBytes(runDir: string): number | null {
 
 const BYTES_UNMEASURED_WARNING =
   'bytesWritten is null: the run directory could not be read to size the files this run wrote.';
+
+/** Prefix of a check-mode run's directory name: the only runs that keep nothing, so the only ones a later start may remove as leftovers. */
+const CHECK_RUN_ID_PREFIX = 'check-';
+
+/** A check run directory untouched this long cannot belong to a live run: the longest budget plus the longest kill, with no frame written since. Another server process's run, or this one's, is therefore never taken. */
+export const MOVIE_CHECK_RUN_STALE_MS =
+  MOVIE_TIMEOUT_BASE_MS + MAX_MOVIE_FRAMES * MOVIE_TIMEOUT_PER_FRAME_MS + MOVIE_KILL_WORST_CASE_MS;
+
+/** Removes the check-mode run directories a server that died mid-run left behind (a check run deletes its own files on every path out). Frames and video runs are kept for the caller and never touched. Never throws. */
+function removeStaleCheckRuns(root: string, now: number = Date.now()): void {
+  const base = moviesDir(root);
+  try {
+    if (!existsSync(base)) return;
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(CHECK_RUN_ID_PREFIX)) continue;
+      const runDir = join(base, entry.name);
+      if (now - statSync(runDir).mtimeMs < MOVIE_CHECK_RUN_STALE_MS) continue;
+      const failure = removeRunDir(runDir);
+      if (failure !== null) logDebug(`render_movie could not remove ${runDir}: ${failure}`);
+    }
+  } catch (error) {
+    logDebug(`render_movie could not look for leftover check runs: ${getErrorMessage(error)}`);
+  }
+}
 
 function removeRunDir(runDir: string): string | null {
   try {
@@ -1011,7 +1038,8 @@ export function createRenderMovieHandler(
     // Refusals precede anything that could prompt a human or touch disk.
     if (!deps.displayAvailable()) return err(refuseNoDisplay());
 
-    const busy = refuseIfBridgeMayLoad(runner, root);
+    // Sessions only: a stranded bridge entry is repaired inside the launch step, after the gate.
+    const busy = refuseIfSessionLiveOnProject(runner, root);
     if (busy !== null) return err(busy);
 
     let godotPath = runner.getGodotPath();
@@ -1035,7 +1063,7 @@ export function createRenderMovieHandler(
     );
     if (!gate.ok) return gate;
 
-    const runId = `${Date.now()}-${randomUUID()}`;
+    const runId = `${mode === 'check' ? CHECK_RUN_ID_PREFIX : ''}${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);
     const outputPath = movieOutputPath(
       root,
@@ -1068,8 +1096,13 @@ export function createRenderMovieHandler(
         });
         if (!charged.ok) return charged;
         // The gate can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
-        const busyAfterGate = refuseIfBridgeMayLoad(runner, root);
+        const busyAfterGate = refuseIfSessionLiveOnProject(runner, root);
         if (busyAfterGate !== null) return err(busyAfterGate);
+        // A bridge a dead server stranded would load into the movie run: removed here, where the gate has passed and a write to project.godot is allowed. The check after it is the refusal for an entry the repair left.
+        runner.repairStrandedBridge(root);
+        const stranded = refuseIfBridgeEntryStranded(root);
+        if (stranded !== null) return err(stranded);
+        removeStaleCheckRuns(root);
         try {
           if (!isUnderDir(moviesDir(root), runDir)) {
             throw new Error('the run directory is outside the movies directory');

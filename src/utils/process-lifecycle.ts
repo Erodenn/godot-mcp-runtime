@@ -48,7 +48,16 @@ export function registerProcessLifecycle(opts: {
     void shutdown();
   };
 
-  proc.on('SIGINT', startShutdown);
+  // A second interrupt is the operator insisting: the wait for headless runs is skipped, and the exit hook still kills what is left.
+  const onInterrupt = (): void => {
+    if (shuttingDown) {
+      exit(GRACEFUL_EXIT_CODE);
+      return;
+    }
+    startShutdown();
+  };
+
+  proc.on('SIGINT', onInterrupt);
   proc.on('SIGTERM', startShutdown);
   // SIGHUP's default action ends Node without the 'exit' handler, and outside Windows the games and headless runs lead their own groups so the terminal's signal misses them.
   // On Windows the system ends the process a few seconds after the console closes, which the graceful path can outlast, so it exits at once.

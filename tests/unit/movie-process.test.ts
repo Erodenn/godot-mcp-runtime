@@ -193,6 +193,35 @@ describe('runMovieProcess', () => {
       expect(errored).toHaveBeenCalledTimes(1);
     });
 
+    it('fires when a child killed at the timeout exits but never closes, and its kill counts as confirmed', async () => {
+      vi.useFakeTimers();
+      const child = createFakeChild();
+      const onClosed = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child), {
+        onClosed,
+      });
+      vi.advanceTimersByTime(TEST_TIMEOUT_MS);
+      child.emit('exit', null, 'SIGKILL');
+      expect(onClosed).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(MOVIE_KILL_GRACE_MS);
+      const result = await promise;
+      expect(result.timedOut).toBe(true);
+      expect(result.killUnconfirmed).toBeUndefined();
+    });
+
+    it('does not fire on an exit before any timeout kill: a launcher can exit while the engine it started runs on', async () => {
+      const child = createFakeChild();
+      const onClosed = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, createDeps(child), {
+        onClosed,
+      });
+      child.emit('exit', 0, null);
+      expect(onClosed).not.toHaveBeenCalled();
+      child.emit('close', 0);
+      await promise;
+      expect(onClosed).toHaveBeenCalledTimes(1);
+    });
+
     it('does not fire when the call gives up on a child whose kill was not confirmed, and fires once it closes', async () => {
       vi.useFakeTimers();
       const child = createFakeChild();
@@ -208,5 +237,38 @@ describe('runMovieProcess', () => {
       child.emit('close', null);
       expect(onClosed).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('the process-exit hook', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('kills the tree of a registered child when the process exits, and not one that already closed', async () => {
+    vi.resetModules();
+    // A fresh module registers its own hook; the spy keeps it from being attached to the worker.
+    const onceSpy = vi.spyOn(process, 'once').mockImplementation(() => process);
+    const fresh = await import('../../src/utils/movie-process.js');
+    const running = createFakeChild();
+    const finished = createFakeChild();
+    const runningDeps = createDeps(running);
+    const finishedDeps = createDeps(finished);
+    const runningCall = fresh.runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, runningDeps);
+    const finishedCall = fresh.runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, finishedDeps);
+    finished.emit('close', 0);
+    await finishedCall;
+
+    const hook = onceSpy.mock.calls.find(([event]) => event === 'exit')?.[1] as
+      | (() => void)
+      | undefined;
+    expect(hook).toBeDefined();
+    hook!();
+
+    expect(runningDeps.killTreeMock).toHaveBeenCalledWith(running);
+    expect(finishedDeps.killTreeMock).not.toHaveBeenCalled();
+    running.emit('close', null);
+    await runningCall;
   });
 });

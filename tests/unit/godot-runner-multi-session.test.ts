@@ -293,7 +293,7 @@ describe('multi-project runtime sessions', () => {
     // Red when either start skips the registry: it would inject the bridge
     // under a Godot that is rendering the project.
     await expect(runner.runProject(projectA, undefined, false, PORT_A)).rejects.toThrow(
-      /A render_movie run is using this project .*wait for it to return/,
+      /A render_movie run is using this project .*has not exited/,
     );
     await expect(runner.attachProject(projectA, PORT_A)).rejects.toThrow(
       /A render_movie run is using this project/,

@@ -306,6 +306,9 @@ export interface RuntimeSessionLogs {
   exitCode: number | null;
 }
 
+/** Random bytes in a session token (32 hex characters): the secret the bridge checks every command against. */
+const SESSION_TOKEN_BYTES = 16;
+
 const BRIDGE_WAIT_STOPPED: BridgeWaitResult = {
   ready: false,
   stopped: true,
@@ -313,17 +316,13 @@ const BRIDGE_WAIT_STOPPED: BridgeWaitResult = {
 };
 
 function describeNoLiveCurrent(status: RuntimeSessionStatus): string {
-  const head =
-    status.current === null
-      ? 'No current runtime session.'
-      : `The current session's Godot process (${status.current.projectPath}) exited with code ${status.current.exitCode ?? 'unknown'}.`;
   const others = status.otherLiveSessions.map((info) => info.projectPath);
   const tail =
     others.length > 0 ? ` Live sessions: ${others.join(', ')}.` : ' No other session is live.';
-  return head + tail;
+  return `No current runtime session.${tail}`;
 }
 
-/** Thrown when a runtime command has no live current session; carries the status so the caller can name the others. The runner never picks one itself. */
+/** Thrown when a runtime command has no current session at all (an exited current is reported by the caller, not thrown); carries the status so the caller can name the others. The runner never picks one itself. */
 export class NoLiveCurrentSessionError extends Error {
   constructor(readonly status: RuntimeSessionStatus) {
     super(describeNoLiveCurrent(status));
@@ -371,7 +370,6 @@ function isShutdownAcknowledged(response: string): boolean {
 
 export interface GodotServerConfig {
   godotPath?: string;
-  debugMode?: boolean;
 }
 
 export interface OperationResult {
@@ -494,6 +492,8 @@ export class GodotRunner {
   private bridge: BridgeManager;
   private validatedPaths: Map<string, boolean> = new Map();
   private cachedVersion: string | null = null;
+  /** What each probed executable printed for `--version`, so `getVersion` does not run the engine again for a path the probe accepted. */
+  private readonly probedVersions = new Map<string, string>();
   private sessions = new Map<string, RuntimeSession>();
   /** The session the runtime tools act on. Never moved implicitly, except by a failed start undoing its own move (`restoreCurrentAfterFailedStart`). */
   private current: RuntimeSession | null = null;
@@ -680,7 +680,8 @@ export class GodotRunner {
         return false;
       }
 
-      await this.spawnAsync(path, ['--version']);
+      const { stdout } = await this.spawnAsync(path, ['--version']);
+      this.probedVersions.set(path, stdout.trim());
 
       logDebug(`Valid Godot path: ${path}`);
       this.validatedPaths.set(path, true);
@@ -815,6 +816,12 @@ export class GodotRunner {
       }
     }
 
+    // The path probe already ran `--version`: its answer is the version, and asking again would spawn a second engine.
+    const probed = this.probedVersions.get(this.godotPath);
+    if (probed !== undefined) {
+      this.cachedVersion = probed;
+      return probed;
+    }
     const { stdout } = await this.spawnAsync(this.godotPath, ['--version']);
     this.cachedVersion = stdout.trim();
     return this.cachedVersion;
@@ -1034,7 +1041,7 @@ export class GodotRunner {
   private assertNoMovieRun(key: string, projectPath: string): void {
     if (!this.movieRuns.has(key)) return;
     throw new Error(
-      `A render_movie run is using this project (${projectPath}); wait for it to return, then retry. Nothing was stopped or launched: the movie process would load the bridge this start injects.`,
+      `A render_movie run is using this project (${projectPath}): its Godot process has not exited, though the call that started it may already have returned. Retry once it has. Nothing was stopped or launched: the movie process would load the bridge this start injects.`,
     );
   }
 
@@ -1156,7 +1163,7 @@ export class GodotRunner {
     let processSpawned = false;
     try {
       // Token before port: a record with a port can be dialed, and a frame must never go out without the token.
-      const sessionToken = randomBytes(16).toString('hex');
+      const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('hex');
       session.token = sessionToken;
       session.bridgePort = port;
 
@@ -1584,7 +1591,7 @@ export class GodotRunner {
 
     try {
       // No env channel reaches a Godot the user launched, so the baked script is the only way to deliver the token. Set before the port.
-      const token = randomBytes(16).toString('hex');
+      const token = randomBytes(SESSION_TOKEN_BYTES).toString('hex');
       session.token = token;
       session.bridgePort = port;
       this.bridge.inject(projectPath, port, token);

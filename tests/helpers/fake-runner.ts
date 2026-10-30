@@ -50,6 +50,8 @@ export interface FakeMovieRun {
 export interface FakeRunner {
   calls: FakeRunnerCall[];
   importCalls: string[];
+  /** Projects `repairStrandedBridge` was called for, in order. */
+  repairs: string[];
   movieRuns: FakeMovieRun[];
   queue: SessionQueue;
   asRunner: GodotRunner;
@@ -58,6 +60,7 @@ export interface FakeRunner {
 export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   const calls: FakeRunnerCall[] = [];
   const importCalls: string[] = [];
+  const repairs: string[] = [];
   const movieRuns: FakeMovieRun[] = [];
   const queue = new SessionQueue();
   const defaults: Pick<FakeRunnerOptions, 'stdout' | 'stderr' | 'throws'> = {
@@ -106,6 +109,9 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
       importCalls.push(projectPath);
       if (importThrows) return Promise.reject(importThrows);
       return options.importPending ?? Promise.resolve();
+    },
+    repairStrandedBridge(projectPath: string): void {
+      repairs.push(projectPath);
     },
     runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
       if (options.exclusiveThrows) return Promise.reject(options.exclusiveThrows);
@@ -156,6 +162,7 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
   return {
     calls,
     importCalls,
+    repairs,
     movieRuns,
     queue,
     asRunner: fake as unknown as GodotRunner,

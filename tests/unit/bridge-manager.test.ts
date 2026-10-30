@@ -1985,3 +1985,67 @@ describe('BridgeManager.repairOrphaned after a project was cached clean', () => 
     expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
   });
 });
+
+describe('BridgeManager reporting a failed restore for a session that registered mid-removal', () => {
+  it('cleanup names the session left without a bridge when the shared script cannot be restored', () => {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const leaving = new BridgeManager(bridgeSourcePath, {
+      removeAutoloadEntry: (projectFile, name) => {
+        mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
+        writeFileSync(
+          join(bridgeOwnersDir(projectPath), `${process.pid}-fedcba9876543210.json`),
+          JSON.stringify({
+            pid: process.pid,
+            instanceId: 'fedcba9876543210',
+            hostname: hostname(),
+            mode: 'spawned',
+            startedAt: new Date().toISOString(),
+            port: ALT_PORT,
+          }),
+          'utf8',
+        );
+        // The template the restore re-reads is gone.
+        unlinkSync(bridgeSourcePath);
+        return removeAutoloadEntry(projectFile, name);
+      },
+    });
+    leaving.inject(projectPath, TEST_PORT);
+
+    const problems = leaving.cleanup(projectPath);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/registered on this project during the removal/);
+    expect(problems[0]).toMatch(/could not be restored/);
+  });
+});
+
+describe('BridgeManager start-identity caching follows its platform option', () => {
+  const OWNER_PID = 464646;
+
+  function identityReads(platform: NodeJS.Platform): number {
+    const { projectPath, bridgeSourcePath } = setupProject();
+    const identity = `${platform}:1`;
+    new BridgeManager(bridgeSourcePath, {
+      pid: () => OWNER_PID,
+      isProcessAlive: () => true,
+      processStartIdentity: () => identity,
+      platform,
+    }).inject(projectPath, TEST_PORT);
+    const processStartIdentity = vi.fn(() => identity);
+    const watcher = new BridgeManager(bridgeSourcePath, {
+      isProcessAlive: () => true,
+      processStartIdentity,
+      platform,
+    });
+
+    watcher.listOtherLiveOwners(projectPath);
+    watcher.listOtherLiveOwners(projectPath);
+
+    return processStartIdentity.mock.calls.length;
+  }
+
+  it('reuses the answer within its window where asking runs a helper program (win32) and asks every read where it does not (linux), whatever the host', () => {
+    expect(identityReads('win32')).toBe(1);
+    expect(identityReads('linux')).toBe(2);
+  });
+});

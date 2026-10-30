@@ -1,8 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import Ajv from 'ajv';
-import { dirname, extname, join, resolve } from 'path';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
+import { basename, dirname, extname, join, resolve } from 'path';
 import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
+import {
+  MOVIE_CHECK_RUN_STALE_MS,
   MOVIE_RUNTIME_WARNINGS_MAX,
   MOVIE_TIMEOUT_BASE_MS,
   MOVIE_TIMEOUT_PER_FRAME_MS,
@@ -13,8 +22,9 @@ import {
   pickEvenly,
   renderToolDefinitions,
 } from '../../../src/tools/render-tools.js';
+import { MS_PER_SECOND } from '../../../src/utils/profiler.js';
 import { moviesDir } from '../../../src/utils/artifact-paths.js';
-import { BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
+import { BridgeManager, BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
 import { projectPathKey } from '../../../src/utils/output-parsing.js';
 import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
@@ -235,6 +245,8 @@ function flagValue(args: string[], flag: string): string {
   return args[args.indexOf(flag) + 1]!;
 }
 
+const STRANDED_BRIDGE_PROJECT =
+  'config_version=5\n\n[autoload]\n\nMcpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n';
 const EVIL_SCRIPT = 'extends Node\n\nfunc _ready():\n\tOS.execute("echo", [])\n';
 const EVIL_AUTOLOAD_PROJECT = 'config_version=5\n\n[autoload]\n\nEvil="*res://evil.gd"\n';
 
@@ -795,6 +807,64 @@ describe('render_movie refusals before any spawn', () => {
     expect(readFileSync(join(dir, 'project.godot')).equals(before)).toBe(true);
   });
 
+  it('repairs a stranded bridge after the launch gate and then runs, leaving the entry removed', async () => {
+    const { dir, runner, fake, stub } = setup({
+      projectGodot: STRANDED_BRIDGE_PROJECT,
+    });
+    const events: string[] = [];
+    // The real repair, against the real project.godot: no owner is registered, so the entry is stranded.
+    const repair = new BridgeManager('unused-bridge-source.gd');
+    (runner as unknown as { repairStrandedBridge: (p: string) => void }).repairStrandedBridge = (
+      projectPath,
+    ) => {
+      events.push('repair');
+      repair.repairOrphaned(projectPath);
+    };
+    const ctx = makeContext({
+      elicit: async () => {
+        events.push('gate');
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const withSpawn = createRenderMovieHandler({
+      runProcess: (...runArgs) => {
+        events.push('spawn');
+        return stub.runProcess(...runArgs);
+      },
+      displayAvailable: () => true,
+    });
+
+    payloadOf(await withSpawn(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
+
+    expect(events).toEqual(['gate', 'repair', 'spawn']);
+    expect(readFileSync(join(dir, 'project.godot'), 'utf8')).not.toContain('McpBridge');
+    expect(fake.repairs).toEqual([]);
+  });
+
+  it('does not touch a stranded bridge before the launch gate: a declined gate repairs nothing', async () => {
+    const { dir, runner, fake, stub, handler } = setup({
+      projectGodot: STRANDED_BRIDGE_PROJECT,
+    });
+
+    const result = await handler(
+      runner,
+      { projectPath: dir },
+      makeContext({ elicit: async () => ({ action: 'decline' }) }),
+    );
+
+    expectErrorMatching(result, /User declined render_movie/);
+    expect(fake.repairs).toEqual([]);
+    expect(stub.calls.length).toBe(0);
+  });
+
+  it('asks the runner to repair the project once per launch, before the stranded-entry check', async () => {
+    const { dir, runner, fake, handler } = setup();
+
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+
+    expect(fake.repairs).toEqual([resolve(dir)]);
+  });
+
   it('runs with a user-owned McpBridge autoload', async () => {
     const { dir, runner, stub, handler } = setup({
       projectGodot: 'config_version=5\n\n[autoload]\n\nMcpBridge="*res://game/my_bridge.gd"\n',
@@ -808,6 +878,47 @@ describe('render_movie refusals before any spawn', () => {
     const result = await handler(runner, { projectPath: dir }, NO_GATE);
     expectErrorMatching(result, /Could not find a valid Godot executable path/);
     expect(stub.calls.length).toBe(0);
+  });
+});
+
+describe('render_movie leftover check runs', () => {
+  const SECONDS_PER_MS = 1 / MS_PER_SECOND;
+
+  function seedRun(dir: string, name: string, ageMs: number): string {
+    const runDir = join(moviesDir(resolve(dir)), name);
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'frame00000000.png'), 'x');
+    const touched = (Date.now() - ageMs) * SECONDS_PER_MS;
+    utimesSync(runDir, touched, touched);
+    return runDir;
+  }
+
+  it('removes check-mode frames an earlier server left, keeps a recent check run and every frames-mode run', async () => {
+    const { dir, runner, handler } = setup();
+    const leftover = seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
+    const recent = seedRun(dir, 'check-2-live', MS_PER_SECOND);
+    const kept = seedRun(dir, '3-frames-run', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
+
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+
+    expect(existsSync(leftover)).toBe(false);
+    expect(existsSync(recent)).toBe(true);
+    expect(existsSync(kept)).toBe(true);
+  });
+
+  it('names a check run so a later start can tell it from a kept one', async () => {
+    const names: string[] = [];
+    const { dir, runner, handler } = setup({
+      stub: { onRun: (info) => names.push(basename(info.dir)) },
+    });
+
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(
+      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, NO_GATE),
+    );
+
+    expect(names[0]!.startsWith('check-')).toBe(true);
+    expect(names[1]!.startsWith('check-')).toBe(false);
   });
 });
 

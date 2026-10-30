@@ -579,11 +579,11 @@ interface FrameSample {
 // `internal_time` at `i + 4` is deliberately skipped (the editor's 'internal functions' toggle).
 function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSample {
   const timings: FrameTimings = {
-    frameMs: asNumber(data[1]) * 1000,
-    processMs: asNumber(data[2]) * 1000,
-    physicsMs: asNumber(data[3]) * 1000,
-    physicsFrameMs: asNumber(data[4]) * 1000,
-    scriptMs: asNumber(data[5]) * 1000,
+    frameMs: asNumber(data[1]) * MS_PER_SECOND,
+    processMs: asNumber(data[2]) * MS_PER_SECOND,
+    physicsMs: asNumber(data[3]) * MS_PER_SECOND,
+    physicsFrameMs: asNumber(data[4]) * MS_PER_SECOND,
+    scriptMs: asNumber(data[5]) * MS_PER_SECOND,
   };
   const servers: FrameSample['servers'] = [];
   let offset = 7;
@@ -594,7 +594,7 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
     if (entries % 2 !== 0) throw badFrame('server block holds an odd entry count');
     const functions: Array<{ name: string; ms: number }> = [];
     for (let j = offset + 2; j < offset + 2 + entries; j += 2) {
-      functions.push({ name: String(data[j]), ms: asNumber(data[j + 1]) * 1000 });
+      functions.push({ name: String(data[j]), ms: asNumber(data[j + 1]) * MS_PER_SECOND });
     }
     servers.push({ name: String(name), functions });
     offset += 2 + entries;
@@ -619,8 +619,8 @@ function parseFrame(data: Variant[], signatures: Map<number, string>): FrameSamp
       function: parts[parts.length - 1] ?? signature,
       sourceResolved: resolved !== undefined,
       calls,
-      selfMs: asNumber(data[i + 2]) * 1000,
-      totalMs: asNumber(data[i + 3]) * 1000,
+      selfMs: asNumber(data[i + 2]) * MS_PER_SECOND,
+      totalMs: asNumber(data[i + 3]) * MS_PER_SECOND,
     });
   }
   return {
@@ -1217,7 +1217,6 @@ export class DebuggerProfiler {
   private rxChunks: Buffer[] = [];
   private rxLength = 0;
   private threadId: Variant = null;
-  private processId: number | null = null;
   private state: ProfilerState = 'idle';
   private error: string | null = null;
   private closed = false;
@@ -1678,7 +1677,6 @@ export class DebuggerProfiler {
 
     if (name === 'set_pid') {
       this.threadId = threadId;
-      this.processId = typeof data[0] === 'number' ? data[0] : null;
       return;
     }
     if (name === 'debug_enter') {
@@ -1916,7 +1914,7 @@ export class DebuggerProfiler {
     return roundNumbers({
       ...(warnings.length > 0 ? { warnings } : {}),
       complete: capture.closedBy === 'sentinel',
-      seconds: capture.elapsedMs / 1000,
+      seconds: capture.elapsedMs / MS_PER_SECOND,
       frames: capture.frames,
       fps: spanMs > 0 && spanFrames > 0 ? spanFrames / (spanMs / MS_PER_SECOND) : null,
       targetFps: capture.targetFps,
@@ -1998,7 +1996,7 @@ export class DebuggerProfiler {
   private armAutoStop(): void {
     this.clearAutoStop();
     const seconds = this.capture?.maxSeconds ?? PROFILE_MAX_SECONDS;
-    this.autoStopTimer = setTimeout(() => this.autoStop(), seconds * 1000);
+    this.autoStopTimer = setTimeout(() => this.autoStop(), seconds * MS_PER_SECOND);
   }
 
   private clearAutoStop(): void {
