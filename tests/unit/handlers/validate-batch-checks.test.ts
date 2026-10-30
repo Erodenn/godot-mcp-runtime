@@ -1,20 +1,20 @@
-/**
- * Batch-mode per-target checks[] for handleValidate.
- *
- * The contract under test: every target's checks travel inside the single
- * validate_batch call (one Godot process for the whole batch), a failure on
- * one target never costs the others their result, and the cold-import retry
- * fires at most once per call.
- */
-
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
-import { createFakeRunner } from '../../helpers/fake-runner.js';
+import { createFakeRunner, type FakeRunner } from '../../helpers/fake-runner.js';
+import { CLIENT_REQUEST_TIMEOUT_MS, type GodotRunner } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 
 const STRUCTURE_CHECK = { type: 'structure', schema: { type: 'Node2D' } };
 const SIGNALS_CHECK = { type: 'signals', nodePath: 'root/Label' };
+/** A project that is not the one under validation. Never touched on disk. */
+const OTHER_PROJECT_PATH = '/some/other/project';
+
+/** Give the fake live sessions on these projects, none of them the current one. */
+function liveSessionsOn(fake: FakeRunner, projectPaths: string[]): void {
+  (fake.asRunner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths =
+    projectPaths;
+}
 
 function parseResults(result: unknown): {
   results: Array<{ target: string; valid: boolean; errors: unknown[] }>;
@@ -251,7 +251,7 @@ describe('handleValidate batch mode - per-target checks', () => {
           errors: [
             {
               message:
-                'Invalid scenePath: must be a relative path inside the project root, no ".."',
+                'Invalid scenePath: "../escape.tscn" resolves outside the project or is not a valid file name',
             },
           ],
         },
@@ -284,6 +284,115 @@ describe('handleValidate batch mode - per-target checks', () => {
     });
   });
 
+  it('skips the import retry while a session is live on the validated project', async () => {
+    // The live session is not the current one: the guard is per project, so
+    // the import must still stay out of that project's .godot/.
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png',
+    });
+    liveSessionsOn(fake, [fixtureProjectPath]);
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+    // The caller gets the first run's own failure, not a retried result.
+    expectErrorMatching(result, /Batch validate failed/);
+  });
+
+  // The import writes .godot/: a game another MCP server runs there is a second writer, and an
+  // unreadable registry does not say there is none.
+  it("skips the import retry while another MCP server's session is live on the project", async () => {
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png',
+    });
+    (fake.asRunner as unknown as { otherLiveSessions: unknown[] }).otherLiveSessions = [
+      {
+        pid: 4242,
+        instanceId: 'abc123',
+        hostname: 'some-host',
+        mode: 'spawned',
+        startedAt: new Date().toISOString(),
+        port: 9900,
+      },
+    ];
+
+    await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('skips the import retry when the owner registry cannot be read', async () => {
+    const { BridgeRegistryUnreadableError } = await import('../../../src/utils/bridge-manager.js');
+    const fake = createFakeRunner({
+      stdout: '',
+      stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png',
+    });
+    (
+      fake.asRunner as unknown as { otherLiveSessionsOnProject: () => never }
+    ).otherLiveSessionsOnProject = () => {
+      throw new BridgeRegistryUnreadableError('cannot list owners: EACCES');
+    };
+
+    await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('does not import for marker text that only appears quoted inside a stderr line', async () => {
+    const goodPayload = JSON.stringify({
+      results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+    });
+    const fake = createFakeRunner({
+      stdout: goodPayload,
+      stderr: '[DEBUG] Params JSON: {"targets":[{"scene_path":"[IMPORT_NEEDED] x.tscn"}]}',
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.importCalls).toEqual([]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('runs the import retry when the only live session is on another project', async () => {
+    const goodPayload = JSON.stringify({
+      results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+    });
+    const fake = createFakeRunner({
+      responses: [
+        { stdout: '', stderr: '[IMPORT_NEEDED] main.tscn: res://placeholder.png' },
+        { stdout: goodPayload },
+      ],
+    });
+    liveSessionsOn(fake, [OTHER_PROJECT_PATH]);
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.importCalls).toEqual([fixtureProjectPath]);
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it('surfaces the import failure without retrying when importAssets rejects', async () => {
     const fake = createFakeRunner({
       stdout: '',
@@ -298,5 +407,99 @@ describe('handleValidate batch mode - per-target checks', () => {
 
     expectErrorMatching(result, /broken asset blocks the import/);
     expect(fake.calls).toHaveLength(1);
+  });
+});
+
+describe('handleValidate cold-import wait and no-result wording', () => {
+  const MARKER_STDERR = '[IMPORT_NEEDED] main.tscn: res://placeholder.png';
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('answers "still importing, retry" before the request times out and leaves the import running', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunner({
+      importPending: new Promise<void>(() => {}),
+      responses: [{ stdout: '', stderr: MARKER_STDERR }],
+    });
+
+    let answer: Awaited<ReturnType<typeof handleValidate>> | undefined;
+    void handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    }).then((result) => {
+      answer = result;
+    });
+    await vi.advanceTimersByTimeAsync(CLIENT_REQUEST_TIMEOUT_MS - 1);
+
+    // Red when executeValidateOp awaits importAssets without the bound: no
+    // answer exists by the time the client stopped listening.
+    expect(answer).toBeDefined();
+    expectErrorMatching(
+      answer,
+      /Batch validation failed: the project's assets are still being imported, nothing was changed; retry this call/,
+    );
+    // Red when the solutions of a thrown runner error are kept for this case.
+    expect(unwrap(answer).content[1]?.text ?? '').toContain('joins the import');
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('gives the retry after a finished import only the time the request has left', async () => {
+    vi.useFakeTimers();
+    let finishImport!: () => void;
+    const importPending = new Promise<void>((done) => {
+      finishImport = done;
+    });
+    const fake = createFakeRunner({
+      importPending,
+      responses: [
+        { stdout: '', stderr: MARKER_STDERR },
+        {
+          stdout: JSON.stringify({
+            results: [{ target: 'main.tscn', valid: true, errors: [], checkErrors: [] }],
+          }),
+        },
+      ],
+    });
+    const IMPORT_TOOK_MS = 40000;
+
+    const pending = handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn', checks: [STRUCTURE_CHECK] }],
+    });
+    await vi.advanceTimersByTimeAsync(IMPORT_TOOK_MS);
+    finishImport();
+    const result = await pending;
+
+    expect(hasError(result)).toBe(false);
+    // Red when the retry runs with the default timeout: 40 s of import plus a
+    // 30 s retry passes the client's 60 s.
+    const retryTimeoutMs = fake.calls[1]?.timeoutMs;
+    expect(retryTimeoutMs).toBeDefined();
+    expect(IMPORT_TOOK_MS + retryTimeoutMs!).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+  });
+
+  it('shows parsed engine diagnostics once, without the raw stderr tail beside them', async () => {
+    const fake = createFakeRunner({
+      stdout: '[Audio] ready\n',
+      stderr:
+        "SCRIPT ERROR: Invalid call. Nonexistent function 'nope' in base 'Node'.\n   at: _run (res://godot_operations.gd:12)",
+    });
+
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [{ scenePath: 'main.tscn' }],
+    });
+
+    const text = unwrap(result).content[0]?.text ?? '';
+    expect(hasError(result)).toBe(true);
+    expect(text).toContain(
+      'Batch validate failed: no result was emitted - the operation gave no reason',
+    );
+    // Red when the head is built from extractGdError while diagnostics parsed:
+    // the same stderr then appears as a raw tail and again as diagnostics.
+    expect(text).not.toContain('stderr (last lines)');
+    expect(text.split("Nonexistent function 'nope'")).toHaveLength(2);
   });
 });

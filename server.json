@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Erodenn/godot-mcp-runtime",
   "title": "Godot MCP Runtime",
-  "description": "Zero-addon MCP server for Godot 4: agents edit, run, and play-test the game.",
+  "description": "Zero-addon MCP server for Godot 4.5 or later: agents edit, run, and play-test the game.",
   "repository": {
     "url": "https://github.com/Erodenn/godot-mcp-runtime",
     "source": "github"
@@ -21,7 +21,7 @@
       "environmentVariables": [
         {
           "name": "GODOT_PATH",
-          "description": "Path to the Godot 4.x executable. Auto-detected if Godot is on PATH.",
+          "description": "Path to the Godot 4.5 or later executable. Auto-detected if Godot is on PATH.",
           "isRequired": false
         },
         {
@@ -31,7 +31,7 @@
         },
         {
           "name": "GODOT_MCP_DISABLE_ELICITATION",
-          "description": "Set to 'true' to disable run_project/run_script confirmation prompts (fail-open) for clients that cannot display elicitation, e.g. Claude Desktop. Tier 1 security hard-blocks still apply.",
+          "description": "Set to 'true' to disable run_project/render_movie/run_script confirmation prompts (fail-open) for clients that cannot display elicitation, e.g. Claude Desktop. Tier 1 security hard-blocks still apply.",
           "isRequired": false
         },
         {

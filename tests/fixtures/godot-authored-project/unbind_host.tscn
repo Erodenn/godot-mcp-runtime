@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://unbind_host.gd" id="1_ub"]
+
+[node name="UnbindHost" type="Node2D"]
+script = ExtResource("1_ub")
+
+[node name="Toggle" type="CheckButton" parent="."]
+
+[connection signal="toggled" from="Toggle" to="." method="_on_toggle_changed" unbinds=1]

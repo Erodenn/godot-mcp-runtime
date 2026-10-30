@@ -3,6 +3,9 @@ root="$(git rev-parse --show-toplevel)"
 
 node "$root/.githooks/pre-commit-check.js" || exit 1
 
+# Warns about comment-heavy additions under src/ and tests/. Never blocks.
+node "$root/scripts/comment-share.js" || true
+
 # Format staged files in place. lint-staged stashes unstaged hunks first, so a
 # partially staged file only has its staged content formatted and committed.
 lint_staged="$root/node_modules/.bin/lint-staged"

@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import Ajv from 'ajv';
+import { resolve } from 'path';
 import { allToolDefinitions } from '../../src/index.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
 import { handleCheckProject } from '../../src/tools/project-tools.js';
 import { createRuntimeFake } from '../helpers/runtime-fakes.js';
+import { liveSessionInfo } from '../helpers/fake-sessions.js';
 import { unwrap } from '../helpers/assertions.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 
@@ -27,10 +29,79 @@ describe('outputSchema: every declared schema is valid', () => {
   });
 });
 
+describe('outputSchema: fields a tool always returns are declared required', () => {
+  // Each tool returns these fields on every success branch; a schema with no required list would validate {} and guarantee nothing.
+  const ALWAYS_RETURNED: Array<[string, string[]]> = [
+    ['simulate_input', ['projectPath', 'success', 'results']],
+    ['get_ui_elements', ['projectPath', 'elements', 'tip']],
+    ['run_script', ['projectPath', 'result', 'tip']],
+    [
+      'start_profiler',
+      [
+        'projectPath',
+        'active',
+        'maxSeconds',
+        'firstFrame',
+        'captureLimit',
+        'visual',
+        'timeline',
+        'timelineMs',
+      ],
+    ],
+    [
+      'profile_project',
+      [
+        'projectPath',
+        'complete',
+        'frames',
+        'frame',
+        'servers',
+        'rows',
+        'fps',
+        'targetFps',
+        'slowFrames',
+        'monitors',
+        'visual',
+        'timeline',
+      ],
+    ],
+    [
+      'stop_profiler',
+      [
+        'projectPath',
+        'complete',
+        'frames',
+        'frame',
+        'servers',
+        'rows',
+        'fps',
+        'targetFps',
+        'slowFrames',
+        'monitors',
+        'visual',
+        'timeline',
+      ],
+    ],
+    ['search_project', ['matches', 'truncated', 'filesSearched', 'fileTypes']],
+    ['create_scene', ['scenePath']],
+    ['attach_script', ['nodePath', 'scriptPath']],
+    ['duplicate_node', ['nodePath', 'newNodePath']],
+    ['delete_nodes', ['results']],
+    ['set_node_properties', ['results']],
+    ['get_node_signals', ['nodePath', 'nodeType', 'signals']],
+  ];
+
+  it.each(ALWAYS_RETURNED)('%s requires them and rejects an empty payload', (name, fields) => {
+    const tool = toolsWithOutputSchema.find(([toolName]) => toolName === name)?.[1];
+    if (!tool) throw new Error(`${name} outputSchema not found`);
+    const schema = tool.outputSchema as { required?: string[] };
+    expect(schema.required ?? []).toEqual(expect.arrayContaining(fields));
+    expect(ajv.compile(tool.outputSchema as object)({})).toBe(false);
+  });
+});
+
 describe('outputSchema and Returns: prose are complementary, not exclusive', () => {
-  // Per docs/tool-authoring.md §3, when a tool has an outputSchema it must also
-  // carry a Returns: sentence in its description: the schema is invisible to
-  // the agent, so the prose is the only return-shape signal the LLM ever sees.
+  // docs/tool-authoring.md section 3: an outputSchema needs a Returns: sentence in the description, the agent's only return-shape signal.
   it.each(toolsWithOutputSchema)(
     '%s description has a Returns: sentence alongside its outputSchema',
     (_name, tool) => {
@@ -39,53 +110,22 @@ describe('outputSchema and Returns: prose are complementary, not exclusive', () 
   );
 });
 
-describe('outputSchema: expected coverage', () => {
-  // Exact allowlist so adding/removing a tool from the structuredContent
-  // contract is a deliberate one-line edit, not a silent drift. Update this
-  // list whenever a tool grows or loses an outputSchema.
-  const TOOLS_WITH_OUTPUT_SCHEMA: readonly string[] = [
-    'attach_script',
-    'batch_scene_operations',
-    'check_project',
-    'create_scene',
-    'delete_nodes',
-    'detach_project',
-    'duplicate_node',
-    'get_debug_output',
-    'get_node_signals',
-    'get_scene_dependencies',
-    'get_ui_elements',
-    'profile_project',
-    'run_script',
-    'search_project',
-    'start_profiler',
-    'set_node_properties',
-    'simulate_input',
-    'stop_profiler',
-    'stop_project',
-    'take_screenshot',
-  ];
-
-  it('every tool with outputSchema is on the explicit allowlist', () => {
-    expect(toolsWithOutputSchema.map(([name]) => name).sort()).toEqual(
-      [...TOOLS_WITH_OUTPUT_SCHEMA].sort(),
-    );
-  });
-});
-
 describe('simulate_input: every declared entry shape validates', () => {
-  // The per-action entry is the widest shape this server returns: keys differ by
-  // action type, a skipped entry carries almost nothing, and a failed batch
-  // still comes back success-shaped. Validate the payloads directly, since the
-  // interesting variety lives in the bridge's output rather than the handler's.
+  // The per-action entry is the widest shape: keys differ by action, skipped entries carry almost nothing, a failed batch is success-shaped.
+  // Validate payloads directly: the variety lives in the bridge's output, not the handler's.
   const simulateInputDef = toolsWithOutputSchema.find(([name]) => name === 'simulate_input')?.[1];
   if (!simulateInputDef) throw new Error('simulate_input outputSchema not found');
   const validate = ajv.compile(simulateInputDef.outputSchema as object);
 
+  // Payloads are as the bridge sends them; the handler adds projectPath, which the schema requires.
   function expectValid(payload: Record<string, unknown>): void {
-    const valid = validate(payload);
+    const valid = validate({ projectPath: fixtureProjectPath, ...payload });
     expect(valid, JSON.stringify(validate.errors)).toBe(true);
   }
+
+  it('rejects a payload that does not name its session', () => {
+    expect(validate({ success: true, results: [] })).toBe(false);
+  });
 
   it('validates a success: false payload carrying a failure and a skipped entry', () => {
     expectValid({
@@ -198,16 +238,21 @@ describe('check_project: every declared response shape validates and carries str
   it('validates { godotVersion, runtime: { activeSession: false } } with no projectPath and no session', async () => {
     const fake = createRuntimeFake();
     const payload = await checkAndValidate(fake, {});
-    expect(payload.runtime).toEqual({ activeSession: false });
+    expect(payload.runtime).toEqual({ activeSession: false, projectPath: null, liveSessions: [] });
   });
 
-  it('validates the projectPath-present shape (name/path/structure/godotVersion/runtime)', async () => {
+  it('validates the projectPath-present shape (name/projectPath/structure/godotVersion/runtime)', async () => {
     const fake = createRuntimeFake();
     const payload = await checkAndValidate(fake, { projectPath: fixtureProjectPath });
     expect(payload).toHaveProperty('name');
-    expect(payload).toHaveProperty('path', fixtureProjectPath);
+    expect(payload).toHaveProperty('projectPath', resolve(fixtureProjectPath));
     expect(payload).toHaveProperty('structure');
-    expect(payload.runtime).toEqual({ activeSession: false });
+    expect(payload.runtime).toEqual({
+      activeSession: false,
+      projectPath: null,
+      liveSessions: [],
+      project: { projectPath: resolve(fixtureProjectPath), session: 'none', current: false },
+    });
   });
 
   it('validates the active-session, bridge-responsive runtime shape', async () => {
@@ -220,6 +265,20 @@ describe('check_project: every declared response shape validates and carries str
       sessionMode: 'spawned',
       bridgeResponsive: true,
     });
+  });
+
+  it('validates the multi-session runtime shape', async () => {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: '/fake/project', hasExited: false });
+    fake.setOtherSessions([liveSessionInfo(resolve(fixtureProjectPath), { bridgePort: 6100 })]);
+    fake.setBridgeResponse({ status: 'pong' });
+    const payload = await checkAndValidate(fake, { projectPath: fixtureProjectPath });
+    expect(payload.runtime).toMatchObject({
+      activeSession: true,
+      projectPath: '/fake/project',
+      project: { session: 'live', current: false, sessionMode: 'spawned' },
+    });
+    expect((payload.runtime as { liveSessions: unknown[] }).liveSessions).toHaveLength(2);
   });
 
   it('validates the exited-process runtime shape (activeSession:false, processExited:true, diagnostics)', async () => {
@@ -235,5 +294,36 @@ describe('check_project: every declared response shape validates and carries str
     const payload = await checkAndValidate(fake, {});
     expect(payload.runtime).toMatchObject({ activeSession: false, processExited: true });
     expect(payload.runtime).not.toHaveProperty('sessionMode');
+  });
+});
+
+describe('renamed response fields: the old names no longer satisfy the schema', () => {
+  // Payloads from before the field renames, minus the new name: a schema without `required` would accept all of them.
+  const retiredPayloads: Array<[string, Record<string, unknown>]> = [
+    ['duplicate_node', { success: true, originalPath: 'root/A', newPath: 'root/A2' }],
+    ['duplicate_node', { success: true }],
+    ['get_scene_dependencies', { scene: 'main.tscn', dependencies: [] }],
+    [
+      'get_debug_output',
+      { projectPath: '/p', output: [], errors: [], running: null, attached: true },
+    ],
+    [
+      'stop_project',
+      {
+        projectPath: '/p',
+        message: 'Godot project stopped',
+        mode: 'spawned',
+        externalProcessPreserved: false,
+        alreadyExited: false,
+        finalOutput: [],
+        finalErrors: [],
+      },
+    ],
+  ];
+
+  it.each(retiredPayloads)('%s rejects its pre-rename payload', (name, payload) => {
+    const definition = toolsWithOutputSchema.find(([toolName]) => toolName === name)?.[1];
+    if (!definition) throw new Error(`${name} outputSchema not found`);
+    expect(ajv.compile(definition.outputSchema as object)(payload)).toBe(false);
   });
 });

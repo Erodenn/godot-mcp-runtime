@@ -1,23 +1,6 @@
-/**
- * Regression tests: run_script compile-error diagnostics enrichment.
- *
- * Observed in production agent workflows: run_script compile failures each
- * returned only "Script compilation failed (error 43). Check syntax.": no
- * line, no message. Agents blindly retried identical scripts and repeatedly
- * called get_debug_output hunting for details that were sitting on the
- * engine process stderr.
- *
- * The fix: handleRunScript, on a compilation-failure error, parses the
- * runtimeErrors captured by sendCommandWithErrors (which include the
- * engine-stderr SCRIPT ERROR block) and appends "Compiler diagnostics:" with
- * message + line to the error response.
- *
- * Uses a minimal fake runner: run_script's handler path needs a runtime
- * session shape, not the executeOperation fake.
- */
-
 import { describe, it, expect } from 'vitest';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
+import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 
 interface FakeRunnerOverrides {
   response: string;
@@ -26,10 +9,17 @@ interface FakeRunnerOverrides {
 }
 
 function makeFakeRunner(o: FakeRunnerOverrides): GodotRunner {
+  const projectPath = '/fake/project';
+  const mode = o.sessionMode ?? 'spawned';
+  const proc = { hasExited: false };
   const fake = {
-    activeProjectPath: '/fake/project',
-    activeSessionMode: o.sessionMode ?? 'spawned',
-    activeProcess: { hasExited: false },
+    activeProjectPath: projectPath,
+    activeSessionMode: mode,
+    activeProcess: proc,
+    ...fakeSessionApi(() => ({ current: { mode, projectPath, process: proc } })),
+    // The session queue: nothing to serialize here, so the operation runs at once.
+    runExclusive: <T>(_label: string, operation: () => Promise<T>): Promise<T> => operation(),
+    queueTurn: () => null,
     async sendCommandWithErrors(): Promise<{
       response: string;
       runtimeErrors: string[];
@@ -45,7 +35,6 @@ function makeFakeRunner(o: FakeRunnerOverrides): GodotRunner {
   return fake as unknown as GodotRunner;
 }
 
-// A benign script that passes the policy gate (no flagged primitives).
 const BENIGN_SCRIPT =
   'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 1\n';
 

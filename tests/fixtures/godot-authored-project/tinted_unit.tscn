@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://c1tintunit01"]
+
+[node name="Tinted" type="Node2D"]
+modulate = Color(0, 1, 0, 1)
+position = Vector2(5, 5)
+
+[node name="Core" type="Sprite2D" parent="."]
+position = Vector2(1, 1)

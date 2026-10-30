@@ -30,7 +30,7 @@ const filtered = Object.entries(lockfile.packages ?? {})
 if (filtered.length === 0) {
   console.error(`${LOG_PREFIX} no peer-optional entries found in current lockfile.`);
   console.error(
-    `${LOG_PREFIX} the lockfile may already be pruned — regenerate it on Linux/WSL or pull a clean copy from CI before running this command.`,
+    `${LOG_PREFIX} the lockfile may already be pruned: regenerate it on Linux/WSL or pull a clean copy from CI before running this command.`,
   );
   process.exit(1);
 }
@@ -44,7 +44,7 @@ if (existsSync(snapshotPath)) {
     const old = readJson(snapshotPath);
     oldKeys = Object.keys(old.entries ?? {});
   } catch {
-    // ignore — treat as no prior snapshot
+    // ignore: treat as no prior snapshot
   }
 }
 

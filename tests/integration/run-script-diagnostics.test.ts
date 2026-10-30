@@ -1,23 +1,6 @@
-/**
- * Integration test: run_script compile-error diagnostics.
- *
- * End-to-end regression for a real-world failure class: run_script compile
- * failures returned only "Script compilation failed (error 43). Check
- * syntax.": the parser's
- * actual message + line number sat on the engine process stderr. Agents
- * retried identical scripts and hunted get_debug_output for details.
- *
- * The fix: handleRunScript parses the runtimeErrors captured since the
- * command marker and appends "Compiler diagnostics:" (message + line) to the
- * error response. This test runs a REAL engine + bridge and asserts the
- * enriched error comes back over the live MCP path.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
-
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -53,10 +36,8 @@ afterEach(async () => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
 });
 
@@ -67,7 +48,6 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1]!;
       await runProjectOrSkip(runner, ctx, tmpProject);
 
-      // Line 3 references an undeclared identifier: compile error 43 class.
       const badScript =
         'extends RefCounted\n' +
         'func execute(scene_tree: SceneTree) -> Variant:\n' +
@@ -82,7 +62,6 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
 
       expect(text).toContain('Script compilation failed');
       expect(text).toContain('Compiler diagnostics');
-      // The diagnostic names the offender and its line in the submitted source
       expect(text).toContain('some_missing_identifier');
       expect(text).toMatch(/:3\b/);
     },

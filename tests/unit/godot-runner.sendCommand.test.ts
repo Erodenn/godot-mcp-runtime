@@ -2,20 +2,31 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as net from 'net';
 import type { AddressInfo } from 'net';
 import { GodotRunner, BridgeDisconnectedError } from '../../src/utils/godot-runner.js';
-import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
+import {
+  encodeFrame,
+  parseFrames,
+  FRAME_HEADER_BYTES,
+  MAX_FRAME_BYTES,
+} from '../../src/utils/bridge-protocol.js';
+import { currentRecord, installSession } from '../helpers/session-install.js';
+
+/** Long enough for a destroyed socket's 'close' event to have been delivered. */
+const STALE_CLOSE_WINDOW_MS = 50;
+
+function oversizedFrameHeader(): Buffer {
+  const header = Buffer.alloc(FRAME_HEADER_BYTES);
+  header.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
+  return header;
+}
 
 interface MockBridge {
   port: number;
   server: net.Server;
-  /** Resolves with the JSON command string of the next frame. */
   nextFrame(): Promise<string>;
-  /** Send a framed JSON response back to the most recently connected peer. */
   reply(payload: string): void;
-  /** Close the most recently connected peer (no response). */
+  replyRaw(bytes: Buffer): void;
   closePeer(): void;
-  /** Stop accepting new connections; existing peers stay alive. */
   stopAccepting(): Promise<void>;
-  /** Tear everything down. */
   shutdown(): Promise<void>;
 }
 
@@ -61,6 +72,10 @@ async function startMockBridge(): Promise<MockBridge> {
       if (!currentPeer) throw new Error('No connected peer');
       currentPeer.write(encodeFrame(payload));
     },
+    replyRaw(bytes) {
+      if (!currentPeer) throw new Error('No connected peer');
+      currentPeer.write(bytes);
+    },
     closePeer() {
       if (currentPeer) currentPeer.destroy();
       currentPeer = null;
@@ -86,8 +101,9 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   beforeEach(async () => {
     bridge = await startMockBridge();
     runner = new GodotRunner({ godotPath: 'godot' });
-    // Direct assignment: port is now baked, not read from env at sendCommand time.
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
+    // Installed on a session record: the port is read from the current session
+    // at sendCommand time, not from env.
+    installSession(runner, { bridgePort: bridge.port });
   });
 
   afterEach(async () => {
@@ -117,12 +133,21 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     expect(r2.n).toBe(2);
   });
 
-  it('rejects a second concurrent command with "another command in flight"', async () => {
+  it('holds a second concurrent command until the first has its reply, instead of rejecting it', async () => {
     const first = runner.sendCommand('slow');
-    await bridge.nextFrame(); // ensure first has been written
-    await expect(runner.sendCommand('other')).rejects.toThrow(/another command/i);
-    bridge.reply('{"ok":true}');
-    await first;
+    const firstFrame = await bridge.nextFrame();
+    const second = runner.sendCommand('other');
+
+    bridge.reply('{"ok":"first"}');
+    expect(JSON.parse(await first)).toEqual({ ok: 'first' });
+
+    const secondFrame = await bridge.nextFrame();
+    bridge.reply('{"ok":"second"}');
+    expect(JSON.parse(await second)).toEqual({ ok: 'second' });
+    expect([firstFrame, secondFrame].map((frame) => JSON.parse(frame).command)).toEqual([
+      'slow',
+      'other',
+    ]);
   });
 
   it('rejects with BridgeDisconnectedError when the peer closes mid-flight', async () => {
@@ -137,7 +162,6 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     await bridge.nextFrame();
     await expect(pending).rejects.toThrow(/timed out/);
 
-    // Socket is destroyed on timeout. Next command must lazy-reconnect.
     const next = runner.sendCommand('ping');
     const recv = await bridge.nextFrame();
     expect(JSON.parse(recv)).toEqual({ command: 'ping' });
@@ -146,17 +170,14 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   });
 
   it('late reply for a timed-out command does not poison the next command', async () => {
-    // Without socket destruction on timeout, the bridge's late reply for A
-    // would correlate against B's promise (since the bridge serializes
-    // commands and only sees A's slot first). Closing the socket on timeout
-    // forces B to a new connection, making cross-talk impossible.
+    // Without socket destruction on timeout, the bridge's late reply for A would correlate against B's promise;
+    // closing the socket forces B onto a new connection.
     const slow = runner.sendCommand('slow', {}, 50);
     await bridge.nextFrame();
     await expect(slow).rejects.toThrow(/timed out/);
 
-    // Simulate the bridge eventually replying for the timed-out command on
-    // the now-destroyed socket. The write either errors silently or hits a
-    // closed socket: either way, B must not see this payload.
+    // The bridge replies late for the timed-out command on the destroyed socket: the write errors or hits a closed socket,
+    // and either way B must not see the payload.
     try {
       bridge.reply('{"this":"is the late slow reply"}');
     } catch {
@@ -171,6 +192,38 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     expect(r).toEqual({ this: 'is the fresh reply' });
   });
 
+  // A socket that delivered an unreadable frame still emits 'close' a tick later; with listeners left on, it settled the command in flight
+  // (in attached mode the probe ping, whose failure ends a live session).
+  it('an oversized frame header drops the socket without a listener left to fail the next command', async () => {
+    const first = runner.sendCommand('first');
+    await bridge.nextFrame();
+    bridge.replyRaw(oversizedFrameHeader());
+    await expect(first).rejects.toThrow(/exceeds limit/);
+    await expect(first).rejects.toBeInstanceOf(BridgeDisconnectedError);
+
+    const next = runner.sendCommand('ping');
+    const recv = await bridge.nextFrame();
+    expect(JSON.parse(recv)).toEqual({ command: 'ping' });
+    await new Promise((resolve) => setTimeout(resolve, STALE_CLOSE_WINDOW_MS));
+    bridge.reply('{"status":"pong"}');
+    await expect(next).resolves.toContain('pong');
+  });
+
+  it('a garbage frame behind a valid one drops the socket the same way', async () => {
+    const first = runner.sendCommand('first');
+    await bridge.nextFrame();
+    // One write: a complete frame, then a header no frame may carry. The
+    // parser throws on the second header before it hands back the first frame.
+    bridge.replyRaw(Buffer.concat([encodeFrame('{"ok":true}'), oversizedFrameHeader()]));
+    await expect(first).rejects.toThrow(/Bridge framing error/);
+
+    const next = runner.sendCommand('ping');
+    await bridge.nextFrame();
+    await new Promise((resolve) => setTimeout(resolve, STALE_CLOSE_WINDOW_MS));
+    bridge.reply('{"status":"pong"}');
+    await expect(next).resolves.toContain('pong');
+  });
+
   it('handles a large response (1 MiB+) that would have been truncated under UDP', async () => {
     const pending = runner.sendCommand('big');
     await bridge.nextFrame();
@@ -182,15 +235,14 @@ describe('GodotRunner.sendCommand (TCP)', () => {
   });
 
   it('connect-refused surfaces as BridgeDisconnectedError', async () => {
-    // Point the runner at a port nobody is listening on.
     const r = new GodotRunner({ godotPath: 'godot' });
-    (r as unknown as { activeBridgePort: number }).activeBridgePort = 1;
+    installSession(r, { bridgePort: 1 });
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
     r.closeConnection();
   });
 
   it('attaches the session token field to every outgoing frame when set', async () => {
-    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'sekrit-token';
+    currentRecord(runner).token = 'sekrit-token';
     const pending = runner.sendCommand('ping');
     const received = await bridge.nextFrame();
     expect(JSON.parse(received)).toEqual({ command: 'ping', token: 'sekrit-token' });
@@ -214,7 +266,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   beforeEach(async () => {
     bridge = await startMockBridge();
     runner = new GodotRunner({ godotPath: 'godot' });
-    (runner as unknown as { activeBridgePort: number }).activeBridgePort = bridge.port;
+    installSession(runner, { bridgePort: bridge.port });
   });
 
   afterEach(async () => {
@@ -223,16 +275,12 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('retries once on BridgeDisconnectedError during an active session', async () => {
-    // Simulate an active session so reconnect logic kicks in.
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();
-    // Drop the connection mid-flight to trigger BridgeDisconnectedError.
     bridge.closePeer();
 
-    // The reconnect delay is 1s, then it retries. The mock bridge accepts
-    // a new connection and receives the retry.
     const retryFrame = await bridge.nextFrame();
     expect(JSON.parse(retryFrame)).toEqual({ command: 'get_ui_elements' });
     bridge.reply('{"nodes":[]}');
@@ -251,7 +299,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry shutdown commands', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('shutdown', {}, 5000);
     await bridge.nextFrame();
@@ -260,7 +308,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry input commands because they are not idempotent', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('input', { actions: [] }, 5000);
     await bridge.nextFrame();
@@ -269,7 +317,7 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('does not retry run_script commands because they may have side effects', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors(
       'run_script',
@@ -282,13 +330,12 @@ describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {
   });
 
   it('propagates error if retry also fails', async () => {
-    (runner as unknown as { activeSessionMode: string }).activeSessionMode = 'spawned';
+    currentRecord(runner).mode = 'spawned';
 
     const pending = runner.sendCommandWithErrors('get_ui_elements', {}, 5000);
     await bridge.nextFrame();
     bridge.closePeer();
 
-    // Stop accepting connections so the retry also fails.
     await bridge.stopAccepting();
 
     await expect(pending).rejects.toBeInstanceOf(BridgeDisconnectedError);

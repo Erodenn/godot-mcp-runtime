@@ -1,31 +1,24 @@
-/**
- * Gate for tests that require a real Godot binary.
- *
- * CI does install Godot, in the dedicated `godot-integration` matrix job
- * (see `.github/workflows/ci.yml`), which sets `GODOT_PATH` before running
- * the suite. Locally, set `GODOT_PATH` yourself to enable these tests. Use
- * `itGodot` exactly like `it`:
- *
- *     import { itGodot } from '../helpers/godot-skip.js';
- *     itGodot('runs a real headless Godot operation', async () => { ... });
- *
- * When `GODOT_PATH` is unset, the case is skipped (not failed).
- */
+/** CI installs Godot in the `godot-integration` matrix job; locally set `GODOT_PATH`. When unset, `itGodot` cases are skipped, not failed. */
 
 import { it } from 'vitest';
+import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { parseMajorMinor, type MajorMinor } from '../../src/utils/engine-version.js';
 
 export const hasGodot = Boolean(process.env.GODOT_PATH);
 
 export const itGodot = it.skipIf(!hasGodot);
 
-/**
- * Heuristic: bridge failures we treat as "no display server" (skip-worthy)
- * rather than real failures. Anything else means runProject or the bridge is
- * genuinely broken and the test must fail loudly.
- *
- * This is the only condition an itGodot runtime test may skip on beyond the
- * `hasGodot` gate above. Do not add others.
- */
+/** Call only where `hasGodot` is true; tests needing a newer engine than CI's oldest (typed dictionaries need 4.4) branch on it. */
+export async function engineMajorMinor(): Promise<MajorMinor> {
+  const runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
+  const parsed = parseMajorMinor(await runner.getVersion());
+  if (parsed === null) {
+    throw new Error('Could not read the Godot version from "--version" output');
+  }
+  return parsed;
+}
+
+/** Used only by the render_movie test to word its failure; `runProjectOrSkip` decides its skip from `checkDisplayAvailable()` before launch, because a failure substring also matches real window-creation defects. */
 export function isHeadlessEnvironmentError(err: string | undefined): boolean {
   if (!err) return false;
   const lower = err.toLowerCase();

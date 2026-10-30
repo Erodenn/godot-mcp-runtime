@@ -16,9 +16,7 @@ const { MOCK_BRIDGE_PORT, spawnMock, findFreePortMock, injectMock, cleanupMock }
   },
 );
 
-// Specifiers resolve relative to THIS file, so they must name the same module
-// ids godot-runner.ts imports. A mismatch binds nothing, silently, and the real
-// implementation runs instead.
+// Specifiers resolve relative to this file and must name godot-runner.ts's module ids, or nothing binds and the real code runs.
 vi.mock('child_process', async () => ({
   ...(await vi.importActual('child_process')),
   spawn: (...args: unknown[]) => spawnMock(...args),
@@ -29,10 +27,11 @@ vi.mock('../../src/utils/bridge-protocol.js', async () => {
 });
 vi.mock('../../src/utils/path-validation.js', async () => {
   const actual = await vi.importActual('../../src/utils/path-validation.js');
-  return { ...actual, checkDisplayAvailable: () => true, validateSubPath: () => false };
+  return { ...actual, checkDisplayAvailable: () => true };
 });
 vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {
+    precheckInject = () => '';
     inject = injectMock;
     cleanup = cleanupMock;
     getLastInjectedPort = () => MOCK_BRIDGE_PORT;
@@ -44,8 +43,8 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 function fakeSpawnedProcess() {
   return {
     pid: 4242,
-    stdout: { on: vi.fn() },
-    stderr: { on: vi.fn() },
+    stdout: { on: vi.fn(), once: vi.fn() },
+    stderr: { on: vi.fn(), once: vi.fn() },
     on: vi.fn(),
     kill: vi.fn(),
   };
@@ -66,9 +65,7 @@ describe('runProject relative projectPath regression', () => {
   });
 
   it('stores the absolute path so pollBridge can match the bridge-reported project_path', async () => {
-    // Regression: with a relative path ('.'), waitForBridge's path guard
-    // compared the bridge-reported absolute project_path against '.' and
-    // failed instantly: misreported as a generic 8s bridge timeout.
+    // With a relative path ('.') the bridge-reported absolute path must not fail waitForBridge's guard.
     const cwdSave = process.cwd();
     process.chdir(projectDir);
     try {
@@ -96,9 +93,7 @@ describe('runProject relative projectPath regression', () => {
     expect(runner.activeBridgePort).toBe(MOCK_BRIDGE_PORT);
   });
 
-  // CI runs the unit suite on ubuntu-latest with no xvfb, where the real
-  // checkDisplayAvailable() rejects the launch. Fake it so an unbound
-  // path-validation mock fails here instead of only in CI.
+  // CI has no xvfb, so the real checkDisplayAvailable() rejects the launch; fake it so an unbound mock fails here, not only in CI.
   it('runs under headless-CI conditions (linux, no DISPLAY)', async () => {
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });

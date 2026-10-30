@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3 uid="uid://ud33laavt82f"]
+
+[ext_resource type="PackedScene" uid="uid://76owar7af2bj" path="res://base_unit.tscn" id="1_base"]
+
+[node name="Derived" instance=ExtResource("1_base")]
+
+[node name="Arm" parent="." index="0"]
+position = Vector2(5, 6)
+
+[node name="Extra" type="Node2D" parent="." index="2"]

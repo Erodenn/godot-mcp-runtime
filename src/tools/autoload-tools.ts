@@ -1,7 +1,12 @@
 import { readFileSync } from 'fs';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import {
+  projectGodotPath,
+  projectSubPathError,
+  PROJECT_SUB_PATH_SOLUTIONS,
+  resolveProjectPath,
+} from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -9,21 +14,35 @@ import {
   optionalString,
   optionalBoolean,
 } from '../utils/arg-parsing.js';
-import { ok, err } from '../utils/result.js';
+import { err } from '../utils/result.js';
+import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseAutoloads,
+  parseAutoloadSection,
   addAutoloadEntry,
+  AUTOLOAD_PATH_FORBIDDEN_REGEX,
   removeAutoloadEntry,
   updateAutoloadEntry,
 } from '../utils/autoload-ini.js';
 
-// --- Tool definitions ---
+const ADD_AUTOLOAD_TIP =
+  'Autoloads load in headless mode too: one that stops the engine before an operation is dispatched (it quits in _init, for example) fails every headless operation, while one that only errors in _ready does not. Run validate on the script to check it; remove_autoload undoes this.';
+
+const AUTOLOAD_ENTRY_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    path: { type: 'string', description: 'res:// path of the script or scene.' },
+    singleton: { type: 'boolean' },
+  },
+  required: ['name', 'path', 'singleton'],
+} as const;
 
 export const autoloadToolDefinitions = [
   {
     name: 'list_autoloads',
     description:
-      'List all registered autoloads in a project with paths and singleton status. Use first when diagnosing headless failures - broken autoloads crash all headless ops, so this tells you what is loaded. No Godot process required (reads project.godot directly). Returns: [{ name, path, singleton }].',
+      'List the autoloads registered in a project, with their paths and singleton flags. Use first when diagnosing headless failures: an autoload that stops the engine before an operation is dispatched fails every headless operation. Reads project.godot directly, no Godot process. Returns: autoloads[], each { name, path, singleton }, one per name (the last assignment, which the engine keeps); empty when none. warnings leads when a line is not listed or is not in the form Godot writes.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -32,11 +51,24 @@ export const autoloadToolDefinitions = [
       },
       required: ['projectPath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present only when an autoload line could not be parsed, or assigns a name a later line assigns again (neither is listed in autoloads), or when project.godot holds lines that are not in the form Godot writes, named by line number: the engine may register an autoload from such a line that is not listed.',
+        },
+        autoloads: { type: 'array', items: AUTOLOAD_ENTRY_SCHEMA },
+      },
+      required: ['autoloads'],
+    },
   },
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a project. autoloadPath accepts "res://..." or a project-relative path (auto-prefixed). singleton defaults true (accessible globally by name). No Godot process required. Warning: autoloads initialize in headless mode - a broken script will crash every subsequent headless op; validate before adding. Returns plain-text confirmation with the registered name, path, and singleton flag. Errors if an autoload with the same name already exists; use update_autoload to modify.',
+      'Register a new autoload in a project. autoloadPath takes res://... or a path inside the project. singleton defaults to true. No Godot process is used. An autoload that stops the engine before a headless operation is dispatched fails all of them (one that only errors in _ready does not): run validate on it first. Returns: autoload { name, path, singleton } read back from project.godot, and a tip. Errors if the name is already registered; use update_autoload to change it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,11 +89,19 @@ export const autoloadToolDefinitions = [
       },
       required: ['projectPath', 'autoloadName', 'autoloadPath'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        autoload: AUTOLOAD_ENTRY_SCHEMA,
+        tip: { type: 'string' },
+      },
+      required: ['autoload', 'tip'],
+    },
   },
   {
     name: 'remove_autoload',
     description:
-      'Unregister an autoload from a project by name. Use to recover from a broken autoload that is crashing headless ops. No Godot process required. Returns plain-text confirmation on success. Errors if no autoload with that name exists.',
+      'Unregister an autoload from a project by name. Use to recover from an autoload that stops the engine before headless operations are dispatched. No Godot process is used. Returns: removed (the name) and autoloads[], the entries that remain, read back from project.godot. Errors if no autoload has that name.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -71,11 +111,23 @@ export const autoloadToolDefinitions = [
       },
       required: ['projectPath', 'autoloadName'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        removed: { type: 'string', description: 'Name of the autoload that was removed.' },
+        autoloads: {
+          type: 'array',
+          description: 'The entries that remain.',
+          items: AUTOLOAD_ENTRY_SCHEMA,
+        },
+      },
+      required: ['removed', 'autoloads'],
+    },
   },
   {
     name: 'update_autoload',
     description:
-      "Modify an existing autoload's path or singleton flag. Pass either or both - omitted fields keep their current value. Use instead of remove_autoload + add_autoload (single edit, no orphan window). No Godot process required. Returns plain-text confirmation on success. Errors if autoloadName is not registered.",
+      "Change an existing autoload's path or singleton flag. Pass autoloadPath, singleton or both; errors if neither is given. An omitted field keeps its current value. Use instead of remove_autoload plus add_autoload: one edit, no window where the autoload is missing. No Godot process is used. Returns: autoload { name, path, singleton } read back from project.godot. Errors if autoloadName is not registered.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -87,10 +139,24 @@ export const autoloadToolDefinitions = [
       },
       required: ['projectPath', 'autoloadName'],
     },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        autoload: AUTOLOAD_ENTRY_SCHEMA,
+      },
+      required: ['autoload'],
+    },
   },
 ] as const satisfies readonly ToolDefinition[];
 
-// --- Handlers ---
+function rejectForbiddenPathCharacters(autoloadPath: string): HandlerResult | undefined {
+  if (!AUTOLOAD_PATH_FORBIDDEN_REGEX.test(autoloadPath)) return undefined;
+  return err(
+    createErrorResponse('autoloadPath must not contain a double quote or a line break', [
+      'Remove the double quote or line break from autoloadPath',
+    ]),
+  );
+}
 
 export function handleListAutoloads(args: OperationParams): HandlerResult {
   args = normalizeParameters(args);
@@ -99,8 +165,22 @@ export function handleListAutoloads(args: OperationParams): HandlerResult {
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
-    const autoloads = parseAutoloads(projectFile);
-    return ok({ content: [{ type: 'text', text: JSON.stringify(autoloads) }] });
+    const { entries, unparsed, shadowed, nonCanonical } = parseAutoloadSection(projectFile);
+    const warnings: string[] = [];
+    if (nonCanonical !== null) {
+      warnings.push(`${nonCanonical}. An autoload such a line registers may not be listed`);
+    }
+    if (unparsed.length > 0) {
+      warnings.push(
+        `[autoload] has ${unparsed.length} line(s) that could not be parsed and are not listed: ${unparsed.join(' | ')}`,
+      );
+    }
+    if (shadowed.length > 0) {
+      warnings.push(
+        `${shadowed.length} autoload line(s) assign a name that a later line assigns again. The engine keeps the last assignment, so these are not listed: ${shadowed.join(' | ')}`,
+      );
+    }
+    return createStructuredResponse(leadWithWarnings({ warnings, autoloads: entries }));
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to list autoloads: ${getErrorMessage(error)}`, [
@@ -121,10 +201,14 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
   const autoloadPath = requireString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
 
-  if (!validateSubPath(parsed.value.projectPath, autoloadPath.value)) {
+  const forbiddenAdd = rejectForbiddenPathCharacters(autoloadPath.value);
+  if (forbiddenAdd) return forbiddenAdd;
+
+  const resolvedAutoload = resolveProjectPath(parsed.value.projectPath, autoloadPath.value, 'read');
+  if (!resolvedAutoload) {
     return err(
-      createErrorResponse('Invalid autoload path', [
-        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      createErrorResponse(projectSubPathError('autoload path', autoloadPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -148,18 +232,23 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
     addAutoloadEntry(
       projectFile,
       autoloadName.value,
-      autoloadPath.value,
+      resolvedAutoload.resPath,
       isSingleton,
       projectFileContent,
     );
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: `Autoload '${autoloadName.value}' registered at '${autoloadPath.value}' (singleton: ${isSingleton}).\nWarning: autoloads initialize in headless mode too. If this script has errors, all headless operations will fail. Verify by running get_scene_tree - if it fails, use remove_autoload to remove it.`,
-        },
-      ],
-    });
+    const registered = parseAutoloads(projectFile).find((a) => a.name === autoloadName.value);
+    if (registered === undefined) {
+      return err(
+        createErrorResponse(
+          `Autoload '${autoloadName.value}' was written but is not in project.godot when it is read back`,
+          [
+            'Open project.godot and check the [autoload] section for a malformed line',
+            'Use list_autoloads to see what is registered',
+          ],
+        ),
+      );
+    }
+    return createStructuredResponse({ autoload: registered, tip: ADD_AUTOLOAD_TIP });
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to add autoload: ${getErrorMessage(error)}`, [
@@ -187,9 +276,16 @@ export function handleRemoveAutoload(args: OperationParams): HandlerResult {
         ]),
       );
     }
-    return ok({
-      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' removed successfully.` }],
-    });
+    const remaining = parseAutoloads(projectFile);
+    if (remaining.some((a) => a.name === autoloadName.value)) {
+      return err(
+        createErrorResponse(
+          `Autoload '${autoloadName.value}' is still in project.godot after the removal was written`,
+          ['Open project.godot and remove the entry from the [autoload] section by hand'],
+        ),
+      );
+    }
+    return createStructuredResponse({ removed: autoloadName.value, autoloads: remaining });
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to remove autoload: ${getErrorMessage(error)}`, [
@@ -210,13 +306,19 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   const autoloadPath = optionalString(args, 'autoloadPath');
   if (!autoloadPath.ok) return autoloadPath;
 
-  if (
-    autoloadPath.value !== undefined &&
-    !validateSubPath(parsed.value.projectPath, autoloadPath.value)
-  ) {
+  if (autoloadPath.value !== undefined) {
+    const forbidden = rejectForbiddenPathCharacters(autoloadPath.value);
+    if (forbidden) return forbidden;
+  }
+
+  const resolvedAutoload =
+    autoloadPath.value === undefined
+      ? undefined
+      : resolveProjectPath(parsed.value.projectPath, autoloadPath.value, 'read');
+  if (autoloadPath.value !== undefined && !resolvedAutoload) {
     return err(
-      createErrorResponse('Invalid autoload path', [
-        'Provide a valid relative path or res:// URI that stays inside the project directory',
+      createErrorResponse(projectSubPathError('autoload path', autoloadPath.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
       ]),
     );
   }
@@ -224,25 +326,41 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
   const singleton = optionalBoolean(args, 'singleton');
   if (!singleton.ok) return singleton;
 
+  if (autoloadPath.value === undefined && singleton.value === undefined) {
+    return err(
+      createErrorResponse('update_autoload changes nothing: pass autoloadPath, singleton or both', [
+        'Pass autoloadPath to change the path',
+        'Pass singleton to change the singleton flag',
+      ]),
+    );
+  }
+
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
     const updated = updateAutoloadEntry(
       projectFile,
       autoloadName.value,
-      autoloadPath.value,
+      resolvedAutoload?.resPath,
       singleton.value,
     );
     if (!updated) {
       return err(
         createErrorResponse(`Autoload '${autoloadName.value}' not found`, [
-          'Use list_autoloads to see existing autoloads',
+          'Use list_autoloads to see existing autoloads; a line it reports as not parsed cannot be updated, remove_autoload removes it',
           'Use add_autoload to register a new one',
         ]),
       );
     }
-    return ok({
-      content: [{ type: 'text', text: `Autoload '${autoloadName.value}' updated successfully.` }],
-    });
+    const current = parseAutoloads(projectFile).find((a) => a.name === autoloadName.value);
+    if (current === undefined) {
+      return err(
+        createErrorResponse(
+          `Autoload '${autoloadName.value}' was updated but is not in project.godot when it is read back`,
+          ['Use list_autoloads to see what is registered'],
+        ),
+      );
+    }
+    return createStructuredResponse({ autoload: current });
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [

@@ -78,7 +78,7 @@ for (const [key, value] of Object.entries(snapshot.entries ?? {})) {
 }
 
 if (restored.length === 0) {
-  console.log(`${LOG_PREFIX} lockfile clean — no restoration needed`);
+  console.log(`${LOG_PREFIX} lockfile clean, no restoration needed`);
   process.exit(0);
 }
 

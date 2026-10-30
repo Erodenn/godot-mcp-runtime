@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Run every check CI runs, in the same order, stopping on the first failure.
-# Formatting is applied rather than checked, the same way CI treats it on main.
-# This is the single entrypoint — no need to also run `npm test` separately.
+# This is the single entrypoint: no need to also run `npm test` separately.
 #
 # Usage:
 #   npm run verify                                       # skips Godot integration tests
@@ -25,7 +24,7 @@ npm run format
 if [ "${GODOT_PATH:-}" != "" ]; then
   step "test (Godot integration enabled: $GODOT_PATH)"
 else
-  step "test (Godot integration tests will skip — set GODOT_PATH to enable)"
+  step "test (Godot integration tests will skip: set GODOT_PATH to enable)"
 fi
 npm test
 

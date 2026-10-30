@@ -1,11 +1,3 @@
-/**
- * Recursive validation of a structure check's schema.
- *
- * A malformed entry below the top level used to cross the boundary unchecked
- * and land on a typed GDScript parameter. Rejecting it here is what keeps the
- * diagnosis specific about which part of the schema is wrong.
- */
-
 import { describe, it, expect } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
@@ -24,9 +16,8 @@ describe('handleValidate - nested structure schema validation', () => {
     });
 
     expectErrorMatching(result, /Invalid schema at schema\.children\[0\]/);
-    // The malformed entry is rejected before Godot is spawned at all: the
-    // parse validation and the checks share one process, and the schema is
-    // shape-checked before that process is asked for.
+    // Rejected before Godot is spawned: the parse validation and the checks share one process, and the
+    // schema is shape-checked first.
     expect(fake.calls).toEqual([]);
   });
 

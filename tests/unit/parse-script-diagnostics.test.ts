@@ -1,22 +1,4 @@
-/**
- * Unit tests for parseScriptDiagnostics: the shared Godot stderr compiler-
- * diagnostic parser.
- *
- * Context: GDScript compile
- * failures don't travel through the API call that triggers them: `load()`
- * returns a placeholder resource, `GDScript.reload()` returns a bare error
- * code (43): the message and line live on stderr. Two consumers depend on
- * this parser:
- *
- *   - `validate` (headless): overlays stderr diagnostics onto the tool's
- *     valid/errors result (replaces the former inline parser).
- *   - `run_script` (live bridge): enriches "Script compilation failed
- *     (error 43). Check syntax." errors with message + line instead of
- *     sending the agent to hunt through get_debug_output.
- *
- * The fixture stderr strings below are verbatim captures from Godot 4.x runs
- * (macOS), including the error-43 compile-failure class.
- */
+/** Fixture stderr is verbatim from Godot 4.x (macOS), error-43 class included: compile failures put message and line on stderr, not in the API result. */
 
 import { describe, it, expect } from 'vitest';
 import { parseScriptDiagnostics } from '../../src/utils/output-parsing.js';
@@ -85,9 +67,7 @@ describe('parseScriptDiagnostics', () => {
   });
 
   it('recovers filePath from the "Failed to load script" echo when at: names no res:// path', () => {
-    // The at: line points into Godot's C++ source, so the entry would carry no
-    // res:// identity -- and parseGodotErrorsByPath drops filePath-less entries,
-    // silently reporting the file valid in batch validate.
+    // The at: line points into Godot's C++ source (no res:// identity): parseGodotErrorsByPath would drop it and batch validate report the file valid.
     const stderr = [
       'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
       '   at: GDScript::reload (modules/gdscript/gdscript.cpp:2907)',
@@ -117,9 +97,7 @@ describe('parseScriptDiagnostics', () => {
   });
 
   it('does not relabel a gdscript:// source with an unrelated nearby res:// path', () => {
-    // The at: line already gives the entry a definite identity (the submitted
-    // source), so the load-failure echo below must not overwrite it -- that
-    // would pair a real file path with the submitted source's line number.
+    // The at: line already gives the entry its identity; the load-failure echo must not overwrite it with a mismatched path and line.
     const stderr = [
       'SCRIPT ERROR: Parse Error: Identifier "x" not declared in the current scope.',
       '   at: GDScript::reload (gdscript://-9223372010447436344.gd:4)',

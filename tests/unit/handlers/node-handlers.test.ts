@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { join } from 'path';
 import {
   handleDeleteNodes,
   handleSetNodeProperties,
@@ -13,16 +14,18 @@ import {
 import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
+import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
+import { allToolDefinitions } from '../../../src/index.js';
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
+/** The property names a tool's outputSchema declares for one entry of its `results` array. */
+function declaredResultFields(toolName: string): string[] {
+  const definition = allToolDefinitions.find((tool) => tool.name === toolName) as
+    | { outputSchema?: { properties: { results: { items: { properties: object } } } } }
+    | undefined;
+  return Object.keys(definition?.outputSchema?.properties.results.items.properties ?? {});
+}
 
 const validBase = { projectPath: fixtureProjectPath, scenePath: fixtureScenePath };
-
-// ---------------------------------------------------------------------------
-// handleDeleteNodes
-// ---------------------------------------------------------------------------
 
 describe('handleDeleteNodes', () => {
   it('rejects missing projectPath', async () => {
@@ -118,11 +121,23 @@ describe('handleDeleteNodes', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].success).toBe(true);
   });
-});
 
-// ---------------------------------------------------------------------------
-// handleSetNodeProperties
-// ---------------------------------------------------------------------------
+  it('declares resolvedNodePath on a result entry and returns the one the engine reported', async () => {
+    const fake = createFakeRunner({
+      stdout:
+        '{"results":[{"nodePath":"%Sprite2D","resolvedNodePath":"root/Sprite2D","success":true}]}',
+    });
+    const result = await handleDeleteNodes(fake.asRunner, {
+      ...validBase,
+      nodePaths: ['%Sprite2D'],
+    });
+    const payload = expectMatchesOutputSchema('delete_nodes', result);
+    expect(payload.results).toEqual([
+      { nodePath: '%Sprite2D', resolvedNodePath: 'root/Sprite2D', success: true },
+    ]);
+    expect(declaredResultFields('delete_nodes')).toContain('resolvedNodePath');
+  });
+});
 
 describe('handleSetNodeProperties', () => {
   const validUpdates = [{ nodePath: 'root/Sprite2D', property: 'visible', value: true }];
@@ -194,6 +209,49 @@ describe('handleSetNodeProperties', () => {
     expect(parsed.results[0].success).toBe(true);
   });
 
+  it('declares resolvedNodePath on a result entry and returns the one the engine reported', async () => {
+    const entry = {
+      nodePath: '%Sprite2D',
+      property: 'visible',
+      resolvedNodePath: 'root/Sprite2D',
+      success: true,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [entry] }) });
+    const result = await handleSetNodeProperties(fake.asRunner, {
+      ...validBase,
+      updates: [{ nodePath: '%Sprite2D', property: 'visible', value: false }],
+    });
+    const payload = expectMatchesOutputSchema('set_node_properties', result);
+    expect(payload.results).toEqual([entry]);
+    expect(declaredResultFields('set_node_properties')).toContain('resolvedNodePath');
+  });
+
+  // Red when an update is checked as spelled and forwarded raw: the runner folds
+  // nodePath and node_path onto one key, so the unchecked spelling is the one run.
+  it('checks and forwards one spelling of an update whose nodePath is spelled both ways', async () => {
+    const SET = { property: 'visible', value: true };
+    const refused = createFakeRunner({ stdout: '{"results":[]}' });
+    const result = await handleSetNodeProperties(refused.asRunner, {
+      ...validBase,
+      updates: [{ nodePath: 'root/A', node_path: '../Outside', ...SET }],
+    });
+    expectErrorMatching(result, /Invalid updates\[0\]\.nodePath/);
+    expect(refused.calls).toHaveLength(0);
+
+    const forwarded = createFakeRunner({ stdout: '{"results":[]}' });
+    await handleSetNodeProperties(forwarded.asRunner, {
+      ...validBase,
+      updates: [
+        { node_path: 'root/A', nodePath: 'root/B', ...SET },
+        { node_path: 'root/C', property: 'meta', value: { node_path: 'kept' } },
+      ],
+    });
+    expect(forwarded.calls[0]?.params.updates).toEqual([
+      { nodePath: 'root/B', ...SET },
+      { nodePath: 'root/C', property: 'meta', value: { node_path: 'kept' } },
+    ]);
+  });
+
   it('handles multi-element updates array', async () => {
     const fake = createFakeRunner({
       stdout:
@@ -212,10 +270,6 @@ describe('handleSetNodeProperties', () => {
     expect(parsed.results).toHaveLength(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleGetNodeProperties (always-array)
-// ---------------------------------------------------------------------------
 
 describe('handleGetNodeProperties', () => {
   const validNodes = [{ nodePath: 'root' }];
@@ -286,12 +340,43 @@ describe('handleGetNodeProperties', () => {
     const parsed = JSON.parse(text);
     expect(parsed.results[0].nodePath).toBe('root');
     expect(parsed.results[0].nodeType).toBe('Node2D');
+    expectMatchesOutputSchema('get_node_properties', result);
+  });
+
+  // Red when a node item is checked as spelled and forwarded raw.
+  it('checks and forwards one spelling of a node item whose keys are spelled both ways', async () => {
+    const refused = createFakeRunner({ stdout: '{"results":[]}' });
+    const badPath = await handleGetNodeProperties(refused.asRunner, {
+      ...validBase,
+      nodes: [{ nodePath: 'root', node_path: '../Outside' }],
+    });
+    expectErrorMatching(badPath, /Invalid nodes\[0\]\.nodePath/);
+    const badFlag = await handleGetNodeProperties(refused.asRunner, {
+      ...validBase,
+      nodes: [{ nodePath: 'root', changedOnly: true, changed_only: 'yes' }],
+    });
+    expectErrorMatching(badFlag, /nodes\[0\]\.changedOnly must be a boolean/);
+    expect(refused.calls).toHaveLength(0);
+
+    const forwarded = createFakeRunner({ stdout: '{"results":[]}' });
+    await handleGetNodeProperties(forwarded.asRunner, {
+      ...validBase,
+      nodes: [{ node_path: 'root/A', nodePath: 'root/B', changed_only: true }],
+    });
+    expect(forwarded.calls[0]?.params.nodes).toEqual([{ nodePath: 'root/B', changedOnly: true }]);
+  });
+
+  it('returns an error response for a payload that carries a load failure', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ error: 'Failed to load scene: main.tscn', results: [] }),
+    });
+    const result = await handleGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: validNodes,
+    });
+    expectErrorMatching(result, /Failed to load scene: main\.tscn/);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleAttachScript
-// ---------------------------------------------------------------------------
 
 describe('handleAttachScript', () => {
   it('rejects missing projectPath', async () => {
@@ -377,7 +462,6 @@ describe('handleAttachScript', () => {
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
-        success: true,
         nodePath: 'root/Sprite2D',
         scriptPath: 'placeholder.gd',
       }),
@@ -390,17 +474,12 @@ describe('handleAttachScript', () => {
     expect(hasError(result)).toBe(false);
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({
-      success: true,
       nodePath: 'root/Sprite2D',
       scriptPath: 'placeholder.gd',
     });
     expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleGetSceneTree
-// ---------------------------------------------------------------------------
 
 describe('handleGetSceneTree', () => {
   it('rejects missing projectPath', async () => {
@@ -458,12 +537,9 @@ describe('handleGetSceneTree', () => {
     const parsed = JSON.parse(text);
     expect(parsed.name).toBe('root');
     expect(parsed.type).toBe('Node2D');
+    expectMatchesOutputSchema('get_scene_tree', result);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleDuplicateNode
-// ---------------------------------------------------------------------------
 
 describe('handleDuplicateNode', () => {
   it('rejects missing projectPath', async () => {
@@ -532,9 +608,8 @@ describe('handleDuplicateNode', () => {
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
-        success: true,
-        originalPath: 'root/Sprite2D',
-        newPath: 'root/Sprite2D2',
+        nodePath: 'root/Sprite2D',
+        newNodePath: 'root/Sprite2D2',
       }),
     });
     const result = await handleDuplicateNode(fake.asRunner, {
@@ -544,17 +619,13 @@ describe('handleDuplicateNode', () => {
     expect(hasError(result)).toBe(false);
     const env = unwrap(result);
     expect(env.structuredContent).toEqual({
-      success: true,
-      originalPath: 'root/Sprite2D',
-      newPath: 'root/Sprite2D2',
+      nodePath: 'root/Sprite2D',
+      newNodePath: 'root/Sprite2D2',
     });
     expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
+    expectMatchesOutputSchema('duplicate_node', result);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleConnectSignal
-// ---------------------------------------------------------------------------
 
 describe('handleConnectSignal', () => {
   it('rejects missing projectPath', async () => {
@@ -654,8 +725,34 @@ describe('handleConnectSignal', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
+    const connection = {
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+      connected: true,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(connection) });
+    const result = await handleConnectSignal(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+    });
+    expect(expectMatchesOutputSchema('connect_signal', result)).toEqual(connection);
+  });
+
+  it('reports connected null with a leading warning when the scene was not read back', async () => {
     const fake = createFakeRunner({
-      stdout: "Signal 'pressed' connected from 'root/Button' to 'root/Receiver._on_pressed'",
+      stdout: JSON.stringify({
+        nodePath: 'root/Button',
+        signal: 'pressed',
+        targetNodePath: 'root/Receiver',
+        method: '_on_pressed',
+        connected: null,
+        warnings: ['not read back'],
+      }),
     });
     const result = await handleConnectSignal(fake.asRunner, {
       ...validBase,
@@ -664,15 +761,11 @@ describe('handleConnectSignal', () => {
       targetNodePath: 'root/Receiver',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('connected');
+    const payload = expectMatchesOutputSchema('connect_signal', result);
+    expect(Object.keys(payload)[0]).toBe('warnings');
+    expect(payload.connected).toBeNull();
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleDisconnectSignal
-// ---------------------------------------------------------------------------
 
 describe('handleDisconnectSignal', () => {
   it('rejects missing projectPath', async () => {
@@ -772,9 +865,14 @@ describe('handleDisconnectSignal', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({
-      stdout: "Signal 'pressed' disconnected from 'root/Button' to 'root/Receiver._on_pressed'",
-    });
+    const connection = {
+      nodePath: 'root/Button',
+      signal: 'pressed',
+      targetNodePath: 'root/Receiver',
+      method: '_on_pressed',
+      connected: false,
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(connection) });
     const result = await handleDisconnectSignal(fake.asRunner, {
       ...validBase,
       nodePath: 'root/Button',
@@ -782,15 +880,9 @@ describe('handleDisconnectSignal', () => {
       targetNodePath: 'root/Receiver',
       method: '_on_pressed',
     });
-    expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('disconnected');
+    expect(expectMatchesOutputSchema('disconnect_signal', result)).toEqual(connection);
   });
 });
-
-// ---------------------------------------------------------------------------
-// handleGetNodeSignals
-// ---------------------------------------------------------------------------
 
 describe('handleGetNodeSignals', () => {
   it('rejects missing projectPath', async () => {
@@ -869,5 +961,22 @@ describe('handleGetNodeSignals', () => {
     const parsed = JSON.parse(text);
     expect(parsed.nodePath).toBe('root/Button');
     expect(parsed.signals[0].name).toBe('pressed');
+  });
+});
+
+describe('attach_script accepts every project path spelling', () => {
+  it.each([
+    ['res://', (p: string) => `res://${p}`],
+    ['absolute', (p: string) => join(fixtureProjectPath, p)],
+  ] as const)('scenePath and scriptPath as %s are forwarded relative', async (_l, spell) => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleAttachScript(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: spell(fixtureScenePath),
+      nodePath: 'root/Node',
+      scriptPath: spell('placeholder.gd'),
+    });
+    expect(fake.calls[0]?.params.scenePath).toBe(fixtureScenePath);
+    expect(fake.calls[0]?.params.scriptPath).toBe('placeholder.gd');
   });
 });

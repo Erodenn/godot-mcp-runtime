@@ -1,40 +1,5 @@
-/**
- * Integration tests for the reactive import-on-demand behavior.
- *
- * Context: on a fresh project, `.godot/imported` does not exist and headless
- * Godot runs no import step: `ResourceLoader.load` fails on real files
- * sitting on disk (`res://assets/paddle.svg`, even `icon.svg`). Worse, a scene
- * that references an unimported texture loads with `null` and auto-save
- * silently strips the reference from the .tscn.
- *
- * The fix: `load_scene_instance` in godot_operations.gd probes ext_resources
- * before loading; if `ResourceLoader.exists(dep)` is false while
- * `FileAccess.file_exists(dep)` is true, it emits
- * `[IMPORT_NEEDED] <scene>: <files>` and returns null. TS catches the marker
- * in stderr, runs the import step, and retries the operation once. The signal
- * is self-terminating: failed imports still write `.import` sidecars, so the
- * same asset is never probed again and instead reports as a broken asset.
- *
- * A dependency that is missing from disk entirely (not just unimported) is a
- * different failure: the scene load is refused outright rather than fed into
- * the import retry, so the reference is never silently stripped on save.
- *
- * Rules:
- * - a fresh project with a new PNG asset: a scene op emits [IMPORT_NEEDED]
- *   rather than a plain failure
- * - the same holds for a uid-form dependency string (every scene saved by
- *   the Godot editor uses this form, not the bare res:// form)
- * - a scene referencing a file that does not exist on disk at all is refused
- *   outright, not imported-then-stripped
- * - after import_assets, the same op succeeds and .godot/imported exists
- * - a warm project still catches a first-time reference to a brand new,
- *   never-imported asset (load_sprite naming a texture with no prior deps)
- * - GodotRunner.importAssets() throws on individual import failures
- *   (Godot exits 0 even when assets fail: stderr is the only signal)
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
+// On a fresh project headless Godot runs no import step, so ResourceLoader.load fails on unimported files and auto-save silently strips their references.
+// importAssets() throws on individual failures because Godot exits 0 even when assets fail; stderr is the only signal.
 
 import { describe, beforeAll, expect } from 'vitest';
 import { cpSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
@@ -46,7 +11,6 @@ import { minimalPng, invalidPng } from '../helpers/png-fixtures.js';
 import { stripExitLeakNoise } from '../helpers/engine-noise.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 
-/** Integration tests spawn a real Godot process; give them room to run. */
 const IMPORT_TEST_TIMEOUT_MS = 180000;
 
 let runner: GodotRunner;
@@ -65,23 +29,16 @@ describe('reactive import on demand (integration)', () => {
       const project = tmp.make('godot-mcp-test-');
       cpSync(fixtureProjectPath, project, { recursive: true });
 
-      // New asset that was never imported.
       const assetsDir = join(project, 'assets');
       mkdirSync(assetsDir, { recursive: true });
       writeFileSync(join(assetsDir, 'test_texture.png'), minimalPng());
 
-      // The committed fixture ships an intentionally-invalid placeholder.png
-      // (see the "Error importing" control case). importAssets() treats any
-      // individual import failure as an error, so give the temp copy a valid
-      // one: this test is about the cold-import flow, not broken assets.
+      // The committed placeholder.png is intentionally invalid and importAssets() treats any import failure as an error, so give the copy a valid one.
       writeFileSync(join(project, 'placeholder.png'), minimalPng());
 
-      // Fresh copy: strip any committed .godot/imported so the project starts cold.
+      // Strip any committed .godot/imported so the project starts cold.
       rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
 
-      // Reference the unimported texture from the scene: the cold-state bug
-      // shape: file on disk, no import artifacts, scene ops would silently
-      // strip the reference on save.
       writeFileSync(
         join(project, 'main.tscn'),
         [
@@ -97,7 +54,6 @@ describe('reactive import on demand (integration)', () => {
         ].join('\n'),
       );
 
-      // A scene operation on the cold project: expect the marker, not a plain failure.
       const { stdout, stderr } = await runner.executeOperation(
         'get_scene_tree',
         { scenePath: 'main.tscn' },
@@ -107,7 +63,6 @@ describe('reactive import on demand (integration)', () => {
       expect(stderr).toContain('[IMPORT_NEEDED]');
       expect(stderr).toContain('res://assets/test_texture.png');
 
-      // Import, then the same operation succeeds.
       await runner.importAssets(project);
       expect(existsSync(join(project, '.godot', 'imported'))).toBe(true);
       const retry = await runner.executeOperation(
@@ -117,7 +72,6 @@ describe('reactive import on demand (integration)', () => {
       );
       expect(retry.stdout.trim()).not.toBe('');
 
-      // Idempotent re-run.
       await runner.importAssets(project);
     },
     IMPORT_TEST_TIMEOUT_MS,
@@ -203,12 +157,10 @@ describe('reactive import on demand (integration)', () => {
       cpSync(fixtureProjectPath, project, { recursive: true });
       writeFileSync(join(project, 'placeholder.png'), minimalPng());
 
-      // Warm the project up first: no texture refs in main.tscn yet.
       await runner.importAssets(project);
       expect(existsSync(join(project, '.godot', 'imported'))).toBe(true);
 
-      // Now add a brand new asset the scene-load probe never saw (it wasn't
-      // a dependency of anything at import time).
+      // Added after warm-up, so the scene-load probe never saw it as a dependency.
       const assetsDir = join(project, 'assets');
       mkdirSync(assetsDir, { recursive: true });
       writeFileSync(join(assetsDir, 'new_texture.png'), minimalPng());

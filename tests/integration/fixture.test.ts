@@ -20,9 +20,11 @@ describe('tests/fixtures/godot-project: fixture health', () => {
     expect(existsSync(join(fixturePath, 'main.tscn'))).toBe(true);
   });
 
-  // The three cases below guard the simulate_input probe fixture. Without them
-  // a missing or renamed file surfaces only as opaque Godot failures inside
-  // integration/simulate-input-observed.test.ts.
+  it('blank.tscn exists alongside main.tscn', () => {
+    expect(existsSync(join(fixturePath, 'blank.tscn'))).toBe(true);
+  });
+
+  // The three cases below guard the simulate_input probe fixture, whose absence would surface only as opaque Godot failures.
   it('input_probe.tscn exists alongside main.tscn', () => {
     expect(existsSync(join(fixturePath, 'input_probe.tscn'))).toBe(true);
   });
@@ -37,5 +39,56 @@ describe('tests/fixtures/godot-project: fixture health', () => {
     const content = readFileSync(join(fixturePath, 'project.godot'), 'utf8');
     expect(content).toContain('probe_move');
     expect(content).toContain('"physical_keycode":87');
+  });
+
+  it('motion_animated.tscn references motion_animated.gd, which exists', () => {
+    const content = readFileSync(join(fixturePath, 'motion_animated.tscn'), 'utf8');
+    expect(content).toContain('res://motion_animated.gd');
+    expect(existsSync(join(fixturePath, 'motion_animated.gd'))).toBe(true);
+  });
+
+  it('motion_static.tscn exists alongside main.tscn', () => {
+    expect(existsSync(join(fixturePath, 'motion_static.tscn'))).toBe(true);
+  });
+});
+
+describe('tests/fixtures/godot-authored-project: fixture health', () => {
+  const authoredPath = join(here, '..', 'fixtures', 'godot-authored-project');
+  const authoredFiles = [
+    'project.godot',
+    'game_state.gd',
+    'player.gd',
+    'player.gd.uid',
+    'player.tscn',
+    'base_unit.tscn',
+    'derived_unit.tscn',
+    'host.tscn',
+    'inventory.gd',
+    'inventory.tscn',
+    'broken_script.gd',
+    'broken_script.tscn',
+    'tinted_unit.tscn',
+    'tinted_host.tscn',
+    'typed_values.gd',
+    'typed_values.tscn',
+    'spawner.gd',
+    'spawner.tscn',
+    'unbind_host.gd',
+    'unbind_host.tscn',
+    'notes.txt',
+  ];
+
+  it.each(authoredFiles)('%s exists', (file) => {
+    expect(existsSync(join(authoredPath, file))).toBe(true);
+  });
+
+  it('player.tscn header carries the scene uid', () => {
+    const content = readFileSync(join(authoredPath, 'player.tscn'), 'utf8');
+    expect(content.split('\n')[0]).toContain('uid="uid://clomui4eibwiq"');
+  });
+
+  it('project.godot registers the GameState autoload', () => {
+    const content = readFileSync(join(authoredPath, 'project.godot'), 'utf8');
+    expect(content).toContain('GameState="*res://game_state.gd"');
   });
 });

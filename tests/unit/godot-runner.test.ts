@@ -5,14 +5,21 @@ import {
   convertCamelToSnakeCase,
   OPAQUE_VALUE_KEYS,
 } from '../../src/utils/parameter-conversion.js';
+import { validatePath, validateNodePath, isUnderDir } from '../../src/utils/path-validation.js';
 import {
-  validatePath,
-  validateSubPath,
-  validateNodePath,
-  isUnderDir,
-} from '../../src/utils/path-validation.js';
-import { extractGdError, createErrorResponse } from '../../src/utils/error-response.js';
-import { extractJson, cleanStdout } from '../../src/utils/output-parsing.js';
+  extractGdError,
+  createErrorResponse,
+  STDERR_TAIL_LINES,
+} from '../../src/utils/error-response.js';
+import {
+  extractJson,
+  cleanStdout,
+  OPERATION_RESULT_SENTINEL,
+  OPERATION_RESULT_TOKEN_END,
+} from '../../src/utils/output-parsing.js';
+
+const RUN_TOKEN = '0123456789abcdef0123456789abcdef';
+const RESULT_FRAME = `${OPERATION_RESULT_SENTINEL}${RUN_TOKEN}${OPERATION_RESULT_TOKEN_END}`;
 
 describe('normalizeParameters', () => {
   it('converts known snake_case keys to camelCase', () => {
@@ -72,9 +79,8 @@ describe('normalizeParameters', () => {
   });
 
   it('converts a sibling structural key while leaving the value subtree alone', () => {
-    // The shape a set_node_properties update actually arrives in: the keys the
-    // user authored inside `value` are a shader uniform name and must reach
-    // Godot byte for byte, while `node_path` beside it is ours to rename.
+    // The shape set_node_properties arrives in: keys inside `value` are a shader uniform name and must reach Godot byte for byte,
+    // while `node_path` beside it is ours to rename.
     const input = {
       node_path: 'root/Sprite',
       property: 'material',
@@ -272,67 +278,6 @@ describe('validatePath', () => {
   });
 });
 
-describe('validateSubPath', () => {
-  const project = resolve('/project');
-
-  it('rejects empty paths', () => {
-    expect(validateSubPath(project, '')).toBe(false);
-  });
-
-  it('rejects paths containing ..', () => {
-    expect(validateSubPath(project, '../etc/passwd')).toBe(false);
-    expect(validateSubPath(project, 'foo/../../bar')).toBe(false);
-  });
-
-  it('rejects absolute paths that escape the project', () => {
-    expect(validateSubPath(project, '/etc/passwd')).toBe(false);
-    expect(validateSubPath(project, resolve('/elsewhere/file.gd'))).toBe(false);
-  });
-
-  it('accepts simple sub-paths', () => {
-    expect(validateSubPath(project, 'scenes/main.tscn')).toBe(true);
-  });
-
-  it('accepts nested sub-paths', () => {
-    expect(validateSubPath(project, 'a/b/c/d.gd')).toBe(true);
-  });
-
-  it('accepts an absolute path that resolves inside the project', () => {
-    const inside = resolve(project, 'sub/file.gd');
-    expect(validateSubPath(project, inside)).toBe(true);
-  });
-
-  it('tolerates a leading res:// prefix', () => {
-    expect(validateSubPath(project, 'res://autoload/foo.gd')).toBe(true);
-  });
-
-  it('rejects a res:// path that escapes via ..', () => {
-    expect(validateSubPath(project, 'res://../escape.gd')).toBe(false);
-  });
-
-  it('rejects a res:// prefix on its own', () => {
-    expect(validateSubPath(project, 'res://')).toBe(false);
-  });
-
-  it('does not match a sibling directory with the same prefix', () => {
-    // path.resolve('/project', '../project-evil') would equal '/project-evil',
-    // which must not pass the startsWith(projectRoot + sep) check.
-    expect(validateSubPath(project, '../project-evil/file.gd')).toBe(false);
-  });
-
-  // POSIX-only: on Windows `resolve('/')` returns the current drive root
-  // (e.g. `C:\\`), so `projectRoot === sep` never holds and the new branch
-  // is unreachable. The regression only matters on POSIX-style roots.
-  const itPosix = process.platform === 'win32' ? it.skip : it;
-  itPosix('handles projectRoot === filesystem root without breaking the prefix check', () => {
-    // Without the tail special-case, projectRoot + sep would be '//' and every
-    // absolute path under '/' would be rejected because '/etc/passwd' does not
-    // start with '//'. The tail computation must collapse to sep so paths
-    // beneath the filesystem root resolve correctly.
-    expect(validateSubPath(sep, '/etc/passwd')).toBe(true);
-  });
-});
-
 describe('validateNodePath', () => {
   it('accepts well-formed relative scene-tree paths', () => {
     expect(validateNodePath('root/Player')).toBe(true);
@@ -387,8 +332,29 @@ describe('extractGdError', () => {
     expect(extractGdError(stderr)).toBe('something broke');
   });
 
-  it('falls back to a generic message when no [ERROR] line present', () => {
-    expect(extractGdError('just noise\n[INFO] ok')).toBe('see get_debug_output for details');
+  it('says no reason was given and carries the end of stderr when no [ERROR] line is present', () => {
+    // Red when the bare message is returned: the engine's last lines are the
+    // only account of why the run stopped.
+    const fallback = extractGdError('just noise\n\n[INFO] ok\n');
+    expect(fallback).toBe(
+      'the operation gave no reason (it printed no [ERROR] line)\nstderr (last lines): just noise\n[INFO] ok',
+    );
+    // get_debug_output reads a runtime session, never a headless run, so the
+    // fallback must not send the caller there.
+    expect(fallback).not.toContain('get_debug_output');
+  });
+
+  it('keeps only the last lines of a long stderr, skipping blank ones', () => {
+    const lines = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`);
+    const fallback = extractGdError(lines.join('\n\n'));
+    expect(fallback).toContain(lines.slice(-STDERR_TAIL_LINES).join('\n'));
+    expect(fallback).not.toContain(`line ${12 - STDERR_TAIL_LINES}\n`);
+  });
+
+  it('says stderr was empty when it was', () => {
+    expect(extractGdError(' \n')).toBe(
+      'the operation gave no reason (it printed no [ERROR] line); its stderr was empty',
+    );
   });
 
   it('strips the prefix correctly when [ERROR] has surrounding context', () => {
@@ -414,44 +380,48 @@ describe('createErrorResponse', () => {
 });
 
 describe('extractJson', () => {
-  it('strips Godot version banner before JSON object', () => {
-    const out = 'Godot Engine v4.5.stable\n{"ok": true}';
+  it('strips Godot version banner before a sentinel payload line', () => {
+    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
     expect(JSON.parse(extractJson(out))).toEqual({ ok: true });
   });
 
-  it('strips banner before JSON array', () => {
-    const out = 'Godot Engine v4.5.stable\n[1, 2, 3]';
+  it('returns an array payload from a sentinel line', () => {
+    const out = `Godot Engine v4.5.stable\n${OPERATION_RESULT_SENTINEL}[1, 2, 3]`;
     expect(JSON.parse(extractJson(out))).toEqual([1, 2, 3]);
   });
 
-  it('returns input unchanged when no JSON present', () => {
+  it('returns input unchanged when no sentinel line is present', () => {
     expect(extractJson('just text, no json')).toBe('just text, no json');
   });
 
-  it('parses cleanly when no bracket-noise precedes the JSON', () => {
-    const out = 'INFO: starting up\n{"ok": true}';
+  it('parses cleanly when no bracket-noise surrounds the payload', () => {
+    const out = `INFO: starting up\n${OPERATION_RESULT_SENTINEL}{"ok": true}`;
     expect(JSON.parse(extractJson(out))).toEqual({ ok: true });
   });
 });
 
 describe('cleanStdout', () => {
-  it('routes JSON-object output through extractJson (strips banner)', () => {
-    const out = 'Godot Engine v4.5.stable\nINFO line\n{"ok": true}';
-    expect(JSON.parse(cleanStdout(out))).toEqual({ ok: true });
+  it('reduces output with a sentinel line to that line (strips banner and noise)', () => {
+    const out = `Godot Engine v4.5.stable\nINFO line\n${RESULT_FRAME}{"ok": true}`;
+    expect(JSON.parse(extractJson(cleanStdout(out, RUN_TOKEN)))).toEqual({ ok: true });
   });
 
-  it('routes JSON-array output through extractJson (no `{` present)', () => {
-    const out = 'Godot Engine v4.5.stable\n[1, 2, 3]';
-    expect(JSON.parse(cleanStdout(out))).toEqual([1, 2, 3]);
+  it('keeps a sentinel array payload (no `{` present)', () => {
+    const out = `Godot Engine v4.5.stable\n${RESULT_FRAME}[1, 2, 3]`;
+    expect(JSON.parse(extractJson(cleanStdout(out, RUN_TOKEN)))).toEqual([1, 2, 3]);
   });
 
-  it('routes plain non-JSON output through cleanOutput (drops banner)', () => {
-    // No `{` or `[` anywhere: takes the cleanOutput branch.
+  it('routes output without a sentinel line through cleanOutput (drops banner)', () => {
     const out = 'Godot Engine v4.5.stable\nplain success';
-    expect(cleanStdout(out)).toBe('plain success');
+    expect(cleanStdout(out, RUN_TOKEN)).toBe('plain success');
+  });
+
+  it('does not treat bracketed lines without a sentinel as a payload', () => {
+    const out = 'Godot Engine v4.5.stable\n[Audio] ready\n{"a": 1}';
+    expect(cleanStdout(out, RUN_TOKEN)).toBe('[Audio] ready\n{"a": 1}');
   });
 
   it('handles empty stdout', () => {
-    expect(cleanStdout('')).toBe('');
+    expect(cleanStdout('', RUN_TOKEN)).toBe('');
   });
 });

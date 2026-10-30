@@ -1,0 +1,16 @@
+config_version=5
+
+[application]
+
+config/name="godot-mcp-runtime authored fixture"
+run/main_scene="res://player.tscn"
+config/features=PackedStringArray("4.5", "GL Compatibility")
+
+[autoload]
+
+GameState="*res://game_state.gd"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
