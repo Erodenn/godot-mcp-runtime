@@ -39,7 +39,7 @@ export const allToolDefinitions = [
   ...validateToolDefinitions,
 ];
 
-export const serverInstructions = `Godot MCP Server - AI-driven Godot 4.x project manipulation.
+export const serverInstructions = `Godot MCP Server - AI-driven Godot 4.5+ project manipulation.
 
 Tool categories:
 - Project management: launch_editor, run_project, switch_project, stop_project, get_debug_output, list_projects, check_project
