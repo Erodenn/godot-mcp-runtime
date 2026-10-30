@@ -314,7 +314,15 @@ export const projectToolDefinitions = [
   },
 ] as const satisfies readonly ToolDefinition[];
 
-const PROJECT_SCAN_BLACKLIST = new Set(['.git', '.godot', '.mcp', 'node_modules', '.svn', '.hg']);
+const PROJECT_SCAN_BLACKLIST = new Set([
+  '.git',
+  '.godot',
+  '.mcp',
+  '.claude',
+  'node_modules',
+  '.svn',
+  '.hg',
+]);
 
 const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
 

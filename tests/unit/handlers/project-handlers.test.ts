@@ -412,7 +412,7 @@ describe('handleListProjects', () => {
   });
 
   it('descends into dot-prefixed project dirs that are not on the blacklist', async () => {
-    // Only known noise dirs (.git, .godot, .mcp, node_modules, .svn, .hg) are skipped, not every dot-prefixed one.
+    // Only known noise dirs (.git, .godot, .mcp, .claude, node_modules, .svn, .hg) are skipped, not every dot-prefixed one.
     const parent = makeTmpEmptyDir();
     const dotProject = join(parent, '.dot-project');
     mkdirSync(dotProject, { recursive: true });
@@ -428,6 +428,18 @@ describe('handleListProjects', () => {
     const text = unwrap(result).content[0].text;
     expect(text).toContain('.dot-project');
     expect(text).not.toContain('.git');
+  });
+
+  // Red when '.claude' leaves the scan blacklist: agent worktree copies of a project would be listed.
+  it('does not descend into .claude, where agent worktrees keep copies of the project', async () => {
+    const parent = makeTmpEmptyDir();
+    const worktreeCopy = join(parent, '.claude', 'worktrees', 'agent-copy');
+    mkdirSync(worktreeCopy, { recursive: true });
+    writeFileSync(join(worktreeCopy, 'project.godot'), 'config_version=5\n', 'utf8');
+
+    const result = await handleListProjects({ directory: parent, recursive: true });
+    expect(hasError(result)).toBe(false);
+    expect(expectMatchesOutputSchema('list_projects', result)).toEqual({ projects: [] });
   });
 });
 
