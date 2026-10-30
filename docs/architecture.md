@@ -2,7 +2,8 @@
 
 ```
 src/
-├── index.ts                # MCP server entry point, server setup
+├── index.ts                # Bin entry: constructs and runs the server, nothing else
+├── server.ts               # GodotMcpServer, allToolDefinitions and serverInstructions; importing it starts nothing
 ├── dispatch.ts             # Tool-name → handler dispatch table
 ├── mcp.types.ts            # Shared MCP-contract types (OperationParams, ToolDefinition, ToolResponse, ToolHandler)
 ├── tools/

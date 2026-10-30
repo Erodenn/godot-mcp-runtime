@@ -2,7 +2,7 @@
 
 import Ajv from 'ajv';
 import { expect } from 'vitest';
-import { allToolDefinitions } from '../../src/index.js';
+import { allToolDefinitions } from '../../src/server.js';
 import { hasError, unwrap } from './assertions.js';
 
 const ajv = new Ajv({ strict: false });

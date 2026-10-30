@@ -133,9 +133,9 @@ When adding a new tool that forwards GDScript to the bridge, route it through th
 
 ### MCP SDK: `Server` vs `McpServer`
 
-`src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/server`, which the SDK marks `@deprecated` in favor of `McpServer`. This is deliberate, and the deprecation note itself reserves `Server` for "advanced use cases". Our 39 tools are hand-written JSON Schema `ToolDefinition` objects served through one dispatch table (`src/dispatch.ts`). `Server` lets `tools/list` and `tools/call` hand that table's definitions and results to the client unchanged. `McpServer` can accept JSON Schema too, but only by registering each tool individually, which would split the single table into per-tool registrations for no gain.
+`src/server.ts` imports the lower-level `Server` class from `@modelcontextprotocol/server`, which the SDK marks `@deprecated` in favor of `McpServer`. This is deliberate, and the deprecation note itself reserves `Server` for "advanced use cases". Our 39 tools are hand-written JSON Schema `ToolDefinition` objects served through one dispatch table (`src/dispatch.ts`). `Server` lets `tools/list` and `tools/call` hand that table's definitions and results to the client unchanged. `McpServer` can accept JSON Schema too, but only by registering each tool individually, which would split the single table into per-tool registrations for no gain.
 
-The strikethrough on the `Server` references in `src/index.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is not scheduled.
+The strikethrough on the `Server` references in `src/server.ts` is a suggestion-level diagnostic that `@ts-ignore` and `@ts-expect-error` don't suppress (those only target error-level diagnostics). It does not fail typecheck or build - leave it visible so any future genuine deprecation is not masked. Migration to `McpServer` is not scheduled.
 
 ## Adding a new tool
 
@@ -155,7 +155,7 @@ Tool descriptions ship on every handshake - they are the entire UI an agent sees
 
 ## Release process
 
-1. Bump version in `package.json`, `src/index.ts` and `server.json` (both its top-level `version` and `packages[].version`)
+1. Bump version in `package.json`, `src/server.ts` and `server.json` (both its top-level `version` and `packages[].version`)
 2. Re-record `docs/assets/demo.gif` if any tool behavior changed since the last release
 3. Write `.github/release-notes/vX.Y.Z.md` when the release has something a human should read (new tools, changed behavior, a migration). Keep it to the important changes, grouped, and link a major release's full before-and-after list in `docs/migration-X.0.md` instead of inlining it. The publish job prepends the notes above the generated notes and fails before `npm publish` if the combined body exceeds GitHub's 125,000-character limit; a unit test caps each notes file at 25,000.
 4. Commit and push to `main`

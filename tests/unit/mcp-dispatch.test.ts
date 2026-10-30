@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 
-import { allToolDefinitions, serverInstructions } from '../../src/index.js';
+import { allToolDefinitions, serverInstructions } from '../../src/server.js';
 import { toolDispatch, dispatchToolCall } from '../../src/dispatch.js';
 import type { GodotRunner } from '../../src/utils/godot-runner.js';
 

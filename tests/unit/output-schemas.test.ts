@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Ajv from 'ajv';
 import { resolve } from 'path';
-import { allToolDefinitions } from '../../src/index.js';
+import { allToolDefinitions } from '../../src/server.js';
 import type { ToolDefinition } from '../../src/mcp.types.js';
 import { handleCheckProject } from '../../src/tools/project-tools.js';
 import { createRuntimeFake } from '../helpers/runtime-fakes.js';

@@ -15,7 +15,7 @@ import { createFakeRunner } from '../../helpers/fake-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { fixtureProjectPath, fixtureScenePath } from '../../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
-import { allToolDefinitions } from '../../../src/index.js';
+import { allToolDefinitions } from '../../../src/server.js';
 
 /** The property names a tool's outputSchema declares for one entry of its `results` array. */
 function declaredResultFields(toolName: string): string[] {

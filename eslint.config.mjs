@@ -89,8 +89,8 @@ export default [
     },
   },
   {
-    // index.ts is the bin entry — main module, not imported. No default export needed but allow if added.
-    files: ['src/index.ts'],
+    // index.ts is the bin entry and server.ts holds the startup and shutdown logging; both write to stderr directly.
+    files: ['src/index.ts', 'src/server.ts'],
     rules: {
       'no-console': 'off', // entry point bootstrapping uses console.error directly
     },
