@@ -80,7 +80,7 @@ The server rejects the call. The bridge never sees the script (or the project ne
 
 ### Non-literal indirection
 
-These dispatch primitives fire when the call's **whole first argument** does not classify as a lone string literal - not just its first token. `load("res://" + evil_var)` is non-literal (the argument is a string concatenated with a variable) even though a string literal appears first; only a call whose first argument is a single bare string token, like `load("res://main.tscn")`, classifies as literal and drops to Tier 3 (warn). A raw string (`load(r"res://main.tscn")`) and a StringName (`&"..."`) are single string tokens too.
+These dispatch primitives fire when the call's **whole first argument** is neither a lone string literal nor a lone number, `true`, `false` or `null` - not just its first token. `Object.call("exec" + "ute")` is non-literal (a string concatenated with another) even though a string literal appears first. A lone number or keyword cannot name a method, so `f.call(5)` matches nothing. The `load` and `preload` rules in "Non-literal resource loading" classify their argument the same way: only a single bare string token, like `load("res://main.tscn")`, is literal and drops to Tier 3 (warn). A raw string (`load(r"res://main.tscn")`) and a StringName (`&"..."`) are single string tokens too.
 
 | Primitive                                               | Rule ID                                                           |
 | ------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -92,7 +92,7 @@ These dispatch primitives fire when the call's **whole first argument** does not
 
 `<receiver>` is each of the seven names in `TIER1_DISPATCH_RECEIVERS` (`src/utils/run-script-policy.ts`): `Object`, `OS`, `Engine`, `ClassDB`, `ProjectSettings`, `ResourceLoader` and `GDExtensionManager`. That is 35 rules, one per receiver and dispatch method (`call`, `callv`, `call_deferred`, `call_deferred_thread_group`, `call_thread_safe`), for example `tier1.indirect.OS.callv.nonliteral`. These are the receivers that carry Tier 1 chain-prefix rules and can be handed a method name at runtime. `Node`, `ConfigFile` and `GDScript` carry Tier 1 rules too and are left out: they are classes, and their reflective use goes through an instance the scanner cannot see.
 
-The `load`, `preload`, `str_to_var` and `bytes_to_var_with_objects` rules (the `load` and `preload` ones are Tier 2, see "Non-literal resource loading") target GDScript global functions. They match only when the name is not preceded by a `.`: `save_manager.load(slot)`, `$SaveManager.load(slot)`, `get_node("Save").load(slot)` and `slots[i].load(d)` call a method of some other object and are not governed by them. The bare form `load(path_var)` is unchanged.
+The `load`, `preload`, `str_to_var` and `bytes_to_var_with_objects` rules (the `load` and `preload` ones are Tier 2, see "Non-literal resource loading") target GDScript global functions. They match only when the name is not preceded by a `.`: `save_manager.load(slot)`, `$SaveManager.load(slot)`, `get_node("Save").load(slot)` and `slots[i].load(d)` call a method of some other object and are not governed by them. The bare form `load(path_var)` still matches.
 
 **A lone number, `true`, `false` or `null` cannot name a method.** `f.call(5)` on a Callable passes 5 as an argument, so a first argument that is one of those tokens matches no dispatch rule: not the named-receiver ones, not the generic ones below, and the same for the other four dispatch methods. A computed argument (`f.call(x + 5)`) is still non-literal.
 
@@ -208,7 +208,7 @@ This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)
 
 ### Non-literal resource loading
 
-`load` and `preload` with a path that is not a lone string literal, and the same on `ResourceLoader`, ask before they run. They are Tier 2 because a computed path is ordinary game code (a save slot, a level list) and `ResourceLoader.load` is the same loader as `load()`. The rule IDs keep their `indirect` name.
+`load` and `preload` with a path that is not a lone string literal, and the same on `ResourceLoader`, ask before they run. They are Tier 2 because a computed path is ordinary game code (a save slot, a level list) and `ResourceLoader.load` is the same loader as `load()`.
 
 | Primitive                                           | Rule ID                                                          |
 | --------------------------------------------------- | ---------------------------------------------------------------- |
@@ -217,7 +217,7 @@ This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)
 | `ResourceLoader.load(non_literal)`                  | `tier2.indirect.ResourceLoader.load.nonliteral`                  |
 | `ResourceLoader.load_threaded_request(non_literal)` | `tier2.indirect.ResourceLoader.load_threaded_request.nonliteral` |
 
-Strict mode promotes these with every other Tier 2 match, so a project whose autoload or launch scene calls `load(path)` is still refused under `GODOT_MCP_STRICT`, exactly as it was when the rules were Tier 1. Demoting them changed what default mode asks, not what strict mode refuses; whether they should stay refused in strict mode is an open question.
+Strict mode promotes these with every other Tier 2 match, so a project whose autoload or launch scene calls `load(path)` is refused under `GODOT_MCP_STRICT`. Whether they should stay refused in strict mode is an open question.
 
 ---
 
