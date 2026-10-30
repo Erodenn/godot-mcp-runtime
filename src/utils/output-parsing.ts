@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { normalize, resolve } from 'path';
+import { foldsPathCase } from './path-validation.js';
 
 // A force-killed process can report a negative signal-kill status as unsigned 32-bit (4294967295 for -1); Godot's own exits are small, so codes at or above 2^31 are reinterpreted as signed.
 const INT32_SIGN_BOUNDARY = 2147483648; // 2^31
@@ -17,9 +18,13 @@ export function normalizeForCompare(p: string): string {
   return normalize(p).replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
-/** One key per project directory whichever way its path was spelled (absolute, separators, trailing slash and case folded); the session map and the bridge's orphan-repair cache both key on it. */
-export function projectPathKey(projectPath: string): string {
-  return normalizeForCompare(resolve(projectPath)).toLowerCase();
+/** One key per project directory whichever way its path was spelled (absolute, separators, trailing slash, and case where the platform folds it); the session map and the bridge's orphan-repair cache both key on it. On Linux two directories that differ only in case are two projects. */
+export function projectPathKey(
+  projectPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const key = normalizeForCompare(resolve(projectPath));
+  return foldsPathCase(platform) ? key.toLowerCase() : key;
 }
 
 /** Prefix of the one stdout line carrying a headless operation's JSON result; stdout is shared with the engine banner and project prints, so the payload is whatever follows it on its line.

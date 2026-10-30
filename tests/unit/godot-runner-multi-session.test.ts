@@ -35,6 +35,7 @@ const {
 } = await import('../../src/utils/godot-runner.js');
 const { BridgeAttachConflictError, BridgeAutoloadCollisionError, BridgeRegistryUnreadableError } =
   await import('../../src/utils/bridge-manager.js');
+const { foldsPathCase } = await import('../../src/utils/path-validation.js');
 type Runner = InstanceType<typeof GodotRunner>;
 type NoLiveCurrent = InstanceType<typeof NoLiveCurrentSessionError>;
 
@@ -421,10 +422,17 @@ describe('multi-project runtime sessions', () => {
     });
   });
 
-  it('session keys ignore case, separators and a trailing slash', async () => {
-    expect(sessionKey('C:\\Games\\Proj\\')).toBe(sessionKey('c:/games/proj'));
+  it('session keys ignore separators and a trailing slash', async () => {
+    expect(sessionKey(`${projectA}/`)).toBe(sessionKey(projectA));
     expect(sessionKey(projectA)).not.toBe(sessionKey(projectB));
 
+    await startProject(projectA, PORT_A);
+
+    expect(runner.getSessionInfo(`${projectA}/`)?.projectPath).toBe(projectA);
+    expect(runner.hasLiveSessionOnProject(`${projectA}/`)).toBe(true);
+  });
+
+  it.runIf(foldsPathCase())('session keys ignore case where the file system does', async () => {
     await startProject(projectA, PORT_A);
 
     expect(runner.getSessionInfo(`${projectA.toUpperCase()}/`)?.projectPath).toBe(projectA);

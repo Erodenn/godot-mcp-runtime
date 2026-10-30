@@ -171,13 +171,18 @@ export function isUnderDir(parent: string, child: string): boolean {
 /** Platforms whose usual file system treats names that differ only in case as one file. */
 const CASE_INSENSITIVE_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(['win32', 'darwin']);
 
-/** One key per file whichever way its path was spelled; case is folded only where names differing in case are one file (on Linux `Main.tscn` and `main.tscn` get two keys). Project directories use `projectPathKey`, which folds everywhere. */
+/** True where names that differ only in case are one file, so a path key folds case. */
+export function foldsPathCase(platform: NodeJS.Platform = process.platform): boolean {
+  return CASE_INSENSITIVE_PLATFORMS.has(platform);
+}
+
+/** One key per file whichever way its path was spelled; case is folded only where names differing in case are one file (on Linux `Main.tscn` and `main.tscn` get two keys). Project directories use `projectPathKey`, which folds the same way. */
 export function fileIdentityKey(
   absPath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
   const normalized = resolve(absPath).split(sep).join('/');
-  return CASE_INSENSITIVE_PLATFORMS.has(platform) ? normalized.toLowerCase() : normalized;
+  return foldsPathCase(platform) ? normalized.toLowerCase() : normalized;
 }
 
 /** The lines an error gives for a path `resolveProjectPath` refused: one wording everywhere so the accepted spellings read the same. */

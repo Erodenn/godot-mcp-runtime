@@ -8,6 +8,7 @@ import {
   normalizeExitCode,
   OPERATION_RESULT_SENTINEL,
   OPERATION_RESULT_TOKEN_END,
+  projectPathKey,
   stripOperationSentinel,
 } from '../../src/utils/output-parsing.js';
 
@@ -216,5 +217,22 @@ describe('normalizeExitCode', () => {
 
   it('leaves a normal small exit code unchanged', () => {
     expect(normalizeExitCode(255)).toBe(255);
+  });
+});
+
+describe('projectPathKey', () => {
+  it('folds case on the platforms whose file systems do', () => {
+    expect(projectPathKey('/home/o/Game', 'win32')).toBe(projectPathKey('/home/o/game', 'win32'));
+    expect(projectPathKey('/home/o/Game', 'darwin')).toBe(projectPathKey('/home/o/game', 'darwin'));
+  });
+
+  it('keeps two directories that differ only in case apart on Linux', () => {
+    expect(projectPathKey('/home/o/Game', 'linux')).not.toBe(
+      projectPathKey('/home/o/game', 'linux'),
+    );
+  });
+
+  it('ignores a trailing slash on every platform', () => {
+    expect(projectPathKey('/home/o/game/', 'linux')).toBe(projectPathKey('/home/o/game', 'linux'));
   });
 });
