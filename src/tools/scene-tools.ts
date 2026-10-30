@@ -77,7 +77,7 @@ export const sceneToolDefinitions = [
         parentNodePath: {
           type: 'string',
           description:
-            'Parent node path from scene root (e.g. "root/Player"). Defaults to the root node.',
+            'Parent node path from scene root (e.g. "root/Player"). Defaults to the root node; an empty string also means the root.',
         },
         position: {
           type: 'object',
@@ -462,7 +462,6 @@ export async function handleAddNode(
     nodeType: nodeTypeScene ? nodeTypeScene.relPath : nodeType.value,
     nodeName: nodeName.value,
   };
-  // Optional: an empty or null parentNodePath means the scene root, as an omitted one does.
   const parentNodePath = parseOptionalNodePath(args, 'parentNodePath');
   if (!parentNodePath.ok) return parentNodePath;
   if (parentNodePath.value !== undefined) params.parentNodePath = parentNodePath.value;
