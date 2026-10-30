@@ -22,8 +22,8 @@ describe('the @warning_ignore_start lists in the GDScript files', () => {
     expect(operations).toEqual(bridge);
   });
 
-  it('cover untyped_declaration, the setting strict typing raises', () => {
-    expect(bridge).toContain('untyped_declaration');
+  it('leave out untyped_declaration, which both scripts satisfy by typing every declaration', () => {
+    expect(bridge).not.toContain('untyped_declaration');
   });
 
   it('list no name twice', () => {

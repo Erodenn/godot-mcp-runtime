@@ -1009,6 +1009,13 @@ function validateCheckItems(checks: unknown): CheckValidationFailure | null {
         };
       }
     }
+    if (t === 'signals' && 'nodePath' in check && 'node_path' in check) {
+      return {
+        message:
+          'Invalid check: a signals check names its node once, as nodePath or node_path, not both',
+        solutions: ['Keep one of nodePath and node_path on the signals check'],
+      };
+    }
     if (t === 'structure') {
       const schemaError = validateSchemaNode((check as { schema?: unknown }).schema, 'schema');
       if (schemaError) return schemaError;

@@ -40,7 +40,6 @@ extends Node
 	"unsafe_method_access",
 	"unsafe_property_access",
 	"unsafe_void_return",
-	"untyped_declaration",
 	"unused_local_constant",
 	"unused_parameter",
 	"unused_private_class_variable",
@@ -55,6 +54,11 @@ extends Node
 const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
 # Attach-mode sessions get the token baked in by BridgeManager.inject; spawned sessions use the MCP_SESSION_TOKEN env var and leave this at its default.
 const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
+# The TCP ports a bridge or parent-watch port may name; an env value outside them is ignored.
+const PORT_MIN := 1
+const PORT_MAX := 65535
+# A letter's lowercase code point sits this far above its KEY_ keycode (KEY_A is 65, "a" is 97); a key event for a letter carries no unicode unless the caller gives one.
+const ASCII_LOWERCASE_OFFSET := 32
 # KEEP IN SYNC: screenshotsDir() in src/utils/artifact-paths.ts composes this directory; handleTakeScreenshot in src/tools/runtime-tools.ts refuses to read outside it.
 const SCREENSHOT_DIR_RES_PATH := "res://.mcp/godot-runtime/screenshots"
 # KEEP IN SYNC: SCREENSHOT_FRAME_RENDER_BUDGET_MS in src/tools/runtime-tools.ts.
@@ -137,6 +141,13 @@ const OVERSIZE_RESPONSE_ERROR := "The response is %d bytes, over the %d byte fra
 # Far enough off every monitor layout that no part of the window is on screen.
 const BACKGROUND_WINDOW_POSITION := Vector2i(-9999, -9999)
 
+# The kinds of input still_held can name; each is also the prefix of its spelling ("key:W"), and a candidate's two fields are the kind and the code Input is asked about.
+const HELD_KIND_KEY := "key"
+const HELD_KIND_MOUSE_BUTTON := "mouse_button"
+const HELD_KIND_ACTION := "action"
+const HELD_FIELD_KIND := "kind"
+const HELD_FIELD_CODE := "code"
+
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
 # A Callable connected to a signal must accept at least as many arguments as it emits, so each gets a lambda of matching arity. text_changed is absent on purpose: it fires per character and says nothing about activation.
@@ -165,6 +176,14 @@ class PeerState:
 	var expected_len: int = -1   # -1 = waiting on header
 	var handling: bool = false   # true while a command is awaiting a response
 	var authenticated: bool = false
+
+# One input batch's own state. Held apart from the bridge's members because an abandoned batch keeps running after the next command starts, and its tally must not land on that command's reply.
+class InputBatch:
+	extends RefCounted
+	# Inputs this batch pressed and did not release, keyed by the spelling still_held reports ("key:W"); each value says how to ask the engine whether it is still pressed.
+	var candidates: Dictionary = {}
+	# Non-finite numbers the batch's own samples replaced with null; added to the reply's count only when the batch reaches a reader.
+	var non_finite_count: int = 0
 
 var tcp_server: TCPServer
 var session_token: String = ""
@@ -208,10 +227,10 @@ func _ready() -> void:
 	var env_port := OS.get_environment("MCP_BRIDGE_PORT")
 	if env_port != "" and env_port.is_valid_int():
 		var parsed_port := int(env_port)
-		if parsed_port >= 1 and parsed_port <= 65535:
+		if _is_usable_port(parsed_port):
 			port = parsed_port
 	tcp_server = TCPServer.new()
-	var err = tcp_server.listen(port, "127.0.0.1")
+	var err: int = tcp_server.listen(port, "127.0.0.1")
 	if err != OK:
 		push_error("McpBridge: Failed to listen on port %d (error %d)" % [port, err])
 	else:
@@ -220,7 +239,7 @@ func _ready() -> void:
 	var watch_port_text := OS.get_environment(PARENT_WATCH_PORT_ENV)
 	if watch_port_text != "" and watch_port_text.is_valid_int():
 		var watch_port := int(watch_port_text)
-		if watch_port >= 1 and watch_port <= 65535:
+		if _is_usable_port(watch_port):
 			_start_parent_watch(watch_port)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
@@ -234,6 +253,9 @@ func _ready() -> void:
 			DisplayServer.window_set_size(size_before)
 		DisplayServer.window_set_position(BACKGROUND_WINDOW_POSITION)
 		print("McpBridge: Background mode active - window off-screen, mouse input passes through")
+
+func _is_usable_port(port: int) -> bool:
+	return port >= PORT_MIN and port <= PORT_MAX
 
 func _process(_delta: float) -> void:
 	if _parent_watch != null:
@@ -256,7 +278,7 @@ func _process(_delta: float) -> void:
 	var i := _peers.size()
 	while i > 0:
 		i -= 1
-		var peer = _peers[i]
+		var peer: PeerState = _peers[i]
 		_poll_peer(peer)
 		if peer.stream == null or peer.stream.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			_peers.remove_at(i)
@@ -345,20 +367,20 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 		_send_response(peer, {"error": "Non-JSON frame (expected a JSON command object)"})
 		return
 
-	var json = JSON.new()
-	var err = json.parse(data)
+	var json: JSON = JSON.new()
+	var err: int = json.parse(data)
 	if err != OK:
 		_send_response(peer, {"error": "Invalid JSON: %s" % json.get_error_message()})
 		return
 
-	var payload = json.data
+	var payload: Variant = json.data
 	if typeof(payload) != TYPE_DICTIONARY:
 		_send_response(peer, {"error": "Expected JSON object"})
 		return
 
 	# An accident guard, not a sandbox: it stops an unauthenticated local process, not a same-user one that reads the token. Fail-open only when no token is configured (standalone run).
 	if session_token != "":
-		var provided = payload.get("token", "")
+		var provided: Variant = payload.get("token", "")
 		if typeof(provided) != TYPE_STRING or provided != session_token:
 			_send_response(peer, {"error": UNAUTHORIZED_ERROR})
 			return
@@ -367,10 +389,10 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 		peer.authenticated = true
 		_input_batch_generation += 1
 
-	var command = payload.get("command", "")
+	var command: Variant = payload.get("command", "")
 	match command:
 		"input":
-			var actions = payload.get("actions", [])
+			var actions: Variant = payload.get("actions", [])
 			if typeof(actions) != TYPE_ARRAY:
 				_send_response(peer, {"error": "actions must be an array"})
 				return
@@ -485,16 +507,17 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	var batch_start_frame := Engine.get_process_frames()
 	var batch_start_ms := Time.get_ticks_msec()
 	var results: Array = []
-	# An ordered set of inputs this batch pressed and did not release; keys are reported verbatim in still_held.
-	var held := {}
+	var batch := InputBatch.new()
 	var stopped := false
+	var abandoned := false
 	var reply_bytes := 0
 
-	for i in actions.size():
-		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, held)
+	for i: int in actions.size():
+		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, batch)
 		# Cancellation point, BEFORE the sentinel print below: a mark emitted now would land in whatever attribution window is open, which is no longer this batch's. A wait can park here long enough for the client to give up.
 		if _input_batch_abandoned(peer, generation):
 			stopped = true
+			abandoned = true
 			break
 		if reply_bytes <= MAX_INPUT_REPLY_BYTES:
 			reply_bytes += JSON.stringify(entry).to_utf8_buffer().size()
@@ -509,22 +532,26 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 
 	# A runtime failure or a cancellation ends the batch: later actions depend on earlier ones.
 	if stopped:
-		for j in range(results.size(), actions.size()):
+		for j: int in range(results.size(), actions.size()):
 			var skipped_type := ""
-			var skipped_action = actions[j]
+			var skipped_action: Variant = actions[j]
 			if typeof(skipped_action) == TYPE_DICTIONARY:
 				skipped_type = str(skipped_action.get("type", ""))
 			results.append({"index": j, "type": skipped_type, "skipped": true})
 
 	var response := {"success": not stopped, "results": results}
-	if not held.is_empty():
-		response["still_held"] = held.keys()
+	# An abandoned batch has no reader: its tally is dropped, and the engine is not asked what it left pressed.
+	if not abandoned:
+		_non_finite_count += batch.non_finite_count
+		var still_held := _read_still_held(batch)
+		if not still_held.is_empty():
+			response["still_held"] = still_held
 	# Reached on the cancelled path too: _send_response skips the write when the peer is gone and clears peer.handling either way, which keeps the every-path-replies invariant without a finally block.
 	_send_response(peer, response)
 
 func _reduce_entry(entry: Dictionary) -> Dictionary:
 	var reduced := {"details_dropped": true}
-	for key in REDUCED_ENTRY_KEYS:
+	for key: String in REDUCED_ENTRY_KEYS:
 		if entry.has(key):
 			reduced[key] = entry[key]
 	if reduced.has("error"):
@@ -547,8 +574,8 @@ func _validate_input_batch(actions: Array, watch: Variant) -> String:
 	var watch_list: Array = watch
 	if watch_list.size() > MAX_WATCH_ENTRIES:
 		return "watch accepts at most %d entries (got %d)" % [MAX_WATCH_ENTRIES, watch_list.size()]
-	for i in watch_list.size():
-		var spec = watch_list[i]
+	for i: int in watch_list.size():
+		var spec: Variant = watch_list[i]
 		if typeof(spec) != TYPE_STRING:
 			return "watch[%d]: must be a string of the form NodePath:property" % i
 		if _split_watch_spec(spec).is_empty():
@@ -558,12 +585,12 @@ func _validate_input_batch(actions: Array, watch: Variant) -> String:
 		return "the batch holds %d actions, over the %d one call may hold; split it across calls" % [actions.size(), MAX_BATCH_ACTIONS]
 
 	var total_wait_ms := 0.0
-	for i in actions.size():
-		var action = actions[i]
+	for i: int in actions.size():
+		var action: Variant = actions[i]
 		if typeof(action) != TYPE_DICTIONARY:
 			return "action %d: must be an object" % i
 		var dict: Dictionary = action
-		var type = dict.get("type", "")
+		var type: Variant = dict.get("type", "")
 		if typeof(type) != TYPE_STRING or not INPUT_ACTION_TYPES.has(type):
 			return "action %d: unknown type '%s'" % [i, str(type)]
 		var field_error := _validate_action_fields(i, type, dict)
@@ -592,24 +619,24 @@ func _validate_action_fields(index: int, type: String, action: Dictionary) -> St
 			return "action %d (%s): hold_ms must be between 0 and %d" % [index, type, MAX_HOLD_MS]
 
 	# Type-only: a field is checked wherever it appears, since rejecting a harmlessly ignored extra field would be a new refusal while a wrong type is a raise waiting to happen.
-	for field in ACTION_SCALAR_FIELD_TYPES:
+	for field: String in ACTION_SCALAR_FIELD_TYPES:
 		if not action.has(field):
 			continue
 		var expected: String = ACTION_SCALAR_FIELD_TYPES[field]
-		var value = action.get(field)
+		var value: Variant = action.get(field)
 		var field_ok := _is_number(value) if expected == ACTION_FIELD_NUMBER else typeof(value) == TYPE_BOOL
 		if not field_ok:
 			return "action %d (%s): %s must be a %s" % [index, type, field, expected]
 
 	match type:
 		"key":
-			var key_name = action.get("key", "")
+			var key_name: Variant = action.get("key", "")
 			if typeof(key_name) != TYPE_STRING or key_name == "":
 				return "action %d (key): key name is required" % index
 			if OS.find_keycode_from_string(key_name) == KEY_NONE:
 				return "action %d (key): unrecognized key name: '%s'" % [index, key_name]
 		"mouse_button", "click_element":
-			var button_name = action.get("button", "left")
+			var button_name: Variant = action.get("button", "left")
 			if typeof(button_name) != TYPE_STRING:
 				return "action %d (%s): button must be a string" % [index, type]
 			var resolved := _resolve_button_name(button_name)
@@ -619,17 +646,17 @@ func _validate_action_fields(index: int, type: String, action: Dictionary) -> St
 			if action.has("double_click") and typeof(action.get("double_click")) != TYPE_BOOL:
 				return "action %d (%s): double_click must be a boolean" % [index, type]
 			if type == "click_element":
-				var element = action.get("element", "")
+				var element: Variant = action.get("element", "")
 				if typeof(element) != TYPE_STRING or element == "":
 					return "action %d (click_element): element identifier is required" % index
 		"action":
-			var action_name = action.get("action", "")
+			var action_name: Variant = action.get("action", "")
 			if typeof(action_name) != TYPE_STRING or action_name == "":
 				return "action %d (action): action name is required" % index
 			if not InputMap.has_action(action_name):
 				return "action %d (action): unknown input action: '%s'" % [index, action_name]
 		"text":
-			var text_value = action.get("text", "")
+			var text_value: Variant = action.get("text", "")
 			if typeof(text_value) != TYPE_STRING or text_value == "":
 				return "action %d (text): text is required" % index
 			if (text_value as String).length() > MAX_TEXT_LENGTH:
@@ -656,7 +683,7 @@ func _is_number(value: Variant) -> bool:
 	return typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT
 
 # Order matters: the UI snapshot and observers come before injection, and every read comes after the settle frame because Input.parse_input_event is buffered.
-func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: int, batch_start_ms: int, held: Dictionary) -> Dictionary:
+func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: int, batch_start_ms: int, batch: InputBatch) -> Dictionary:
 	var dict: Dictionary = action
 	var type := str(dict.get("type", ""))
 	var entry := {"index": index, "type": type}
@@ -683,14 +710,16 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	# No observer is connected yet, so this early exit leaks nothing.
 	if entry.has("error"):
 		if not watch.is_empty():
+			var tally_before := _non_finite_count
 			entry["watch"] = _sample_watch(watch)
+			_move_tally_to_batch(batch, tally_before)
 		return _finish_entry(entry, batch_start_frame, batch_start_ms)
 
 	# Connected only on a click_element target and only for signals it declares; lambdas capture by value, so the sink is an Array. The pairs are kept so the disconnect undoes exactly what was done.
 	var observed: Array = []
 	var connections := {}
 	if target != null:
-		for signal_name in OBSERVED_SIGNAL_ARITY:
+		for signal_name: String in OBSERVED_SIGNAL_ARITY:
 			if not target.has_signal(signal_name):
 				continue
 			var observer := _make_signal_observer(signal_name, int(OBSERVED_SIGNAL_ARITY[signal_name]), observed)
@@ -705,7 +734,8 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var key_pressed: bool = dict.get("pressed")
 				_inject_key(dict, key_pressed)
-				_update_held(held, "key:%s" % str(dict.get("key", "")), key_pressed)
+				var held_keycode := OS.find_keycode_from_string(str(dict.get("key", "")))
+				_track_held(batch, HELD_KIND_KEY, OS.get_keycode_string(held_keycode), held_keycode, key_pressed)
 			else:
 				_inject_key(dict, true)
 				await _tap_hold(dict, true)
@@ -714,7 +744,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var button_pressed: bool = dict.get("pressed")
 				_inject_mouse_button(dict, button_pressed)
-				_update_held(held, "mouse_button:%s" % str(dict.get("button", "left")), button_pressed)
+				var held_button_name := str(dict.get("button", "left"))
+				var held_button: MouseButton = _resolve_button_name(held_button_name)[0]
+				_track_held(batch, HELD_KIND_MOUSE_BUTTON, held_button_name, held_button, button_pressed)
 			else:
 				_inject_mouse_button(dict, true)
 				await _tap_hold(dict, false)
@@ -730,7 +762,8 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var action_pressed: bool = dict.get("pressed")
 				_inject_action(dict, action_pressed)
-				_update_held(held, "action:%s" % str(dict.get("action", "")), action_pressed)
+				var held_action_name := str(dict.get("action", ""))
+				_track_held(batch, HELD_KIND_ACTION, held_action_name, held_action_name, action_pressed)
 			else:
 				_inject_action(dict, true)
 				await _tap_hold(dict, true)
@@ -740,7 +773,7 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 		"wait":
 			if dict.has("frames"):
 				var frames := int(dict.get("frames"))
-				for _n in frames:
+				for _n: int in frames:
 					await get_tree().process_frame
 			else:
 				await _wait_wall_clock_ms(float(dict.get("ms")))
@@ -754,13 +787,13 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	var fired: Array = observed.duplicate()
 	if not fired.is_empty():
 		entry["signals"] = fired
-	for signal_name in connections:
+	for signal_name: String in connections:
 		var observer: Callable = connections[signal_name]
 		if is_instance_valid(target) and target.is_connected(signal_name, observer):
 			target.disconnect(signal_name, observer)
 
 	if type == "click_element" or type == "mouse_button":
-		var hit = _hit_control()
+		var hit: Variant = _hit_control()
 		if hit != null:
 			var hit_control: Control = hit
 			entry["hit"] = str(hit_control.get_path())
@@ -780,7 +813,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	if type == "mouse_motion":
 		var viewport := get_viewport()
 		if viewport != null:
+			var position_tally_before := _non_finite_count
 			entry["position"] = _serialize_value(viewport.get_mouse_position())
+			_move_tally_to_batch(batch, position_tally_before)
 
 	if type == "text":
 		var focus_node := _focus_owner()
@@ -793,7 +828,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	if not changes.is_empty():
 		entry["changes"] = changes
 	if not watch.is_empty():
+		var watch_tally_before := _non_finite_count
 		entry["watch"] = _sample_watch(watch)
+		_move_tally_to_batch(batch, watch_tally_before)
 
 	return _finish_entry(entry, batch_start_frame, batch_start_ms)
 
@@ -813,11 +850,38 @@ func _make_signal_observer(signal_name: String, arity: int, sink: Array) -> Call
 		_:
 			return Callable()
 
-func _update_held(held: Dictionary, key: String, pressed: bool) -> void:
+# `input_name` is the canonical spelling of the input (the engine's keycode string for a key), so a press of "w" and a release of "W" are the same candidate.
+func _track_held(batch: InputBatch, kind: String, input_name: String, code: Variant, pressed: bool) -> void:
+	var spelling := "%s:%s" % [kind, input_name]
 	if pressed:
-		held[key] = true
+		batch.candidates[spelling] = {HELD_FIELD_KIND: kind, HELD_FIELD_CODE: code}
 	else:
-		held.erase(key)
+		batch.candidates.erase(spelling)
+
+# still_held is read from the engine, not from the request: a candidate is reported only when Input says it is pressed, in the order it was pressed. The state is the one _inject_* builds the event for; a key is asked by keycode and by physical keycode, as the event sets both.
+func _read_still_held(batch: InputBatch) -> Array:
+	# Parsed events are buffered; the state a read sees must include the last one.
+	Input.flush_buffered_events()
+	var held: Array = []
+	for spelling: String in batch.candidates:
+		var candidate: Dictionary = batch.candidates[spelling]
+		var code: Variant = candidate[HELD_FIELD_CODE]
+		var pressed := false
+		match candidate[HELD_FIELD_KIND]:
+			HELD_KIND_KEY:
+				pressed = Input.is_key_pressed(code) or Input.is_physical_key_pressed(code)
+			HELD_KIND_MOUSE_BUTTON:
+				pressed = Input.is_mouse_button_pressed(code)
+			HELD_KIND_ACTION:
+				pressed = Input.is_action_pressed(StringName(str(code)))
+		if pressed:
+			held.append(spelling)
+	return held
+
+# A serialization walk never awaits, so what it tallied since `before` is moved off the shared count at once: the batch adds it to its own reply, and a different command's reply never takes it.
+func _move_tally_to_batch(batch: InputBatch, before: int) -> void:
+	batch.non_finite_count += _non_finite_count - before
+	_non_finite_count = before
 
 # hold_ms wins when given. Key and action taps wait for one process frame AND one physics frame: a render frame at high fps can hold zero physics ticks and _physics_process polling would never see the press. Mouse taps keep a zero gap, like a real click.
 func _tap_hold(action: Dictionary, frame_gap: bool) -> void:
@@ -854,7 +918,7 @@ func _inject_key(action: Dictionary, pressed: bool) -> void:
 	if action.has("unicode"):
 		event.unicode = int(action.get("unicode"))
 	elif keycode >= KEY_A and keycode <= KEY_Z:
-		event.unicode = int(keycode) if event.shift_pressed else int(keycode) + 32
+		event.unicode = int(keycode) if event.shift_pressed else int(keycode) + ASCII_LOWERCASE_OFFSET
 	elif keycode >= KEY_0 and keycode <= KEY_9:
 		event.unicode = int(keycode)
 	Input.parse_input_event(event)
@@ -883,7 +947,7 @@ func _inject_mouse_button(action: Dictionary, pressed: bool) -> void:
 	Input.parse_input_event(event)
 
 func _inject_mouse_motion(action: Dictionary) -> void:
-	var event = InputEventMouseMotion.new()
+	var event: InputEventMouseMotion = InputEventMouseMotion.new()
 	event.position = Vector2(action.get("x", 0), action.get("y", 0))
 	event.global_position = event.position
 	event.relative = Vector2(action.get("relative_x", 0), action.get("relative_y", 0))
@@ -912,7 +976,7 @@ func _inject_click_element(action: Dictionary, target: Control, pressed: bool) -
 
 # One press+release pair per character, queued in one pass: parse_input_event preserves order and the focused text Control consumes the pairs in that order.
 func _inject_text(text: String) -> void:
-	for i in text.length():
+	for i: int in text.length():
 		var character := text.substr(i, 1)
 		var code := text.unicode_at(i)
 		# Derive a keycode where the character has an obvious key; a space or symbol still types, since text entry reads unicode.
@@ -937,7 +1001,7 @@ func _snapshot_ui() -> Dictionary:
 	var elements: Array[Dictionary] = []
 	_collect_control_nodes(get_tree().root, elements, true, "")
 	var snapshot := {}
-	for element in elements:
+	for element: Dictionary in elements:
 		snapshot[element["path"]] = {
 			"text": element.get("text", ""),
 			"disabled": element.get("disabled", false),
@@ -949,7 +1013,7 @@ func _diff_ui(before: Dictionary, after: Dictionary, pre_focus: String, pre_scen
 	var disappeared: Array = []
 	var changed: Array = []
 
-	for path in after:
+	for path: Variant in after:
 		if not before.has(path):
 			appeared.append(path)
 			continue
@@ -963,7 +1027,7 @@ func _diff_ui(before: Dictionary, after: Dictionary, pre_focus: String, pre_scen
 		if delta.size() > 1:
 			changed.append(delta)
 
-	for path in before:
+	for path: Variant in before:
 		if not after.has(path):
 			disappeared.append(path)
 
@@ -995,10 +1059,10 @@ func _put_capped(changes: Dictionary, key: String, values: Array) -> int:
 # Drops any path with an ancestor in the same list, so an overlay opening reports one path instead of every Control under it.
 func _collapse_subtrees(paths: Array) -> Array:
 	var kept: Array = []
-	for path in paths:
+	for path: Variant in paths:
 		var path_text := str(path)
 		var has_ancestor := false
-		for other in paths:
+		for other: Variant in paths:
 			var other_text := str(other)
 			if other_text != path_text and path_text.begins_with(other_text + "/"):
 				has_ancestor = true
@@ -1020,7 +1084,7 @@ func _split_watch_spec(spec: Variant) -> Array:
 # Watch samples never fail a batch: an unresolvable node or property reports null for that key.
 func _sample_watch(watch: Array) -> Dictionary:
 	var samples := {}
-	for spec in watch:
+	for spec: Variant in watch:
 		var key := str(spec)
 		samples[key] = _sample_one_watch(spec)
 	return samples
@@ -1036,7 +1100,7 @@ func _sample_one_watch(spec: Variant) -> Variant:
 
 # Replaces any running track. Each sample carries the engine process frame, the counter the profiler's frames use, so the Node side can place it on a capture's timeline; sampling runs from _process, so it continues while an input batch holds the peer.
 func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
-	var watch = payload.get("watch", [])
+	var watch: Variant = payload.get("watch", [])
 	if typeof(watch) != TYPE_ARRAY or (watch as Array).is_empty():
 		_send_response(peer, {"error": "watch must be a non-empty array of NodePath:property strings"})
 		return
@@ -1044,12 +1108,12 @@ func _handle_track_start(peer: PeerState, payload: Dictionary) -> void:
 	if watch_list.size() > MAX_TRACK_ENTRIES:
 		_send_response(peer, {"error": "track accepts at most %d entries (got %d)" % [MAX_TRACK_ENTRIES, watch_list.size()]})
 		return
-	for i in watch_list.size():
+	for i: int in watch_list.size():
 		if _split_watch_spec(watch_list[i]).is_empty():
 			_send_response(peer, {"error": "track[%d]: expected NodePath:property (got '%s')" % [i, str(watch_list[i])]})
 			return
-	var interval = payload.get("interval_ms", DEFAULT_TRACK_INTERVAL_MS)
-	var duration = payload.get("max_ms", DEFAULT_TRACK_DURATION_MS)
+	var interval: Variant = payload.get("interval_ms", DEFAULT_TRACK_INTERVAL_MS)
+	var duration: Variant = payload.get("max_ms", DEFAULT_TRACK_DURATION_MS)
 	if not _is_number(interval) or not _is_number(duration):
 		_send_response(peer, {"error": "interval_ms and max_ms must be numbers"})
 		return
@@ -1096,7 +1160,7 @@ func _hit_control() -> Variant:
 	var viewport := get_viewport()
 	if viewport == null or not viewport.has_method("gui_get_hovered_control"):
 		return null
-	var hovered = viewport.call("gui_get_hovered_control")
+	var hovered: Variant = viewport.call("gui_get_hovered_control")
 	# is_instance_valid as well as null: a handler may have freed the hovered control, a freed Object does not compare equal to null, and get_path() on it would take the coroutine down.
 	if hovered == null or not is_instance_valid(hovered):
 		return null
@@ -1121,8 +1185,17 @@ func _current_scene_path() -> String:
 	return str(scene.get_path())
 
 func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
-	var visible_only: bool = payload.get("visible_only", true)
-	var type_filter: String = payload.get("type_filter", "")
+	# Variant, then checked: a typed read of a wrong-typed field raises and the peer would wait out its timeout. The server validates both, so only a hand-driven bridge meets it.
+	var visible_only_field: Variant = payload.get("visible_only", true)
+	if typeof(visible_only_field) != TYPE_BOOL:
+		_send_response(peer, {"error": "visible_only must be a boolean"})
+		return
+	var type_filter_field: Variant = payload.get("type_filter", "")
+	if typeof(type_filter_field) != TYPE_STRING:
+		_send_response(peer, {"error": "type_filter must be a string"})
+		return
+	var visible_only: bool = visible_only_field
+	var type_filter: String = type_filter_field
 	# is_class() matches native class names only, so an unknown name can never match, and an empty list would read as "no such controls".
 	if type_filter != "":
 		if not ClassDB.class_exists(type_filter):
@@ -1152,7 +1225,7 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 		if visible_only and not ctrl.is_visible_in_tree():
 			return
 		if type_filter != "" and not ctrl.is_class(type_filter):
-			for child in node.get_children():
+			for child: Node in node.get_children():
 				_collect_control_nodes(child, elements, visible_only, type_filter)
 			return
 		var rect := ctrl.get_global_rect()
@@ -1184,7 +1257,7 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 		if ctrl.tooltip_text != "":
 			element["tooltip"] = ctrl.tooltip_text
 		elements.append(element)
-	for child in node.get_children():
+	for child: Node in node.get_children():
 		_collect_control_nodes(child, elements, visible_only, type_filter)
 
 func _find_control_by_identifier(identifier: String) -> Control:
@@ -1203,12 +1276,17 @@ func _find_control_by_identifier(identifier: String) -> Control:
 		if current is Control:
 			if String(current.name) == identifier:
 				return current as Control
-		for child in current.get_children():
+		for child: Node in current.get_children():
 			queue.append(child)
 	return null
 
 func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
-	var source: String = payload.get("source", "")
+	# Variant, then checked, as in _handle_get_ui_elements: a typed read of a wrong-typed field raises and no reply is sent.
+	var source_field: Variant = payload.get("source", "")
+	if typeof(source_field) != TYPE_STRING:
+		_send_response(peer, {"error": "source must be a string"})
+		return
+	var source: String = source_field
 	if source.strip_edges() == "":
 		_send_response(peer, {"error": "No script source provided"})
 		return
@@ -1226,7 +1304,7 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": signature_problem})
 		return
 
-	var instance = script.new()
+	var instance: Variant = script.new()
 	if instance == null:
 		_send_response(peer, {"error": "Failed to instantiate script"})
 		return
@@ -1239,21 +1317,24 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": RUN_SCRIPT_ENTRY_MISSING_ERROR})
 		return
 
-	# Awaited in case the script uses async/await; the argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states.
-	var result = await instance.execute(get_tree())
+	# The argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states. A coroutine returns its pending state, which the await resolves.
+	# A freed Object is never awaited: `await` raises on one ("Trying to await on a freed object."), the handler stops and no response is sent.
+	var result: Variant = instance.execute(get_tree())
+	if typeof(result) != TYPE_OBJECT or is_instance_valid(result):
+		result = await result
 
 	if instance is RefCounted:
 		instance = null
 	else:
 		instance.free()
 
-	var serialized = _serialize_value(result)
+	var serialized: Variant = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
 
 # The list runs from the script to its base scripts, so the first match is the one a call reaches.
 func _script_method_info(script: Script, method_name: String) -> Dictionary:
 	var methods: Array = script.get_script_method_list()
-	for method in methods:
+	for method: Variant in methods:
 		if typeof(method) == TYPE_DICTIONARY and str(method.get("name", "")) == method_name:
 			return method
 	return {}
@@ -1262,8 +1343,8 @@ func _script_method_info(script: Script, method_name: String) -> Dictionary:
 func _required_argument_count(method: Dictionary) -> int:
 	if not OS.has_feature("editor"):
 		return 0
-	var declared = method.get("args", [])
-	var defaults = method.get("default_args", [])
+	var declared: Variant = method.get("args", [])
+	var defaults: Variant = method.get("default_args", [])
 	if typeof(declared) != TYPE_ARRAY or typeof(defaults) != TYPE_ARRAY:
 		return 0
 	return maxi(declared.size() - defaults.size(), 0)
@@ -1281,14 +1362,14 @@ func _run_script_signature_problem(script: GDScript) -> String:
 	if entry.is_empty():
 		# Not declared by the script or its bases; has_method on the instance answers for a native method of that name.
 		return ""
-	var declared = entry.get("args", null)
+	var declared: Variant = entry.get("args", null)
 	if typeof(declared) != TYPE_ARRAY:
 		return ""
 	var required := _required_argument_count(entry)
 	if declared.size() < RUN_SCRIPT_ENTRY_ARGUMENT_COUNT or required > RUN_SCRIPT_ENTRY_ARGUMENT_COUNT:
 		return "execute is called with exactly one argument, the SceneTree, and this script's execute declares %d parameter(s), %d of them required. %s" % [declared.size(), required, RUN_SCRIPT_ENTRY_MISSING_ERROR]
 
-	var parameter = declared[0]
+	var parameter: Variant = declared[0]
 	if typeof(parameter) == TYPE_DICTIONARY:
 		var parameter_type: int = int(parameter.get("type", TYPE_NIL))
 		var parameter_class := str(parameter.get("class_name", ""))
@@ -1341,13 +1422,39 @@ func _take_serialize_element() -> bool:
 
 # Identity, not ==: == on a container that holds itself is the recursion this exists to stop.
 func _on_serialize_path(container: Variant) -> bool:
-	for ancestor in _serialize_path:
+	for ancestor: Variant in _serialize_path:
 		if is_same(ancestor, container):
 			return true
 	return false
 
+# Packed arrays that serialize as the plain array of their elements, the shape get_node_properties reads them in; a type absent here goes out as text.
+# KEEP IN SYNC: _PACKED_READ_TYPES in src/scripts/godot_operations.gd (tests/unit/bridge-keep-in-sync.test.ts compares the two lists).
+const _PACKED_READ_TYPES: Array = [
+	TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY,
+	TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY,
+	TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_VECTOR4_ARRAY,
+	TYPE_PACKED_COLOR_ARRAY,
+]
+
+# A packed array is a container for the bounds: it is cut at the depth limit and each element is charged against the element budget, with the same markers an Array gets. It cannot hold itself, and an element is never a container, so no path entry is needed. Indexed rather than converted, so a large sampled array costs only the elements the budget admits.
+func _serialize_packed(packed: Variant, depth: int) -> Variant:
+	if depth >= _serialize_depth_limit:
+		return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
+	var size: int = packed.size()
+	var result := []
+	for i: int in size:
+		if not _take_serialize_element():
+			result.append(TRUNCATED_ELEMENTS_MARKER % (size - i))
+			break
+		result.append(_serialize_bounded(packed[i], depth + 1))
+	return result
+
 # `depth` is how many containers enclose `value`; call through _serialize_value or _serialize_sample, which set the bounds.
+# Value shapes match _variant_to_json in src/scripts/godot_operations.gd (vectors as {x,y,..}, colors as {r,g,b,a}, packed arrays as arrays); only the bounds, the markers and the Object shapes differ.
 func _serialize_bounded(value: Variant, depth: int) -> Variant:
+	# A freed Object is not null and `is` raises on one; a track samples from _process, where that would raise every tick. Checked before the null test, so the answer does not hang on how == treats a freed Object.
+	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
+		return "<Freed Object>"
 	if value == null:
 		return null
 
@@ -1371,6 +1478,12 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 		TYPE_VECTOR3I:
 			var v: Vector3i = value
 			return {"x": v.x, "y": v.y, "z": v.z}
+		TYPE_VECTOR4:
+			var v: Vector4 = value
+			return {"x": _finite_or_null(v.x), "y": _finite_or_null(v.y), "z": _finite_or_null(v.z), "w": _finite_or_null(v.w)}
+		TYPE_VECTOR4I:
+			var v: Vector4i = value
+			return {"x": v.x, "y": v.y, "z": v.z, "w": v.w}
 		TYPE_COLOR:
 			var c: Color = value
 			return {"r": _finite_or_null(c.r), "g": _finite_or_null(c.g), "b": _finite_or_null(c.b), "a": _finite_or_null(c.a)}
@@ -1383,7 +1496,7 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			_serialize_path.append(d)
 			var result := {}
 			var taken := 0
-			for key in d:
+			for key: Variant in d:
 				if not _take_serialize_element():
 					result[TRUNCATED_ENTRIES_KEY] = TRUNCATED_ENTRIES_MARKER % (d.size() - taken)
 					break
@@ -1399,7 +1512,7 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 				return TRUNCATED_CYCLE_MARKER
 			_serialize_path.append(a)
 			var result := []
-			for i in a.size():
+			for i: int in a.size():
 				if not _take_serialize_element():
 					result.append(TRUNCATED_ELEMENTS_MARKER % (a.size() - i))
 					break
@@ -1407,9 +1520,6 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			_serialize_path.pop_back()
 			return result
 		TYPE_OBJECT:
-			# A freed Object is not null and `is` raises on one; a track samples from _process, where that would raise every tick.
-			if not is_instance_valid(value):
-				return "<Freed Object>"
 			if value is Node:
 				var node: Node = value
 				# get_path() on a node outside the tree prints an engine error, so that case gives "" without the call.
@@ -1421,7 +1531,9 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			else:
 				return _bound_text(str(value))
 		_:
-			# Everything else goes out as text (packed arrays included), so the string limit bounds a sampled PackedByteArray.
+			if typeof(value) in _PACKED_READ_TYPES:
+				return _serialize_packed(value, depth)
+			# Everything else goes out as text (Rect2, Quaternion, transforms, a packed type outside _PACKED_READ_TYPES), bounded by the string limit.
 			return _bound_text(str(value))
 
 func _handle_shutdown(peer: PeerState) -> void:
@@ -1458,7 +1570,7 @@ func _send_response(peer: PeerState, data: Dictionary) -> void:
 	peer.handling = false
 
 func _close_all_peers() -> void:
-	for peer in _peers:
+	for peer: PeerState in _peers:
 		if peer.stream != null:
 			peer.stream.disconnect_from_host()
 			peer.stream = null

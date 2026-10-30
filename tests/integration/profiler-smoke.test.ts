@@ -16,7 +16,7 @@ import {
   handleStartProfiler,
   handleStopProfiler,
 } from '../../src/tools/profiler-tools.js';
-import { hasError, unwrap } from '../helpers/assertions.js';
+import { errorText, hasError, unwrap } from '../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 
 interface CaptureShape {
@@ -55,6 +55,17 @@ interface CaptureShape {
     selfMs: number;
     percentOfFrame: number;
   }>;
+}
+
+const EXIT_WAIT_MS = 15000;
+const DISCONNECT_WAIT_MS = 10000;
+/** The solutions line `profile_disconnected` alone carries, so a different refusal cannot satisfy the match. */
+const DISCONNECT_SOLUTION = 'ended or dropped the debugger connection';
+
+function allText(result: unknown): string {
+  return unwrap(result)
+    .content.map((entry) => entry.text ?? '')
+    .join('\n');
 }
 
 describe('profiler smoke', () => {
@@ -212,6 +223,49 @@ describe('profiler smoke', () => {
       const capture = unwrap(stopped).structuredContent as unknown as CaptureShape;
       expect(capture.frames).toBeGreaterThan(0);
       expect(capture.rows.map((row) => row.function)).toContain('burn');
+    },
+    90000,
+  );
+
+  // Red when assertCanStart drops its closed/error check (profile_disconnected): the call then opens a capture on the dead socket and replaces the finished one, or waits out the frame timeout instead.
+  itGodot(
+    'after the game exits, profile_project reports the disconnect and stop_profiler still returns the earlier capture',
+    async (ctx) => {
+      await launchProfilingSession(ctx);
+
+      const first = await handleProfileProject(runner, { seconds: 2, top: 10 });
+      expect(hasError(first)).toBe(false);
+      const earlier = unwrap(first).structuredContent as unknown as CaptureShape;
+      expect(earlier.frames).toBeGreaterThan(0);
+
+      const profiler = runner.activeProfiler!;
+      const spawned = runner.activeProcess!;
+      const exited = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Godot process did not exit within timeout')),
+          EXIT_WAIT_MS,
+        );
+        spawned.process.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      spawned.process.kill('SIGKILL');
+      await exited;
+      // The socket close can trail the process exit, and only a seen disconnect refuses the start.
+      await expect.poll(() => profiler.connected, { timeout: DISCONNECT_WAIT_MS }).toBe(false);
+
+      const refused = await handleProfileProject(runner, { seconds: 2 });
+      expect(hasError(refused)).toBe(true);
+      expect(errorText(refused)).not.toMatch(/spawned Godot process has exited/);
+      expect(allText(refused)).toContain(DISCONNECT_SOLUTION);
+
+      const stopped = await handleStopProfiler(runner, { top: 10 });
+      expect(hasError(stopped)).toBe(false);
+      expectMatchesOutputSchema('stop_profiler', stopped);
+      const kept = unwrap(stopped).structuredContent as unknown as CaptureShape;
+      expect(kept.frames).toBe(earlier.frames);
+      expect(kept.rows.map((row) => row.function)).toContain('burn');
     },
     90000,
   );

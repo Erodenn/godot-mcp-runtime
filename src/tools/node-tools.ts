@@ -169,7 +169,7 @@ export const nodeToolDefinitions = [
   {
     name: 'get_node_properties',
     description:
-      'Read the current property values of one or more nodes from a scene file, in one Godot process. Always-array: pass a single-element nodes array for a one-off read. Per-node changedOnly: true leaves out properties that match the class defaults, for a compact diff. Returns: results[], one entry per node in input order: { nodePath, nodeType, properties }, or { nodePath, error } when the node was not found. Values use the input shapes of set_node_properties. Errors if the scene cannot be loaded.',
+      'Read the current property values of one or more nodes from a scene file, in one Godot process. Always-array: pass a one-element nodes array for one node. Per-node changedOnly: true leaves out properties that match the class defaults. Returns: results[] in input order: { nodePath, nodeType, properties }, or { nodePath, error } when not found. Values use the input shapes of set_node_properties. warnings leads when changedOnly had no defaults to compare. Errors if the scene cannot be loaded.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -200,6 +200,7 @@ export const nodeToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
         results: {
           type: 'array',
           items: {

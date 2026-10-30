@@ -309,6 +309,23 @@ describe('handleGetNodeProperties', () => {
     expectErrorMatching(result, /nodes/i);
   });
 
+  it('passes a leading warnings entry through, and the outputSchema declares it', async () => {
+    const payload = {
+      warnings: ['changedOnly could not build a default Node2D to compare against'],
+      results: [{ nodePath: 'root', nodeType: 'Node2D', properties: {} }],
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(payload) });
+    const result = await handleGetNodeProperties(fake.asRunner, {
+      ...validBase,
+      nodes: [{ nodePath: 'root', changedOnly: true }],
+    });
+    expect(expectMatchesOutputSchema('get_node_properties', result)).toEqual(payload);
+    const definition = allToolDefinitions.find((tool) => tool.name === 'get_node_properties') as {
+      outputSchema: { properties: Record<string, unknown> };
+    };
+    expect(Object.keys(definition.outputSchema.properties)).toContain('warnings');
+  });
+
   it('treats empty Godot output as a failed operation', async () => {
     const fake = createFakeRunner({ stdout: '' });
     const result = await handleGetNodeProperties(fake.asRunner, {
