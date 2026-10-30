@@ -309,17 +309,20 @@ describe('handleGetNodeProperties', () => {
     expectErrorMatching(result, /nodes/i);
   });
 
-  it('passes a leading warnings entry through, and the outputSchema declares it', async () => {
+  it('moves a warnings entry the script emitted last to the front, and the outputSchema declares it', async () => {
+    // GDScript sorts keys, so `warnings` arrives after `results`.
     const payload = {
-      warnings: ['changedOnly could not build a default Node2D to compare against'],
       results: [{ nodePath: 'root', nodeType: 'Node2D', properties: {} }],
+      warnings: ['changedOnly could not build a default Node2D to compare against'],
     };
     const fake = createFakeRunner({ stdout: JSON.stringify(payload) });
     const result = await handleGetNodeProperties(fake.asRunner, {
       ...validBase,
       nodes: [{ nodePath: 'root', changedOnly: true }],
     });
-    expect(expectMatchesOutputSchema('get_node_properties', result)).toEqual(payload);
+    const structured = expectMatchesOutputSchema('get_node_properties', result);
+    expect(structured).toEqual(payload);
+    expect(Object.keys(structured)[0]).toBe('warnings');
     const definition = allToolDefinitions.find((tool) => tool.name === 'get_node_properties') as {
       outputSchema: { properties: Record<string, unknown> };
     };
