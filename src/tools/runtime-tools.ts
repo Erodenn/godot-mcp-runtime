@@ -13,7 +13,7 @@ import {
 import {
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
   OVERSIZE_RESPONSE_FIELD,
-  takeNonFiniteWarning,
+  readNonFiniteWarning,
 } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -2238,7 +2238,7 @@ async function simulateInput(runner: GodotRunner, args: OperationParams): Promis
     });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
-    const nonFiniteWarning = takeNonFiniteWarning(parsed);
+    const nonFiniteWarning = readNonFiniteWarning(parsed);
 
     // A flat `error` is a pre-validation refusal: nothing was injected; the oversize reply never gets here.
     if (parsed.error) {
@@ -2683,7 +2683,7 @@ async function executeAdmittedScript(
     });
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
-    const nonFiniteWarning = takeNonFiniteWarning(parsed);
+    const nonFiniteWarning = readNonFiniteWarning(parsed);
 
     if (parsed.error) {
       // Compile failures return a bare "error N" with no location; the parser diagnostic (message and line) is on engine stderr, so surface it here.

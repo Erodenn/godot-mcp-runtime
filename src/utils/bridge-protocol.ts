@@ -27,8 +27,8 @@ export function nonFiniteWarning(count: unknown): string | null {
   return `${count} non-finite numbers (INF, NAN) were returned as null`;
 }
 
-/** The warning for the non-finite count a parsed reply carries, or null. The field never reaches a payload because every caller builds its payload from named reply fields and none spreads the reply; the handler tests that strip it pin that. */
-export function takeNonFiniteWarning(reply: object): string | null {
+/** The warning for the non-finite count a parsed reply carries, or null. The field never reaches a payload because every caller builds its payload from named reply fields and none spreads the reply; the handler tests asserting its absence pin that. */
+export function readNonFiniteWarning(reply: object): string | null {
   return nonFiniteWarning((reply as Record<string, unknown>)[NON_FINITE_COUNT_FIELD]);
 }
 

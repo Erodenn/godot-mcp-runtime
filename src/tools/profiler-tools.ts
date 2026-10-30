@@ -1,6 +1,6 @@
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
-import { takeNonFiniteWarning } from '../utils/bridge-protocol.js';
+import { readNonFiniteWarning } from '../utils/bridge-protocol.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
@@ -707,7 +707,7 @@ async function collectTrack(runner: GodotRunner, owner: DebuggerProfiler): Promi
   try {
     const raw = await runner.sendCommand('track_stop', {}, TRACK_COMMAND_TIMEOUT_MS);
     const reply = JSON.parse(raw) as { samples?: unknown; error?: unknown };
-    const nonFiniteWarning = takeNonFiniteWarning(reply);
+    const nonFiniteWarning = readNonFiniteWarning(reply);
     trackNonFiniteWarnings.set(owner, nonFiniteWarning);
     if (typeof reply.error === 'string') return { samples: null, error: reply.error };
     if (!Array.isArray(reply.samples)) {
