@@ -41,7 +41,6 @@ extends SceneTree
 	"unsafe_method_access",
 	"unsafe_property_access",
 	"unsafe_void_return",
-	"untyped_declaration",
 	"unused_local_constant",
 	"unused_parameter",
 	"unused_private_class_variable",
