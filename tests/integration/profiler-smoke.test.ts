@@ -182,7 +182,10 @@ describe('profiler smoke', () => {
       const buckets = timeline!.buckets;
       expect(buckets.length).toBeGreaterThan(1);
       expect(buckets[0]!.frames).toBeGreaterThan(0);
-      expect(buckets[0]!.fps).toBeGreaterThan(0);
+      // fps is null for a bucket whose folded frames span no measurable time
+      const firstTimed = buckets.find((bucket) => bucket.fps !== null);
+      expect(firstTimed).toBeDefined();
+      expect(firstTimed!.fps).toBeGreaterThan(0);
       expect(buckets[0]!.top.map((item) => item.name).join(', ')).toContain('burn');
       const tracked = buckets.filter((bucket) => bucket.track !== null);
       expect(tracked.length).toBeGreaterThan(0);
