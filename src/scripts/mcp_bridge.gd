@@ -141,7 +141,7 @@ const OVERSIZE_RESPONSE_ERROR := "The response is %d bytes, over the %d byte fra
 # Far enough off every monitor layout that no part of the window is on screen.
 const BACKGROUND_WINDOW_POSITION := Vector2i(-9999, -9999)
 
-# The kinds of input still_held can name; each is also the prefix of its spelling ("key:W"), and a candidate's two fields are the kind and the code Input is asked about.
+# Each kind is also the prefix of its still_held spelling ("key:W"), which clients read.
 const HELD_KIND_KEY := "key"
 const HELD_KIND_MOUSE_BUTTON := "mouse_button"
 const HELD_KIND_ACTION := "action"
@@ -858,7 +858,7 @@ func _track_held(batch: InputBatch, kind: String, input_name: String, code: Vari
 	else:
 		batch.candidates.erase(spelling)
 
-# still_held is read from the engine, not from the request: a candidate is reported only when Input says it is pressed, in the order it was pressed. The state is the one _inject_* builds the event for; a key is asked by keycode and by physical keycode, as the event sets both.
+# Read from Input, not from the request: an action the request does not name (a click_element) can release a held input. A key is asked by keycode and by physical keycode, as _inject_key sets both.
 func _read_still_held(batch: InputBatch) -> Array:
 	# Parsed events are buffered; the state a read sees must include the last one.
 	Input.flush_buffered_events()
@@ -1436,7 +1436,7 @@ const _PACKED_READ_TYPES: Array = [
 	TYPE_PACKED_COLOR_ARRAY,
 ]
 
-# A packed array is a container for the bounds: it is cut at the depth limit and each element is charged against the element budget, with the same markers an Array gets. It cannot hold itself, and an element is never a container, so no path entry is needed. Indexed rather than converted, so a large sampled array costs only the elements the budget admits.
+# Indexed rather than converted, so a large sampled array costs only the elements the budget admits. No cycle path entry: a packed array cannot hold itself.
 func _serialize_packed(packed: Variant, depth: int) -> Variant:
 	if depth >= _serialize_depth_limit:
 		return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
