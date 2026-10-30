@@ -150,9 +150,9 @@ const ARRAY_DISPATCH_METHOD = 'callv';
 /** Every method that calls a method named by its first argument; a literal name is evaluated as the call it makes (`reflectiveCallTarget`). */
 const REFLECTIVE_DISPATCH_METHODS: ReadonlySet<string> = new Set(DISPATCH_METHODS);
 
-/** The dispatch methods that get their own generic Tier 2 rule; `call` and `callv` keep their hand-written ones. */
+/** The dispatch methods whose generic Tier 2 rule is generated; `call` keeps its hand-written one for its extra solution. */
 const GENERIC_DISPATCH_RULE_METHODS: readonly string[] = DISPATCH_METHODS.filter(
-  (method) => method !== 'call' && method !== 'callv',
+  (method) => method !== 'call',
 );
 
 const METHOD_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -925,17 +925,6 @@ export const policyRules: readonly PolicyRule[] = [
       'Call the method directly by name',
       `If the receiver is ${TIER1_DISPATCH_RECEIVERS.join('/')}, that dedicated rule already governs this call`,
     ],
-  },
-  {
-    id: 'tier2.generic.callv.nonliteral',
-    tier: 2,
-    chain: ['callv'],
-    matchLastSegment: true,
-    matchAsBareIdentifier: true,
-    argumentKind: 'nonliteral',
-    reason:
-      'A non-literal .callv on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
-    solutions: ['Call the method directly by name'],
   },
   // Same shape as `tier2.generic.call.nonliteral` for the other methods that call a method by name.
   ...GENERIC_DISPATCH_RULE_METHODS.map(
