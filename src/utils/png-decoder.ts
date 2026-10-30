@@ -10,7 +10,6 @@ const CHUNK_TYPE_BYTES = 4;
 const CHUNK_CRC_BYTES = 4;
 const CHUNK_HEADER_BYTES = CHUNK_LENGTH_BYTES + CHUNK_TYPE_BYTES;
 const CHUNK_OVERHEAD_BYTES = CHUNK_HEADER_BYTES + CHUNK_CRC_BYTES;
-/** Offsets of the IHDR fields within its payload. */
 const IHDR_WIDTH_OFFSET = 0;
 const IHDR_HEIGHT_OFFSET = 4;
 const IHDR_BIT_DEPTH_OFFSET = 8;
@@ -25,7 +24,6 @@ const OUTPUT_CHANNELS = 4;
 const OPAQUE_ALPHA = 255;
 const BYTE_MASK = 0xff;
 const NO_INTERLACE = 0;
-/** Scanline filter types. */
 const FILTER_NONE = 0;
 const FILTER_SUB = 1;
 const FILTER_UP = 2;

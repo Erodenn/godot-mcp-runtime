@@ -95,16 +95,15 @@ function argumentsOf(
   return args;
 }
 
-/** The identifier tokens that are scalar values on their own. */
 const SCALAR_KEYWORDS: ReadonlySet<string> = new Set(['true', 'false', 'null']);
 
-/** No tokens is 'none' (a no-arg call must not match a non-literal rule); one string literal is 'literal'; one number, `true`, `false` or `null` token is 'scalar'; anything else is 'nonliteral'. */
 const UNREADABLE_ARGUMENT: ArgumentClassification = 'nonliteral';
 
 function isScalarToken(tok: Token): boolean {
   return tok.kind === 'number' || (tok.kind === 'identifier' && SCALAR_KEYWORDS.has(tok.text));
 }
 
+/** No tokens is 'none', so a no-arg call never matches a non-literal rule. */
 function classifyArgument(argument: readonly Token[]): ArgumentClassification {
   if (argument.length === 0) return 'none';
   if (argument.length === 1 && argument[0]!.kind === 'string') return 'literal';
@@ -1101,7 +1100,6 @@ function resolveReflectiveCall(
   if (firstScan === null) return OPAQUE_DISPATCH;
   let args: Token[][] = firstScan;
   if ((args[0] ?? []).length === 0) return null;
-  // A number, `true`, `false` or `null` cannot name a method: `f.call(5)` is a Callable call passing 5.
   if (classifyArgument(args[0] ?? []) === 'scalar') return null;
 
   const names: string[] = [];
