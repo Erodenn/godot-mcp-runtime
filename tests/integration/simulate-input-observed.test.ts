@@ -476,8 +476,8 @@ describe('simulate_input observed results (live bridge)', () => {
     TEST_TIMEOUT_MS,
   );
 
-  // Red when still_held echoes the request text ("key:w") instead of the engine's keycode string, or
-  // stops reading the engine: a release the engine honored would still be reported.
+  // Red when still_held echoes the request text ("key:w") instead of the engine's keycode string. The
+  // release runs in a new batch, which has no candidates, so this case cannot see whether Input is read.
   itGodot(
     'an unreleased key press is reported in the engine keycode spelling, whatever case the request used',
     async (ctx) => {
@@ -501,6 +501,41 @@ describe('simulate_input observed results (live bridge)', () => {
         ],
       });
       expect(released.still_held).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // Red when still_held stops asking Input: the click's release of left is one the request never names,
+  // so a still_held built from the batch's own presses and releases would still report mouse_button:left.
+  itGodot(
+    'a held mouse button released by a later click_element in the same batch is not reported',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const clicked = await simulate({
+        actions: [
+          { type: 'mouse_button', button: 'left', x: 0, y: 0, pressed: true },
+          { type: 'click_element', element: p('PlainBtn') },
+        ],
+      });
+      expect(clicked.results).toHaveLength(2);
+      expect(
+        clicked.results[1]!,
+        `the click must inject its press and release; payload=${JSON.stringify(clicked)}`,
+      ).toMatchObject({ type: 'click_element', ok: true });
+      expect(
+        clicked.still_held,
+        `the click released left, so it must not be reported; payload=${JSON.stringify(clicked)}`,
+      ).toBeUndefined();
+
+      // The same press with nothing after it is reported, so the absence above is the engine's answer.
+      const held = await simulate({
+        actions: [{ type: 'mouse_button', button: 'left', x: 0, y: 0, pressed: true }],
+      });
+      expect(
+        held.still_held,
+        `an unreleased mouse press must be reported; payload=${JSON.stringify(held)}`,
+      ).toEqual(['mouse_button:left']);
     },
     TEST_TIMEOUT_MS,
   );
