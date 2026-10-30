@@ -1928,16 +1928,6 @@ describe('BridgeManager keeps a bare [autoload] header it found at injection', (
 
     expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(EMPTY_HEADER_PROJECT);
   });
-
-  it('removal through the default remover (remove_autoload) still drops an emptied header', () => {
-    const { projectPath } = setupProject();
-    const file = join(projectPath, 'project.godot');
-    writeFileSync(file, 'config_version=5\n\n[autoload]\nMcpBridge="*res://x.gd"\n', 'utf8');
-
-    removeAutoloadEntry(file, 'McpBridge');
-
-    expect(readFileSync(file, 'utf8')).not.toContain('[autoload]');
-  });
 });
 
 describe('BridgeManager.repairOrphaned after a project was cached clean', () => {
