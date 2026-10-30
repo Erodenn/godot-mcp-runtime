@@ -393,6 +393,13 @@ const NO_RESULT_SOLUTIONS = [
   'Ensure Godot is installed correctly',
 ];
 
+/** The run's own `warnings` (a result returned after a timeout kill carries one), which validate's rebuilt response must still lead with. */
+function runWarnings(payload: unknown): string[] {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return [];
+  const warnings = (payload as { warnings?: unknown }).warnings;
+  return Array.isArray(warnings) ? warnings.filter((w): w is string => typeof w === 'string') : [];
+}
+
 function noResultMessage(prefix: string, stderr: string): string {
   const head = `${prefix}: no result was emitted - `;
   if (stderr.includes('[ERROR]')) return `${head}${extractGdError(stderr)}`;
@@ -696,7 +703,12 @@ export async function handleValidate(
         }
       }
 
-      return createStructuredResponse(leadWithWarnings({ warnings: attributed.warnings, results }));
+      return createStructuredResponse(
+        leadWithWarnings({
+          warnings: [...runWarnings(batchParsed), ...attributed.warnings],
+          results,
+        }),
+      );
     } catch (error: unknown) {
       return err(validateExceptionResponse('Batch validation failed', error));
     } finally {
@@ -825,6 +837,7 @@ export async function handleValidate(
 
     const singleTarget = resolvedScriptPath ?? resolvedScenePath ?? '';
     let engineRow: EngineTargetResult = { target: singleTarget, valid: false };
+    let engineWarnings: string[] = [];
     if (combined) {
       if (!stdout.trim()) {
         return err(
@@ -853,6 +866,7 @@ export async function handleValidate(
       } catch {
         batchParsed = {};
       }
+      engineWarnings = runWarnings(batchParsed);
       const target = batchParsed.results?.[0];
       if (!target) {
         return err(
@@ -885,6 +899,7 @@ export async function handleValidate(
           createErrorResponse(noResultMessage('Validation failed', stderr), NO_RESULT_SOLUTIONS),
         );
       }
+      engineWarnings = runWarnings(parsed);
       engineRow = {
         target: singleTarget,
         resolvedPath:
@@ -902,7 +917,7 @@ export async function handleValidate(
     const { valid, errors } = attributed.results[0]!;
 
     return createStructuredResponse(
-      leadWithWarnings({ warnings: attributed.warnings, valid, errors }),
+      leadWithWarnings({ warnings: [...engineWarnings, ...attributed.warnings], valid, errors }),
     );
   } catch (error: unknown) {
     return err(validateExceptionResponse('Validation failed', error));

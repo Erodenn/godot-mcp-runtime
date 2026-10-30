@@ -284,6 +284,44 @@ describe('attributeDiagnostics', () => {
   });
 });
 
+describe('handleValidate keeps the run warning of a result returned after a timeout kill', () => {
+  const TIMEOUT_WARNING =
+    'The Godot process printed its result but did not exit within 30000ms and was killed; its exit was confirmed.';
+
+  it('leads a single-target verdict with it', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        valid: true,
+        resolvedPath: 'res://good.gd',
+        errors: [],
+        warnings: [TIMEOUT_WARNING],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      scriptPath: 'main.tscn',
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect(payload.valid).toBe(true);
+    expect((payload.warnings as string[])[0]).toBe(TIMEOUT_WARNING);
+  });
+
+  it('leads a batch verdict with it', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [{ target: 'main.tscn', valid: true, errors: [] }],
+        warnings: [TIMEOUT_WARNING],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: [{ scenePath: fixtureScenePath }],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    expect((payload.warnings as string[])[0]).toBe(TIMEOUT_WARNING);
+  });
+});
+
 describe('handleValidate batch mode', () => {
   it('invokes validate_batch (not validate_resource) when a targets array is provided', async () => {
     // targets[] must route through the batch operation; the result shape cannot tell batch from single, so inspect the spy.
