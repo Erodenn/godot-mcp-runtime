@@ -19,6 +19,7 @@ const INVENTORY_SCENE = 'inventory.tscn';
 const PLAYER_SCENE = 'player.tscn';
 const CASE_TIMEOUT_MS = 120000;
 const TYPED_DICTIONARY_MIN_MINOR = 4;
+// 3e9: above int32, inside uint32. 5000: above the z_index limit of 4096. 16777217 = 2^24 + 1, the first integer float32 cannot hold.
 const ABOVE_INT32_MAX = 3000000000;
 const ABOVE_Z_INDEX_LIMIT = 5000;
 const HUGE_NUMBER = 1e30;

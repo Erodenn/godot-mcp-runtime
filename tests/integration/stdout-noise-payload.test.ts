@@ -65,6 +65,7 @@ describe('headless operation payload with a noisy autoload', () => {
         {
           encoding: 'utf8',
           timeout: NOISE_PROBE_TIMEOUT_MS,
+          // SIGKILL: not catchable, so a wedged engine cannot outlive the timeout.
           killSignal: 'SIGKILL',
           maxBuffer: NOISE_PROBE_MAX_BUFFER_BYTES,
         },
@@ -152,6 +153,7 @@ describe('headless operation payload with an autoload that prints a forged resul
         {
           encoding: 'utf8',
           timeout: NOISE_PROBE_TIMEOUT_MS,
+          // SIGKILL: not catchable, so a wedged engine cannot outlive the timeout.
           killSignal: 'SIGKILL',
           maxBuffer: NOISE_PROBE_MAX_BUFFER_BYTES,
         },

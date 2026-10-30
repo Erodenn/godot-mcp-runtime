@@ -208,6 +208,7 @@ describe('ParentWatchListener', () => {
     listener = new ParentWatchListener();
     const socket = await connect(await listener.port());
     const ended = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+    // An unread socket never emits close for the peer's FIN.
     socket.resume();
 
     listener.close();

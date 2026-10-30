@@ -32,6 +32,7 @@ const RECENT_ERROR_LINES = 200;
 /** Wall clock, not frames: a frame count makes the test frame-rate dependent, and the window it must outlast is in seconds. */
 const STALE_BATCH_WAIT_MS = 6000;
 const STALE_CLIENT_TIMEOUT_MS = 300;
+// Must outlast STALE_BATCH_WAIT_MS, or the test passes before an abandoned batch could print; the client timeout must stay far below it.
 const STALE_RESUME_MARGIN_MS = STALE_BATCH_WAIT_MS + 3000;
 const STALE_DRAIN_TIMEOUT_MS = 1000;
 
