@@ -1333,18 +1333,35 @@ describe('multi-project runtime sessions', () => {
     expect(runner.getSessionInfo(projectA)).toMatchObject({ live: true, bridgePort: PORT_A });
   });
 
-  it('a start reports what the cleanup of a differently spelled replaced project could not confirm', async () => {
-    await startProject(projectA, PORT_A);
-    const respelled = projectA.toUpperCase();
-    bridge.cleanupProblemsFor.set(projectA, ['the bridge script could not be removed (EBUSY)']);
+  it.runIf(foldsPathCase())(
+    'a start reports what the cleanup of a differently spelled replaced project could not confirm',
+    async () => {
+      await startProject(projectA, PORT_A);
+      const respelled = projectA.toUpperCase();
+      bridge.cleanupProblemsFor.set(projectA, ['the bridge script could not be removed (EBUSY)']);
 
-    await startProject(respelled, PORT_A_RERUN);
+      await startProject(respelled, PORT_A_RERUN);
 
-    const warnings = runner.getSessionInfo(respelled)?.startWarnings ?? [];
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain(projectA);
-    expect(warnings[0]).toContain('the bridge script could not be removed (EBUSY)');
-  });
+      const warnings = runner.getSessionInfo(respelled)?.startWarnings ?? [];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(projectA);
+      expect(warnings[0]).toContain('the bridge script could not be removed (EBUSY)');
+    },
+  );
+
+  it.skipIf(foldsPathCase())(
+    'a path differing only in case is another project and keeps the first one running',
+    async () => {
+      const first = await startProject(projectA, PORT_A, { exitOnKill: false });
+      const other = projectA.toUpperCase();
+
+      await startProject(other, PORT_A_RERUN, { exitOnKill: false });
+
+      expect(first.kill).not.toHaveBeenCalled();
+      expect(bridge.cleanupCalls).toEqual([]);
+      expect(sessionPaths().sort()).toEqual([projectA, other].sort());
+    },
+  );
 
   it('commandWasNotSent is true only for a command that provably never reached the game', async () => {
     const send = (): Promise<unknown> =>
@@ -1405,18 +1422,20 @@ describe('multi-project runtime sessions', () => {
     expect(commandWasNotSent(new Error("Command 'run_script' timed out"))).toBe(false);
   });
 
-  it("replacing a session through a differently spelled path removes the replaced spelling's bridge artifacts", async () => {
-    const first = await startProject(projectA, PORT_A, { exitOnKill: false });
-    // Same session key, different string. On a case-sensitive filesystem this
-    // can be another directory, so the replaced one must not keep its bridge.
-    const respelled = projectA.toUpperCase();
+  it.runIf(foldsPathCase())(
+    "replacing a session through a differently spelled path removes the replaced spelling's bridge artifacts",
+    async () => {
+      const first = await startProject(projectA, PORT_A, { exitOnKill: false });
+      // Same session key, different string, so the replaced one must not keep its bridge.
+      const respelled = projectA.toUpperCase();
 
-    await startProject(respelled, PORT_A_RERUN, { exitOnKill: false });
+      await startProject(respelled, PORT_A_RERUN, { exitOnKill: false });
 
-    expect(first.kill).toHaveBeenCalledTimes(1);
-    expect(bridge.cleanupCalls).toEqual([projectA]);
-    expect(sessionPaths()).toEqual([respelled]);
-  });
+      expect(first.kill).toHaveBeenCalledTimes(1);
+      expect(bridge.cleanupCalls).toEqual([projectA]);
+      expect(sessionPaths()).toEqual([respelled]);
+    },
+  );
 
   it('a command for a current session whose game exited is rejected for lack of a bridge port', async () => {
     const childA = await startProject(projectA, PORT_A);

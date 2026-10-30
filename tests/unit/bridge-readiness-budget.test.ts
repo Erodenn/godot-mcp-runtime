@@ -6,6 +6,7 @@ import {
   BRIDGE_UNAUTHORIZED_ERROR,
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
 } from '../../src/utils/bridge-protocol.js';
+import { foldsPathCase } from '../../src/utils/path-validation.js';
 import { SESSION_QUEUE_WAIT_TIMEOUT_MS } from '../../src/utils/session-queue.js';
 import {
   GodotRunner,
@@ -206,16 +207,40 @@ describe('bridge readiness budget', () => {
     expect(harness.pings).toBe(1);
   });
 
-  // The session's path and the one Godot reports for res:// can differ in drive-letter or directory case and trailing slash;
-  // that is the same project under the session map's folding.
-  it('accepts a pong whose project path differs from the expected one only in case and trailing slash', async () => {
+  // The session's path and the one Godot reports for res:// can differ in trailing slash,
+  // and in drive-letter or directory case where the file system folds case; that is the same project under the session map's folding.
+  it('accepts a pong whose project path differs from the expected one only in trailing slash', async () => {
     const harness = pollWithStub(
       () =>
         Promise.resolve(JSON.stringify({ status: 'pong', project_path: 'D:/Games/My Project/' })),
-      { expectedPath: 'd:/games/my project' },
+      { expectedPath: 'D:/Games/My Project' },
     );
     expect(await harness.poll()).toEqual({ ready: true, waitedMs: expect.any(Number) });
   });
+
+  it.runIf(foldsPathCase())(
+    'accepts a pong whose project path differs from the expected one in case',
+    async () => {
+      const harness = pollWithStub(
+        () =>
+          Promise.resolve(JSON.stringify({ status: 'pong', project_path: 'D:/Games/My Project/' })),
+        { expectedPath: 'd:/games/my project' },
+      );
+      expect(await harness.poll()).toEqual({ ready: true, waitedMs: expect.any(Number) });
+    },
+  );
+
+  it.skipIf(foldsPathCase())(
+    'refuses a pong whose project path differs from the expected one in case',
+    async () => {
+      const harness = pollWithStub(
+        () =>
+          Promise.resolve(JSON.stringify({ status: 'pong', project_path: 'D:/Games/My Project/' })),
+        { expectedPath: 'd:/games/my project' },
+      );
+      expect((await harness.poll()).ready).toBe(false);
+    },
+  );
 
   it('still refuses a pong from a bridge that reports another project', async () => {
     const harness = pollWithStub(

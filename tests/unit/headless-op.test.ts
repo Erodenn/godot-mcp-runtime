@@ -8,6 +8,7 @@ import {
   HEADLESS_RESPONSE_MARGIN_MS,
   IMPORT_RETRY_RESERVE_MS,
 } from '../../src/utils/headless-op.js';
+import { foldsPathCase } from '../../src/utils/path-validation.js';
 import { sceneBackupsDir } from '../../src/utils/artifact-paths.js';
 import {
   batchSceneWrites,
@@ -2001,9 +2002,19 @@ describe('findLiveSessionOnProject', () => {
     expect(findLiveSessionOnProject(fake.asRunner, '/proj')).toBeNull();
   });
 
-  it('reports self for a live session on the same project, ignoring case and separators', () => {
-    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: 'C:\\Games\\Proj\\' });
-    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+  it('reports self for a live session on the same project, ignoring a trailing slash', () => {
+    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/games/proj/' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/games/proj')).toEqual({ owner: 'self' });
+  });
+
+  it.runIf(foldsPathCase())('reports self for a live session spelled in another case', () => {
+    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/Games/Proj' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/games/proj')).toEqual({ owner: 'self' });
+  });
+
+  it.skipIf(foldsPathCase())('reports no owner for a path that differs only in case', () => {
+    const fake = runnerWithLiveSession({ mode: 'spawned', projectPath: '/games/Proj' });
+    expect(findLiveSessionOnProject(fake.asRunner, '/games/proj')).toBeNull();
   });
 
   it('returns null for a live session on a different project', () => {
@@ -2013,8 +2024,8 @@ describe('findLiveSessionOnProject', () => {
 
   it('reports self for a live session on the project that is not the current session', () => {
     const fake = runnerWithLiveSession({ mode: 'attached', projectPath: '/current' });
-    withExtraLiveSessions(fake, ['C:\\Games\\Proj\\']);
-    expect(findLiveSessionOnProject(fake.asRunner, 'c:/games/proj')).toEqual({ owner: 'self' });
+    withExtraLiveSessions(fake, ['/games/proj/']);
+    expect(findLiveSessionOnProject(fake.asRunner, '/games/proj')).toEqual({ owner: 'self' });
     expect(findLiveSessionOnProject(fake.asRunner, '/unrelated')).toBeNull();
   });
 
