@@ -1030,7 +1030,7 @@ export function restateSceneGuard(guard: SceneGuard, intents: SceneWriteIntent[]
 }
 
 /** Compares every guarded scene with disk. A scene that lost content gets one lead line, the capped items and a pre-save backup under `.mcp/godot-runtime/scene-backups/<run id>/` (never pruned here);
- * one written but not comparable gets an `unchecked` entry and no backup. Never throws. */
+ * one written but not comparable gets an `unchecked` entry, with a backup only when the pre-save `.tscn` was not a text scene. Never throws. */
 export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardOutcome {
   const outcome: SceneGuardOutcome = { warnings: [], unchecked: [], wroteScene: false };
   try {
@@ -1074,10 +1074,25 @@ export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardO
         failedScripts,
       );
       if (comparison.notChecked !== null) {
+        // A `.tscn` that was not a text scene before this save (corrupt, or truncated by an earlier failure) is overwritten with nothing to compare it to: its bytes are kept. A binary scene is expected to be unreadable as text and is not copied on every save.
+        const keepsBefore =
+          comparison.notChecked === NOT_TEXT_SCENE_BEFORE &&
+          !isSaveAs &&
+          isTextScenePath(target.relPath) &&
+          target.before !== null;
+        let backupNote = '';
+        if (keepsBefore) {
+          let location = backups.get(write.targetKey);
+          if (location === undefined) {
+            location = writeBackup(guard, target.relPath, target.before!);
+            backups.set(write.targetKey, location);
+          }
+          backupNote = ` The file as it was before the save: ${location}.`;
+        }
         if (!outcome.unchecked.some((entry) => entry.fileKey === target.key)) {
           outcome.unchecked.push({
             fileKey: target.key,
-            warning: `Saved ${target.relPath}, but the save was not checked for lost content: ${comparison.notChecked}.`,
+            warning: `Saved ${target.relPath}, but the save was not checked for lost content: ${comparison.notChecked}.${backupNote}`,
           });
         }
         continue;

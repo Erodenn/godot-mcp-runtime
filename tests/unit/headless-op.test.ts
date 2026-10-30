@@ -1712,6 +1712,26 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
     expect(existsSync(sceneBackupsDir(projectPath))).toBe(false);
   });
 
+  it('backs up a pre-save .tscn that is not a text scene byte for byte and names the backup in the warning', async () => {
+    const projectPath = tmp.makeProject('loss-guard-');
+    // Bytes that are not valid UTF-8 and carry no [gd_scene] header: a text round trip would change them.
+    const damaged = Buffer.from([0xff, 0xfe, 0x00, 0x5b, 0x6e, 0x6f, 0x64, 0x65, 0x80, 0x0d, 0x0a]);
+    writeFileSync(join(projectPath, 'level.tscn'), damaged);
+    const fake = writingRunner(projectPath, [{ 'level.tscn': SCRIPTED }]);
+
+    const payload = unwrap(await guarded(fake, projectPath, inPlaceSceneWrite('level.tscn')))
+      .structuredContent as { warnings: string[] };
+
+    const [runDir] = readdirSync(sceneBackupsDir(projectPath));
+    const backupFile = join(sceneBackupsDir(projectPath), runDir!, 'level.tscn');
+    // Red when the unchecked branch does not copy target.before: no file, and no path in the warning.
+    expect(readFileSync(backupFile).equals(damaged)).toBe(true);
+    expect(payload.warnings).toHaveLength(1);
+    expect(payload.warnings[0]).toMatch(
+      /^Saved level\.tscn, but the save was not checked for lost content: .+\. The file as it was before the save: \.mcp\/godot-runtime\/scene-backups\/[^/]+\/level\.tscn\. Said once per file in this server session\.$/,
+    );
+  });
+
   it('says a binary scene was saved unchecked once per file per runner, not on every save', async () => {
     const projectPath = tmp.makeProject('loss-guard-');
     for (const name of ['level.scn', 'other.scn']) {
