@@ -4250,6 +4250,18 @@ describe('simulate_input batch time budget', () => {
     expect(hasError(result)).toBe(false);
     expect(fake.bridgeCalls).toHaveLength(1);
   });
+
+  // Red when the budget constants are retuned and the description keeps the old figure.
+  it('states the input batch action cap as the time budget derives it', () => {
+    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
+    const properties = simulateInput!.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties.actions?.description).toContain(
+      'The budget admits at most 5900 actions per call, fewer when they tap, hold or wait.',
+    );
+  });
 });
 
 describe('run_project reports what its start could not confirm', () => {
@@ -4555,18 +4567,6 @@ describe('the queue wait is charged against the command it delayed', () => {
     const payload = expectMatchesOutputSchema('run_script', result);
     expect(payload).not.toHaveProperty('success');
     expect(payload.result).toBe(1);
-  });
-
-  // Red when the budget constants are retuned and the description keeps the old figure.
-  it('states the input batch action cap as the time budget derives it', () => {
-    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
-    const properties = simulateInput!.inputSchema.properties as Record<
-      string,
-      { description?: string }
-    >;
-    expect(properties.actions?.description).toContain(
-      'The budget admits at most 5900 actions per call, fewer when they tap, hold or wait.',
-    );
   });
 });
 
