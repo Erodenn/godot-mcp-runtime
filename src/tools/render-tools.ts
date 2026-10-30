@@ -596,7 +596,8 @@ export const MOVIE_CHECK_RUN_STALE_MS =
   MOVIE_TIMEOUT_BASE_MS + MAX_MOVIE_FRAMES * MOVIE_TIMEOUT_PER_FRAME_MS + MOVIE_KILL_WORST_CASE_MS;
 
 /** Removes the check-mode run directories a server that died mid-run left behind (a check run deletes its own files on every path out). Frames and video runs are kept for the caller and never touched. Never throws. */
-function removeStaleCheckRuns(root: string, now: number = Date.now()): void {
+function removeStaleCheckRuns(root: string): void {
+  const now = Date.now();
   const base = moviesDir(root);
   try {
     if (!existsSync(base)) return;
