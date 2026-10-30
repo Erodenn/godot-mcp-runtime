@@ -752,9 +752,9 @@ describe('evaluateScript: global-function rules ignore method calls', () => {
   ];
 
   for (const form of methodForms) {
-    it(`does not hard-block ${form} through the load/preload rules`, () => {
+    it(`does not flag ${form} through the load/preload rules`, () => {
       const d = evalLine(form);
-      expect(d.matches.some((m) => m.ruleId.startsWith('tier1.indirect.'))).toBe(false);
+      expect(d.matches.some((m) => /^tier\d\.indirect\./.test(m.ruleId))).toBe(false);
       expect(d.matches.some((m) => m.ruleId.startsWith('tier3.literal.'))).toBe(false);
     });
   }
