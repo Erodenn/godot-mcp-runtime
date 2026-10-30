@@ -1452,7 +1452,7 @@ func _serialize_packed(packed: Variant, depth: int) -> Variant:
 # `depth` is how many containers enclose `value`; call through _serialize_value or _serialize_sample, which set the bounds.
 # Value shapes match _variant_to_json in src/scripts/godot_operations.gd (vectors as {x,y,..}, colors as {r,g,b,a}, packed arrays as arrays); only the bounds, the markers and the Object shapes differ.
 func _serialize_bounded(value: Variant, depth: int) -> Variant:
-	# A freed Object is not null and `is` raises on one; a track samples from _process, where that would raise every tick. Checked before the null test, so the answer does not hang on how == treats a freed Object.
+	# Without this check a freed Object comes back as null, the same as a real null, and nothing says the object is gone. Checked before the null test, so the answer does not hang on how == treats a freed Object.
 	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
 		return "<Freed Object>"
 	if value == null:
