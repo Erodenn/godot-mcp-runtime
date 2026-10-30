@@ -54,7 +54,7 @@ const activeMovieChildren = new Map<ChildProcess, (proc: ChildProcess) => void>(
 let exitHookRegistered = false;
 
 /** Kills the tree of every child still running; the body of the exit hook. Never throws. */
-export function killActiveMovieChildren(): void {
+function killActiveMovieChildren(): void {
   for (const [child, killTree] of activeMovieChildren) {
     try {
       killTree(child);

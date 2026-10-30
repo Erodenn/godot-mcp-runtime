@@ -71,7 +71,7 @@ export function isElicitAccepted(result: ElicitorResult): boolean {
 }
 
 export interface SessionState {
-  /** Absolute project paths already approved for `run_project` in this session; the first call per path elicits. */
+  /** `projectPathKey` keys of projects already confirmed for `run_project` (spawn) or `render_movie` in this session; the first launch per key elicits. */
   runProjectConfirmed: Set<string>;
 }
 
