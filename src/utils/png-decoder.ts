@@ -2,12 +2,42 @@ import { inflateSync } from 'zlib';
 
 /** Minimal dependency-free PNG decoder for 8-bit RGB(A): parses IHDR + IDAT, inflates, reverses the scanline filters; returns RGBA bytes (alpha 255 for RGB) plus dimensions, and throws on palette, 16-bit or interlaced images. */
 
+const PNG_SIGNATURE: Buffer = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE_LENGTH = PNG_SIGNATURE.length;
+/** A chunk is length (4), type (4), data, CRC (4). */
+const CHUNK_LENGTH_BYTES = 4;
+const CHUNK_TYPE_BYTES = 4;
+const CHUNK_CRC_BYTES = 4;
+const CHUNK_HEADER_BYTES = CHUNK_LENGTH_BYTES + CHUNK_TYPE_BYTES;
+const CHUNK_OVERHEAD_BYTES = CHUNK_HEADER_BYTES + CHUNK_CRC_BYTES;
+/** Offsets of the IHDR fields within its payload. */
+const IHDR_WIDTH_OFFSET = 0;
+const IHDR_HEIGHT_OFFSET = 4;
+const IHDR_BIT_DEPTH_OFFSET = 8;
+const IHDR_COLOR_TYPE_OFFSET = 9;
+const IHDR_INTERLACE_OFFSET = 12;
+const SUPPORTED_BIT_DEPTH = 8;
+const COLOR_TYPE_RGB = 2;
+const COLOR_TYPE_RGBA = 6;
+const CHANNELS_RGB = 3;
+const CHANNELS_RGBA = 4;
+const OUTPUT_CHANNELS = 4;
+const OPAQUE_ALPHA = 255;
+const BYTE_MASK = 0xff;
+const NO_INTERLACE = 0;
+/** Scanline filter types. */
+const FILTER_NONE = 0;
+const FILTER_SUB = 1;
+const FILTER_UP = 2;
+const FILTER_AVERAGE = 3;
+const FILTER_PAETH = 4;
 /** Bytes in an IHDR payload: width, height, bit depth, color type, compression, filter, interlace. */
 const IHDR_DATA_LENGTH = 13;
 /** Largest side accepted. 8K frames are 7680 x 4320, so this leaves 2x headroom. */
 export const PNG_MAX_DIMENSION = 16384;
 /** Largest pixel count accepted: 8192 x 8192, twice an 8K frame. Bounds the inflate and output buffers. */
-export const PNG_MAX_PIXELS = 8192 * 8192;
+const PNG_MAX_PIXELS_SIDE = 8192;
+export const PNG_MAX_PIXELS = PNG_MAX_PIXELS_SIDE * PNG_MAX_PIXELS_SIDE;
 
 function paethPredictor(a: number, b: number, c: number): number {
   const p = a + b - c;
@@ -26,12 +56,14 @@ export interface DecodedPng {
 }
 
 export function decodePng(buffer: Buffer): DecodedPng {
-  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(signature)) {
+  if (
+    buffer.length < PNG_SIGNATURE_LENGTH ||
+    !buffer.subarray(0, PNG_SIGNATURE_LENGTH).equals(PNG_SIGNATURE)
+  ) {
     throw new Error('Not a valid PNG file (bad signature)');
   }
 
-  let offset = 8;
+  let offset = PNG_SIGNATURE_LENGTH;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
@@ -39,10 +71,12 @@ export function decodePng(buffer: Buffer): DecodedPng {
   let interlace = 0;
   const idatChunks: Buffer[] = [];
 
-  while (offset + 8 <= buffer.length) {
+  while (offset + CHUNK_HEADER_BYTES <= buffer.length) {
     const length = buffer.readUInt32BE(offset);
-    const type = buffer.subarray(offset + 4, offset + 8).toString('ascii');
-    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    const type = buffer
+      .subarray(offset + CHUNK_LENGTH_BYTES, offset + CHUNK_HEADER_BYTES)
+      .toString('ascii');
+    const data = buffer.subarray(offset + CHUNK_HEADER_BYTES, offset + CHUNK_HEADER_BYTES + length);
 
     if (type === 'IHDR') {
       if (data.length < IHDR_DATA_LENGTH) {
@@ -50,25 +84,28 @@ export function decodePng(buffer: Buffer): DecodedPng {
           `PNG IHDR chunk truncated: ${data.length} bytes, expected ${IHDR_DATA_LENGTH}`,
         );
       }
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      bitDepth = data[8]!;
-      colorType = data[9]!;
-      interlace = data[12]!;
+      width = data.readUInt32BE(IHDR_WIDTH_OFFSET);
+      height = data.readUInt32BE(IHDR_HEIGHT_OFFSET);
+      bitDepth = data[IHDR_BIT_DEPTH_OFFSET]!;
+      colorType = data[IHDR_COLOR_TYPE_OFFSET]!;
+      interlace = data[IHDR_INTERLACE_OFFSET]!;
     } else if (type === 'IDAT') {
       idatChunks.push(data);
     } else if (type === 'IEND') {
       break;
     }
-    offset += 12 + length; // length + type + data + CRC
+    offset += CHUNK_OVERHEAD_BYTES + length;
   }
 
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+  if (
+    bitDepth !== SUPPORTED_BIT_DEPTH ||
+    (colorType !== COLOR_TYPE_RGB && colorType !== COLOR_TYPE_RGBA)
+  ) {
     throw new Error(
       `Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType} (need 8-bit RGB/RGBA)`,
     );
   }
-  if (interlace !== 0) {
+  if (interlace !== NO_INTERLACE) {
     throw new Error('Interlaced PNG is not supported');
   }
 
@@ -81,7 +118,7 @@ export function decodePng(buffer: Buffer): DecodedPng {
     );
   }
 
-  const channels = colorType === 6 ? 4 : 3;
+  const channels = colorType === COLOR_TYPE_RGBA ? CHANNELS_RGBA : CHANNELS_RGB;
   const bytesPerPixel = channels;
   const stride = width * bytesPerPixel;
   const expectedRawLength = height * (stride + 1);
@@ -99,7 +136,7 @@ export function decodePng(buffer: Buffer): DecodedPng {
     throw new Error(`PNG data truncated: ${raw.length} bytes, expected ${expectedRawLength}`);
   }
 
-  const out = new Uint8Array(width * height * 4);
+  const out = new Uint8Array(width * height * OUTPUT_CHANNELS);
   let prevLine: Uint8Array | null = null;
   let rawOffset = 0;
 
@@ -113,35 +150,35 @@ export function decodePng(buffer: Buffer): DecodedPng {
       const upLeft = prevLine && x >= bytesPerPixel ? prevLine[x - bytesPerPixel]! : 0;
       let predicted: number;
       switch (filter) {
-        case 0:
+        case FILTER_NONE:
           predicted = rawByte;
           break;
-        case 1:
+        case FILTER_SUB:
           predicted = rawByte + left;
           break;
-        case 2:
+        case FILTER_UP:
           predicted = rawByte + up;
           break;
-        case 3:
-          predicted = rawByte + ((left + up) >> 1);
+        case FILTER_AVERAGE:
+          predicted = rawByte + Math.floor((left + up) / 2);
           break;
-        case 4:
+        case FILTER_PAETH:
           predicted = rawByte + paethPredictor(left, up, upLeft);
           break;
         default:
           throw new Error(`Unknown PNG scanline filter: ${filter}`);
       }
-      line[x] = predicted & 0xff;
+      line[x] = predicted & BYTE_MASK;
     }
     rawOffset += stride;
     prevLine = line;
     for (let x = 0; x < width; x++) {
       const src = x * bytesPerPixel;
-      const dst = (y * width + x) * 4;
+      const dst = (y * width + x) * OUTPUT_CHANNELS;
       out[dst] = line[src]!;
       out[dst + 1] = line[src + 1]!;
       out[dst + 2] = line[src + 2]!;
-      out[dst + 3] = channels === 4 ? line[src + 3]! : 255;
+      out[dst + 3] = channels === CHANNELS_RGBA ? line[src + 3]! : OPAQUE_ALPHA;
     }
   }
 
