@@ -113,7 +113,7 @@ describe('launch scan: references are classified by path, not only by type', () 
 
     const collected = sceneParsing.collectSceneScripts(join(dir, 'main.tscn'), dir);
     expect(collected.unscanned.map((u) => u.reason)).toEqual([
-      'resource res://ui.res is not scanned (a binary .res file can carry a script)',
+      'resource res://ui.res is not scanned (a resource file can carry a script)',
     ]);
 
     const warnings = await gateWarnings(dir);

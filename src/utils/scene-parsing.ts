@@ -1,5 +1,5 @@
 /** .tscn parsing for the run-script security pipeline: one scanner following Godot's own statement grammar, and a transitive collection of the scripts a scene brings with it, reporting what it cannot read rather than skipping it.
- * Not read (see `docs/security.md`): binary `.res`/`.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
+ * Not read (see `docs/security.md`): any resource file that is not a script, a scene or a known script-inert kind (`.res`, `.material`, ...), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -11,8 +11,35 @@ const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
 /** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says: `.tres` and `.escn` share the statement grammar; a binary `.scn` is walked and reported as not text. */
 const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
-/** Path extensions of binary resource files, which can carry a script the scan cannot read. */
-const RESOURCE_FILE_EXTENSIONS: readonly string[] = ['.res'];
+/** Path extensions of files that hold only pixels, samples, glyphs or shader code, so they cannot carry a script. Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
+const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
+  // Images
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.svg',
+  '.svgz',
+  '.bmp',
+  '.tga',
+  '.exr',
+  '.hdr',
+  '.dds',
+  '.ktx',
+  // Audio
+  '.ogg',
+  '.wav',
+  '.mp3',
+  // Fonts
+  '.ttf',
+  '.otf',
+  '.woff',
+  '.woff2',
+  // Shaders
+  '.gdshader',
+  '.gdshaderinc',
+  '.shader',
+];
 /** `type` values that mark an `ext_resource` as a script: Godot's loaders take the base or concrete class, so a hand-edited `type="GDScript"` loads as `Script` does. */
 const SCRIPT_TYPE_HINTS: ReadonlySet<string> = new Set(['Script', 'GDScript', 'CSharpScript']);
 const UNICODE_SHORT_ESCAPE_DIGITS = 4;
@@ -689,10 +716,10 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
           else skip(`script ${path} is not GDScript and is not scanned`);
         } else if (path === null) {
           skip(`ext_resource has no res:// path and was not followed: ${header.raw}`);
-        } else if (RESOURCE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
+        } else if (!SCRIPT_INERT_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
           if (!reportedResources.has(lowered)) {
             reportedResources.add(lowered);
-            skip(`resource ${path} is not scanned (a binary .res file can carry a script)`);
+            skip(`resource ${path} is not scanned (a resource file can carry a script)`);
           }
         }
       } else if (

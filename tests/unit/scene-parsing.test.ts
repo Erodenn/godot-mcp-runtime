@@ -602,3 +602,49 @@ describe('collectSceneScripts across multi-line values', () => {
     expect(collectSceneScripts(scenePath, dir).scripts).toEqual([join(dir, 'late.gd')]);
   });
 });
+
+describe('collectSceneScripts on resource references the walk does not read', () => {
+  const sceneWith = (...lines: string[]): string =>
+    ['[gd_scene format=3]', '', ...lines, '', '[node name="Main" type="Node"]', ''].join('\n');
+
+  it('reports an unread extension that is not script-inert, such as .material', () => {
+    const dir = tmp.makeProject('unread-material-', 'config_version=5\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      sceneWith('[ext_resource type="Material" path="res://x.material" id="1"]'),
+    );
+
+    const items = collectSceneScripts(join(dir, 'main.tscn'), dir).unscanned;
+
+    expect(items).toHaveLength(1);
+    expect(items[0].reason).toContain('res://x.material');
+    expect(items[0].reason).toContain('is not scanned');
+  });
+
+  it('reports nothing for images, audio, fonts and shaders', () => {
+    const dir = tmp.makeProject('inert-assets-', 'config_version=5\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      sceneWith(
+        '[ext_resource type="Texture2D" path="res://a.png" id="1"]',
+        '[ext_resource type="AudioStream" path="res://b.ogg" id="2"]',
+        '[ext_resource type="FontFile" path="res://c.ttf" id="3"]',
+        '[ext_resource type="Shader" path="res://d.gdshader" id="4"]',
+      ),
+    );
+
+    expect(collectSceneScripts(join(dir, 'main.tscn'), dir).unscanned).toEqual([]);
+  });
+
+  it('reports one file once when two scenes reference it', () => {
+    const dir = tmp.makeProject('unread-once-', 'config_version=5\n');
+    const line = '[ext_resource type="Material" path="res://x.material" id="1"]';
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      sceneWith(line, '[ext_resource type="PackedScene" path="res://child.tscn" id="2"]'),
+    );
+    writeFileSync(join(dir, 'child.tscn'), sceneWith(line));
+
+    expect(collectSceneScripts(join(dir, 'main.tscn'), dir).unscanned).toHaveLength(1);
+  });
+});
