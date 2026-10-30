@@ -2522,7 +2522,7 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 	# resource_path is a plain String property, so nothing downstream treats it as a path; Godot resolves res://../x outward and pack() would write it as an ext_resource.
 	var spec_resource_path: Variant = spec.get("resource_path", "")
 	if typeof(spec_resource_path) == TYPE_STRING and spec_resource_path != "" and normalize_scene_path(spec_resource_path).is_empty():
-		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': resource_path '%s' escapes the project root" % [property, spec_resource_path]}
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': resource_path '%s' is not a file path inside the project (no '..' out of res://, no other scheme, no '::' sub-resource)" % [property, spec_resource_path]}
 
 	# Plain properties first: virtual keys such as ShaderMaterial shader_parameter/<uniform> exist only once the resource they depend on is assigned.
 	var ordered_keys: Array = []
