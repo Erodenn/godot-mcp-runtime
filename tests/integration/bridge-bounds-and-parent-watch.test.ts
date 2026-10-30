@@ -280,9 +280,8 @@ describe('bridge serialization bounds and the parent watch', () => {
     CASE_TIMEOUT_MS,
   );
 
-  // Red when the freed-Object guard in _serialize_bounded is removed (mutation-e13.patch): `is` on a
-  // freed instance raises, the handler stops and no reply comes. Red the same way when
-  // _handle_run_script awaits the returned value unconditionally: `await` raises on a freed Object.
+  // Red when the freed-Object guard in _serialize_bounded is removed (`is` on a freed instance raises, no reply comes),
+  // or when _handle_run_script awaits the returned value unconditionally.
   itGodot(
     'run_script returns a freed node as the freed-Object marker, with no script error',
     async (ctx) => {
