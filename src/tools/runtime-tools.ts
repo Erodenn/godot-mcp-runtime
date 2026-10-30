@@ -374,7 +374,7 @@ export const runtimeToolDefinitions = [
           type: 'number',
           minimum: MIN_RUNTIME_TIMEOUT_MS,
           maximum: MAX_RUNTIME_TIMEOUT_MS,
-          description: `Timeout in milliseconds to wait for the screenshot, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
+          description: `Timeout in milliseconds to wait for the screenshot, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
         },
         responseMode: {
           type: 'string',
@@ -702,7 +702,7 @@ export const runtimeToolDefinitions = [
           type: 'number',
           minimum: MIN_RUNTIME_TIMEOUT_MS,
           maximum: MAX_RUNTIME_TIMEOUT_MS,
-          description: `Timeout in ms, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
+          description: `Timeout in ms, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
         },
       },
       required: ['script'],
