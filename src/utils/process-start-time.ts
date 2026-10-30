@@ -15,7 +15,7 @@ export interface ProcessStartIdentityDeps {
   run: (command: string, args: string[]) => { status: number | null; stdout: string } | null;
 }
 
-export const defaultProcessStartIdentityDeps: ProcessStartIdentityDeps = {
+const defaultProcessStartIdentityDeps: ProcessStartIdentityDeps = {
   platform: process.platform,
   readFile: (path) => readFileSync(path, 'utf8'),
   run: (command, args) => {

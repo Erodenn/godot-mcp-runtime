@@ -113,7 +113,7 @@ function classifyArgument(argument: readonly Token[]): ArgumentClassification {
 }
 
 /** Classifies the whole first argument, so `load("res://" + evil_var)` is 'nonliteral' rather than matching on the leading literal. */
-export function classifyFirstArgument(
+function classifyFirstArgument(
   tokens: readonly Token[],
   openParenIndex: number,
   budget: ScanBudget = newScanBudget(tokens.length),

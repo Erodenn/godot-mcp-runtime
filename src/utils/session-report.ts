@@ -229,7 +229,7 @@ export function runtimeCommandFailure(
 }
 
 /** The error for a call a stop cut off or that reached an already-ended session; a cut-off call may have done part of its work, which stays done. */
-export function sessionStoppedError(
+function sessionStoppedError(
   error: SessionStoppedError,
   failurePrefix: string,
   status: RuntimeSessionStatus,
