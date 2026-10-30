@@ -616,7 +616,7 @@ export const runtimeToolDefinitions = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'Inputs this batch pressed and did not release, e.g. "key:W", "action:jump".',
+            'Inputs this batch pressed that the engine still reports pressed when the batch ends, e.g. "key:W", "action:jump", "mouse_button:left"; a key is spelled as the engine names its keycode, whatever case the request used. Absent when none.',
         },
       },
       required: ['projectPath', 'success', 'results'],
@@ -681,7 +681,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return value is JSON-serialized (primitives, Vector2/3, Color, Dictionary, Array, Node paths). print() goes to get_debug_output, not the result. Returns: projectPath, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result leads with a warning.',
+      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return is JSON-serialized: vectors as {x,y[,z,w]}, Color as {r,g,b,a}, packed arrays as plain arrays, a Node as {class,name,path}. print() goes to get_debug_output. Returns: projectPath, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result warns.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -702,7 +702,10 @@ export const runtimeToolDefinitions = [
       type: 'object',
       properties: {
         projectPath: { type: 'string' },
-        result: {},
+        result: {
+          description:
+            'The value execute returned. Vector2, Vector3 and Vector4 (and their int forms) are {x, y[, z, w]}, Color is {r, g, b, a}, and a packed array is a plain array of its elements, the shapes get_node_properties returns. A non-finite number (INF, NAN) is null and counted in warnings. Rect2, Quaternion, transforms and other types without a shape of their own are their text form. A Node is {class, name, path}, a Resource {class, path}, another Object its text, a freed Object "<Freed Object>".',
+        },
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },

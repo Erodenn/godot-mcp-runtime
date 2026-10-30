@@ -452,6 +452,59 @@ describe('simulate_input observed results (live bridge)', () => {
     TEST_TIMEOUT_MS,
   );
 
+  // Red when still_held goes back to the request's own spelling: "w" and "W" would be two entries, and
+  // the release of "W" would leave "w" reported as held.
+  itGodot(
+    'pressing w and releasing W in one batch leaves still_held absent',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const payload = await simulate({
+        actions: [
+          { type: 'key', key: 'w', pressed: true },
+          { type: 'key', key: 'W', pressed: false },
+          { type: 'wait', frames: SHORT_WAIT_FRAMES },
+        ],
+      });
+
+      expect(payload.results).toHaveLength(3);
+      expect(
+        payload.still_held,
+        `a press released under another case must not stay reported; payload=${JSON.stringify(payload)}`,
+      ).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // Red when still_held echoes the request text ("key:w") instead of the engine's keycode string, or
+  // stops reading the engine: a release the engine honored would still be reported.
+  itGodot(
+    'an unreleased key press is reported in the engine keycode spelling, whatever case the request used',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const held = await simulate({
+        actions: [
+          { type: 'key', key: 'w', pressed: true },
+          { type: 'wait', frames: SHORT_WAIT_FRAMES },
+        ],
+      });
+      expect(
+        held.still_held,
+        `the press of "w" must be reported as the engine spells the key; payload=${JSON.stringify(held)}`,
+      ).toEqual(['key:W']);
+
+      const released = await simulate({
+        actions: [
+          { type: 'key', key: 'W', pressed: false },
+          { type: 'wait', frames: SHORT_WAIT_FRAMES },
+        ],
+      });
+      expect(released.still_held).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   itGodot(
     'text types into the focused LineEdit and reports its value',
     async (ctx) => {

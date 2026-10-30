@@ -55,6 +55,11 @@ extends Node
 const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
 # Attach-mode sessions get the token baked in by BridgeManager.inject; spawned sessions use the MCP_SESSION_TOKEN env var and leave this at its default.
 const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
+# The TCP ports a bridge or parent-watch port may name; an env value outside them is ignored.
+const PORT_MIN := 1
+const PORT_MAX := 65535
+# A letter's lowercase code point sits this far above its KEY_ keycode (KEY_A is 65, "a" is 97); a key event for a letter carries no unicode unless the caller gives one.
+const ASCII_LOWERCASE_OFFSET := 32
 # KEEP IN SYNC: screenshotsDir() in src/utils/artifact-paths.ts composes this directory; handleTakeScreenshot in src/tools/runtime-tools.ts refuses to read outside it.
 const SCREENSHOT_DIR_RES_PATH := "res://.mcp/godot-runtime/screenshots"
 # KEEP IN SYNC: SCREENSHOT_FRAME_RENDER_BUDGET_MS in src/tools/runtime-tools.ts.
@@ -137,6 +142,13 @@ const OVERSIZE_RESPONSE_ERROR := "The response is %d bytes, over the %d byte fra
 # Far enough off every monitor layout that no part of the window is on screen.
 const BACKGROUND_WINDOW_POSITION := Vector2i(-9999, -9999)
 
+# The kinds of input still_held can name; each is also the prefix of its spelling ("key:W"), and a candidate's two fields are the kind and the code Input is asked about.
+const HELD_KIND_KEY := "key"
+const HELD_KIND_MOUSE_BUTTON := "mouse_button"
+const HELD_KIND_ACTION := "action"
+const HELD_FIELD_KIND := "kind"
+const HELD_FIELD_CODE := "code"
+
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
 # A Callable connected to a signal must accept at least as many arguments as it emits, so each gets a lambda of matching arity. text_changed is absent on purpose: it fires per character and says nothing about activation.
@@ -165,6 +177,14 @@ class PeerState:
 	var expected_len: int = -1   # -1 = waiting on header
 	var handling: bool = false   # true while a command is awaiting a response
 	var authenticated: bool = false
+
+# One input batch's own state. Held apart from the bridge's members because an abandoned batch keeps running after the next command starts, and its tally must not land on that command's reply.
+class InputBatch:
+	extends RefCounted
+	# Inputs this batch pressed and did not release, keyed by the spelling still_held reports ("key:W"); each value says how to ask the engine whether it is still pressed.
+	var candidates: Dictionary = {}
+	# Non-finite numbers the batch's own samples replaced with null; added to the reply's count only when the batch reaches a reader.
+	var non_finite_count: int = 0
 
 var tcp_server: TCPServer
 var session_token: String = ""
@@ -208,7 +228,7 @@ func _ready() -> void:
 	var env_port := OS.get_environment("MCP_BRIDGE_PORT")
 	if env_port != "" and env_port.is_valid_int():
 		var parsed_port := int(env_port)
-		if parsed_port >= 1 and parsed_port <= 65535:
+		if _is_usable_port(parsed_port):
 			port = parsed_port
 	tcp_server = TCPServer.new()
 	var err = tcp_server.listen(port, "127.0.0.1")
@@ -220,7 +240,7 @@ func _ready() -> void:
 	var watch_port_text := OS.get_environment(PARENT_WATCH_PORT_ENV)
 	if watch_port_text != "" and watch_port_text.is_valid_int():
 		var watch_port := int(watch_port_text)
-		if watch_port >= 1 and watch_port <= 65535:
+		if _is_usable_port(watch_port):
 			_start_parent_watch(watch_port)
 
 	if OS.get_environment("MCP_BACKGROUND") == "1":
@@ -234,6 +254,9 @@ func _ready() -> void:
 			DisplayServer.window_set_size(size_before)
 		DisplayServer.window_set_position(BACKGROUND_WINDOW_POSITION)
 		print("McpBridge: Background mode active - window off-screen, mouse input passes through")
+
+func _is_usable_port(port: int) -> bool:
+	return port >= PORT_MIN and port <= PORT_MAX
 
 func _process(_delta: float) -> void:
 	if _parent_watch != null:
@@ -485,16 +508,17 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 	var batch_start_frame := Engine.get_process_frames()
 	var batch_start_ms := Time.get_ticks_msec()
 	var results: Array = []
-	# An ordered set of inputs this batch pressed and did not release; keys are reported verbatim in still_held.
-	var held := {}
+	var batch := InputBatch.new()
 	var stopped := false
+	var abandoned := false
 	var reply_bytes := 0
 
 	for i in actions.size():
-		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, held)
+		var entry: Dictionary = await _run_action(i, actions[i], watch_list, batch_start_frame, batch_start_ms, batch)
 		# Cancellation point, BEFORE the sentinel print below: a mark emitted now would land in whatever attribution window is open, which is no longer this batch's. A wait can park here long enough for the client to give up.
 		if _input_batch_abandoned(peer, generation):
 			stopped = true
+			abandoned = true
 			break
 		if reply_bytes <= MAX_INPUT_REPLY_BYTES:
 			reply_bytes += JSON.stringify(entry).to_utf8_buffer().size()
@@ -517,8 +541,12 @@ func _handle_input(peer: PeerState, actions: Array, watch: Variant = []) -> void
 			results.append({"index": j, "type": skipped_type, "skipped": true})
 
 	var response := {"success": not stopped, "results": results}
-	if not held.is_empty():
-		response["still_held"] = held.keys()
+	# An abandoned batch has no reader: its tally is dropped, and the engine is not asked what it left pressed.
+	if not abandoned:
+		_non_finite_count += batch.non_finite_count
+		var still_held := _read_still_held(batch)
+		if not still_held.is_empty():
+			response["still_held"] = still_held
 	# Reached on the cancelled path too: _send_response skips the write when the peer is gone and clears peer.handling either way, which keeps the every-path-replies invariant without a finally block.
 	_send_response(peer, response)
 
@@ -656,7 +684,7 @@ func _is_number(value: Variant) -> bool:
 	return typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT
 
 # Order matters: the UI snapshot and observers come before injection, and every read comes after the settle frame because Input.parse_input_event is buffered.
-func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: int, batch_start_ms: int, held: Dictionary) -> Dictionary:
+func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: int, batch_start_ms: int, batch: InputBatch) -> Dictionary:
 	var dict: Dictionary = action
 	var type := str(dict.get("type", ""))
 	var entry := {"index": index, "type": type}
@@ -683,7 +711,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	# No observer is connected yet, so this early exit leaks nothing.
 	if entry.has("error"):
 		if not watch.is_empty():
+			var tally_before := _non_finite_count
 			entry["watch"] = _sample_watch(watch)
+			_move_tally_to_batch(batch, tally_before)
 		return _finish_entry(entry, batch_start_frame, batch_start_ms)
 
 	# Connected only on a click_element target and only for signals it declares; lambdas capture by value, so the sink is an Array. The pairs are kept so the disconnect undoes exactly what was done.
@@ -705,7 +735,8 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var key_pressed: bool = dict.get("pressed")
 				_inject_key(dict, key_pressed)
-				_update_held(held, "key:%s" % str(dict.get("key", "")), key_pressed)
+				var held_keycode := OS.find_keycode_from_string(str(dict.get("key", "")))
+				_track_held(batch, HELD_KIND_KEY, OS.get_keycode_string(held_keycode), held_keycode, key_pressed)
 			else:
 				_inject_key(dict, true)
 				await _tap_hold(dict, true)
@@ -714,7 +745,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var button_pressed: bool = dict.get("pressed")
 				_inject_mouse_button(dict, button_pressed)
-				_update_held(held, "mouse_button:%s" % str(dict.get("button", "left")), button_pressed)
+				var held_button_name := str(dict.get("button", "left"))
+				var held_button: MouseButton = _resolve_button_name(held_button_name)[0]
+				_track_held(batch, HELD_KIND_MOUSE_BUTTON, held_button_name, held_button, button_pressed)
 			else:
 				_inject_mouse_button(dict, true)
 				await _tap_hold(dict, false)
@@ -730,7 +763,8 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if dict.has("pressed"):
 				var action_pressed: bool = dict.get("pressed")
 				_inject_action(dict, action_pressed)
-				_update_held(held, "action:%s" % str(dict.get("action", "")), action_pressed)
+				var held_action_name := str(dict.get("action", ""))
+				_track_held(batch, HELD_KIND_ACTION, held_action_name, held_action_name, action_pressed)
 			else:
 				_inject_action(dict, true)
 				await _tap_hold(dict, true)
@@ -780,7 +814,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	if type == "mouse_motion":
 		var viewport := get_viewport()
 		if viewport != null:
+			var position_tally_before := _non_finite_count
 			entry["position"] = _serialize_value(viewport.get_mouse_position())
+			_move_tally_to_batch(batch, position_tally_before)
 
 	if type == "text":
 		var focus_node := _focus_owner()
@@ -793,7 +829,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	if not changes.is_empty():
 		entry["changes"] = changes
 	if not watch.is_empty():
+		var watch_tally_before := _non_finite_count
 		entry["watch"] = _sample_watch(watch)
+		_move_tally_to_batch(batch, watch_tally_before)
 
 	return _finish_entry(entry, batch_start_frame, batch_start_ms)
 
@@ -813,11 +851,38 @@ func _make_signal_observer(signal_name: String, arity: int, sink: Array) -> Call
 		_:
 			return Callable()
 
-func _update_held(held: Dictionary, key: String, pressed: bool) -> void:
+# `input_name` is the canonical spelling of the input (the engine's keycode string for a key), so a press of "w" and a release of "W" are the same candidate.
+func _track_held(batch: InputBatch, kind: String, input_name: String, code: Variant, pressed: bool) -> void:
+	var spelling := "%s:%s" % [kind, input_name]
 	if pressed:
-		held[key] = true
+		batch.candidates[spelling] = {HELD_FIELD_KIND: kind, HELD_FIELD_CODE: code}
 	else:
-		held.erase(key)
+		batch.candidates.erase(spelling)
+
+# still_held is read from the engine, not from the request: a candidate is reported only when Input says it is pressed, in the order it was pressed. The state is the one _inject_* builds the event for; a key is asked by keycode and by physical keycode, as the event sets both.
+func _read_still_held(batch: InputBatch) -> Array:
+	# Parsed events are buffered; the state a read sees must include the last one.
+	Input.flush_buffered_events()
+	var held: Array = []
+	for spelling in batch.candidates:
+		var candidate: Dictionary = batch.candidates[spelling]
+		var code: Variant = candidate[HELD_FIELD_CODE]
+		var pressed := false
+		match candidate[HELD_FIELD_KIND]:
+			HELD_KIND_KEY:
+				pressed = Input.is_key_pressed(code) or Input.is_physical_key_pressed(code)
+			HELD_KIND_MOUSE_BUTTON:
+				pressed = Input.is_mouse_button_pressed(code)
+			HELD_KIND_ACTION:
+				pressed = Input.is_action_pressed(StringName(str(code)))
+		if pressed:
+			held.append(spelling)
+	return held
+
+# A serialization walk never awaits, so what it tallied since `before` is moved off the shared count at once: the batch adds it to its own reply, and a different command's reply never takes it.
+func _move_tally_to_batch(batch: InputBatch, before: int) -> void:
+	batch.non_finite_count += _non_finite_count - before
+	_non_finite_count = before
 
 # hold_ms wins when given. Key and action taps wait for one process frame AND one physics frame: a render frame at high fps can hold zero physics ticks and _physics_process polling would never see the press. Mouse taps keep a zero gap, like a real click.
 func _tap_hold(action: Dictionary, frame_gap: bool) -> void:
@@ -854,7 +919,7 @@ func _inject_key(action: Dictionary, pressed: bool) -> void:
 	if action.has("unicode"):
 		event.unicode = int(action.get("unicode"))
 	elif keycode >= KEY_A and keycode <= KEY_Z:
-		event.unicode = int(keycode) if event.shift_pressed else int(keycode) + 32
+		event.unicode = int(keycode) if event.shift_pressed else int(keycode) + ASCII_LOWERCASE_OFFSET
 	elif keycode >= KEY_0 and keycode <= KEY_9:
 		event.unicode = int(keycode)
 	Input.parse_input_event(event)
@@ -1121,8 +1186,17 @@ func _current_scene_path() -> String:
 	return str(scene.get_path())
 
 func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
-	var visible_only: bool = payload.get("visible_only", true)
-	var type_filter: String = payload.get("type_filter", "")
+	# Variant, then checked: a typed read of a wrong-typed field raises and the peer would wait out its timeout. The server validates both, so only a hand-driven bridge meets it.
+	var visible_only_field: Variant = payload.get("visible_only", true)
+	if typeof(visible_only_field) != TYPE_BOOL:
+		_send_response(peer, {"error": "visible_only must be a boolean"})
+		return
+	var type_filter_field: Variant = payload.get("type_filter", "")
+	if typeof(type_filter_field) != TYPE_STRING:
+		_send_response(peer, {"error": "type_filter must be a string"})
+		return
+	var visible_only: bool = visible_only_field
+	var type_filter: String = type_filter_field
 	# is_class() matches native class names only, so an unknown name can never match, and an empty list would read as "no such controls".
 	if type_filter != "":
 		if not ClassDB.class_exists(type_filter):
@@ -1208,7 +1282,12 @@ func _find_control_by_identifier(identifier: String) -> Control:
 	return null
 
 func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
-	var source: String = payload.get("source", "")
+	# Variant, then checked, as in _handle_get_ui_elements: a typed read of a wrong-typed field raises and no reply is sent.
+	var source_field: Variant = payload.get("source", "")
+	if typeof(source_field) != TYPE_STRING:
+		_send_response(peer, {"error": "source must be a string"})
+		return
+	var source: String = source_field
 	if source.strip_edges() == "":
 		_send_response(peer, {"error": "No script source provided"})
 		return
@@ -1239,8 +1318,11 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": RUN_SCRIPT_ENTRY_MISSING_ERROR})
 		return
 
-	# Awaited in case the script uses async/await; the argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states.
-	var result = await instance.execute(get_tree())
+	# The argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states. A coroutine returns its pending state, which the await resolves.
+	# A freed Object is never awaited: `await` raises on one ("Trying to await on a freed object."), the handler stops and no response is sent.
+	var result = instance.execute(get_tree())
+	if typeof(result) != TYPE_OBJECT or is_instance_valid(result):
+		result = await result
 
 	if instance is RefCounted:
 		instance = null
@@ -1346,8 +1428,34 @@ func _on_serialize_path(container: Variant) -> bool:
 			return true
 	return false
 
+# Packed arrays that serialize as the plain array of their elements, the shape get_node_properties reads them in; a type absent here goes out as text.
+# KEEP IN SYNC: _PACKED_READ_TYPES in src/scripts/godot_operations.gd (tests/unit/bridge-keep-in-sync.test.ts compares the two lists).
+const _PACKED_READ_TYPES: Array = [
+	TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY,
+	TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY,
+	TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_VECTOR4_ARRAY,
+	TYPE_PACKED_COLOR_ARRAY,
+]
+
+# A packed array is a container for the bounds: it is cut at the depth limit and each element is charged against the element budget, with the same markers an Array gets. It cannot hold itself, and an element is never a container, so no path entry is needed. Indexed rather than converted, so a large sampled array costs only the elements the budget admits.
+func _serialize_packed(packed: Variant, depth: int) -> Variant:
+	if depth >= _serialize_depth_limit:
+		return TRUNCATED_DEPTH_MARKER % _serialize_depth_limit
+	var size: int = packed.size()
+	var result := []
+	for i in size:
+		if not _take_serialize_element():
+			result.append(TRUNCATED_ELEMENTS_MARKER % (size - i))
+			break
+		result.append(_serialize_bounded(packed[i], depth + 1))
+	return result
+
 # `depth` is how many containers enclose `value`; call through _serialize_value or _serialize_sample, which set the bounds.
+# Value shapes match _variant_to_json in src/scripts/godot_operations.gd (vectors as {x,y,..}, colors as {r,g,b,a}, packed arrays as arrays); only the bounds, the markers and the Object shapes differ.
 func _serialize_bounded(value: Variant, depth: int) -> Variant:
+	# A freed Object is not null and `is` raises on one; a track samples from _process, where that would raise every tick. Checked before the null test, so the answer does not hang on how == treats a freed Object.
+	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
+		return "<Freed Object>"
 	if value == null:
 		return null
 
@@ -1371,6 +1479,12 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 		TYPE_VECTOR3I:
 			var v: Vector3i = value
 			return {"x": v.x, "y": v.y, "z": v.z}
+		TYPE_VECTOR4:
+			var v: Vector4 = value
+			return {"x": _finite_or_null(v.x), "y": _finite_or_null(v.y), "z": _finite_or_null(v.z), "w": _finite_or_null(v.w)}
+		TYPE_VECTOR4I:
+			var v: Vector4i = value
+			return {"x": v.x, "y": v.y, "z": v.z, "w": v.w}
 		TYPE_COLOR:
 			var c: Color = value
 			return {"r": _finite_or_null(c.r), "g": _finite_or_null(c.g), "b": _finite_or_null(c.b), "a": _finite_or_null(c.a)}
@@ -1407,9 +1521,6 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			_serialize_path.pop_back()
 			return result
 		TYPE_OBJECT:
-			# A freed Object is not null and `is` raises on one; a track samples from _process, where that would raise every tick.
-			if not is_instance_valid(value):
-				return "<Freed Object>"
 			if value is Node:
 				var node: Node = value
 				# get_path() on a node outside the tree prints an engine error, so that case gives "" without the call.
@@ -1421,7 +1532,9 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 			else:
 				return _bound_text(str(value))
 		_:
-			# Everything else goes out as text (packed arrays included), so the string limit bounds a sampled PackedByteArray.
+			if typeof(value) in _PACKED_READ_TYPES:
+				return _serialize_packed(value, depth)
+			# Everything else goes out as text (Rect2, Quaternion, transforms, a packed type outside _PACKED_READ_TYPES), bounded by the string limit.
 			return _bound_text(str(value))
 
 func _handle_shutdown(peer: PeerState) -> void:

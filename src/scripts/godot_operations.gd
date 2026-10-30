@@ -2882,6 +2882,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 	return {"ok": true, "value": coerced, "error": ""}
 
 # Packed arrays whose elements read as the plain array set_node_properties takes (_PACKED_ARRAY_ELEMENT_TYPE); a type absent from both stays text.
+# KEEP IN SYNC: _PACKED_READ_TYPES in src/scripts/mcp_bridge.gd (tests/unit/bridge-keep-in-sync.test.ts compares the two lists).
 const _PACKED_READ_TYPES: Array = [
 	TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY,
 	TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY,

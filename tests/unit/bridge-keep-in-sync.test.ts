@@ -491,3 +491,144 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     expect(quits).toHaveLength(1);
   });
 });
+
+/** The bridge's serializer and the headless one name the same packed types and write the same value shapes; each reads the other's list only as text. */
+describe('mcp_bridge.gd serializes values in the shapes godot_operations.gd reads them in', () => {
+  const operationsSource = readFileSync(
+    new URL('../../src/scripts/godot_operations.gd', import.meta.url),
+    'utf8',
+  );
+
+  function packedReadTypes(source: string, file: string): string[] {
+    const match = source.match(/^const _PACKED_READ_TYPES: Array = \[([^\]]*)\]/m);
+    expect(match, `${file} must declare const _PACKED_READ_TYPES`).not.toBeNull();
+    return [...match![1]!.matchAll(/TYPE_PACKED_\w+/g)].map((type) => type[0]).sort();
+  }
+
+  // Red when a packed type is added to or dropped from one list only: a value the headless
+  // reader returns as an array would come back from run_script as text, or the reverse.
+  it('lists the same packed types on both sides', () => {
+    const bridge = packedReadTypes(bridgeSource, 'mcp_bridge.gd');
+    const operations = packedReadTypes(operationsSource, 'godot_operations.gd');
+    expect(bridge.length).toBeGreaterThan(0);
+    expect(bridge).toEqual(operations);
+  });
+
+  it('carries a KEEP IN SYNC marker on each list naming the other', () => {
+    expect(bridgeSource).toMatch(
+      /# KEEP IN SYNC: _PACKED_READ_TYPES in src\/scripts\/godot_operations\.gd[^\n]*\nconst _PACKED_READ_TYPES/,
+    );
+    expect(operationsSource).toMatch(
+      /# KEEP IN SYNC: _PACKED_READ_TYPES in src\/scripts\/mcp_bridge\.gd[^\n]*\nconst _PACKED_READ_TYPES/,
+    );
+  });
+
+  // Red when the Vector4 arms are removed: a Vector4 would fall to the text branch again.
+  it('writes Vector4 and Vector4i as {x,y,z,w}', () => {
+    const walker = gdFunctionBody('_serialize_bounded');
+    expect(walker).toContain('TYPE_VECTOR4:');
+    expect(walker).toContain('TYPE_VECTOR4I:');
+    expect(walker.match(/"w": /g)).toHaveLength(2);
+  });
+
+  // Red when a packed array stops going through the element budget, depth cut and markers.
+  it('bounds a packed array like an array: depth cut, element budget, marker', () => {
+    expect(gdFunctionBody('_serialize_bounded')).toContain(
+      'if typeof(value) in _PACKED_READ_TYPES:\n\t\t\t\treturn _serialize_packed(value, depth)',
+    );
+    const packed = gdFunctionBody('_serialize_packed');
+    expect(packed).toContain('if depth >= _serialize_depth_limit:');
+    expect(packed).toContain('TRUNCATED_DEPTH_MARKER %');
+    expect(packed).toContain('if not _take_serialize_element():');
+    expect(packed).toContain('TRUNCATED_ELEMENTS_MARKER %');
+    expect(packed).toContain('_serialize_bounded(packed[i], depth + 1)');
+  });
+});
+
+/** Numbers the bridge once spelled inline; the rest of mcp_bridge.gd reads the named constants. */
+describe('mcp_bridge.gd names its port bounds and its letter-case offset', () => {
+  const codeLines = bridgeSource
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .filter((line) => !/^const /.test(line));
+
+  // Red when a port bound or the case offset is written as a literal again outside a const declaration.
+  it('has no 65535 or "+ 32" literal outside a const declaration', () => {
+    expect(codeLines.filter((line) => /\b65535\b/.test(line))).toEqual([]);
+    expect(codeLines.filter((line) => /\+ 32\b/.test(line))).toEqual([]);
+  });
+
+  it('checks both ports it reads from the environment against the one named range', () => {
+    expect(gdConst('PORT_MIN')).toBe('1');
+    expect(gdConst('PORT_MAX')).toBe('65535');
+    expect(gdFunctionBody('_ready').match(/_is_usable_port\(/g)).toHaveLength(2);
+    expect(gdFunctionBody('_is_usable_port')).toContain('port >= PORT_MIN and port <= PORT_MAX');
+    expect(gdFunctionBody('_inject_key')).toContain('ASCII_LOWERCASE_OFFSET');
+    expect(gdConst('ASCII_LOWERCASE_OFFSET')).toBe('32');
+  });
+});
+
+/** A handler that reads a payload field into a typed variable raises on a wrong type and sends no reply; the client then waits out its whole timeout. */
+describe('mcp_bridge.gd handlers type-check payload fields before using them', () => {
+  // Red when a typed read of a payload field comes back: `var source: String = payload.get(...)`
+  // raises in the engine on a non-string, and the bridge command never answers.
+  it.each([
+    ['_handle_get_ui_elements', ['visible_only', 'type_filter']],
+    ['_handle_run_script', ['source']],
+  ])('%s reads %j as Variant and refuses a wrong type', (handler, fields) => {
+    const body = gdFunctionBody(handler);
+    for (const field of fields as string[]) {
+      expect(body).toContain(`var ${field}_field: Variant = payload.get("${field}"`);
+      expect(body).toMatch(
+        new RegExp(`if typeof\\(${field}_field\\) != TYPE_(BOOL|STRING):\\n\\t+_send_response\\(`),
+      );
+      expect(body).not.toMatch(new RegExp(`var ${field}: \\w+ = payload\\.get`));
+    }
+  });
+});
+
+/** An input batch keeps its own non-finite tally and reads still_held from the engine. */
+describe('mcp_bridge.gd input batches', () => {
+  const SERIALIZER_CALL = /_sample_watch\(|_serialize_value\(/g;
+
+  // Red when a batch serialization stops moving its tally to the batch: an abandoned batch's
+  // count would be taken by the next reply and could hide that reply's own warning.
+  it('moves the tally of every serialization in _run_action to the batch', () => {
+    const body = gdFunctionBody('_run_action');
+    const calls = body.match(SERIALIZER_CALL) ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(body.match(/var \w+ := _non_finite_count\n/g)).toHaveLength(calls.length);
+    expect(body.match(/_move_tally_to_batch\(batch, \w+\)/g)).toHaveLength(calls.length);
+    // Each call sits between its own `before` read and its own move.
+    const sandwiches = body.match(
+      /var (\w+) := _non_finite_count\n[^\n]*(?:_sample_watch\(|_serialize_value\()[^\n]*\n\t+_move_tally_to_batch\(batch, \1\)/g,
+    );
+    expect(sandwiches).toHaveLength(calls.length);
+  });
+
+  // Red when the batch's count is added for an abandoned batch too.
+  it('adds the batch tally to the shared count only when a reader is left', () => {
+    const body = gdFunctionBody('_handle_input');
+    expect(body).toMatch(
+      /if not abandoned:\n\t+_non_finite_count \+= batch\.non_finite_count\n\t+var still_held := _read_still_held\(batch\)/,
+    );
+    expect(body.match(/_non_finite_count \+= /g)).toHaveLength(1);
+  });
+
+  // Red when still_held is built from the request again.
+  it('reads still_held from Input, not from the request', () => {
+    const read = gdFunctionBody('_read_still_held');
+    expect(read).toContain('Input.is_key_pressed(code) or Input.is_physical_key_pressed(code)');
+    expect(read).toContain('Input.is_mouse_button_pressed(code)');
+    expect(read).toContain('Input.is_action_pressed(StringName(str(code)))');
+    expect(gdFunctionBody('_handle_input')).not.toContain('held.keys()');
+    expect(bridgeSource).not.toContain('_update_held');
+  });
+
+  // Red when a press is recorded under the request's own text, so "w" and "W" are two candidates again.
+  it("records a key under the engine's keycode string", () => {
+    expect(gdFunctionBody('_run_action')).toContain(
+      '_track_held(batch, HELD_KIND_KEY, OS.get_keycode_string(held_keycode), held_keycode, key_pressed)',
+    );
+  });
+});

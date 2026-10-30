@@ -4552,6 +4552,31 @@ describe('the queue wait is charged against the command it delayed', () => {
     expect(payload.result).toBe(1);
   });
 
+  // Red when the budget constants are retuned and the description keeps the old figure.
+  it('states the input batch action cap as the time budget derives it', () => {
+    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
+    const properties = simulateInput!.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties.actions?.description).toContain(
+      'The budget admits at most 5900 actions per call, fewer when they tap, hold or wait.',
+    );
+  });
+});
+
+describe('the bridge reports a non-finite count the tools turn into a warning', () => {
+  const BENIGN_SCRIPT =
+    'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 1\n';
+
+  function spawnedFake(): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setSession({ mode: 'spawned', projectPath: '/p', process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
+    return fake;
+  }
+
   // Red when the Node side stops reading the bridge's non-finite count: the field would not reach
   // the payload, or a nulled result would read as a script failure.
   it('run_script leads with the non-finite warning and strips the internal field', async () => {
@@ -4575,17 +4600,5 @@ describe('the queue wait is charged against the command it delayed', () => {
     const payload = expectMatchesOutputSchema('simulate_input', result);
     expect(payload.warnings).toEqual(['1 non-finite numbers (INF, NAN) were returned as null']);
     expect(JSON.stringify(payload)).not.toContain(NON_FINITE_COUNT_FIELD);
-  });
-
-  // Red when the budget constants are retuned and the description keeps the old figure.
-  it('states the input batch action cap as the time budget derives it', () => {
-    const simulateInput = runtimeToolDefinitions.find((tool) => tool.name === 'simulate_input');
-    const properties = simulateInput!.inputSchema.properties as Record<
-      string,
-      { description?: string }
-    >;
-    expect(properties.actions?.description).toContain(
-      'The budget admits at most 5900 actions per call, fewer when they tap, hold or wait.',
-    );
   });
 });
