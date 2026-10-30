@@ -12,6 +12,7 @@ import { createErrorResponse } from '../utils/error-response.js';
 import {
   parseProjectArgs,
   parseSceneArgs,
+  parseOptionalNodePath,
   parseRequiredNodePath,
   requireString,
   optionalString,
@@ -461,11 +462,10 @@ export async function handleAddNode(
     nodeType: nodeTypeScene ? nodeTypeScene.relPath : nodeType.value,
     nodeName: nodeName.value,
   };
-  if (args.parentNodePath !== undefined) {
-    const parentNodePath = parseRequiredNodePath(args, 'parentNodePath');
-    if (!parentNodePath.ok) return parentNodePath;
-    params.parentNodePath = parentNodePath.value;
-  }
+  // Optional: an empty or null parentNodePath means the scene root, as an omitted one does.
+  const parentNodePath = parseOptionalNodePath(args, 'parentNodePath');
+  if (!parentNodePath.ok) return parentNodePath;
+  if (parentNodePath.value !== undefined) params.parentNodePath = parentNodePath.value;
   if (Object.keys(mergedProps).length > 0) params.properties = mergedProps;
   return executeSceneOp(
     runner,

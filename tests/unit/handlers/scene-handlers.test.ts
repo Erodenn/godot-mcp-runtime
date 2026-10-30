@@ -203,6 +203,24 @@ describe('handleAddNode', () => {
     expect(payload.nodeName).toBe('@Foo@2');
   });
 
+  // Red when add_node reads parentNodePath with parseRequiredNodePath again.
+  it.each([[''], [undefined]])(
+    'targets the scene root when parentNodePath is %j',
+    async (parent) => {
+      const fake = createFakeRunner({
+        stdout: JSON.stringify({ nodeName: 'Foo', nodeType: 'Node2D', nodePath: 'root/Foo' }),
+      });
+      const result = await handleAddNode(fake.asRunner, {
+        ...validBase,
+        nodeType: 'Node2D',
+        nodeName: 'Foo',
+        parentNodePath: parent,
+      });
+      expect(hasError(result)).toBe(false);
+      expect(fake.calls[0]?.params.parentNodePath).toBeUndefined();
+    },
+  );
+
   it('sends the properties value when it conflicts with a top-level shorthand', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({ nodeName: 'Foo', nodeType: 'Node2D', nodePath: 'root/Foo' }),
