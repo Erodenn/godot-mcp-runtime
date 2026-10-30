@@ -857,7 +857,7 @@ describe('render_movie refusals before any spawn', () => {
     expect(stub.calls.length).toBe(0);
   });
 
-  it('asks the runner to repair the project once per launch, before the stranded-entry check', async () => {
+  it('asks the runner to repair the project once per launch', async () => {
     const { dir, runner, fake, handler } = setup();
 
     payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
