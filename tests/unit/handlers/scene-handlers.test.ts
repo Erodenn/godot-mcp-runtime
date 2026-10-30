@@ -204,7 +204,7 @@ describe('handleAddNode', () => {
   });
 
   // Red when add_node reads parentNodePath with parseRequiredNodePath again.
-  it.each([[''], [undefined]])(
+  it.each([[''], [null], [undefined]])(
     'targets the scene root when parentNodePath is %j',
     async (parent) => {
       const fake = createFakeRunner({
