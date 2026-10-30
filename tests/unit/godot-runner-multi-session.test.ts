@@ -1075,6 +1075,40 @@ describe('multi-project runtime sessions', () => {
     expect(runner.getCurrentSessionInfo()).toBeNull();
   });
 
+  // Red when stopSessionRef stops handing the pointer back to the session that was current before the start.
+  it('a spawned start torn down after launching gives current back to the session that held it', async () => {
+    await startProject(projectA, PORT_A);
+    queuedChildren.push(makeFakeChildProcess({ exitOnKill: true }));
+    const started = await runner.runProject(projectB, undefined, false, PORT_B);
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectB });
+
+    await runner.stopSessionRef(started);
+
+    expect(sessionPaths()).toEqual([projectA]);
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectA, live: true });
+  });
+
+  it('a start torn down after launching leaves no session current when none was current before it', async () => {
+    queuedChildren.push(makeFakeChildProcess({ exitOnKill: true }));
+    const started = await runner.runProject(projectA, undefined, false, PORT_A);
+
+    await runner.stopSessionRef(started);
+
+    expect(runner.getCurrentSessionInfo()).toBeNull();
+  });
+
+  it('a torn-down start does not take the pointer back from a session switched to meanwhile', async () => {
+    await startProject(projectA, PORT_A);
+    await startProject(projectB, PORT_B);
+    queuedChildren.push(makeFakeChildProcess({ exitOnKill: true }));
+    const started = await runner.runProject(projectC, undefined, false, PORT_C);
+    runner.switchSession(projectB);
+
+    await runner.stopSessionRef(started);
+
+    expect(runner.getCurrentSessionInfo()).toMatchObject({ projectPath: projectB });
+  });
+
   it('a start overtaken by a shutdown inside its profiler await launches nothing and writes nothing', async () => {
     let resolveProfiler: (profiler: FakeProfiler) => void = () => {};
     profilerCreateMock.mockReturnValue(

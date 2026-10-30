@@ -246,6 +246,8 @@ export interface RuntimeSession {
   stopped: boolean;
   /** The stop in progress; a second stop shares it. */
   stopping: Promise<RuntimeStopResult | null> | null;
+  /** Key of the session that was current when this one's start made it current, or null; `stopSessionRef` gives it back the pointer when the start fails after launching. A key, not the record, so a chain of starts does not keep stopped records alive. */
+  currentBeforeStart: string | null;
 }
 
 /** Reference to one session record for a caller acting on it after its own awaits; the current pointer and map may name another by then. */
@@ -478,7 +480,7 @@ export class GodotRunner {
   private validatedPaths: Map<string, boolean> = new Map();
   private cachedVersion: string | null = null;
   private sessions = new Map<string, RuntimeSession>();
-  /** The session the runtime tools act on. Never moved implicitly, except by a start that launched nothing undoing its own move (`restoreCurrentAfterFailedStart`). */
+  /** The session the runtime tools act on. Never moved implicitly, except by a failed start undoing its own move (`restoreCurrentAfterFailedStart`). */
   private current: RuntimeSession | null = null;
   private killTreeDeps: KillTreeDeps = defaultKillTreeDeps;
 
@@ -1096,6 +1098,7 @@ export class GodotRunner {
     session.profiler = profiler;
     const epoch = session.epoch;
     const previousCurrent = this.current;
+    session.currentBeforeStart = previousCurrent?.key ?? null;
     this.sessions.set(key, session);
     this.setCurrent(session);
 
@@ -1194,7 +1197,8 @@ export class GodotRunner {
       // Nothing is running for this record: drop it and remove whatever bridge artifacts were left.
       const heldCurrent = this.current === session;
       this.appendCleanupProblems(err, this.discardFailedStart(session, true));
-      if (!processSpawned && heldCurrent) this.restoreCurrentAfterFailedStart(previousCurrent);
+      if (!processSpawned && heldCurrent)
+        this.restoreCurrentAfterFailedStart(session.currentBeforeStart);
       throw err;
     }
   }
@@ -1271,11 +1275,11 @@ export class GodotRunner {
     return { confirmed: exited || tracked.hasExited, pid };
   }
 
-  /** Undo, not promotion: give `current` back to the record that held it before a start that launched nothing, if it is still registered and nothing took the pointer. */
-  private restoreCurrentAfterFailedStart(previousCurrent: RuntimeSession | null): void {
-    if (previousCurrent === null || this.current !== null) return;
-    if (this.sessions.get(previousCurrent.key) !== previousCurrent) return;
-    this.setCurrent(previousCurrent);
+  /** Undo, not promotion: give `current` back to the record that held it before a start that failed, if it is still registered and nothing took the pointer. */
+  private restoreCurrentAfterFailedStart(previousKey: string | null): void {
+    if (previousKey === null || this.current !== null) return;
+    const previous = this.sessions.get(previousKey);
+    if (previous !== undefined) this.setCurrent(previous);
   }
 
   // Called first, before any await, kill or bridge call, so handlers of the old epoch are inert.
@@ -1301,6 +1305,7 @@ export class GodotRunner {
       startWarnings: [],
       stopped: false,
       stopping: null,
+      currentBeforeStart: null,
     };
     this.knownSessions.add(session);
     return session;
@@ -1521,6 +1526,7 @@ export class GodotRunner {
     const session = this.createSession(projectPath, 'attached');
     session.startWarnings = startWarnings;
     const previousCurrent = this.current;
+    session.currentBeforeStart = previousCurrent?.key ?? null;
     this.sessions.set(key, session);
     this.setCurrent(session);
 
@@ -1537,7 +1543,7 @@ export class GodotRunner {
       // inject writes its owner file before .gitignore and project.godot, so a throw there leaves a live owner claim; the cleanup withdraws it.
       const heldCurrent = this.current === session;
       this.appendCleanupProblems(err, this.discardFailedStart(session, true));
-      if (heldCurrent) this.restoreCurrentAfterFailedStart(previousCurrent);
+      if (heldCurrent) this.restoreCurrentAfterFailedStart(session.currentBeforeStart);
       throw err;
     }
   }
@@ -1610,7 +1616,11 @@ export class GodotRunner {
   stopSessionRef(ref: SessionRef): Promise<RuntimeStopResult | null> {
     const session = this.recordOf(ref);
     if (this.sessions.get(session.key) !== session) return Promise.resolve(null);
-    return this.stopSession(session);
+    const wasCurrent = this.current === session;
+    return this.stopSession(session).then((result) => {
+      if (wasCurrent) this.restoreCurrentAfterFailedStart(session.currentBeforeStart);
+      return result;
+    });
   }
 
   /** Ask a session's bridge to shut down on a connection of its own, so a command the command socket carries neither blocks the stop nor is mistaken for its reply. Never throws; bounded by `timeoutMs`. */
