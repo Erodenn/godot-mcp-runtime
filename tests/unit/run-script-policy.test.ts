@@ -376,8 +376,8 @@ describe('evaluateScript: member chain whitespace/newline skeleton key', () => {
 });
 
 describe('evaluateScript: whole-first-argument classification', () => {
-  // `load("res://" + evil)` must stay Tier 1 (non-literal), not drop to Tier 3 on the leading literal.
-  it('blocks load("res://" + x) as non-literal, not warn', () => {
+  // `load("res://" + evil)` must stay non-literal (Tier 2), not drop to Tier 3 on the leading literal.
+  it('asks for load("res://" + x) as non-literal, not warn', () => {
     const d = evalLine('var r = load("res://" + x)');
     expect(d.decision).toBe('elicit_required');
     expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
@@ -397,7 +397,7 @@ describe('evaluateScript: whole-first-argument classification', () => {
     expect(d.matches.some((m) => m.ruleId === 'tier3.literal.load')).toBe(true);
   });
 
-  it('regression: load(some_var) stays hard_block', () => {
+  it('regression: load(some_var) stays elicit_required', () => {
     const d = evalLine('var r = load(some_var)');
     expect(d.decision).toBe('elicit_required');
     expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
@@ -778,7 +778,7 @@ describe('evaluateScript: global-function rules ignore method calls', () => {
     expect(evalLine('get_node("P").str_to_var(s)').decision).toBe('ok');
   });
 
-  it('still blocks a global load that follows a statement ending in a dot-free line', () => {
+  it('still flags a global load that follows a statement ending in a dot-free line', () => {
     expect(evaluateScript(VALID_PREFIX + 'var a = 1\n\tvar r = load(p)\n').decision).toBe(
       'elicit_required',
     );
