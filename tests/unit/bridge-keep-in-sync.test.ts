@@ -555,6 +555,21 @@ describe('mcp_bridge.gd serializes values in the shapes godot_operations.gd read
     expect(walker.match(/"w": /g)).toHaveLength(2);
   });
 
+  // Red when a float component is written raw: an INF in it would reach the reply un-nulled and uncounted.
+  it.each(['TYPE_VECTOR2', 'TYPE_VECTOR3', 'TYPE_VECTOR4', 'TYPE_COLOR'])(
+    'writes every component of a %s through _finite_or_null',
+    (arm) => {
+      const walker = gdFunctionBody('_serialize_bounded');
+      const body = walker.match(new RegExp(String.raw`\n(\t+)${arm}:\n((?:\1\t[^\n]*\n)+)`));
+      expect(body, `_serialize_bounded must have a ${arm} arm`).not.toBeNull();
+      const components = body![2]!.match(/"[xyzwrgba]": [^,}]+/g) ?? [];
+      expect(components.length).toBeGreaterThan(1);
+      for (const component of components) {
+        expect(component).toMatch(/: _finite_or_null\([cv]\.[xyzwrgba]\)$/);
+      }
+    },
+  );
+
   // Red when a packed array stops going through the element budget, depth cut and markers.
   it('bounds a packed array like an array: depth cut, element budget, marker', () => {
     expect(gdFunctionBody('_serialize_bounded')).toContain(
