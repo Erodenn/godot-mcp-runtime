@@ -23,12 +23,12 @@ export interface MovieProcessResult {
   timedOut: boolean;
   /** Set when the process could not be started at all. */
   spawnError?: string;
-  /** Set on a timeout whose kill was sent but whose process did not report closing within the grace period: it may still be running. */
+  /** Set on a timeout whose kill was sent but whose process reported neither exit nor close within the grace period: it may still be running. */
   killUnconfirmed?: boolean;
 }
 
 export interface MovieRunHooks {
-  /** Called once when the child is known not to be running (it reported `close`, or never started), not when the call merely gives up on a child that outlived its timeout kill: a caller tracking 'a movie process uses this project' ends that here, not on the result. */
+  /** Called once when the child is known not to be running (it reported `close`, exited after the timeout's tree kill, or never started), not when the call merely gives up on a child that outlived its timeout kill: a caller tracking 'a movie process uses this project' ends that here, not on the result. */
   onClosed?: () => void;
 }
 
@@ -74,7 +74,7 @@ function appendTail(current: string, chunk: unknown): string {
   return (current + String(chunk)).slice(-MOVIE_OUTPUT_CAPTURE_MAX_CHARS);
 }
 
-/** Runs Godot and waits for exit, bounded by `timeoutMs`; never rejects: `spawnError`, `timedOut` (tree kill sent; `killUnconfirmed` if it did not report closing within grace), else the exit code and each stream's tail. */
+/** Runs Godot and waits for exit, bounded by `timeoutMs`; never rejects: `spawnError`, `timedOut` (tree kill sent; `killUnconfirmed` if it reported neither exit nor close within grace), else the exit code and each stream's tail. */
 export function runMovieProcess(
   godotPath: string,
   args: string[],
@@ -98,7 +98,7 @@ export function runMovieProcess(
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    let exited = false;
+    let exitedAfterKill = false;
     const timers: { timeout?: NodeJS.Timeout; grace?: NodeJS.Timeout } = {};
 
     const finish = (result: MovieProcessResult): void => {
@@ -145,10 +145,9 @@ export function runMovieProcess(
       finish({ exitCode: null, stdout, stderr, timedOut: false, spawnError: error.message });
     });
     child.on('exit', () => {
-      exited = true;
-      // After the timeout's tree kill nothing of the run is left to hold a pipe open, so an exit without a close is a dead child, not one still using the project; before it, a launcher can exit while the engine it started runs on.
+      // Only an exit after the tree kill confirms it: before it, a launcher can exit while the engine it started runs on. The child stays in the exit-hook set until `close`, since a descendant may still hold its pipes.
       if (!timedOut) return;
-      activeMovieChildren.delete(child);
+      exitedAfterKill = true;
       reportClosed();
     });
     child.on('close', (code: number | null) => {
@@ -166,7 +165,7 @@ export function runMovieProcess(
           stdout,
           stderr,
           timedOut: true,
-          ...(exited ? {} : { killUnconfirmed: true }),
+          ...(exitedAfterKill ? {} : { killUnconfirmed: true }),
         });
       }, MOVIE_KILL_GRACE_MS);
     }, timeoutMs);

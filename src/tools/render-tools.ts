@@ -862,7 +862,7 @@ async function findRunFailure(
       'Request fewer frames',
       'A project that blocks at startup never reaches the frame limit: start it with run_project and read get_debug_output',
     ];
-    // "Killed" is only said when the process reported closing after the kill.
+    // "Killed" is only said when the process reported exiting or closing after the kill.
     if (result.killUnconfirmed === true) {
       return createErrorResponse(
         `render_movie timed out after ${rc.timeoutMs} ms. A kill was sent to the Godot process tree, but it did not report exiting within ${MOVIE_KILL_GRACE_MS} ms, so a Godot process may still be running.${tail}`,
