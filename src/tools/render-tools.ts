@@ -506,7 +506,7 @@ function refuseOtherSession(other: BridgeOwnerInfo, projectRoot: string): ToolRe
 
 function refuseStrandedBridge(registeredPath: string): ToolResponse {
   return createErrorResponse(
-    `project.godot registers the McpBridge autoload (${registeredPath}) but no live MCP session owns it. render_movie does not run with the bridge loaded and does not edit project.godot.`,
+    `project.godot registers the McpBridge autoload (${registeredPath}) but no live MCP session owns it, and the entry was still there after render_movie tried to remove it. render_movie does not run with the bridge loaded.`,
     [
       'Call remove_autoload with autoloadName "McpBridge" on this project, then retry render_movie',
       'If an older server version is running this project, stop it first',
