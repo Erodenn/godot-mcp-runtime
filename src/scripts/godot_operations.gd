@@ -467,6 +467,8 @@ func _probe_scene_deps(full_path: String) -> Dictionary:
 			missing.append(path)
 	return {"needs_import": needs_import, "missing": missing}
 
+const _MISSING_REFERENCES_REFUSAL := "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: "
+
 # Probes dependencies before load(): a never-imported one makes load() succeed with null resources (or hang), and the save strips the reference.
 # Mechanism and the rejected MissingResource route: docs/architecture.md "Cold Asset Import".
 func load_scene_instance(scene_path: String) -> Node:
@@ -486,7 +488,7 @@ func load_scene_instance(scene_path: String) -> Node:
 	# Missing files first: a scene with both problems is refused rather than imported and then refused.
 	var probe: Dictionary = _probe_scene_deps(full_path)
 	if probe.missing.size() > 0:
-		last_scene_load_error = "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)
+		last_scene_load_error = _MISSING_REFERENCES_REFUSAL + ", ".join(probe.missing)
 		log_error(last_scene_load_error)
 		return null
 	if probe.needs_import.size() > 0:
@@ -855,7 +857,7 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 		return {"ok": false, "error": "Scene file does not exist: " + scene_full_path}
 	var probe: Dictionary = _probe_scene_deps(scene_full_path)
 	if probe.missing.size() > 0:
-		return {"ok": false, "error": "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)}
+		return {"ok": false, "error": _MISSING_REFERENCES_REFUSAL + ", ".join(probe.missing)}
 	if probe.needs_import.size() > 0:
 		return {"ok": false, "error": _report_import_needed(type_or_path, ", ".join(probe.needs_import))}
 	var packed: Resource = load(scene_full_path)
@@ -3108,7 +3110,7 @@ func _prepass_value_roots(op: Dictionary, op_name: Variant, probe_scenes: Dictio
 # Returns true when it exited the batch (the caller returns at once).
 func _prepass_refuses(missing: Array, needs_import: Array) -> bool:
 	if missing.size() > 0:
-		log_error("Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(missing))
+		log_error(_MISSING_REFERENCES_REFUSAL + ", ".join(missing))
 		_fail_operation()
 		return true
 	if needs_import.size() > 0:
