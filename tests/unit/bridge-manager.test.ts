@@ -1889,3 +1889,99 @@ describe('BridgeManager with an owner from another platform on this hostname', (
     expect(foreignHostOwnerRemedy(info, projectPath, info.hostname, 'linux')).toBeNull();
   });
 });
+
+describe('BridgeManager keeps a bare [autoload] header it found at injection', () => {
+  const EMPTY_HEADER_PROJECT = 'config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n';
+
+  it('inject then cleanup on a file holding an empty header leaves the file byte-identical', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: EMPTY_HEADER_PROJECT });
+    manager.inject(projectPath, TEST_PORT);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('McpBridge=');
+
+    manager.cleanup(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(EMPTY_HEADER_PROJECT);
+  });
+
+  it('inject then cleanup on a file with no [autoload] header removes the section it created', () => {
+    const original = 'config_version=5\n\n[rendering]\nx="y"\n';
+    const { projectPath, manager } = setupProject({ projectGodot: original });
+    manager.inject(projectPath, TEST_PORT);
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toContain('[autoload]');
+
+    manager.cleanup(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(original);
+  });
+
+  it('a repair by the instance that injected keeps the header too', () => {
+    const { projectPath, manager } = setupProject({
+      projectGodot: EMPTY_HEADER_PROJECT,
+      managerOptions: { processStartIdentity: NO_START_IDENTITY },
+    });
+    manager.inject(projectPath, TEST_PORT);
+    for (const file of ownerFileNames(projectPath)) {
+      unlinkSync(join(bridgeOwnersDir(projectPath), file));
+    }
+
+    manager.repairOrphaned(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(EMPTY_HEADER_PROJECT);
+  });
+
+  it('removal through the default remover (remove_autoload) still drops an emptied header', () => {
+    const { projectPath } = setupProject();
+    const file = join(projectPath, 'project.godot');
+    writeFileSync(file, 'config_version=5\n\n[autoload]\nMcpBridge="*res://x.gd"\n', 'utf8');
+
+    removeAutoloadEntry(file, 'McpBridge');
+
+    expect(readFileSync(file, 'utf8')).not.toContain('[autoload]');
+  });
+});
+
+describe('BridgeManager.repairOrphaned after a project was cached clean', () => {
+  it('finds a stranded entry a sibling server injected and abandoned after the clean verdict', () => {
+    const { projectPath, manager } = setupProject();
+    manager.repairOrphaned(projectPath);
+    const file = join(projectPath, 'project.godot');
+    expect(readFileSync(file, 'utf8')).not.toContain('McpBridge=');
+
+    writeFileSync(
+      file,
+      'config_version=5\n\n[autoload]\nMcpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
+      'utf8',
+    );
+    manager.repairOrphaned(projectPath);
+
+    expect(readFileSync(file, 'utf8')).not.toContain('McpBridge=');
+  });
+
+  it('does not read the project again while project.godot is unchanged', () => {
+    const { projectPath, manager } = setupProject();
+    manager.repairOrphaned(projectPath);
+    const readAssignments = vi.spyOn(
+      manager as unknown as { readBridgeAssignments: () => string[] },
+      'readBridgeAssignments',
+    );
+
+    manager.repairOrphaned(projectPath);
+
+    expect(readAssignments).not.toHaveBeenCalled();
+  });
+
+  it('removes the stranded entry and script of a dead owner', () => {
+    const { projectPath, manager } = setupProject({
+      managerOptions: { processStartIdentity: NO_START_IDENTITY },
+    });
+    manager.inject(projectPath, TEST_PORT);
+    for (const file of ownerFileNames(projectPath)) {
+      unlinkSync(join(bridgeOwnersDir(projectPath), file));
+    }
+
+    manager.repairOrphaned(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
+    expect(existsSync(bridgeScriptAbsPath(projectPath))).toBe(false);
+  });
+});

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
+  hasEmptyAutoloadSection,
   parseAutoloads,
   parseAutoloadSection,
   addAutoloadEntry,
@@ -186,6 +187,15 @@ describe('removeAutoloadEntry', () => {
     const content = readProject(dir);
     expect(content).not.toContain('[autoload]');
     expect(content).toContain('[rendering]');
+  });
+
+  it('with keepEmptySection leaves the bare [autoload] header when the last entry goes', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\nOnly="*res://only.gd"\n\n[rendering]\nx="y"\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'Only', undefined, { keepEmptySection: true })).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n');
   });
 
   it('with a predicate removes only the assignments whose path satisfies it', () => {
@@ -765,5 +775,18 @@ describe('an autoload line Godot did not write', () => {
     expect(section.entries).toHaveLength(1);
     expect(section.unparsed).toEqual([]);
     expect(section.nonCanonical).toContain('line 4 (not a key=value statement)');
+  });
+});
+
+describe('hasEmptyAutoloadSection', () => {
+  it('is true for a header with no statement, even with blank lines or a next section after it', () => {
+    expect(hasEmptyAutoloadSection('config_version=5\n\n[autoload]\n')).toBe(true);
+    expect(hasEmptyAutoloadSection('[autoload]\n\n[rendering]\nx="y"\n')).toBe(true);
+  });
+
+  it('is false with a statement in the section, with no section, or when only another section holds statements', () => {
+    expect(hasEmptyAutoloadSection('[autoload]\nA="*res://a.gd"\n')).toBe(false);
+    expect(hasEmptyAutoloadSection('config_version=5\n')).toBe(false);
+    expect(hasEmptyAutoloadSection('[rendering]\nx="y"\n')).toBe(false);
   });
 });

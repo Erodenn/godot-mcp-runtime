@@ -373,6 +373,63 @@ describe('a headless run that times out', () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
+  it('returns the result line a process printed before it hung, with a leading timeout warning', async () => {
+    fakeTreeKill(runner, () => {
+      queueMicrotask(() => child.emit('close', null));
+      return 0;
+    });
+    const pending = runner.executeOperation('save_scene', {}, projectPath, OPERATION_TIMEOUT_MS);
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    child.stdout.emit(
+      'data',
+      Buffer.from(
+        resultLine(resultTokenOfSpawn(0), JSON.stringify({ saved: true, warnings: ['kept'] })),
+      ),
+    );
+
+    const { stdout } = await pending;
+
+    const payload = JSON.parse(extractOperationPayload(stdout) ?? 'null') as {
+      saved: boolean;
+      warnings: string[];
+    };
+    expect(payload.saved).toBe(true);
+    expect(payload.warnings).toHaveLength(2);
+    expect(payload.warnings[0]).toMatch(
+      /did not exit within 25ms and was killed; its exit was confirmed/,
+    );
+    expect(payload.warnings[1]).toBe('kept');
+  });
+
+  it('words the warning for a kill whose exit was not confirmed', async () => {
+    vi.useFakeTimers();
+    fakeTreeKill(runner);
+    const pending = runner.executeOperation('save_scene', {}, projectPath, OPERATION_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    child.stdout.emit(
+      'data',
+      Buffer.from(resultLine(resultTokenOfSpawn(0), JSON.stringify({ saved: true }))),
+    );
+    await vi.advanceTimersByTimeAsync(OPERATION_TIMEOUT_MS + KILL_CONFIRM_WAIT_MS);
+
+    const { stdout } = await pending;
+
+    const payload = JSON.parse(extractOperationPayload(stdout) ?? 'null') as { warnings: string[] };
+    expect(payload.warnings[0]).toMatch(/did not report its exit .* may still be running/);
+  });
+
+  it('still errors "Process timed out" when the hung process printed no result line', async () => {
+    fakeTreeKill(runner, () => {
+      queueMicrotask(() => child.emit('close', null));
+      return 0;
+    });
+    const pending = runner.executeOperation('save_scene', {}, projectPath, OPERATION_TIMEOUT_MS);
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    child.stdout.emit('data', Buffer.from('Godot Engine v4.4\nsome log line\n'));
+
+    await expect(pending).rejects.toThrow(/Process timed out after 25ms/);
+  });
+
   it('a timeout past the largest timer delay does not fire at once', async () => {
     vi.useFakeTimers();
     fakeTreeKill(runner);

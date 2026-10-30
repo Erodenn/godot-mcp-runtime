@@ -32,6 +32,7 @@ import {
   newOperationResultToken,
   normalizeForCompare,
   normalizeExitCode,
+  OPERATION_RESULT_SENTINEL,
   OPERATION_RESULT_TOKEN_ENV,
   projectPathKey,
 } from './output-parsing.js';
@@ -406,6 +407,20 @@ function readBytesFromChunks(chunks: Buffer[], n: number): Buffer {
   return result;
 }
 
+/** A headless run killed at its timeout. The output so far is kept under names `asSpawnError` does not match, so a caller that tolerates a failing exit never swallows a timeout; `executeOperation` reads it to recover a result line the process printed before it hung. */
+class HeadlessTimeoutError extends Error {
+  constructor(
+    message: string,
+    readonly timeoutMs: number,
+    readonly exitConfirmed: boolean,
+    readonly partialStdout: string,
+    readonly partialStderr: string,
+  ) {
+    super(message);
+    this.name = 'HeadlessTimeoutError';
+  }
+}
+
 /** Narrows a caught `unknown` to a spawn rejection carrying the partial `stdout`/`stderr`, or null. */
 function asSpawnError(error: unknown): (Error & { stdout: string; stderr: string }) | null {
   if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
@@ -588,10 +603,14 @@ export class GodotRunner {
         finish();
       };
       const timeoutError = (exitConfirmed: boolean): Error =>
-        new Error(
+        new HeadlessTimeoutError(
           exitConfirmed
             ? `Process timed out after ${timeoutMs}ms and was killed; its exit was confirmed.`
             : `Process timed out after ${timeoutMs}ms. The kill was sent, but the process (pid ${proc.pid ?? 'unknown'}) did not report its exit within ${HEADLESS_KILL_CONFIRM_TIMEOUT_MS}ms: it may still be running and may still write to the project.`,
+          timeoutMs,
+          exitConfirmed,
+          stdout,
+          stderr,
         );
       const timer = setTimeout(() => {
         timedOut = true;
@@ -801,6 +820,11 @@ export class GodotRunner {
     return this.cachedVersion;
   }
 
+  /** Remove bridge artifacts a dead server stranded in the project (no live owner registered). Called before every headless operation, every `run_project` start (spawn and attach) and every `render_movie` launch; never throws. */
+  repairStrandedBridge(projectPath: string): void {
+    this.bridge.repairOrphaned(projectPath);
+  }
+
   async executeOperation(
     operation: string,
     params: OperationParams,
@@ -811,7 +835,7 @@ export class GodotRunner {
     logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
     this.assertHeadlessRunAllowed(`the ${operation} operation`);
-    this.bridge.repairOrphaned(projectPath);
+    this.repairStrandedBridge(projectPath);
 
     const snakeCaseParams = convertCamelToSnakeCase(params);
     logDebug(`Converted snake_case params: ${JSON.stringify(snakeCaseParams)}`);
@@ -850,6 +874,9 @@ export class GodotRunner {
         [OPERATION_RESULT_TOKEN_ENV]: resultToken,
       }));
     } catch (error: unknown) {
+      if (error instanceof HeadlessTimeoutError) {
+        return this.resultOfTimedOutOperation(error, resultToken);
+      }
       const spawnError = asSpawnError(error);
       if (!spawnError) throw error;
       stdout = spawnError.stdout;
@@ -876,6 +903,29 @@ export class GodotRunner {
     }
 
     return { stdout: cleanStdout(stdout, resultToken), stderr };
+  }
+
+  /** A run killed at its timeout that had already printed its token-framed result line did its work and hung on the way out: the result is returned with a leading `warnings` entry naming the kill. Without such a line, or with a payload that is not an object (nowhere to put the entry), the timeout error stands. */
+  private resultOfTimedOutOperation(
+    timeout: HeadlessTimeoutError,
+    resultToken: string,
+  ): { stdout: string; stderr: string } {
+    const payload = extractTokenFramedPayload(timeout.partialStdout, resultToken);
+    if (payload === null) throw timeout;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      throw timeout;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw timeout;
+    const record = parsed as Record<string, unknown>;
+    const warning = timeout.exitConfirmed
+      ? `The Godot process printed its result but did not exit within ${timeout.timeoutMs}ms and was killed; its exit was confirmed.`
+      : `The Godot process printed its result but did not exit within ${timeout.timeoutMs}ms; the kill was sent but the process did not report its exit within ${HEADLESS_KILL_CONFIRM_TIMEOUT_MS}ms, so it may still be running and may still write to the project.`;
+    const existing = Array.isArray(record.warnings) ? (record.warnings as unknown[]) : [];
+    const withWarning = JSON.stringify({ ...record, warnings: [warning, ...existing] });
+    return { stdout: OPERATION_RESULT_SENTINEL + withWarning, stderr: timeout.partialStderr };
   }
 
   launchEditor(projectPath: string): ChildProcess {
@@ -1044,6 +1094,7 @@ export class GodotRunner {
     try {
       if (profiling) profiler = await DebuggerProfiler.create();
       this.assertNotShuttingDown(projectPath);
+      this.repairStrandedBridge(projectPath);
       this.bridge.precheckInject(projectPath, false);
       this.assertStartBudget('spawned', key);
     } catch (err) {
@@ -1499,6 +1550,7 @@ export class GodotRunner {
     this.assertNoMovieRun(key, projectPath);
     const port = bridgePort ?? (await findFreePort());
     this.assertNotShuttingDown(projectPath);
+    this.repairStrandedBridge(projectPath);
     this.bridge.precheckInject(projectPath, true);
     this.assertStartBudget('attached', key);
 

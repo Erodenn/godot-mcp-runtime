@@ -312,7 +312,7 @@ All mutation operations save automatically. Use `save_scene` only for save-as (`
 
 Every tool below errors while a Godot runtime session is active on the same project - a running process can write its own scene files at any point, so a headless write would race it. Call `stop_project` to clear the block. When the session on that project is not the current one, `switch_project` to it first; the error says which case applies. A spawned process that exits on its own clears the block at that moment, without a tool call.
 
-A headless operation that outruns its timeout has its process tree killed, and the error says which of two things happened: the exit was confirmed, or the kill was sent and the process did not report its exit in time. In the second case it may still be running and may still write to the project, so check the scene file before retrying.
+A headless operation that outruns its timeout has its process tree killed, and the error says which of two things happened: the exit was confirmed, or the kill was sent and the process did not report its exit in time. In the second case it may still be running and may still write to the project, so check the scene file before retrying. When the process had already printed its result before it hung, the call is not an error: it returns that result with a leading `warnings` entry saying the process did not exit in time and was killed (with the same confirmed or unconfirmed wording). A timeout with no result printed is still the error.
 
 | Tool                     | Description                                                                              |
 | ------------------------ | ---------------------------------------------------------------------------------------- |

@@ -7,6 +7,7 @@ import {
   mkdirSync,
   rmdirSync,
   readdirSync,
+  statSync,
 } from 'fs';
 import { hostname as osHostname } from 'os';
 import { randomBytes } from 'crypto';
@@ -20,6 +21,7 @@ import {
 } from './process-start-time.js';
 import {
   addAutoloadEntry,
+  hasEmptyAutoloadSection,
   normalizeAutoloadPath,
   parseAutoloads,
   parseAutoloadAssignments,
@@ -149,7 +151,18 @@ type RemoveAutoloadEntryFn = (
   projectFile: string,
   name: string,
   shouldRemove?: (entryPath: string) => boolean,
+  options?: { keepEmptySection?: boolean },
 ) => boolean;
+
+/** What `project.godot` looked like when a repair last found the project clean: any change to it (a sibling's injection that later died) makes the verdict stale. */
+function projectFileSignature(projectFile: string): string | null {
+  try {
+    const stat = statSync(projectFile);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
 
 interface OwnerFileEntry {
   fileName: string;
@@ -205,7 +218,10 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
 
 /** Owns the McpBridge autoload artifacts: the script copy and owner registry under `.mcp/godot-runtime/bridge/`, the `[autoload]` entry, the `.mcp/.gdignore` marker and the `.gitignore` entry. Designed for N server processes sharing a project, so every entry point reads disk, never in-memory state. Gap: two servers doing read-modify-write on `project.godot` at once can lose an edit (no file lock); the owner file written first and the next inject narrow it. An older server writes no owner file and is invisible here. An `McpBridge` entry at a path that is not server-owned (`isServerOwnedBridgePath`) is the user's: inject refuses and cleanup leaves it. */
 export class BridgeManager {
-  private repairedProjects: Set<string> = new Set();
+  /** Projects `repairOrphaned` found clean, with the `project.godot` signature that verdict was read at. */
+  private repairedProjects: Map<string, string> = new Map();
+  /** Projects whose `project.godot` held an `[autoload]` header with no statement when this instance added the bridge entry: removal puts that header back. In memory, so another server process removing the entry last drops the bare header, as before. */
+  private emptyAutoloadHeaders: Set<string> = new Set();
   private readonly instanceId: string;
   private readonly pid: number;
   private readonly hostnameFn: () => string;
@@ -305,8 +321,6 @@ export class BridgeManager {
     bakedToken: string | undefined,
     template: string,
   ): void {
-    const projectFile = join(projectPath, 'project.godot');
-
     // .gdignore must exist before a .gd file lands under .mcp/, on every inject: a checkout or sibling cleanup may have removed .mcp/.
     BridgeManager.ensureMcpGdignore(projectPath);
     mkdirSync(bridgeOwnersDir(projectPath), { recursive: true });
@@ -338,7 +352,7 @@ export class BridgeManager {
     this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
 
     BridgeManager.ensureGitignored(projectPath);
-    this.ensureBridgeEntry(projectFile, () => {
+    this.ensureBridgeEntry(projectPath, () => {
       // Withdraw the owner file: it would hold sibling edit guards closed for a session that never started.
       this.unlinkQuietly(this.ownerFilePath(projectPath));
     });
@@ -348,7 +362,8 @@ export class BridgeManager {
   }
 
   /** Make project.godot register `McpBridge` at this server's script: add it, repoint an older location, or leave it. Re-reads the file: a sibling may have added or migrated the entry, and a stale value would add a duplicate. @throws {BridgeAutoloadCollisionError} for a user's own entry, after calling `beforeCollisionThrow`. */
-  private ensureBridgeEntry(projectFile: string, beforeCollisionThrow: () => void): void {
+  private ensureBridgeEntry(projectPath: string, beforeCollisionThrow: () => void): void {
+    const projectFile = join(projectPath, 'project.godot');
     const currentEntry = this.findBridgeAutoload(projectFile);
     if (currentEntry !== undefined && !isServerOwnedBridgePath(currentEntry)) {
       beforeCollisionThrow();
@@ -360,6 +375,13 @@ export class BridgeManager {
       );
     }
     if (currentEntry === undefined) {
+      // Recorded before the add, while the header is still bare, so removal can put it back.
+      const headerKey = projectPathKey(projectPath);
+      if (hasEmptyAutoloadSection(readFileSync(projectFile, 'utf8'))) {
+        this.emptyAutoloadHeaders.add(headerKey);
+      } else {
+        this.emptyAutoloadHeaders.delete(headerKey);
+      }
       addAutoloadEntry(projectFile, BRIDGE_AUTOLOAD_NAME, BRIDGE_SCRIPT_RES_PATH, true);
       logDebug('Injected bridge autoload into project.godot');
     } else if (currentEntry !== normalizeAutoloadPath(BRIDGE_SCRIPT_RES_PATH)) {
@@ -426,12 +448,14 @@ export class BridgeManager {
     }
   }
 
-  /** Clear bridge artifacts stranded by a hard-killed server: an `McpBridge=` line without its script, or a script, with no live registered owner. Runs from `executeOperation`, so the first headless op of any kind (`validate` included) can clear them; `removeBridgeArtifacts` bounds what it may delete to server-owned paths. Only the clean verdict is cached per project; a project with a live owner is re-read every time, and `inject`/`cleanup` clear the cache. An older server writes no owner file, so its artifacts can be misclassified as stranded. */
+  /** Clear bridge artifacts stranded by a hard-killed server: an `McpBridge=` line without its script, or a script, with no live registered owner. Runs before every headless operation (`validate` included), every `run_project` start and every `render_movie` launch (`GodotRunner.repairStrandedBridge`); `removeBridgeArtifacts` bounds what it may delete to server-owned paths. Only the clean verdict is cached per project, with the `project.godot` size and mtime it was read at, so a change to the file (a sibling's injection that later died) is looked at again; a project with a live owner is re-read every time, and `inject`/`cleanup` clear the cache. An older server writes no owner file, so its artifacts can be misclassified as stranded. */
   repairOrphaned(projectPath: string): void {
     // Keyed by the folded path: headless tools pass the caller's spelling while inject and cleanup use the resolved one, and a raw key would miss the invalidation and skip the promised retry.
     const cacheKey = projectPathKey(projectPath);
-    if (this.repairedProjects.has(cacheKey)) return;
     const projectFile = join(projectPath, 'project.godot');
+    const cached = this.repairedProjects.get(cacheKey);
+    // A changed project.godot voids the verdict: a sibling server may have injected since, and died.
+    if (cached !== undefined && cached === projectFileSignature(projectFile)) return;
     if (!existsSync(projectFile)) return;
     try {
       // Not cached: a live owner can die and strand the bridge at any time.
@@ -452,7 +476,8 @@ export class BridgeManager {
         }
         logDebug('Cleaned up stranded McpBridge artifacts');
       }
-      this.repairedProjects.add(cacheKey);
+      const signature = projectFileSignature(projectFile);
+      if (signature !== null) this.repairedProjects.set(cacheKey, signature);
     } catch (err) {
       logDebug(`Non-fatal: Failed to check/repair orphaned bridge: ${err}`);
     }
@@ -645,7 +670,7 @@ export class BridgeManager {
       const template = readFileSync(this.bridgeScriptPath, 'utf8');
       const attachOwner = claimedBy.find((e) => e.info.mode === 'attached')?.info;
       this.writeRenderedScriptIfChanged(projectPath, template, attachOwner);
-      this.ensureBridgeEntry(join(projectPath, 'project.godot'), () => {});
+      this.ensureBridgeEntry(projectPath, () => {});
       logDebug('Restored the shared bridge artifacts for a session that registered during removal');
     } catch (err) {
       logDebug(`Non-fatal: could not restore the shared bridge artifacts: ${err}`);
@@ -668,7 +693,7 @@ export class BridgeManager {
         logDebug(`Left user-registered ${BRIDGE_AUTOLOAD_NAME} autoload at ${userPath} untouched`);
       }
       if (assignedPaths.some(isServerOwnedBridgePath)) {
-        const entryProblem = this.removeBridgeEntry(projectFile);
+        const entryProblem = this.removeBridgeEntry(projectPath);
         if (entryProblem !== null) problems.push(entryProblem);
       }
     } catch (err) {
@@ -721,9 +746,12 @@ export class BridgeManager {
   }
 
   /** Remove every server-owned `McpBridge` assignment and read the file back to confirm: the call returning is not the entry being removed. A user's line is never removed, even when it overrides or is overridden by ours. Returns null when none remains, else the problem as a sentence. Never throws. */
-  private removeBridgeEntry(projectFile: string): string | null {
+  private removeBridgeEntry(projectPath: string): string | null {
+    const projectFile = join(projectPath, 'project.godot');
     try {
-      this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME, isServerOwnedBridgePath);
+      this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME, isServerOwnedBridgePath, {
+        keepEmptySection: this.emptyAutoloadHeaders.has(projectPathKey(projectPath)),
+      });
     } catch (err) {
       logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);
       return `the ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be removed from project.godot (${describeFailure(err)}): ${BRIDGE_ENTRY_REMEDY}`;

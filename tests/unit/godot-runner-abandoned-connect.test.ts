@@ -154,6 +154,7 @@ describe('a bridge connect still pending when a probe ping gives up', () => {
     cleanupCalls = [];
     (runner as unknown as { bridge: unknown }).bridge = {
       precheckInject: () => '',
+      repairOrphaned: () => {},
       inject: (projectPath: string) => {
         injectCalls.push(projectPath);
       },

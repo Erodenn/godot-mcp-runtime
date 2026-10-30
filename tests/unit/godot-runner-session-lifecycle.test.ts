@@ -765,3 +765,59 @@ describe('spawn options reach child_process.spawn', () => {
     });
   });
 });
+
+describe('a start repairs bridge artifacts a dead server stranded', () => {
+  const START_PORT = 19989;
+  let runner: Runner;
+  let projectPath: string;
+  let order: string[];
+  let savedDisplay: string | undefined;
+
+  beforeEach(() => {
+    savedDisplay = process.env.DISPLAY;
+    if (process.platform === 'linux' && !process.env.DISPLAY) process.env.DISPLAY = ':0';
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue(makeFakeChildProcess());
+    runner = new GodotRunner({ godotPath: 'godot' });
+    stubBridge(runner);
+    order = [];
+    const bridge = (
+      runner as unknown as { bridge: Record<string, (...args: unknown[]) => unknown> }
+    ).bridge;
+    bridge.repairOrphaned = () => {
+      order.push('repair');
+    };
+    bridge.precheckInject = () => {
+      order.push('precheck');
+      return '';
+    };
+    bridge.inject = () => {
+      order.push('inject');
+    };
+    projectPath = tmp.makeProject('godot-mcp-start-repair-');
+  });
+
+  afterEach(() => {
+    if (savedDisplay === undefined) delete process.env.DISPLAY;
+    else process.env.DISPLAY = savedDisplay;
+    runner.closeConnection();
+  });
+
+  it('removes stranded artifacts before a spawned start checks and injects', async () => {
+    await runner.runProject(projectPath, undefined, false, START_PORT);
+
+    expect(order).toEqual(['repair', 'precheck', 'inject']);
+  });
+
+  it('removes stranded artifacts before an attach checks and injects', async () => {
+    await runner.attachProject(projectPath, START_PORT);
+
+    expect(order).toEqual(['repair', 'precheck', 'inject']);
+  });
+
+  it('exposes the same repair for the render_movie launch', () => {
+    runner.repairStrandedBridge(projectPath);
+
+    expect(order).toEqual(['repair']);
+  });
+});

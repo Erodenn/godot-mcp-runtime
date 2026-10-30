@@ -32,6 +32,7 @@ vi.mock('../../src/utils/path-validation.js', async () => {
 vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {
     precheckInject = () => '';
+    repairOrphaned = () => {};
     inject = injectMock;
     cleanup = cleanupMock;
     getLastInjectedPort = () => MOCK_BRIDGE_PORT;

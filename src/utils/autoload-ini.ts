@@ -228,6 +228,16 @@ export function addAutoloadEntry(
   writeFileAtomicSync(projectFilePath, lines.join(''));
 }
 
+/** True when the file has an `[autoload]` section holding no statement at all: a bare header a caller about to add an entry may want to put back after removing it (`keepEmptySection`). Checks the section `addAutoloadEntry` writes into, the last. */
+export function hasEmptyAutoloadSection(content: string): boolean {
+  const scan = scanProjectFile(content);
+  const section = scan.sections.filter((s) => s.name === AUTOLOAD_SECTION).at(-1);
+  if (section === undefined) return false;
+  return !scan.statements.some(
+    (s) => s.startLine > section.headerLine && s.startLine < section.endLine,
+  );
+}
+
 /** Every assignment of this autoload that reads as an entry, overridden ones included, for a caller that must see the others before removing some. */
 export function parseAutoloadAssignments(projectFilePath: string, name: string): AutoloadEntry[] {
   const scan = scanProjectFile(readFileSync(projectFilePath, 'utf8'));
@@ -235,11 +245,12 @@ export function parseAutoloadAssignments(projectFilePath: string, name: string):
 }
 
 /** Removes every assignment of this autoload under every spelling and `[autoload]` section, so no earlier line takes over. With `shouldRemove`, only entry-reading assignments whose path satisfies it go; the last one left is what the engine then loads.
- * An `[autoload]` section left empty is dropped with its header unless the header carries a comment; at end of file the blank lines before it go too. Returns true when the file was mutated. */
+ * An `[autoload]` section left empty is dropped with its header unless the header carries a comment or `options.keepEmptySection` is set; at end of file the blank lines before it go too. Returns true when the file was mutated. */
 export function removeAutoloadEntry(
   projectFilePath: string,
   name: string,
   shouldRemove?: (entryPath: string) => boolean,
+  options: { keepEmptySection?: boolean } = {},
 ): boolean {
   const content = readFileSync(projectFilePath, 'utf8');
   const scan = scanProjectFile(content);
@@ -257,6 +268,7 @@ export function removeAutoloadEntry(
   }
 
   for (const section of scan.sections) {
+    if (options.keepEmptySection === true) break;
     if (section.name !== AUTOLOAD_SECTION || section.headerHasComment) continue;
     const bodyEnd = Math.min(section.endLine, lines.length);
     let empty = true;
