@@ -1,4 +1,4 @@
-// Standalone because src/index.ts boots a server at import time; a test importing it would attach process.exit-capable handlers to the worker's stdin.
+// Standalone, with an injectable `proc` and `exit`, so a test drives the handlers without attaching process.exit-capable ones to the worker's stdin.
 
 import { HEADLESS_SHUTDOWN_WAIT_MS, type GodotRunner } from './godot-runner.js';
 import { logError } from './logger.js';
@@ -48,7 +48,7 @@ export function registerProcessLifecycle(opts: {
     void shutdown();
   };
 
-  // A second interrupt is the operator insisting: the wait for headless runs is skipped, and the exit hook still kills what is left.
+  // A SIGINT during a shutdown already under way, whatever began it, is the operator insisting: the wait for headless runs is skipped, and the exit hook still kills what is left.
   const onInterrupt = (): void => {
     if (shuttingDown) {
       exit(GRACEFUL_EXIT_CODE);

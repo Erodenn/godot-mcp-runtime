@@ -220,7 +220,7 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
 export class BridgeManager {
   /** Projects `repairOrphaned` found clean, with the `project.godot` signature that verdict was read at. */
   private repairedProjects: Map<string, string> = new Map();
-  /** Projects whose `project.godot` held an `[autoload]` header with no statement when this instance added the bridge entry: removal puts that header back. In memory, so another server process removing the entry last drops the bare header, as before. */
+  /** Projects whose `project.godot` held an `[autoload]` header with no statement when this instance added the bridge entry: removal puts that header back. In memory, so another server process removing the entry last drops the bare header. */
   private emptyAutoloadHeaders: Set<string> = new Set();
   private readonly instanceId: string;
   private readonly pid: number;
@@ -455,7 +455,6 @@ export class BridgeManager {
     const cacheKey = projectPathKey(projectPath);
     const projectFile = join(projectPath, 'project.godot');
     const cached = this.repairedProjects.get(cacheKey);
-    // A changed project.godot voids the verdict: a sibling server may have injected since, and died.
     if (cached !== undefined && cached === projectFileSignature(projectFile)) return;
     if (!existsSync(projectFile)) return;
     try {
@@ -677,7 +676,7 @@ export class BridgeManager {
       logDebug(`Non-fatal: could not restore the shared bridge artifacts: ${err}`);
       // The sibling holds an owner file and no bridge: said, so stop_project does not report a clean stop.
       return [
-        `a session registered on this project during the removal and the shared bridge script and ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be restored for it (${describeFailure(err)}); that session has no bridge, so stop it and run run_project again`,
+        `a session registered on this project during the removal and the shared bridge script and ${BRIDGE_AUTOLOAD_NAME} autoload entry could not be restored for it (${describeFailure(err)}); that session has no bridge until the server that started it stops it and runs run_project again`,
       ];
     }
     return [];

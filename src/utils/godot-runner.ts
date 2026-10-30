@@ -827,7 +827,7 @@ export class GodotRunner {
     return this.cachedVersion;
   }
 
-  /** Remove bridge artifacts a dead server stranded in the project (no live owner registered). Called before every headless operation, every `run_project` start (spawn and attach) and every `render_movie` launch; never throws. */
+  /** Remove bridge artifacts a dead server stranded in the project (no live owner registered); never throws. */
   repairStrandedBridge(projectPath: string): void {
     this.bridge.repairOrphaned(projectPath);
   }

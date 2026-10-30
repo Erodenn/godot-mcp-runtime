@@ -36,8 +36,7 @@ import {
 
 const UTF8_MAX_BYTES_PER_CHAR = 4;
 
-// Regex fragments for reading the scripts as text whether or not a declaration carries a type
-// annotation. None captures, so backreferences in the patterns that use them keep their numbers.
+// Typed or untyped declarations alike; no fragment captures, so backreference numbers hold.
 /** A GDScript type name, optionally with one bracketed element type: `int`, `Array[String]`. */
 const GD_TYPE = String.raw`[A-Za-z_][\w.]*(?:\[[^\]\n]*\])?`;
 /** The assignment of a `var` or `const`: inferred `:=` or annotated `: Type =`. */
@@ -570,7 +569,7 @@ describe('mcp_bridge.gd serializes values in the shapes godot_operations.gd read
   });
 });
 
-/** Numbers the bridge once spelled inline; the rest of mcp_bridge.gd reads the named constants. */
+/** Numbers mcp_bridge.gd names as constants and must not spell inline. */
 describe('mcp_bridge.gd names its port bounds and its letter-case offset', () => {
   const codeLines = bridgeSource
     .split('\n')
