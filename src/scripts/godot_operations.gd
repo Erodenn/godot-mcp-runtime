@@ -49,10 +49,10 @@ extends SceneTree
 	"unused_variable",
 )
 
-var debug_mode = false
+var debug_mode: bool = false
 
 # The marker asks the TS layer to import and re-run the operation; only safe while nothing is written.
-var import_marker_armed = true
+var import_marker_armed: bool = true
 
 var last_scene_load_error: String = ""
 
@@ -84,14 +84,14 @@ const _NON_FINITE_PATH_CAP := 8
 const _SELF_CONTAINING_MARKER := "<truncated: this container contains itself>"
 
 # Compared by identity: == on a container that holds itself recurses forever.
-func _encloses(enclosing: Array, container) -> bool:
-	for outer in enclosing:
+func _encloses(enclosing: Array, container: Variant) -> bool:
+	for outer: Variant in enclosing:
 		if is_same(outer, container):
 			return true
 	return false
 
 # Never an edit in place: a payload can hold a node's own typed container, which refuses a null.
-func _null_non_finite(value, path: String, found: Array, enclosing: Array):
+func _null_non_finite(value: Variant, path: String, found: Array, enclosing: Array) -> Variant:
 	match typeof(value):
 		TYPE_FLOAT:
 			if not is_finite(value):
@@ -103,7 +103,7 @@ func _null_non_finite(value, path: String, found: Array, enclosing: Array):
 				return _SELF_CONTAINING_MARKER
 			enclosing.append(dict)
 			var cleaned_dict: Dictionary = {}
-			for key in dict.keys():
+			for key: Variant in dict.keys():
 				var child_path: String = str(key) if path == "" else path + "." + str(key)
 				cleaned_dict[key] = _null_non_finite(dict[key], child_path, found, enclosing)
 			enclosing.pop_back()
@@ -114,7 +114,7 @@ func _null_non_finite(value, path: String, found: Array, enclosing: Array):
 				return _SELF_CONTAINING_MARKER
 			enclosing.append(arr)
 			var cleaned_array: Array = []
-			for i in range(arr.size()):
+			for i: int in range(arr.size()):
 				cleaned_array.append(_null_non_finite(arr[i], path + "[" + str(i) + "]", found, enclosing))
 			enclosing.pop_back()
 			return cleaned_array
@@ -127,23 +127,23 @@ func _null_non_finite(value, path: String, found: Array, enclosing: Array):
 	return value
 
 # The warning goes into a Dictionary payload's own `warnings`; an Array payload has nowhere to put one.
-func _sanitize_non_finite(payload):
+func _sanitize_non_finite(payload: Variant) -> Variant:
 	var found: Array = []
-	var cleaned = _null_non_finite(payload, "", found, [])
+	var cleaned: Variant = _null_non_finite(payload, "", found, [])
 	if found.is_empty() or not (cleaned is Dictionary):
 		return cleaned
 	var shown: Array = found.slice(0, _NON_FINITE_PATH_CAP)
 	var text := "%d non-finite numbers (INF, NAN) were returned as null at: %s" % [found.size(), ", ".join(PackedStringArray(shown))]
 	if found.size() > shown.size():
 		text += " (and %d more)" % (found.size() - shown.size())
-	var existing = cleaned.get("warnings", [])
+	var existing: Variant = cleaned.get("warnings", [])
 	var combined: Array = existing.duplicate() if existing is Array else []
 	combined.append(text)
 	cleaned["warnings"] = combined
 	return cleaned
 
 # The only emitter of a result line; never print one directly.
-func emit_result(payload) -> void:
+func emit_result(payload: Variant) -> void:
 	result_emitted = true
 	payload = _sanitize_non_finite(payload)
 	if payload is Dictionary and not result_warnings.is_empty():
@@ -166,23 +166,23 @@ func _init() -> void:
 
 # Runs after autoload singletons are registered as globals; in _init a scene script naming one fails to compile.
 # The work stays in a callee so a runtime error cannot skip the quit. This is the only quit in the file, so nothing replaces its code.
-func _initialize():
+func _initialize() -> void:
 	_run_from_cmdline()
 	quit(_EXIT_FAILURE if operation_failed or not result_emitted else _EXIT_SUCCESS)
 
 func _run_from_cmdline() -> void:
-	var args = OS.get_cmdline_args()
+	var args: PackedStringArray = OS.get_cmdline_args()
 
 	debug_mode = "--debug-godot" in args
 
-	var script_index = args.find("--script")
+	var script_index: int = args.find("--script")
 	if script_index == -1:
 		log_error("Could not find --script argument")
 		_fail_operation()
 		return
 
-	var operation_index = script_index + 2
-	var params_index = script_index + 3
+	var operation_index: int = script_index + 2
+	var params_index: int = script_index + 3
 
 	if args.size() <= params_index:
 		log_error("Usage: godot --headless --script godot_operations.gd <operation> <json_params>")
@@ -192,17 +192,17 @@ func _run_from_cmdline() -> void:
 
 	log_debug("All arguments: " + str(args))
 
-	var operation = args[operation_index]
-	var params_json = args[params_index]
+	var operation: String = args[operation_index]
+	var params_json: String = args[params_index]
 
 	# KEEP IN SYNC with OPERATION_STARTED_MARKER in src/utils/godot-runner.ts: the
 	# Node side reads this line as proof that dispatch started.
 	log_info("Operation: " + operation)
 	log_debug("Params JSON: " + params_json)
 
-	var json = JSON.new()
-	var error = json.parse(params_json)
-	var params = null
+	var json: JSON = JSON.new()
+	var error: int = json.parse(params_json)
+	var params: Variant = null
 
 	if error == OK:
 		params = json.get_data()
@@ -262,17 +262,17 @@ func _run_from_cmdline() -> void:
 			return
 
 # Every log line goes to stderr: stdout carries only the sentinel-framed result, and DEBUG must never change a tool's return.
-func log_debug(message):
+func log_debug(message: Variant) -> void:
 	if debug_mode:
 		printerr("[DEBUG] " + message)
 
-func log_info(message):
+func log_info(message: Variant) -> void:
 	printerr("[INFO] " + message)
 
-func log_error(message):
+func log_error(message: Variant) -> void:
 	printerr("[ERROR] " + message)
 
-func get_script_by_name(name_of_class):
+func get_script_by_name(name_of_class: Variant) -> Script:
 	if debug_mode:
 		printerr("Attempting to get script for class: " + name_of_class)
 
@@ -287,7 +287,7 @@ func get_script_by_name(name_of_class):
 	if ResourceLoader.exists(direct_path, "Script"):
 		if debug_mode:
 			printerr("Resource exists, loading directly: " + direct_path)
-		var script = load(direct_path) as Script
+		var script: Script = load(direct_path) as Script
 		if script:
 			if debug_mode:
 				printerr("Successfully loaded script from path")
@@ -297,18 +297,18 @@ func get_script_by_name(name_of_class):
 	elif debug_mode:
 		printerr("Resource not found, checking global class registry")
 
-	var global_classes = ProjectSettings.get_global_class_list()
+	var global_classes: Array = ProjectSettings.get_global_class_list()
 	if debug_mode:
 		printerr("Searching through " + str(global_classes.size()) + " global classes")
 
-	for global_class in global_classes:
-		var found_name_of_class = global_class["class"]
-		var found_path = global_class["path"]
+	for global_class: Variant in global_classes:
+		var found_name_of_class: Variant = global_class["class"]
+		var found_path: Variant = global_class["path"]
 
 		if found_name_of_class == name_of_class:
 			if debug_mode:
 				printerr("Found matching class in registry: " + found_name_of_class + " at path: " + found_path)
-			var script = load(found_path) as Script
+			var script: Script = load(found_path) as Script
 			if script:
 				if debug_mode:
 					printerr("Successfully loaded script from registry")
@@ -320,12 +320,12 @@ func get_script_by_name(name_of_class):
 	printerr("Could not find script for class: " + name_of_class)
 	return null
 
-func instantiate_class(name_of_class):
+func instantiate_class(name_of_class: Variant) -> Variant:
 	if name_of_class.is_empty():
 		printerr("Cannot instantiate class: name is empty")
 		return null
 
-	var result = null
+	var result: Variant = null
 	if debug_mode:
 		printerr("Attempting to instantiate class: " + name_of_class)
 
@@ -341,7 +341,7 @@ func instantiate_class(name_of_class):
 	else:
 		if debug_mode:
 			printerr("Class not found in ClassDB, trying to get script")
-		var script = get_script_by_name(name_of_class)
+		var script: Script = get_script_by_name(name_of_class)
 		if script is GDScript:
 			if debug_mode:
 				printerr("Found GDScript, creating instance")
@@ -369,7 +369,7 @@ func normalize_scene_path(scene_path: String) -> String:
 	var relative: String = written.simplify_path()
 	if relative.is_empty() or relative.begins_with("/"):
 		return ""
-	for segment in relative.split("/"):
+	for segment: String in relative.split("/"):
 		if segment == "..":
 			return ""
 	return "res://" + relative
@@ -383,7 +383,7 @@ func _scene_file_key(scene_path: String) -> String:
 	if _scene_file_keys.has(normalized):
 		return _scene_file_keys[normalized]
 	var resolved := "res://"
-	for segment in normalized.substr("res://".length()).split("/"):
+	for segment: String in normalized.substr("res://".length()).split("/"):
 		resolved = resolved.path_join(_entry_name_on_disk(resolved, segment))
 	_scene_file_keys[normalized] = resolved
 	return resolved
@@ -409,7 +409,7 @@ func _entry_name_on_disk(dir_path: String, entry_name: String) -> String:
 		return entry_name
 	var folded := entry_name.to_lower()
 	var on_disk := ""
-	for candidate in entries:
+	for candidate: Variant in entries:
 		if str(candidate).to_lower() != folded:
 			continue
 		if on_disk != "":
@@ -425,10 +425,10 @@ func _project_relative(res_path: String) -> String:
 # A dependency string is bare "res://x" or uid-form "uid://id::::res://x"; the uid's current path wins because the editor may have moved the file.
 # rfind, not get_slice, so a bare path containing "::" still parses.
 func _resolve_dep_path(dep: String) -> String:
-	var text_path = dep.substr(dep.rfind("::") + 2) if dep.contains("::") else dep
+	var text_path: String = dep.substr(dep.rfind("::") + 2) if dep.contains("::") else dep
 	if not dep.begins_with("uid://"):
 		return text_path
-	var uid_text = dep.substr(0, dep.find("::")) if dep.contains("::") else dep
+	var uid_text: String = dep.substr(0, dep.find("::")) if dep.contains("::") else dep
 	var id := ResourceUID.text_to_id(uid_text)
 	if id != ResourceUID.INVALID_ID and ResourceUID.has_id(id):
 		return ResourceUID.get_id_path(id)
@@ -456,12 +456,12 @@ func _report_import_needed(context: String, paths: String) -> String:
 
 # Shared by load_scene_instance and the batch pre-pass: needs_import is on disk but never imported, missing is not on disk.
 func _probe_scene_deps(full_path: String) -> Dictionary:
-	var deps = ResourceLoader.get_dependencies(full_path)
+	var deps: PackedStringArray = ResourceLoader.get_dependencies(full_path)
 	var needs_import: Array = []
 	var missing: Array = []
-	for dep in deps:
-		var path = _resolve_dep_path(dep)
-		var status = _classify_dep_path(path)
+	for dep: String in deps:
+		var path: String = _resolve_dep_path(dep)
+		var status: String = _classify_dep_path(path)
 		if status == "needs_import":
 			needs_import.append(path)
 		elif status == "missing":
@@ -470,9 +470,9 @@ func _probe_scene_deps(full_path: String) -> Dictionary:
 
 # Probes dependencies before load(): a never-imported one makes load() succeed with null resources (or hang), and the save strips the reference.
 # Mechanism and the rejected MissingResource route: docs/architecture.md "Cold Asset Import".
-func load_scene_instance(scene_path: String):
+func load_scene_instance(scene_path: String) -> Node:
 	last_scene_load_error = ""
-	var full_path = _scene_file_key(scene_path)
+	var full_path: String = _scene_file_key(scene_path)
 	if full_path.is_empty():
 		last_scene_load_error = "Path escapes the project root: " + scene_path
 		log_error(last_scene_load_error)
@@ -485,7 +485,7 @@ func load_scene_instance(scene_path: String):
 		return null
 
 	# Missing files first: a scene with both problems is refused rather than imported and then refused.
-	var probe = _probe_scene_deps(full_path)
+	var probe: Dictionary = _probe_scene_deps(full_path)
 	if probe.missing.size() > 0:
 		last_scene_load_error = "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)
 		log_error(last_scene_load_error)
@@ -494,13 +494,13 @@ func load_scene_instance(scene_path: String):
 		last_scene_load_error = _report_import_needed(scene_path, ", ".join(probe.needs_import))
 		return null
 
-	var scene = load(full_path)
+	var scene: Resource = load(full_path)
 	if not scene:
 		last_scene_load_error = "Failed to load scene: " + full_path
 		log_error(last_scene_load_error)
 		return null
 
-	var instance = _instantiate_packed(scene, true)
+	var instance: Node = _instantiate_packed(scene, true)
 	if not instance:
 		last_scene_load_error = "Failed to instantiate scene: " + full_path
 		log_error(last_scene_load_error)
@@ -521,10 +521,10 @@ func _instantiate_base_scene(scene_path: String) -> Node:
 	var full_path := _scene_file_key(scene_path)
 	if full_path.is_empty():
 		return null
-	var packed = load(full_path)
+	var packed: Resource = load(full_path)
 	if packed == null or not (packed is PackedScene):
 		return null
-	var base = packed.get_state().get_node_instance(0)
+	var base: Variant = packed.get_state().get_node_instance(0)
 	if base == null or not (base is PackedScene):
 		return null
 	return base.instantiate()
@@ -536,10 +536,10 @@ func find_node_by_path(scene_root: Node, node_path: String) -> Node:
 	if node_path == String(scene_root.name):
 		return scene_root
 
-	var path = node_path
-	var first_slash = path.find("/")
+	var path: String = node_path
+	var first_slash: int = path.find("/")
 	if first_slash != -1:
-		var first_segment = path.substr(0, first_slash)
+		var first_segment: String = path.substr(0, first_slash)
 		if first_segment == "root" or first_segment == String(scene_root.name):
 			path = path.substr(first_slash + 1)
 
@@ -555,7 +555,7 @@ const _PATH_ATTR := "path=\""
 const _SCENE_BODY_PREFIXES: Array = ["[node ", "[sub_resource "]
 
 func _starts_scene_body(line: String) -> bool:
-	for prefix in _SCENE_BODY_PREFIXES:
+	for prefix: Variant in _SCENE_BODY_PREFIXES:
 		if line.begins_with(prefix):
 			return true
 	return false
@@ -573,7 +573,7 @@ func _read_scene_uids(full_path: String) -> Dictionary:
 	var found := {"scene": "", "ext": {}}
 	if not full_path.to_lower().ends_with(".tscn") or not FileAccess.file_exists(full_path):
 		return found
-	for raw_line in FileAccess.get_file_as_string(full_path).split("\n"):
+	for raw_line: String in FileAccess.get_file_as_string(full_path).split("\n"):
 		var line: String = raw_line.strip_edges()
 		if line.begins_with(_SCENE_HEADER_PREFIX):
 			found.scene = _header_attr(line, _UID_ATTR)
@@ -655,7 +655,7 @@ func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Diction
 		return false
 	var lines := text.split("\n")
 	var changed := false
-	for i in range(lines.size()):
+	for i: int in range(lines.size()):
 		var line: String = lines[i]
 		if _starts_scene_body(line):
 			break
@@ -686,7 +686,7 @@ func _refresh_cached_scene(full_path: String) -> void:
 
 # A scene written while its uids could not be put back still returns true with a result_warnings entry: false would make the agent apply the operations a second time.
 func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
-	var full_path = _scene_file_key(save_path)
+	var full_path: String = _scene_file_key(save_path)
 	if full_path.is_empty():
 		log_error("Path escapes the project root: " + save_path)
 		return false
@@ -698,15 +698,15 @@ func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 	if source_path != "" and source_path != full_path:
 		ext_uids.merge(_read_scene_uids(source_path).ext)
 
-	var packed_scene = PackedScene.new()
-	var result = packed_scene.pack(scene_root)
+	var packed_scene: PackedScene = PackedScene.new()
+	var result: int = packed_scene.pack(scene_root)
 
 	if result != OK:
 		log_error("Failed to pack scene: " + str(result))
 		return false
 
 	var is_new_file := not FileAccess.file_exists(full_path)
-	var save_error = ResourceSaver.save(packed_scene, full_path)
+	var save_error: int = ResourceSaver.save(packed_scene, full_path)
 	if save_error != OK:
 		log_error("Failed to save scene: " + str(save_error))
 		return false
@@ -724,29 +724,29 @@ func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 	return true
 
 func _ensure_res_dir(full_res_path: String) -> bool:
-	var dir_path = full_res_path.get_base_dir()
+	var dir_path: String = full_res_path.get_base_dir()
 	if dir_path == "res://" or dir_path.is_empty():
 		return true
-	var dir = DirAccess.open("res://")
+	var dir: DirAccess = DirAccess.open("res://")
 	if not dir:
 		return false
-	var relative_dir = dir_path.trim_prefix("res://")
+	var relative_dir: String = dir_path.trim_prefix("res://")
 	if relative_dir.is_empty() or dir.dir_exists(relative_dir):
 		return true
 	_forget_scene_file_keys()
 	return dir.make_dir_recursive(relative_dir) == OK
 
-func create_scene(params):
+func create_scene(params: Variant) -> void:
 	printerr("Creating scene: " + params.scene_path)
 
-	var full_scene_path = normalize_scene_path(params.scene_path)
+	var full_scene_path: String = normalize_scene_path(params.scene_path)
 	if full_scene_path.is_empty():
 		log_error("Path escapes the project root: " + params.scene_path)
 		_fail_operation()
 		return
 	log_debug("Scene path: " + full_scene_path)
 
-	var root_node_type = "Node2D"
+	var root_node_type: Variant = "Node2D"
 	if params.has("root_node_type"):
 		root_node_type = params.root_node_type
 	log_debug("Root node type: " + root_node_type)
@@ -780,8 +780,8 @@ const _PROMOTED_SPATIAL_PARAMS: Array = ["position", "rotation", "scale", "visib
 const _SCENE_SUFFIXES: Array = [".tscn", ".scn"]
 
 func _is_scene_path(type_or_path: String) -> bool:
-	var lowered = type_or_path.to_lower()
-	for suffix in _SCENE_SUFFIXES:
+	var lowered: String = type_or_path.to_lower()
+	for suffix: Variant in _SCENE_SUFFIXES:
 		if lowered.ends_with(suffix):
 			return true
 	return false
@@ -790,13 +790,13 @@ func _is_scene_path(type_or_path: String) -> bool:
 # A script that does not say what it extends (it failed to compile) is judged by its instance, freed when not reference counted.
 func _instantiate_node_class(name_of_class: String) -> Dictionary:
 	var not_a_node := "'%s' is not a Node type, so it cannot be a node of a scene" % name_of_class
-	var instance = null
+	var instance: Variant = null
 	if ClassDB.class_exists(name_of_class):
 		if not ClassDB.is_parent_class(name_of_class, "Node"):
 			return {"ok": false, "node": null, "error": not_a_node}
 		instance = instantiate_class(name_of_class)
 	else:
-		var script = get_script_by_name(name_of_class)
+		var script: Script = get_script_by_name(name_of_class)
 		if script is Script:
 			var base_type: String = str(script.get_instance_base_type())
 			if base_type != "" and not ClassDB.is_parent_class(base_type, "Node"):
@@ -829,11 +829,11 @@ func _instantiate_node_class(name_of_class: String) -> Dictionary:
 func _script_init_required_args(script: Script) -> int:
 	if not OS.has_feature("editor"):
 		return 0
-	for method in script.get_script_method_list():
+	for method: Variant in script.get_script_method_list():
 		if typeof(method) != TYPE_DICTIONARY or str(method.get("name", "")) != "_init":
 			continue
-		var args = method.get("args", [])
-		var defaults = method.get("default_args", [])
+		var args: Variant = method.get("args", [])
+		var defaults: Variant = method.get("default_args", [])
 		if typeof(args) != TYPE_ARRAY or typeof(defaults) != TYPE_ARRAY:
 			return 0
 		return maxi(args.size() - defaults.size(), 0)
@@ -842,27 +842,27 @@ func _script_init_required_args(script: Script) -> int:
 const _STOPPED_BY_SCRIPT_ERROR := "stopped by a script error before it finished, see the engine's error output"
 
 # A script error inside an _apply_*/_instantiate_* function hands back the declared type's default (an empty Dictionary) or null; reading .ok off it raises again and ends the operation with no reason.
-func _was_stopped(outcome) -> bool:
+func _was_stopped(outcome: Variant) -> bool:
 	return typeof(outcome) != TYPE_DICTIONARY or not outcome.has("ok")
 
 func _instantiate_node_type(type_or_path: String) -> Dictionary:
 	if not _is_scene_path(type_or_path):
 		return _instantiate_node_class(type_or_path)
 
-	var scene_full_path = _scene_file_key(type_or_path)
+	var scene_full_path: String = _scene_file_key(type_or_path)
 	if scene_full_path.is_empty():
 		return {"ok": false, "error": "Scene path escapes the project root: " + type_or_path}
 	if not FileAccess.file_exists(scene_full_path):
 		return {"ok": false, "error": "Scene file does not exist: " + scene_full_path}
-	var probe = _probe_scene_deps(scene_full_path)
+	var probe: Dictionary = _probe_scene_deps(scene_full_path)
 	if probe.missing.size() > 0:
 		return {"ok": false, "error": "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)}
 	if probe.needs_import.size() > 0:
 		return {"ok": false, "error": _report_import_needed(type_or_path, ", ".join(probe.needs_import))}
-	var packed = load(scene_full_path)
+	var packed: Resource = load(scene_full_path)
 	if packed == null or not (packed is PackedScene):
 		return {"ok": false, "error": "Failed to load scene: " + scene_full_path}
-	var instanced = _instantiate_packed(packed, false)
+	var instanced: Node = _instantiate_packed(packed, false)
 	if instanced == null:
 		return {"ok": false, "error": "Failed to instantiate scene: " + scene_full_path}
 	return {"ok": true, "node": instanced}
@@ -874,15 +874,15 @@ func _name_not_kept_warning(requested_name: String, final_name: String) -> Strin
 
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	# Each is handed to a typed parameter below, where a wrong type raises.
-	for string_param in ["parent_node_path", "node_type", "node_name"]:
+	for string_param: String in ["parent_node_path", "node_type", "node_name"]:
 		if op.has(string_param) and typeof(op[string_param]) != TYPE_STRING:
 			return {"ok": false, "error": "%s must be a string" % string_param}
 	if op.has("properties") and typeof(op.properties) != TYPE_DICTIONARY:
 		return {"ok": false, "error": "properties must be an object"}
-	var parent_path = "root"
+	var parent_path: Variant = "root"
 	if op.has("parent_node_path"):
 		parent_path = op.parent_node_path
-	var parent = find_node_by_path(scene_root, parent_path)
+	var parent: Node = find_node_by_path(scene_root, parent_path)
 	if not parent:
 		return {"ok": false, "error": "Parent node not found: " + parent_path}
 	if not op.has("node_type") or op.node_type == "":
@@ -894,18 +894,18 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 		var target_scene := _scene_file_key(str(op.scene_path))
 		if target_scene != "" and target_scene == _scene_file_key(op.node_type):
 			return {"ok": false, "error": "Cannot instance scene '%s' into itself" % _project_relative(target_scene)}
-	var instantiated = _instantiate_node_type(op.node_type)
+	var instantiated: Dictionary = _instantiate_node_type(op.node_type)
 	if _was_stopped(instantiated):
 		return {"ok": false, "error": "Failed to instantiate node of type: %s (%s)" % [str(op.node_type), _STOPPED_BY_SCRIPT_ERROR]}
 	if not instantiated.ok:
 		return {"ok": false, "error": instantiated.error}
-	var new_node = instantiated.node
+	var new_node: Variant = instantiated.node
 	new_node.name = op.node_name
 	# The batch path forwards operations raw, so promoted spatial params are folded in; `properties` wins on conflict.
-	var props = {}
+	var props: Dictionary = {}
 	if op.has("properties"):
 		props = op.properties.duplicate()
-	for promoted in _PROMOTED_SPATIAL_PARAMS:
+	for promoted: Variant in _PROMOTED_SPATIAL_PARAMS:
 		if op.has(promoted) and not props.has(promoted):
 			props[promoted] = op[promoted]
 	# The node joins its parent before any property is set: a setter or getter can depend on where the node is (Control layout_mode, anchors_preset).
@@ -917,13 +917,13 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	if props.has("script"):
 		ordered_properties.erase("script")
 		ordered_properties.push_front("script")
-	for property in ordered_properties:
+	for property: Variant in ordered_properties:
 		var failure := ""
-		var settable = _check_node_property_settable(new_node, property)
+		var settable: Dictionary = _check_node_property_settable(new_node, property)
 		if not settable.ok:
 			failure = settable.error
 		else:
-			var prepared = _prepare_property_value(new_node, property, props[property])
+			var prepared: Dictionary = _prepare_property_value(new_node, property, props[property])
 			if not prepared.ok:
 				failure = prepared.error
 			else:
@@ -931,7 +931,7 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 				failure = assigned.error
 				# Verify the script assignment landed -- same backstop as attach_script and _apply_updates (_verify_script_attached).
 				if failure == "" and property == "script":
-					var verify = _verify_script_attached(new_node, prepared.value)
+					var verify: Dictionary = _verify_script_attached(new_node, prepared.value)
 					if not verify.ok:
 						failure = verify.error
 				if failure == "":
@@ -968,18 +968,18 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "node_path is required for load_sprite"}
 	if not op.has("texture_path") or op.texture_path == "":
 		return {"ok": false, "error": "texture_path is required for load_sprite"}
-	var sprite_node = find_node_by_path(scene_root, op.node_path)
+	var sprite_node: Node = find_node_by_path(scene_root, op.node_path)
 	if not sprite_node:
 		return {"ok": false, "error": "Node not found: " + op.node_path}
 	if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
 		return {"ok": false, "error": "Node is not a sprite-compatible type: " + sprite_node.get_class()}
-	var full_texture_path = normalize_scene_path(op.texture_path)
+	var full_texture_path: String = normalize_scene_path(op.texture_path)
 	if full_texture_path.is_empty():
 		return {"ok": false, "error": "Path escapes the project root: " + op.texture_path}
 	# First reference to an asset the scene-load probe never saw: check the cold-import state before load().
 	if _classify_dep_path(full_texture_path) == "needs_import":
 		return {"ok": false, "error": _report_import_needed("load_sprite " + op.node_path, full_texture_path)}
-	var texture = load(full_texture_path)
+	var texture: Resource = load(full_texture_path)
 	if not texture:
 		return {"ok": false, "error": "Failed to load texture: " + full_texture_path}
 	if not (texture is Texture2D):
@@ -990,7 +990,7 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 	_claim_for_serialization(scene_root, sprite_node)
 	sprite_node.texture = texture
 	# Read back from the node, not the request.
-	var assigned = sprite_node.texture
+	var assigned: Variant = sprite_node.texture
 	if assigned == null or assigned.resource_path == "":
 		return {"ok": false, "error": "Texture assignment did not land on the node: " + full_texture_path}
 	return {
@@ -1003,15 +1003,15 @@ func _apply_load_sprite(scene_root: Node, op: Dictionary) -> Dictionary:
 		},
 	}
 
-func add_node(params):
+func add_node(params: Variant) -> void:
 	printerr("Adding node to scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var result = _apply_add_node(scene_root, params)
+	var result: Dictionary = _apply_add_node(scene_root, params)
 	if not result.ok:
 		log_error(result.error)
 		_fail_operation()
@@ -1027,15 +1027,15 @@ func add_node(params):
 		_fail_operation()
 		return
 
-func load_sprite(params):
+func load_sprite(params: Variant) -> void:
 	printerr("Loading sprite into scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var result = _apply_load_sprite(scene_root, params)
+	var result: Dictionary = _apply_load_sprite(scene_root, params)
 	if not result.ok:
 		log_error(result.error)
 		_fail_operation()
@@ -1048,30 +1048,30 @@ func load_sprite(params):
 		_fail_operation()
 		return
 
-func export_mesh_library(params):
+func export_mesh_library(params: Variant) -> void:
 	printerr("Exporting MeshLibrary from scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var mesh_library = MeshLibrary.new()
+	var mesh_library: MeshLibrary = MeshLibrary.new()
 
-	var mesh_item_names = params.mesh_item_names if params.has("mesh_item_names") else []
-	var use_specific_items = mesh_item_names.size() > 0
+	var mesh_item_names: Variant = params.mesh_item_names if params.has("mesh_item_names") else []
+	var use_specific_items: bool = mesh_item_names.size() > 0
 
-	var item_id = 0
+	var item_id: int = 0
 
-	for child in scene_root.get_children():
+	for child: Node in scene_root.get_children():
 		if use_specific_items and not (child.name in mesh_item_names):
 			continue
 
-		var mesh_instance = null
+		var mesh_instance: Variant = null
 		if child is MeshInstance3D:
 			mesh_instance = child
 		else:
-			for descendant in child.get_children():
+			for descendant: Node in child.get_children():
 				if descendant is MeshInstance3D:
 					mesh_instance = descendant
 					break
@@ -1081,7 +1081,7 @@ func export_mesh_library(params):
 			mesh_library.set_item_name(item_id, child.name)
 			mesh_library.set_item_mesh(item_id, mesh_instance.mesh)
 
-			for collision_child in child.get_children():
+			for collision_child: Node in child.get_children():
 				if collision_child is CollisionShape3D and collision_child.shape:
 					mesh_library.set_item_shapes(item_id, [collision_child.shape])
 					break
@@ -1091,7 +1091,7 @@ func export_mesh_library(params):
 			item_id += 1
 
 	if item_id > 0:
-		var full_output_path = normalize_scene_path(params.output_path)
+		var full_output_path: String = normalize_scene_path(params.output_path)
 		if full_output_path.is_empty():
 			log_error("Path escapes the project root: " + params.output_path)
 			_fail_operation()
@@ -1102,11 +1102,11 @@ func export_mesh_library(params):
 			_fail_operation()
 			return
 
-		var error = ResourceSaver.save(mesh_library, full_output_path)
+		var error: int = ResourceSaver.save(mesh_library, full_output_path)
 		if error == OK:
 			# Read back from the library, not the loop counter.
 			var exported_names: Array = []
-			for id in mesh_library.get_item_list():
+			for id: int in mesh_library.get_item_list():
 				exported_names.append(mesh_library.get_item_name(id))
 			var payload := {
 				"outputPath": _project_relative(full_output_path),
@@ -1115,7 +1115,7 @@ func export_mesh_library(params):
 			}
 			if use_specific_items:
 				var not_exported: Array = []
-				for requested in mesh_item_names:
+				for requested: Variant in mesh_item_names:
 					if not (str(requested) in exported_names):
 						not_exported.append(str(requested))
 				if not not_exported.is_empty():
@@ -1130,15 +1130,15 @@ func export_mesh_library(params):
 		_fail_operation()
 		return
 
-func save_scene(params):
+func save_scene(params: Variant) -> void:
 	printerr("Saving scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var save_path = params.new_path if params.has("new_path") else params.scene_path
+	var save_path: Variant = params.new_path if params.has("new_path") else params.scene_path
 
 	if not save_scene_to_path(scene_root, save_path):
 		log_error("Failed to save scene")
@@ -1146,7 +1146,7 @@ func save_scene(params):
 		return
 
 	# Confirm the file on disk before reporting it as written.
-	var saved_full_path = normalize_scene_path(str(save_path))
+	var saved_full_path: String = normalize_scene_path(str(save_path))
 	if not FileAccess.file_exists(saved_full_path):
 		log_error("Scene save reported success but the file is not on disk: " + saved_full_path)
 		_fail_operation()
@@ -1156,10 +1156,10 @@ func save_scene(params):
 		"savedScenePath": _project_relative(saved_full_path),
 	})
 
-func delete_nodes(params):
+func delete_nodes(params: Variant) -> void:
 	printerr("Deleting nodes from scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
@@ -1168,11 +1168,11 @@ func delete_nodes(params):
 	var results: Array = []
 	var any_deleted := false
 	# A node the base scene defines is rebuilt on every load, so a deletion would be reported saved and come back.
-	var base_root = _instantiate_base_scene(params.scene_path)
+	var base_root: Node = _instantiate_base_scene(params.scene_path)
 
-	for node_path in node_paths:
-		var entry = {"nodePath": node_path}
-		var node = find_node_by_path(scene_root, node_path)
+	for node_path: Variant in node_paths:
+		var entry: Dictionary = {"nodePath": node_path}
+		var node: Node = find_node_by_path(scene_root, node_path)
 		# A %Name path says nothing about where its node sits; the Node side needs the place to tell this deletion from a node the save lost.
 		if node:
 			entry["resolvedNodePath"] = _relative_path(scene_root, node)
@@ -1186,7 +1186,7 @@ func delete_nodes(params):
 		elif base_root != null and base_root.has_node(scene_root.get_path_to(node)):
 			entry["error"] = "Node '%s' is inherited from the scene this one extends and cannot be deleted from here: it is re-created on every load. Delete it in the base scene." % node_path
 		else:
-			var parent = node.get_parent()
+			var parent: Node = node.get_parent()
 			parent.remove_child(node)
 			node.queue_free()
 			entry["success"] = true
@@ -1220,8 +1220,8 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 	var warnings: Array = []
 	var any_set := false
 
-	for i in range(updates.size()):
-		var update = updates[i]
+	for i: int in range(updates.size()):
+		var update: Variant = updates[i]
 		# A malformed item is reported here; dot access on a missing key raises.
 		var well_formed: bool = (
 			typeof(update) == TYPE_DICTIONARY
@@ -1231,13 +1231,13 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 			and typeof(update.get("node_path")) == TYPE_STRING
 			and typeof(update.get("property")) == TYPE_STRING
 		)
-		var result = {"nodePath": "", "property": ""}
+		var result: Dictionary = {"nodePath": "", "property": ""}
 		if not well_formed:
 			result["error"] = "updates[%d] must be an object with nodePath, property and value" % i
 		else:
 			result["nodePath"] = update.node_path
 			result["property"] = update.property
-			var node = find_node_by_path(scene_root, update.node_path)
+			var node: Node = find_node_by_path(scene_root, update.node_path)
 			var settable: Dictionary = {"ok": false, "error": ""}
 			if node != null:
 				result["resolvedNodePath"] = _relative_path(scene_root, node)
@@ -1247,7 +1247,7 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 			elif not settable.ok:
 				result["error"] = settable.error
 			else:
-				var prepared = _prepare_property_value(node, update.property, update.value)
+				var prepared: Dictionary = _prepare_property_value(node, update.property, update.value)
 				if not prepared.ok:
 					result["error"] = prepared.error
 				else:
@@ -1259,7 +1259,7 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 					if not backstop_ok:
 						result["error"] = assign_error
 					elif update.property == "script":
-						var verify = _verify_script_attached(node, prepared.value)
+						var verify: Dictionary = _verify_script_attached(node, prepared.value)
 						if not verify.ok:
 							result["error"] = verify.error
 							backstop_ok = false
@@ -1276,8 +1276,8 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 			break
 
 	# Updates after an abort were never attempted: list each as skipped so results stays one entry per update.
-	for skipped_index in range(results.size(), updates.size()):
-		var skipped_update = updates[skipped_index]
+	for skipped_index: int in range(results.size(), updates.size()):
+		var skipped_update: Variant = updates[skipped_index]
 		var skipped_entry := {"nodePath": "", "property": "", "skipped": true}
 		if typeof(skipped_update) == TYPE_DICTIONARY:
 			if typeof(skipped_update.get("node_path")) == TYPE_STRING:
@@ -1289,12 +1289,12 @@ func _apply_updates(scene_root: Node, updates: Array, abort_on_error: bool) -> D
 	return {"ok": true, "any_set": any_set, "error": "", "results": results, "warnings": warnings}
 
 func set_node_properties(params: Dictionary) -> void:
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var applied = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
+	var applied: Dictionary = _apply_updates(scene_root, params.updates, params.get("abort_on_error", false))
 	if applied.any_set:
 		if not save_scene_to_path(scene_root, params.scene_path):
 			log_error("Failed to save scene after updates")
@@ -1307,7 +1307,7 @@ func set_node_properties(params: Dictionary) -> void:
 	emit_result(payload)
 
 func get_node_properties(params: Dictionary) -> void:
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
@@ -1315,37 +1315,37 @@ func get_node_properties(params: Dictionary) -> void:
 	var results: Array = []
 	var defaults_cache: Dictionary = {}
 
-	for i in range(params.nodes.size()):
-		var node_spec = params.nodes[i]
+	for i: int in range(params.nodes.size()):
+		var node_spec: Variant = params.nodes[i]
 		# An empty or missing node_path resolves to the scene root, so a mistyped key would read the wrong node.
 		if typeof(node_spec) != TYPE_DICTIONARY or typeof(node_spec.get("node_path", "")) != TYPE_STRING or node_spec.get("node_path", "") == "":
 			results.append({"nodePath": "", "error": "nodes[%d] is missing nodePath" % i})
 			continue
 		var node_path: String = node_spec.node_path
-		var changed_only = node_spec.get("changed_only", false)
-		var node = find_node_by_path(scene_root, node_path)
+		var changed_only: Variant = node_spec.get("changed_only", false)
+		var node: Node = find_node_by_path(scene_root, node_path)
 		if node == null:
 			results.append({"nodePath": node_path, "error": "Node not found"})
 		else:
-			var props = _collect_node_properties(node, changed_only, defaults_cache)
+			var props: Dictionary = _collect_node_properties(node, changed_only, defaults_cache)
 			results.append({"nodePath": node_path, "nodeType": node.get_class(), "properties": props})
 
-	for klass in defaults_cache:
-		var inst = defaults_cache[klass]
+	for klass: Variant in defaults_cache:
+		var inst: Variant = defaults_cache[klass]
 		if inst:
 			inst.free()
 
 	emit_result({"results": results})
 
-func get_scene_tree(params):
+func get_scene_tree(params: Variant) -> void:
 	printerr("Getting scene tree for: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var tree_root = scene_root
+	var tree_root: Node = scene_root
 	if params.has("parent_path") and params.parent_path:
 		tree_root = find_node_by_path(scene_root, params.parent_path)
 		if not tree_root:
@@ -1353,20 +1353,20 @@ func get_scene_tree(params):
 			_fail_operation()
 			return
 
-	var max_depth = -1
+	var max_depth: int = -1
 	if params.has("max_depth"):
 		max_depth = int(params.max_depth)
 
 	var depth_cut := {"nodes": 0}
-	var tree = build_tree_recursive(tree_root, scene_root, 0, max_depth, depth_cut)
+	var tree: Dictionary = build_tree_recursive(tree_root, scene_root, 0, max_depth, depth_cut)
 	if depth_cut.nodes > 0:
 		tree["warnings"] = ["maxDepth %d cut the tree: %d node(s) have children null and a childCount" % [max_depth, depth_cut.nodes]]
 	emit_result(tree)
 
 # A node at the depth limit with children reports children null and a childCount (not listed, not absent); without children, an empty list.
 func build_tree_recursive(node: Node, scene_root: Node, depth: int, max_depth: int, depth_cut: Dictionary) -> Dictionary:
-	var script_path = ""
-	var script = node.get_script()
+	var script_path: String = ""
+	var script: Variant = node.get_script()
 	if script and script.resource_path:
 		script_path = script.resource_path
 
@@ -1377,8 +1377,8 @@ func build_tree_recursive(node: Node, scene_root: Node, depth: int, max_depth: i
 		"script": script_path,
 	}
 	if max_depth < 0 or depth < max_depth:
-		var children = []
-		for child in node.get_children():
+		var children: Array = []
+		for child: Node in node.get_children():
 			children.append(build_tree_recursive(child, scene_root, depth + 1, max_depth, depth_cut))
 		entry["children"] = children
 	elif node.get_child_count() > 0:
@@ -1424,30 +1424,30 @@ func _check_script_attachable(script: Script, path: String) -> Dictionary:
 	return {"ok": false, "error": "Script '%s' cannot be instantiated." % path}
 
 # Even past _check_script_attachable, verify get_script() reflects the assigned Script (or null when clearing): a silent failed assignment must not report success.
-func _verify_script_attached(node: Object, expected) -> Dictionary:
+func _verify_script_attached(node: Object, expected: Variant) -> Dictionary:
 	if node.get_script() == expected:
 		return {"ok": true, "error": ""}
-	var desc = expected.resource_path if (expected is Script and expected.resource_path != "") else str(expected)
+	var desc: Variant = expected.resource_path if (expected is Script and expected.resource_path != "") else str(expected)
 	return {
 		"ok": false,
 		"error": "Script was loaded but Godot did not attach it to the node (get_script() does not reflect it after the assignment): " + desc
 	}
 
-func attach_script(params):
+func attach_script(params: Variant) -> void:
 	printerr("Attaching script to node in scene: " + params.scene_path)
 
-	var scene_root = load_scene_instance(params.scene_path)
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var node = find_node_by_path(scene_root, params.node_path)
+	var node: Node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		_fail_operation()
 		return
 
-	var full_script_path = normalize_scene_path(params.script_path)
+	var full_script_path: String = normalize_scene_path(params.script_path)
 	if full_script_path.is_empty():
 		log_error("Path escapes the project root: " + params.script_path)
 		_fail_operation()
@@ -1458,19 +1458,19 @@ func attach_script(params):
 		_fail_operation()
 		return
 
-	var csharp_support = _check_csharp_support(full_script_path)
+	var csharp_support: Dictionary = _check_csharp_support(full_script_path)
 	if not csharp_support.ok:
 		log_error(csharp_support.error)
 		_fail_operation()
 		return
 
-	var script = load(full_script_path)
+	var script: Resource = load(full_script_path)
 	if not script:
 		log_error("Failed to load script: " + full_script_path)
 		_fail_operation()
 		return
 
-	var attach_check = _check_script_attachable(script, full_script_path)
+	var attach_check: Dictionary = _check_script_attachable(script, full_script_path)
 	if not attach_check.ok:
 		log_error(attach_check.error)
 		_fail_operation()
@@ -1479,7 +1479,7 @@ func attach_script(params):
 	_claim_for_serialization(scene_root, node)
 	node.set_script(script)
 
-	var verify = _verify_script_attached(node, script)
+	var verify: Dictionary = _verify_script_attached(node, script)
 	if not verify.ok:
 		log_error(verify.error)
 		_fail_operation()
@@ -1498,27 +1498,27 @@ func attach_script(params):
 
 const _UNBOUND_COUNT_MIN_MINOR := 4
 
-# The parameter is untyped on purpose: the method is looked up when the line runs, so the script compiles on an engine that predates it.
-func _unbound_argument_count(callable) -> int:
+# The parameter is Variant on purpose: the method is looked up when the line runs, so the script compiles on an engine that predates it.
+func _unbound_argument_count(callable: Variant) -> int:
 	if not _engine_minor_at_least(_UNBOUND_COUNT_MIN_MINOR):
 		return 0
 	return int(callable.get_unbound_arguments_count())
 
 # The copy has already left the donor tree, so its own nodes answer false.
-func _is_donor_node(value, donor_root: Node) -> bool:
+func _is_donor_node(value: Variant, donor_root: Node) -> bool:
 	return value is Node and (value == donor_root or donor_root.is_ancestor_of(value))
 
 # A copy taken from a donor tree can still point at donor nodes outside the copy (persistent signal connections, Node-valued properties); those die with the donor, so each is re-pointed at the node on the same path in the edited scene.
 func _retarget_donor_references(copy: Node, donor_root: Node, scene_root: Node) -> void:
-	for current in _iter_subtree(copy):
-		for signal_info in current.get_signal_list():
-			for conn in current.get_signal_connection_list(signal_info.name):
+	for current: Variant in _iter_subtree(copy):
+		for signal_info: Variant in current.get_signal_list():
+			for conn: Variant in current.get_signal_connection_list(signal_info.name):
 				var callable: Callable = conn["callable"]
-				var target = callable.get_object()
+				var target: Object = callable.get_object()
 				if (int(conn["flags"]) & CONNECT_PERSIST) == 0 or not _is_donor_node(target, donor_root):
 					continue
 				current.disconnect(signal_info.name, callable)
-				var counterpart = scene_root.get_node_or_null(donor_root.get_path_to(target))
+				var counterpart: Node = scene_root.get_node_or_null(donor_root.get_path_to(target))
 				if counterpart == null:
 					continue
 				var retargeted := Callable(counterpart, callable.get_method())
@@ -1530,28 +1530,28 @@ func _retarget_donor_references(copy: Node, donor_root: Node, scene_root: Node) 
 					retargeted = retargeted.unbind(unbound)
 				if not current.is_connected(signal_info.name, retargeted):
 					current.connect(signal_info.name, retargeted, int(conn["flags"]))
-		for descriptor in current.get_property_list():
+		for descriptor: Variant in current.get_property_list():
 			if (int(descriptor.usage) & PROPERTY_USAGE_STORAGE) == 0:
 				continue
-			var value = current.get(descriptor.name)
+			var value: Variant = current.get(descriptor.name)
 			if _is_donor_node(value, donor_root):
 				current.set(descriptor.name, scene_root.get_node_or_null(donor_root.get_path_to(value)))
 			elif typeof(value) == TYPE_ARRAY:
 				var any_retargeted := false
-				for i in range(value.size()):
+				for i: int in range(value.size()):
 					if _is_donor_node(value[i], donor_root):
 						value[i] = scene_root.get_node_or_null(donor_root.get_path_to(value[i]))
 						any_retargeted = true
 				if any_retargeted:
 					current.set(descriptor.name, value)
 
-func duplicate_node(params):
-	var scene_root = load_scene_instance(params.scene_path)
+func duplicate_node(params: Variant) -> void:
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var node = find_node_by_path(scene_root, params.node_path)
+	var node: Node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		_fail_operation()
@@ -1561,7 +1561,7 @@ func duplicate_node(params):
 		_fail_operation()
 		return
 
-	var parent = node.get_parent()
+	var parent: Node = node.get_parent()
 	if params.has("target_parent_path"):
 		parent = find_node_by_path(scene_root, params.target_parent_path)
 		if not parent:
@@ -1571,11 +1571,11 @@ func duplicate_node(params):
 
 	# Not Node.duplicate(): it re-creates an instanced scene without an edit state, so pack() writes the copy as a typed node with every non-default property.
 	# The copy comes out of a second instantiation (the donor) of the same file, whose nodes carry the same edit states, editable marks, groups and connections.
-	var donor_root = load_scene_instance(params.scene_path)
+	var donor_root: Node = load_scene_instance(params.scene_path)
 	if not donor_root:
 		_fail_operation()
 		return
-	var duplicate = find_node_by_path(donor_root, params.node_path)
+	var duplicate: Node = find_node_by_path(donor_root, params.node_path)
 	if duplicate == null or duplicate == donor_root:
 		donor_root.free()
 		log_error("Node not found in a second instance of the scene: " + params.node_path)
@@ -1584,7 +1584,7 @@ func duplicate_node(params):
 	duplicate.get_parent().remove_child(duplicate)
 	# An owner has to be an ancestor, so every owner outside the copy is cleared before add_child. Inner nodes owned by an instance root inside the copy keep it: the instance re-creates them on load, and re-owning them would make pack() write them twice.
 	# The walk still goes through an instance, because a node this scene added under one is owned by the scene.
-	for current in _iter_subtree(duplicate):
+	for current: Variant in _iter_subtree(duplicate):
 		var current_owner: Node = current.owner
 		if current_owner != null and not (current_owner == duplicate or duplicate.is_ancestor_of(current_owner)):
 			current.owner = null
@@ -1595,7 +1595,7 @@ func duplicate_node(params):
 	parent.add_child(duplicate)
 	_claim_for_serialization(scene_root, parent)
 	# pack() drops a node whose owner it does not reach, so each ownerless node of the copy gets this scene as owner.
-	for current in _iter_subtree(duplicate):
+	for current: Variant in _iter_subtree(duplicate):
 		if current.owner == null:
 			current.owner = scene_root
 	_retarget_donor_references(duplicate, donor_root, scene_root)
@@ -1616,26 +1616,26 @@ func duplicate_node(params):
 		_fail_operation()
 		return
 
-func get_node_signals(params):
-	var scene_root = load_scene_instance(params.scene_path)
+func get_node_signals(params: Variant) -> void:
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var node = find_node_by_path(scene_root, params.node_path)
+	var node: Node = find_node_by_path(scene_root, params.node_path)
 	if not node:
 		log_error("Node not found: " + params.node_path)
 		_fail_operation()
 		return
 
-	var signals = []
-	for sig in node.get_signal_list():
-		var sig_name = sig["name"]
-		var connections = []
-		for conn in node.get_signal_connection_list(sig_name):
-			var target_object = conn["callable"].get_object()
+	var signals: Array = []
+	for sig: Dictionary in node.get_signal_list():
+		var sig_name: Variant = sig["name"]
+		var connections: Array = []
+		for conn: Dictionary in node.get_signal_connection_list(sig_name):
+			var target_object: Variant = conn["callable"].get_object()
 			# get_object().get_path() returns "" for any node outside the live SceneTree, which headless scenes always are; report the target in the "root/..." form connect_signal accepts so it round-trips.
-			var target_str = "unknown"
+			var target_str: String = "unknown"
 			if target_object == scene_root:
 				target_str = "root"
 			elif target_object is Node:
@@ -1657,14 +1657,14 @@ func get_node_signals(params):
 	})
 
 func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) -> void:
-	for node in _iter_subtree(scope):
-		var node_rel = _relative_path(scene_root, node)
-		for sig in node.get_signal_list():
-			var sig_name = sig["name"]
-			for conn in node.get_signal_connection_list(sig_name):
+	for node: Variant in _iter_subtree(scope):
+		var node_rel: String = _relative_path(scene_root, node)
+		for sig: Variant in node.get_signal_list():
+			var sig_name: Variant = sig["name"]
+			for conn: Variant in node.get_signal_connection_list(sig_name):
 				var callable: Callable = conn["callable"]
-				var target_object = callable.get_object()
-				var method = String(callable.get_method())
+				var target_object: Object = callable.get_object()
+				var method: String = String(callable.get_method())
 				# CONNECT_PERSIST marks a connection authored in the scene file; the engine's own connections carry no flag. It gates only the missing-handler check below:
 				# the other checks have no engine-connection false positive to guard against, and gating them could only hide findings.
 				var is_persisted := (int(conn.get("flags", 0)) & CONNECT_PERSIST) != 0
@@ -1710,30 +1710,30 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) -> void:
 	# Index targets across the whole scene so a handler connected from outside the scope is not reported; keyed by (node_path, method) because Object identity does not match across iterations.
 	var wired_pairs := {}
-	for node in _iter_subtree(scene_root):
-		for sig in node.get_signal_list():
-			var sig_name = sig["name"]
-			for conn in node.get_signal_connection_list(sig_name):
+	for node: Variant in _iter_subtree(scene_root):
+		for sig: Variant in node.get_signal_list():
+			var sig_name: Variant = sig["name"]
+			for conn: Variant in node.get_signal_connection_list(sig_name):
 				var callable: Callable = conn["callable"]
-				var target_object = callable.get_object()
+				var target_object: Object = callable.get_object()
 				if target_object is Node:
 					# Engine-internal connections do not make a user handler wired.
 					if _is_engine_internal_connection(target_object, String(callable.get_method())):
 						continue
-					var target_path = _relative_path(scene_root, target_object)
-					var method_name = String(callable.get_method())
+					var target_path: String = _relative_path(scene_root, target_object)
+					var method_name: String = String(callable.get_method())
 					if not target_path.is_empty():
 						wired_pairs[target_path + "::" + method_name] = true
 
-	for node in _iter_subtree(scope):
-		var node_rel = _relative_path(scene_root, node)
+	for node: Variant in _iter_subtree(scope):
+		var node_rel: String = _relative_path(scene_root, node)
 		if node_rel.is_empty():
 			continue
-		var script_methods = _get_script_user_defined_methods(node)
-		for method_name in script_methods:
+		var script_methods: Array = _get_script_user_defined_methods(node)
+		for method_name: Variant in script_methods:
 			if not method_name.begins_with("_on_"):
 				continue
-			var pair_key = node_rel + "::" + method_name
+			var pair_key: String = node_rel + "::" + method_name
 			if not wired_pairs.has(pair_key):
 				issues.append({
 					"node": node_rel,
@@ -1747,7 +1747,7 @@ func _iter_subtree(root: Node) -> Array:
 	var out := [root]
 	var cursor := 0
 	while cursor < out.size():
-		for child in out[cursor].get_children():
+		for child: Variant in out[cursor].get_children():
 			out.append(child)
 		cursor += 1
 	return out
@@ -1773,10 +1773,10 @@ func _is_engine_internal_connection(target_object: Object, method: String) -> bo
 	return _is_engine_builtin_declared(target_object, method)
 
 func _is_user_script_method(target_object: Object, method: String) -> bool:
-	var script = target_object.get_script()
+	var script: Variant = target_object.get_script()
 	if script == null:
 		return false
-	for m in script.get_script_method_list():
+	for m: Variant in script.get_script_method_list():
 		if String(m["name"]) == method:
 			return true
 	return false
@@ -1792,31 +1792,31 @@ func _is_engine_builtin_declared(target_object: Object, method: String) -> bool:
 
 # get_script_method_list() covers the script's own methods and those of any GDScript it extends; only _on_* names are kept.
 func _get_script_user_defined_methods(node: Node) -> Array:
-	var script = node.get_script()
+	var script: Variant = node.get_script()
 	if script == null:
 		return []
 
 	var methods := []
-	for m in script.get_script_method_list():
-		var method_name = String(m["name"])
+	for m: Variant in script.get_script_method_list():
+		var method_name: String = String(m["name"])
 		if method_name.begins_with("_on_"):
 			methods.append(method_name)
 
 	return methods
 
 # Bypasses the resource cache so the result is what the file holds, not the instance just packed.
-func _reload_saved_scene(scene_path: String):
-	var full_path = _scene_file_key(scene_path)
+func _reload_saved_scene(scene_path: String) -> Node:
+	var full_path: String = _scene_file_key(scene_path)
 	if full_path.is_empty():
 		return null
-	var packed = ResourceLoader.load(full_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	var packed: Resource = ResourceLoader.load(full_path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if packed == null or not (packed is PackedScene):
 		return null
 	return packed.instantiate()
 
 func _count_signal_connections(source: Node, signal_name: String, target: Node, method: String) -> int:
 	var count := 0
-	for conn in source.get_signal_connection_list(signal_name):
+	for conn: Dictionary in source.get_signal_connection_list(signal_name):
 		var callable: Callable = conn["callable"]
 		if callable.get_object() == target and String(callable.get_method()) == method:
 			count += 1
@@ -1825,11 +1825,11 @@ func _count_signal_connections(source: Node, signal_name: String, target: Node, 
 # read is false when the saved scene could not be loaded or a node was not found: nothing is then known about the connection.
 func _read_back_connection(scene_path: String, node_path: String, signal_name: String, target_node_path: String, method: String) -> Dictionary:
 	var outcome := {"read": false, "connected": false, "source": "", "target": ""}
-	var reloaded = _reload_saved_scene(scene_path)
+	var reloaded: Node = _reload_saved_scene(scene_path)
 	if reloaded == null:
 		return outcome
-	var source = find_node_by_path(reloaded, node_path)
-	var target = find_node_by_path(reloaded, target_node_path)
+	var source: Node = find_node_by_path(reloaded, node_path)
+	var target: Node = find_node_by_path(reloaded, target_node_path)
 	if source != null and target != null:
 		outcome = {
 			"read": true,
@@ -1841,7 +1841,7 @@ func _read_back_connection(scene_path: String, node_path: String, signal_name: S
 	return outcome
 
 # connected comes from the saved scene read back; when that failed it is null with a warning, not the state the request asked for.
-func _signal_result_payload(scene_root: Node, source: Node, target: Node, params, read_back: Dictionary) -> Dictionary:
+func _signal_result_payload(scene_root: Node, source: Node, target: Node, params: Variant, read_back: Dictionary) -> Dictionary:
 	var payload := {
 		"nodePath": _relative_path(scene_root, source),
 		"signal": str(params.signal),
@@ -1857,19 +1857,19 @@ func _signal_result_payload(scene_root: Node, source: Node, target: Node, params
 		payload["warnings"] = ["The scene was saved, but it could not be read back to confirm the connection, so connected is null"]
 	return payload
 
-func connect_signal(params):
-	var scene_root = load_scene_instance(params.scene_path)
+func connect_signal(params: Variant) -> void:
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var source = find_node_by_path(scene_root, params.node_path)
+	var source: Node = find_node_by_path(scene_root, params.node_path)
 	if not source:
 		log_error("Source node not found: " + params.node_path)
 		_fail_operation()
 		return
 
-	var target = find_node_by_path(scene_root, params.target_node_path)
+	var target: Node = find_node_by_path(scene_root, params.target_node_path)
 	if not target:
 		log_error("Target node not found: " + params.target_node_path)
 		_fail_operation()
@@ -1886,7 +1886,7 @@ func connect_signal(params):
 		return
 
 	# CONNECT_PERSIST is required for the connection to be serialized; without it the connection disappears on save.
-	var err = source.connect(params.signal, Callable(target, params.method), CONNECT_PERSIST)
+	var err: int = source.connect(params.signal, Callable(target, params.method), CONNECT_PERSIST)
 	if err != OK:
 		log_error("Failed to connect signal: " + str(err))
 		_fail_operation()
@@ -1900,26 +1900,26 @@ func connect_signal(params):
 		_fail_operation()
 		return
 
-	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	var read_back: Dictionary = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
 	if read_back.read and not read_back.connected:
 		log_error("Signal was connected and the scene saved, but the saved scene does not hold the connection when it is read back")
 		_fail_operation()
 		return
 	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
-func disconnect_signal(params):
-	var scene_root = load_scene_instance(params.scene_path)
+func disconnect_signal(params: Variant) -> void:
+	var scene_root: Node = load_scene_instance(params.scene_path)
 	if not scene_root:
 		_fail_operation()
 		return
 
-	var source = find_node_by_path(scene_root, params.node_path)
+	var source: Node = find_node_by_path(scene_root, params.node_path)
 	if not source:
 		log_error("Source node not found: " + params.node_path)
 		_fail_operation()
 		return
 
-	var target = find_node_by_path(scene_root, params.target_node_path)
+	var target: Node = find_node_by_path(scene_root, params.target_node_path)
 	if not target:
 		log_error("Target node not found: " + params.target_node_path)
 		_fail_operation()
@@ -1937,23 +1937,23 @@ func disconnect_signal(params):
 		_fail_operation()
 		return
 
-	var read_back = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
+	var read_back: Dictionary = _read_back_connection(params.scene_path, params.node_path, params.signal, params.target_node_path, params.method)
 	if read_back.read and read_back.connected:
 		log_error("Signal was disconnected and the scene saved, but the saved scene still holds the connection when it is read back")
 		_fail_operation()
 		return
 	emit_result(_signal_result_payload(scene_root, source, target, params, read_back))
 
-func validate_resource(params):
+func validate_resource(params: Variant) -> void:
 	if not (params.has("script_path") or params.has("scene_path")):
 		log_error("validate_resource requires script_path or scene_path")
 		_fail_operation()
 		return
-	var result = _validate_single(params)
+	var result: Dictionary = _validate_single(params)
 	emit_result({"valid": result.valid, "resolvedPath": result.get("resolvedPath", ""), "errors": result.errors})
 
-func validate_checks(params):
-	var outcome = _run_scene_checks(str(params.scene_path), params.checks if params.has("checks") else [])
+func validate_checks(params: Variant) -> void:
+	var outcome: Dictionary = _run_scene_checks(str(params.scene_path), params.checks if params.has("checks") else [])
 	if not outcome.ok:
 		log_error(outcome.error)
 		_fail_operation()
@@ -1962,8 +1962,8 @@ func validate_checks(params):
 
 # ok=false means the scene could not be loaded; load_scene_instance has already written its diagnosis (including [IMPORT_NEEDED]) to stderr.
 # Never quits: validate_batch needs per-target isolation. Freeing the instance here keeps a batch of N scenes from holding N live trees.
-func _run_scene_checks(scene_path: String, checks) -> Dictionary:
-	var scene_root = load_scene_instance(scene_path)
+func _run_scene_checks(scene_path: String, checks: Variant) -> Dictionary:
+	var scene_root: Node = load_scene_instance(scene_path)
 	if not scene_root:
 		# The reason goes in the result: the [ERROR] line on stderr is not a form the diagnostic parser reads.
 		var skipped := "Scene checks skipped: could not load scene " + scene_path
@@ -1975,29 +1975,29 @@ func _run_scene_checks(scene_path: String, checks) -> Dictionary:
 	return {"ok": true, "error": "", "errors": errors}
 
 # Does not free scene_root; the caller owns it. Every entry is hedged rather than trusted: a malformed entry must be reported, not raise.
-func _collect_check_errors(scene_root: Node, checks) -> Array:
+func _collect_check_errors(scene_root: Node, checks: Variant) -> Array:
 	var errors: Array = []
 	if typeof(checks) != TYPE_ARRAY:
 		return errors
-	for check in checks:
+	for check: Variant in checks:
 		if not (check is Dictionary):
 			errors.append({
 				"check": "",
 				"message": "Invalid check entry: expected an object, got " + type_string(typeof(check)),
 			})
 			continue
-		var check_type = str(check.get("type", ""))
+		var check_type: String = str(check.get("type", ""))
 		if check_type == "structure":
-			var schema = check.get("schema", {})
+			var schema: Variant = check.get("schema", {})
 			var missing_nodes: Array = []
 			var missing_properties: Array = []
 			var issues: Array = []
 			_validate_schema_node(scene_root, scene_root, schema, missing_nodes, missing_properties, issues)
-			for mn in missing_nodes:
-				var mn_expected = str(mn.get("expected", "?"))
-				var mn_path = str(mn.get("path", "?"))
+			for mn: Variant in missing_nodes:
+				var mn_expected: String = str(mn.get("expected", "?"))
+				var mn_path: String = str(mn.get("path", "?"))
 				# An unmatched child is a finding about the parent named in path; a type mismatch names the type actually there.
-				var mn_message = "Expected node of type %s at %s, found %s" % [mn_expected, mn_path, str(mn.get("actual", "?"))]
+				var mn_message: String = "Expected node of type %s at %s, found %s" % [mn_expected, mn_path, str(mn.get("actual", "?"))]
 				if mn.get("unmatched_child", false):
 					mn_message = "No child of type %s under %s" % [mn_expected, mn_path]
 				errors.append({
@@ -2005,16 +2005,16 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 					"path": str(mn.get("path", "")),
 					"message": mn_message,
 				})
-			for mp in missing_properties:
+			for mp: Variant in missing_properties:
 				errors.append({
 					"check": "structure",
 					"path": str(mp.get("path", "")),
 					"message": "Property %s not set on %s" % [str(mp.get("property", "?")), str(mp.get("path", "?"))],
 				})
-			for issue in issues:
+			for issue: Variant in issues:
 				errors.append({"check": "structure", "message": str(issue)})
 		elif check_type == "signals":
-			var scope_node = scene_root
+			var scope_node: Node = scene_root
 			if check.has("node_path") and str(check.node_path) != "":
 				scope_node = find_node_by_path(scene_root, str(check.node_path))
 				if not scope_node:
@@ -2026,8 +2026,8 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 			var sig_issues: Array = []
 			_collect_connection_issues(scope_node, scene_root, sig_issues)
 			_collect_orphaned_handlers(scope_node, scene_root, sig_issues)
-			for si in sig_issues:
-				var entry = {
+			for si: Variant in sig_issues:
+				var entry: Dictionary = {
 					"check": "signals",
 					"node": str(si.get("node", "")),
 					"signal": str(si.get("signal", "")),
@@ -2045,14 +2045,14 @@ func _collect_check_errors(scene_root: Node, checks) -> Array:
 
 	return errors
 
-func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
+func _validate_schema_node(node: Node, scene_root: Node, schema: Variant, missing_nodes: Array, missing_properties: Array, issues: Array) -> void:
 	# A malformed entry is reported, not fatal.
 	if not (schema is Dictionary):
 		issues.append("Invalid schema entry: expected an object, got " + type_string(typeof(schema)))
 		return
 
 	if schema.has("type"):
-		var expected_type = str(schema.type)
+		var expected_type: String = str(schema.type)
 		if node.get_class() != expected_type:
 			missing_nodes.append({
 				"path": _relative_path(scene_root, node),
@@ -2061,7 +2061,7 @@ func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: 
 			})
 
 	if schema.has("has_property"):
-		var prop_name = str(schema.has_property)
+		var prop_name: String = str(schema.has_property)
 		if not _node_has_property_set(node, prop_name):
 			missing_properties.append({
 				"path": _relative_path(scene_root, node),
@@ -2069,26 +2069,26 @@ func _validate_schema_node(node: Node, scene_root: Node, schema, missing_nodes: 
 			})
 
 	if schema.has("children"):
-		var children_schema = schema.children
+		var children_schema: Variant = schema.children
 		if typeof(children_schema) == TYPE_ARRAY:
 			# Consumed children are tracked so two schema entries of the same type match two distinct nodes.
 			var available := node.get_children().duplicate()
-			for child_schema in children_schema:
-				var found = _find_child_matching(available, child_schema)
+			for child_schema: Variant in children_schema:
+				var found: Node = _find_child_matching(available, child_schema)
 				if found:
 					available.erase(found)
 					_validate_schema_node(found, scene_root, child_schema, missing_nodes, missing_properties, issues)
 				else:
-					var expected_type = str(child_schema.get("type", "?")) if child_schema is Dictionary else "?"
+					var expected_type: String = str(child_schema.get("type", "?")) if child_schema is Dictionary else "?"
 					missing_nodes.append({
 						"path": _relative_path(scene_root, node),
 						"expected": expected_type,
 						"unmatched_child": true
 					})
 
-func _find_child_matching(available: Array, child_schema) -> Node:
-	var expected_type = str(child_schema.get("type", "")) if child_schema is Dictionary else ""
-	for child in available:
+func _find_child_matching(available: Array, child_schema: Variant) -> Node:
+	var expected_type: String = str(child_schema.get("type", "")) if child_schema is Dictionary else ""
+	for child: Variant in available:
 		if expected_type.is_empty() or child.get_class() == expected_type:
 			return child
 	return null
@@ -2097,7 +2097,7 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 	# `in` guards against Godot printing "Invalid get index" for properties the node type does not declare.
 	if not (prop_name in node):
 		return false
-	var val = node.get(prop_name)
+	var val: Variant = node.get(prop_name)
 	if val == null:
 		return false
 	if typeof(val) == TYPE_STRING and str(val).is_empty():
@@ -2106,11 +2106,11 @@ func _node_has_property_set(node: Node, prop_name: String) -> bool:
 
 
 # Every vector and color component must be a JSON number before a dictionary is coerced: a constructor handed anything else raises, the coercion yields null, and null is a value some properties accept.
-func _is_json_number(value) -> bool:
+func _is_json_number(value: Variant) -> bool:
 	return typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT
 
 # Components not all numbers: returned unchanged so the caller's type check reports it instead of a constructor failing.
-func _coerce_property_value(value):
+func _coerce_property_value(value: Variant) -> Variant:
 	if typeof(value) != TYPE_DICTIONARY:
 		return value
 	# Only an exact key set is a vector or a color; any other dictionary is the author's own data and is returned as it came.
@@ -2145,8 +2145,8 @@ func _prepare_packed_array_elements(property: String, node_class: String, declar
 		}
 	var accepted: Array = _ELEMENT_TYPE_COMPAT[elem_type]
 	var out: Array = []
-	for i in range(arr.size()):
-		var element = _coerce_property_value(arr[i])
+	for i: int in range(arr.size()):
+		var element: Variant = _coerce_property_value(arr[i])
 		if not (typeof(element) in accepted):
 			return {
 				"ok": false,
@@ -2192,7 +2192,7 @@ const _INT64_FLOAT_LIMIT := 9223372036854775808.0
 
 # Why a JSON number cannot be stored as an integer (the tail of a sentence), or "" when it can. The one check every integer target shares.
 # The target's width is unknown here: packed arrays and vectors check their own range, an int property is read back in _assign_property.
-func _json_int_problem(value) -> String:
+func _json_int_problem(value: Variant) -> String:
 	if typeof(value) != TYPE_FLOAT:
 		return ""
 	if not is_finite(value):
@@ -2210,7 +2210,7 @@ const _INT32_MAX := 2147483647
 
 # set() wraps or saturates an int that does not fit the property's width (process_priority is 32-bit) without reporting it, so an int is read back. Outside 32 bits and different: error. Within 32 bits and different: kept with a warning (a setter may normalize, a getter may answer from the node's surroundings).
 # restore_on_error writes the previous value back through the setter, sound only because the error cases are an overflowed integer and a refused object; a caller that discards the node passes false.
-func _assign_property(target: Object, property: String, value, restore_on_error: bool) -> Dictionary:
+func _assign_property(target: Object, property: String, value: Variant, restore_on_error: bool) -> Dictionary:
 	var checks_int: bool = (
 		typeof(value) == TYPE_INT
 		and not property.begins_with(_METADATA_PREFIX)
@@ -2218,10 +2218,10 @@ func _assign_property(target: Object, property: String, value, restore_on_error:
 	)
 	# set() of an object the property's class does not accept stores nothing or clears the property and reports neither; the property must read back the very object assigned.
 	var checks_object: bool = typeof(value) == TYPE_OBJECT and is_instance_valid(value)
-	var previous = target.get(property) if (checks_int or checks_object) and restore_on_error else null
+	var previous: Variant = target.get(property) if (checks_int or checks_object) and restore_on_error else null
 	target.set(property, value)
 	if checks_object:
-		var held = target.get(property)
+		var held: Variant = target.get(property)
 		if is_same(held, value):
 			return {"error": "", "warning": ""}
 		if typeof(held) == TYPE_OBJECT and is_instance_valid(held):
@@ -2239,7 +2239,7 @@ func _assign_property(target: Object, property: String, value, restore_on_error:
 		}
 	if not checks_int:
 		return {"error": "", "warning": ""}
-	var stored = target.get(property)
+	var stored: Variant = target.get(property)
 	if typeof(stored) == TYPE_INT and stored == value:
 		return {"error": "", "warning": ""}
 	if value >= _INT32_MIN and value <= _INT32_MAX:
@@ -2270,8 +2270,8 @@ func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
 	if raw.size() != keys.size() or not raw.has_all(keys):
 		return not_built
 	var components: Array = []
-	for key in keys:
-		var component = raw[key]
+	for key: Variant in keys:
+		var component: Variant = raw[key]
 		if not _is_json_number(component) or _is_fractional_float(component):
 			return not_built
 		var problem := _json_int_problem(component)
@@ -2282,7 +2282,7 @@ func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
 			not_built["problem"] = "component %s (%s) %s" % [key, str(component), problem]
 			return not_built
 		components.append(int(component))
-	var built = null
+	var built: Variant = null
 	match vector_type:
 		TYPE_VECTOR2I:
 			built = Vector2i(components[0], components[1])
@@ -2293,7 +2293,7 @@ func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
 	return {"built": true, "value": built, "problem": ""}
 
 # JSON numbers arrive as floats; a float is valid for an int property only when whole, otherwise the typed setter truncates silently.
-func _is_fractional_float(value) -> bool:
+func _is_fractional_float(value: Variant) -> bool:
 	return typeof(value) == TYPE_FLOAT and value != floorf(value)
 
 # A JSON object coerces to the float vector and the typed setter then truncates silently ((1.5, 2.7) on a Vector2i stores (1, 2)).
@@ -2307,7 +2307,7 @@ const _PACKED_INT_RANGE: Dictionary = {
 	TYPE_PACKED_INT64_ARRAY: [-9223372036854775807 - 1, 9223372036854775807],
 }
 
-func _has_fractional_component(value) -> bool:
+func _has_fractional_component(value: Variant) -> bool:
 	var components: Array = []
 	match typeof(value):
 		TYPE_VECTOR2:
@@ -2316,7 +2316,7 @@ func _has_fractional_component(value) -> bool:
 			components = [value.x, value.y, value.z]
 		TYPE_VECTOR4:
 			components = [value.x, value.y, value.z, value.w]
-	for component in components:
+	for component: Variant in components:
 		if component != floorf(component):
 			return true
 	return false
@@ -2330,7 +2330,7 @@ const _IDENTIFIER_DIGIT_CHARS: String = "0123456789"
 func _is_ascii_identifier(text: String) -> bool:
 	if text.is_empty():
 		return false
-	for i in range(text.length()):
+	for i: int in range(text.length()):
 		var character := text[i]
 		var allowed := _IDENTIFIER_LEADING_CHARS.contains(character)
 		if i > 0 and _IDENTIFIER_DIGIT_CHARS.contains(character):
@@ -2349,7 +2349,7 @@ func _check_node_property_settable(node: Node, property: String) -> Dictionary:
 		return {"ok": true, "error": ""}
 
 	if "/" in property:
-		var slash_descriptor = _find_property_descriptor(node, property)
+		var slash_descriptor: Variant = _find_property_descriptor(node, property)
 		var declared := false
 		if slash_descriptor != null:
 			var slash_usage: int = slash_descriptor.get("usage", 0)
@@ -2363,7 +2363,7 @@ func _check_node_property_settable(node: Node, property: String) -> Dictionary:
 
 	if not (property in node):
 		return {"ok": false, "error": "Property '%s' does not exist on node of type '%s'" % [property, node_class]}
-	var descriptor = _find_property_descriptor(node, property)
+	var descriptor: Variant = _find_property_descriptor(node, property)
 	if descriptor == null:
 		return {"ok": false, "error": "Property '%s' on node of type '%s' has no entry in its property list (a constant, or a value served by _get), so it cannot be stored in a scene file" % [property, node_class]}
 	return {"ok": true, "error": ""}
@@ -2371,7 +2371,7 @@ func _check_node_property_settable(node: Node, property: String) -> Dictionary:
 # A script variable declared without @export is set on the loaded instance but pack() writes stored properties only, so the write succeeds and this warning says it is not in the file.
 # Native properties without the storage flag (rotation_degrees, global_position) are saved through their alias, so nothing is claimed.
 func _unstored_script_variable_warning(node: Node, property: String) -> String:
-	var descriptor = _find_property_descriptor(node, property)
+	var descriptor: Variant = _find_property_descriptor(node, property)
 	if descriptor == null:
 		return ""
 	var usage: int = descriptor.get("usage", 0)
@@ -2379,14 +2379,14 @@ func _unstored_script_variable_warning(node: Node, property: String) -> String:
 		return ""
 	return "Property '%s' is a script variable declared without @export. It was set on the loaded scene, but a scene file stores exported variables only, so the value is not saved. Add @export to keep it, or set it at runtime with run_script." % property
 
-func _find_property_descriptor(node: Object, property: String):
-	for p in node.get_property_list():
+func _find_property_descriptor(node: Object, property: String) -> Variant:
+	for p: Dictionary in node.get_property_list():
 		if p.name == property:
 			return p
 	return null
 
 func _declared_property_type(node: Object, property: String) -> int:
-	var descriptor = _find_property_descriptor(node, property)
+	var descriptor: Variant = _find_property_descriptor(node, property)
 	if descriptor == null:
 		return TYPE_NIL
 	return descriptor.type
@@ -2454,23 +2454,23 @@ const _ELEMENT_TYPE_COMPAT: Dictionary = {
 # ClassDB and is_class() know engine classes only; a property declared with a script class_name is matched through the project's global class list.
 func _script_chain_has_global_class(object: Object, class_label: String) -> bool:
 	var script_paths: Dictionary = {}
-	var current = object.get_script()
+	var current: Variant = object.get_script()
 	while current is Script:
 		if current.resource_path != "":
 			script_paths[current.resource_path] = true
 		current = current.get_base_script()
 	if script_paths.is_empty():
 		return false
-	for global_class in ProjectSettings.get_global_class_list():
+	for global_class: Dictionary in ProjectSettings.get_global_class_list():
 		if str(global_class.get("class", "")) == class_label and script_paths.has(str(global_class.get("path", ""))):
 			return true
 	return false
 
 # The res:// load path and inline construction share this so both reject a wrong-class resource identically. A property with no resource-type hint always passes.
-func _check_resource_hint_class(descriptor, res, property: String, origin: String) -> Dictionary:
+func _check_resource_hint_class(descriptor: Variant, res: Variant, property: String, origin: String) -> Dictionary:
 	if descriptor == null or descriptor.get("hint") != PROPERTY_HINT_RESOURCE_TYPE or descriptor.get("hint_string", "") == "":
 		return {"ok": true, "error": ""}
-	for allowed_class in descriptor.hint_string.split(","):
+	for allowed_class: Variant in descriptor.hint_string.split(","):
 		if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
 			return {"ok": true, "error": ""}
 		if not ClassDB.class_exists(allowed_class) and _script_chain_has_global_class(res, allowed_class):
@@ -2482,7 +2482,7 @@ const _NON_SETTABLE_PROPERTY_USAGE_MASK: int = (
 )
 
 # Group/subgroup/category pseudo-entries (TYPE_NIL, no STORAGE bit) must not pass the existence gate: TYPE_NIL means "accept anything", so instance.set() would no-op silently while the tool reports success.
-func _is_settable_property_descriptor(descriptor) -> bool:
+func _is_settable_property_descriptor(descriptor: Variant) -> bool:
 	if descriptor == null:
 		return false
 	var usage: int = descriptor.get("usage", 0)
@@ -2495,7 +2495,7 @@ const _SHADER_PARAMETER_PREFIX: String = "shader_parameter/"
 # Zero while a shader is assigned but failed to compile or declares no uniforms: attributes the existence-gate error correctly.
 func _shader_parameter_count(instance: Object) -> int:
 	var count: int = 0
-	for p in instance.get_property_list():
+	for p: Dictionary in instance.get_property_list():
 		if String(p.name).begins_with(_SHADER_PARAMETER_PREFIX):
 			count += 1
 	return count
@@ -2503,30 +2503,30 @@ func _shader_parameter_count(instance: Object) -> int:
 # Class eligibility is settled against ClassDB before instantiate(): a constructed Resource is RefCounted and cannot be free()d from GDScript, a non-Resource class is manually managed and would leak, so neither can be dropped after the fact.
 # Inner properties go through _prepare_property_value, so every level has the same error contract.
 func _construct_inline_resource(node: Object, property: String, spec: Dictionary) -> Dictionary:
-	var class_name_str = spec.type
+	var class_name_str: Variant = spec.type
 	if not ClassDB.class_exists(class_name_str):
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': unknown class '%s'" % [property, class_name_str]}
 	if not ClassDB.is_parent_class(class_name_str, "Resource"):
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' is not a Resource (only Resource subclasses can be constructed inline)" % [property, class_name_str]}
 	if not ClassDB.can_instantiate(class_name_str):
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': class '%s' cannot be instantiated (abstract or native-only)" % [property, class_name_str]}
-	var instance = ClassDB.instantiate(class_name_str)
+	var instance: Variant = ClassDB.instantiate(class_name_str)
 	if instance == null:
 		return {"ok": false, "value": null, "error": "Failed to instantiate class '%s' for property '%s'" % [class_name_str, property]}
 
-	var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), instance, property, "Constructed")
+	var hint_check: Dictionary = _check_resource_hint_class(_find_property_descriptor(node, property), instance, property, "Constructed")
 	if not hint_check.ok:
 		return {"ok": false, "value": null, "error": hint_check.error}
 
 	# resource_path is a plain String property, so nothing downstream treats it as a path; Godot resolves res://../x outward and pack() would write it as an ext_resource.
-	var spec_resource_path = spec.get("resource_path", "")
+	var spec_resource_path: Variant = spec.get("resource_path", "")
 	if typeof(spec_resource_path) == TYPE_STRING and spec_resource_path != "" and normalize_scene_path(spec_resource_path).is_empty():
 		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': resource_path '%s' escapes the project root" % [property, spec_resource_path]}
 
 	# Plain properties first: virtual keys such as ShaderMaterial shader_parameter/<uniform> exist only once the resource they depend on is assigned.
 	var ordered_keys: Array = []
 	var virtual_keys: Array = []
-	for inner_prop in spec.keys():
+	for inner_prop: Variant in spec.keys():
 		if inner_prop == "type":
 			continue
 		if "/" in String(inner_prop):
@@ -2535,7 +2535,7 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 			ordered_keys.append(inner_prop)
 	ordered_keys.append_array(virtual_keys)
 
-	for inner_prop in ordered_keys:
+	for inner_prop: Variant in ordered_keys:
 		# The `in` operator misses shader_parameter/<uniform> keys even after the shader is assigned, so a slash key is also accepted when it resolves to a real settable entry in the live property list.
 		# set() alone must not be the gate: it accepts unknown names silently.
 		var exists: bool = inner_prop in instance
@@ -2547,7 +2547,7 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 					return {"ok": false, "value": null, "error": "Property '%s' does not resolve on resource of type '%s' (constructed for property '%s') -- a shader is assigned but exposes no shader_parameter/* uniforms, which usually means it failed to compile or declares none; check stderr, or run validate" % [inner_prop, class_name_str, property]}
 				return {"ok": false, "value": null, "error": "Property '%s' does not resolve on resource of type '%s' (constructed for property '%s') -- for shader_parameter/<name>, the shader must be assigned first and <name> must be a uniform it declares" % [inner_prop, class_name_str, property]}
 			return {"ok": false, "value": null, "error": "Property '%s' does not exist on resource of type '%s' (constructed for property '%s')" % [inner_prop, class_name_str, property]}
-		var prepared = _prepare_property_value(instance, inner_prop, spec[inner_prop])
+		var prepared: Dictionary = _prepare_property_value(instance, inner_prop, spec[inner_prop])
 		if not prepared.ok:
 			return {"ok": false, "value": null, "error": "Cannot set inner property '%s' on %s constructed for property '%s': %s" % [inner_prop, class_name_str, property, prepared.error]}
 		var assigned := _assign_property(instance, inner_prop, prepared.value, false)
@@ -2561,14 +2561,14 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 # The live value's Array.get_typed_builtin() wins; the hint_string's leading integer is the fallback. Composite forms ("24/17:Texture2D") resolve to TYPE_OBJECT/TYPE_ARRAY, absent from _ELEMENT_TYPE_COMPAT, so the caller rejects them.
 # TYPE_NIL means an untyped Array, the only pass-through case.
 func _typed_array_element_type(node: Object, property: String) -> int:
-	var current = node.get(property)
+	var current: Variant = node.get(property)
 	if typeof(current) == TYPE_ARRAY and current.is_typed():
 		return current.get_typed_builtin()
-	var descriptor = _find_property_descriptor(node, property)
+	var descriptor: Variant = _find_property_descriptor(node, property)
 	if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_ARRAY_TYPE:
 		var hint: String = str(descriptor.get("hint_string", ""))
 		var digits := ""
-		for i in range(hint.length()):
+		for i: int in range(hint.length()):
 			var character := hint[i]
 			if not character.is_valid_int():
 				break
@@ -2578,8 +2578,8 @@ func _typed_array_element_type(node: Object, property: String) -> int:
 	return TYPE_NIL
 
 # Duplicate-and-clear keeps the element type, class name and script, which the typed-Array constructor would need spelled out.
-func _emptied_typed_array(node: Object, property: String):
-	var current = node.get(property)
+func _emptied_typed_array(node: Object, property: String) -> Variant:
+	var current: Variant = node.get(property)
 	if typeof(current) != TYPE_ARRAY or not current.is_typed():
 		return null
 	var emptied: Array = current.duplicate()
@@ -2591,8 +2591,8 @@ func _emptied_typed_array(node: Object, property: String):
 func _prepare_typed_array_elements(property: String, node_class: String, elem_type: int, arr: Array) -> Dictionary:
 	var accepted: Array = _ELEMENT_TYPE_COMPAT[elem_type]
 	var out: Array = []
-	for i in range(arr.size()):
-		var element = _coerce_property_value(arr[i])
+	for i: int in range(arr.size()):
+		var element: Variant = _coerce_property_value(arr[i])
 		if elem_type in _INT_VECTOR_TYPES and typeof(arr[i]) == TYPE_DICTIONARY:
 			var int_vector: Dictionary = _int_vector_from_json(elem_type, arr[i])
 			if int_vector.problem != "":
@@ -2666,9 +2666,9 @@ func _typed_dictionary_error(message: String) -> Dictionary:
 	return {"ok": false, "value": null, "error": message, "typed": false}
 
 # set() with an untyped dictionary on a typed property is refused without an error, so the container is built here: the current value is duplicated and cleared (keeps its key and value types without a typed-dictionary constructor, a compile error below 4.4). Every entry is validated before anything is assigned, because assigning a wrong-typed value raises and aborts this function.
-# `current` is deliberately untyped so the file compiles on engines that predate Dictionary.is_typed().
+# `current` is deliberately Variant so the file compiles on engines that predate Dictionary.is_typed().
 func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) -> Dictionary:
-	var current = node.get(property)
+	var current: Variant = node.get(property)
 	if not _engine_has_typed_dictionaries() or typeof(current) != TYPE_DICTIONARY or not current.is_typed():
 		return {"ok": true, "value": null, "error": "", "typed": false}
 	var node_class := node.get_class()
@@ -2683,8 +2683,8 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 
 	var typed_keys: Array = []
 	var typed_values: Array = []
-	for raw_key in raw:
-		var key = raw_key
+	for raw_key: Variant in raw:
+		var key: Variant = raw_key
 		if key_type == TYPE_INT:
 			if not str(raw_key).is_valid_int():
 				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': key \"%s\" is not a whole number, and the dictionary is keyed by int" % [
@@ -2700,7 +2700,7 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 			key = float(str(raw_key))
 		elif key_type != TYPE_NIL:
 			key = type_convert(raw_key, key_type)
-		var element = raw[raw_key]
+		var element: Variant = raw[raw_key]
 		if value_type != TYPE_NIL:
 			element = _coerce_property_value(element)
 			if value_type in _INT_VECTOR_TYPES and typeof(raw[raw_key]) == TYPE_DICTIONARY:
@@ -2729,9 +2729,9 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 		typed_keys.append(key)
 		typed_values.append(element)
 
-	var typed = current.duplicate()
+	var typed: Variant = current.duplicate()
 	typed.clear()
-	for i in range(typed_keys.size()):
+	for i: int in range(typed_keys.size()):
 		typed[typed_keys[i]] = typed_values[i]
 	if typed.size() != raw.size():
 		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': two keys of the object became the same %s key, so the dictionary could not be built" % [
@@ -2740,11 +2740,11 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 
 # set() casts through the property's typed setter with no validity return: an incompatible value silently stores the declared type's zero value (a String on an int stores 0), so the value is checked against get_property_list() first.
 # Object-typed: a plain value is rejected except a res:// string (auto-loaded) or a {type} dict (constructed inline). Dictionary-typed: coercion is skipped. TYPE_NIL accepts anything; null passes only for Object-typed or untyped properties.
-func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
+func _prepare_property_value(node: Object, property: String, raw_value: Variant) -> Dictionary:
 	# A metadata entry is untyped whatever the property list says: stored as sent, even a dictionary shaped like a vector.
 	var is_metadata: bool = property.begins_with(_METADATA_PREFIX)
-	var declared = TYPE_NIL if is_metadata else _declared_property_type(node, property)
-	var coerced = raw_value if (declared == TYPE_DICTIONARY or is_metadata) else _coerce_property_value(raw_value)
+	var declared: int = TYPE_NIL if is_metadata else _declared_property_type(node, property)
+	var coerced: Variant = raw_value if (declared == TYPE_DICTIONARY or is_metadata) else _coerce_property_value(raw_value)
 	if coerced == null:
 		# null clears an Object-typed property, removes a metadata entry and resets an untyped Variant; on any other type the setter stores the zero value silently.
 		if declared == TYPE_OBJECT or declared == TYPE_NIL:
@@ -2769,7 +2769,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	# Packed arrays: JSON sends a plain Array of raw elements and the typed setter silently casts each to the zero value, so each is coerced and fails loudly.
 	if _PACKED_ARRAY_ELEMENT_TYPE.has(declared) and typeof(coerced) == TYPE_ARRAY:
-		var element_prep = _prepare_packed_array_elements(property, node.get_class(), declared, coerced)
+		var element_prep: Dictionary = _prepare_packed_array_elements(property, node.get_class(), declared, coerced)
 		if not element_prep.ok:
 			return {"ok": false, "value": null, "error": element_prep.error}
 		coerced = element_prep.value
@@ -2779,9 +2779,9 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 	if declared == TYPE_ARRAY and typeof(coerced) == TYPE_ARRAY:
 		var elem_type := _typed_array_element_type(node, property)
 		if elem_type != TYPE_NIL:
-			var emptied = _emptied_typed_array(node, property) if coerced.is_empty() else null
+			var emptied: Variant = _emptied_typed_array(node, property) if coerced.is_empty() else null
 			if _ELEMENT_TYPE_COMPAT.has(elem_type):
-				var typed_prep = _prepare_typed_array_elements(property, node.get_class(), elem_type, coerced)
+				var typed_prep: Dictionary = _prepare_typed_array_elements(property, node.get_class(), elem_type, coerced)
 				if not typed_prep.ok:
 					return {"ok": false, "value": null, "error": typed_prep.error}
 				coerced = typed_prep.value
@@ -2797,7 +2797,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 
 	# A script-declared Dictionary[K, V] refuses an untyped dictionary like a typed Array: set() reports nothing. Untyped properties and engines without typed dictionaries come back typed false and keep the raw value.
 	if declared == TYPE_DICTIONARY and typeof(coerced) == TYPE_DICTIONARY:
-		var dict_prep = _prepare_typed_dictionary(node, property, coerced)
+		var dict_prep: Dictionary = _prepare_typed_dictionary(node, property, coerced)
 		if not dict_prep.ok:
 			return {"ok": false, "value": null, "error": dict_prep.error}
 		if dict_prep.typed:
@@ -2818,26 +2818,26 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 				return {"ok": false, "value": null, "error": _report_import_needed("property " + property, res_path)}
 			# Same pre-load C#-support check as attach_script: without a C# module load() on a .cs fails with a generic message.
 			if property == "script":
-				var csharp_support = _check_csharp_support(res_path)
+				var csharp_support: Dictionary = _check_csharp_support(res_path)
 				if not csharp_support.ok:
 					return {"ok": false, "value": null, "error": csharp_support.error}
-			var res = load(res_path)
+			var res: Resource = load(res_path)
 			if not res:
 				return {"ok": false, "value": null, "error": "Failed to load resource: " + res_path}
 			if res.resource_path == "":
 				return {"ok": false, "value": null, "error": "Resource was imported but has no resource_path - the import likely failed for this asset. Check stderr for the import error."}
-			var hint_check = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
+			var hint_check: Dictionary = _check_resource_hint_class(_find_property_descriptor(node, property), res, property, "Loaded")
 			if not hint_check.ok:
 				return {"ok": false, "value": null, "error": hint_check.error}
 			# Only the node's own script slot silently drops an unattachable Script (parse errors, @abstract, unbuilt C# class), so gate on the property name, not on `res is Script` (_check_script_attachable).
 			if property == "script" and res is Script:
-				var attach_check = _check_script_attachable(res, res_path)
+				var attach_check: Dictionary = _check_script_attachable(res, res_path)
 				if not attach_check.ok:
 					return {"ok": false, "value": null, "error": attach_check.error}
 			return {"ok": true, "value": res, "error": ""}
 
 		if typeof(coerced) == TYPE_DICTIONARY and coerced.has("type") and typeof(coerced.type) == TYPE_STRING:
-			var constructed = _construct_inline_resource(node, property, coerced)
+			var constructed: Dictionary = _construct_inline_resource(node, property, coerced)
 			if not constructed.ok:
 				return {"ok": false, "value": null, "error": constructed.error}
 			return {"ok": true, "value": constructed.value, "error": ""}
@@ -2849,7 +2849,7 @@ func _prepare_property_value(node: Object, property: String, raw_value) -> Dicti
 		}
 
 	if declared != TYPE_NIL:
-		var accepted_types = _PROPERTY_TYPE_COMPAT.get(declared, [declared])
+		var accepted_types: Variant = _PROPERTY_TYPE_COMPAT.get(declared, [declared])
 		if not (typeof(coerced) in accepted_types):
 			return {
 				"ok": false,
@@ -2892,7 +2892,7 @@ const _PACKED_READ_TYPES: Array = [
 
 # Reads a value in the shapes _coerce_property_value and the element paths take back: {x,y}, {x,y,z}, {x,y,z,w}, {r,g,b,a}, plain arrays. A type the write side does not accept stays text.
 # `enclosing` holds the containers being walked; one met again is _SELF_CONTAINING_MARKER, which emit_result leaves in place.
-func _variant_to_json(value, enclosing: Array):
+func _variant_to_json(value: Variant, enclosing: Array) -> Variant:
 	match typeof(value):
 		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
 			return value
@@ -2913,7 +2913,7 @@ func _variant_to_json(value, enclosing: Array):
 				return _SELF_CONTAINING_MARKER
 			enclosing.append(value)
 			var converted: Array = []
-			for item in value:
+			for item: Variant in value:
 				converted.append(_variant_to_json(item, enclosing))
 			enclosing.pop_back()
 			return converted
@@ -2922,22 +2922,22 @@ func _variant_to_json(value, enclosing: Array):
 				return _SELF_CONTAINING_MARKER
 			enclosing.append(value)
 			var converted_dict: Dictionary = {}
-			for key in value:
+			for key: Variant in value:
 				converted_dict[key] = _variant_to_json(value[key], enclosing)
 			enclosing.pop_back()
 			return converted_dict
 	if typeof(value) in _PACKED_READ_TYPES:
 		var elements: Array = []
-		for item in value:
+		for item: Variant in value:
 			elements.append(_variant_to_json(item, enclosing))
 		return elements
 	return str(value)
 
 # changed_only compares against a default instance per class kept in defaults_cache; the caller frees the cache.
 func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Dictionary) -> Dictionary:
-	var default_node = null
+	var default_node: Variant = null
 	if changed_only:
-		var klass = node.get_class()
+		var klass: String = node.get_class()
 		if defaults_cache.has(klass):
 			default_node = defaults_cache[klass]
 		else:
@@ -2946,15 +2946,15 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 			if default_node == null:
 				result_warnings.append("changedOnly could not build a default %s to compare against, so every property of a %s node is listed as changed" % [klass, klass])
 
-	var properties = {}
-	var property_list = node.get_property_list()
+	var properties: Dictionary = {}
+	var property_list: Array = node.get_property_list()
 
-	for prop in property_list:
-		var prop_name = prop["name"]
-		var prop_usage = prop["usage"]
+	for prop: Dictionary in property_list:
+		var prop_name: Variant = prop["name"]
+		var prop_usage: Variant = prop["usage"]
 
 		if prop_usage & PROPERTY_USAGE_STORAGE or prop_usage & PROPERTY_USAGE_EDITOR:
-			var value = node.get(prop_name)
+			var value: Variant = node.get(prop_name)
 
 			if default_node and default_node.get(prop_name) == value:
 				continue
@@ -2967,12 +2967,12 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 # "resolvedPath" is the normalized path the engine reports diagnostics against, so the TS layer can match stderr to this target.
 func _validate_single(target: Dictionary) -> Dictionary:
 	if target.has("script_path") and target.script_path != "":
-		var path = _scene_file_key(target.script_path)
+		var path: String = _scene_file_key(target.script_path)
 		if path.is_empty():
 			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.script_path}], "target": target.script_path}
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.script_path}
-		var resource = load(path)
+		var resource: Resource = load(path)
 		# A file that loads as anything but a GDScript was not checked here; reporting it valid would be a verdict nobody reached.
 		if resource != null and not (resource is GDScript):
 			return {
@@ -2988,12 +2988,12 @@ func _validate_single(target: Dictionary) -> Dictionary:
 			script_valid = resource.can_instantiate() or (resource.has_method("is_abstract") and resource.is_abstract())
 		return {"valid": script_valid, "errors": [], "target": target.script_path, "resolvedPath": path}
 	elif target.has("scene_path") and target.scene_path != "":
-		var path = _scene_file_key(target.scene_path)
+		var path: String = _scene_file_key(target.scene_path)
 		if path.is_empty():
 			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.scene_path}], "target": target.scene_path}
 		if not FileAccess.file_exists(path):
 			return {"valid": false, "errors": [{"message": "File not found: " + path}], "target": target.scene_path}
-		var scene = load(path)
+		var scene: Resource = load(path)
 		return {"valid": scene is PackedScene, "errors": [], "target": target.scene_path, "resolvedPath": path}
 	else:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
@@ -3002,12 +3002,12 @@ func _validate_single(target: Dictionary) -> Dictionary:
 # checkErrors is separate from "errors" because the TS layer overlays stderr diagnostics over "errors" for any target that produced some, which would discard merged check errors. Every failure lands on its own target and the loop continues.
 func validate_batch(params: Dictionary) -> void:
 	var results: Array = []
-	for target in params.targets:
-		var result = _validate_single(target)
-		var checks = target.get("checks", []) if target is Dictionary else []
+	for target: Variant in params.targets:
+		var result: Dictionary = _validate_single(target)
+		var checks: Variant = target.get("checks", []) if target is Dictionary else []
 		if typeof(checks) == TYPE_ARRAY and not checks.is_empty():
-			var scene_path = str(target.get("scene_path", ""))
-			var outcome = _run_scene_checks(scene_path, checks)
+			var scene_path: String = str(target.get("scene_path", ""))
+			var outcome: Dictionary = _run_scene_checks(scene_path, checks)
 			if not outcome.ok:
 				result["checkErrors"] = [{"message": outcome.error}]
 				result["valid"] = false
@@ -3020,16 +3020,16 @@ func validate_batch(params: Dictionary) -> void:
 	emit_result({"results": results})
 
 # Collects every res:// string in a JSON-sourced value (a bare path, an inline resource spec nesting one, arrays or dicts of them) so assets are probed before a mutation. JSON cannot produce a cycle.
-func _collect_res_paths(value, out: Array) -> void:
+func _collect_res_paths(value: Variant, out: Array) -> void:
 	match typeof(value):
 		TYPE_STRING:
 			if (value as String).begins_with("res://"):
 				out.append(value)
 		TYPE_DICTIONARY:
-			for key in value:
+			for key: Variant in value:
 				_collect_res_paths(value[key], out)
 		TYPE_ARRAY:
-			for item in value:
+			for item: Variant in value:
 				_collect_res_paths(item, out)
 
 # A path PARAMETER follows the tool surface's convention (project-relative or res://), so it is normalized with normalize_scene_path, unlike property VALUES where only a res:// string is a reference (_collect_res_paths). A scene (is_scene) is probed for its own dependencies, any other asset is classified directly.
@@ -3037,7 +3037,7 @@ func _collect_res_paths(value, out: Array) -> void:
 func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionary, needs_import: Array, missing: Array) -> void:
 	if raw_path == "":
 		return
-	var full_path = normalize_scene_path(raw_path)
+	var full_path: String = normalize_scene_path(raw_path)
 	if full_path.is_empty() or full_path in seen_paths:
 		return
 	seen_paths[full_path] = true
@@ -3047,7 +3047,7 @@ func _prepass_path_param(raw_path: String, is_scene: bool, seen_paths: Dictionar
 		return
 	if not FileAccess.file_exists(full_path):
 		return
-	var probe = _probe_scene_deps(full_path)
+	var probe: Dictionary = _probe_scene_deps(full_path)
 	missing.append_array(probe.missing)
 	needs_import.append_array(probe.needs_import)
 
@@ -3057,26 +3057,26 @@ func _value_may_load_asset(node: Object, property: String) -> bool:
 		return true
 	if property.begins_with(_METADATA_PREFIX):
 		return false
-	var descriptor = _find_property_descriptor(node, property)
+	var descriptor: Variant = _find_property_descriptor(node, property)
 	if descriptor == null:
 		return true
 	return descriptor.type == TYPE_OBJECT
 
 # Collects the property VALUES one batch operation can assign, for the res:// walk: a reference found only at assignment time would emit [IMPORT_NEEDED] mid-batch, after earlier operations mutated. Only values on Object-typed targets are returned (_value_may_load_asset).
 # Update targets are looked up in `probe_scenes` (normalized path -> instance or null), loaded on first use; the caller frees them.
-func _prepass_value_roots(op: Dictionary, op_name, probe_scenes: Dictionary) -> Array:
+func _prepass_value_roots(op: Dictionary, op_name: Variant, probe_scenes: Dictionary) -> Array:
 	var value_roots: Array = []
 	if op_name == "add_node" and typeof(op.get("properties", null)) == TYPE_DICTIONARY:
 		var found: Array = []
 		_collect_res_paths(op.properties, found)
 		if found.is_empty():
 			return []
-		var made = _instantiate_node_type(str(op.get("node_type", "")))
+		var made: Dictionary = _instantiate_node_type(str(op.get("node_type", "")))
 		if _was_stopped(made) or not made.ok:
 			value_roots.append(op.properties)
 			return value_roots
 		var kept: Dictionary = {}
-		for key in op.properties:
+		for key: Variant in op.properties:
 			if _value_may_load_asset(made.node, str(key)):
 				kept[key] = op.properties[key]
 		if not (made.node is RefCounted):
@@ -3084,22 +3084,22 @@ func _prepass_value_roots(op: Dictionary, op_name, probe_scenes: Dictionary) -> 
 		value_roots.append(kept)
 	elif op_name == "set_node_properties" and op.has("updates") and op.updates is Array:
 		var update_values: Array = []
-		for update in op.updates:
+		for update: Variant in op.updates:
 			if typeof(update) == TYPE_DICTIONARY and update.has("value"):
 				update_values.append(update)
 		var found_in_updates: Array = []
-		for update in update_values:
+		for update: Variant in update_values:
 			_collect_res_paths(update.value, found_in_updates)
 		if found_in_updates.is_empty():
 			return []
-		var scene_root = null
+		var scene_root: Variant = null
 		var scene_key := normalize_scene_path(str(op.get("scene_path", "")))
 		if scene_key != "":
 			if not probe_scenes.has(scene_key):
 				probe_scenes[scene_key] = load_scene_instance(scene_key)
 			scene_root = probe_scenes[scene_key]
-		for update in update_values:
-			var node = null
+		for update: Variant in update_values:
+			var node: Node = null
 			if scene_root != null and typeof(update.get("node_path", null)) == TYPE_STRING:
 				node = find_node_by_path(scene_root, update.node_path)
 			if _value_may_load_asset(node, str(update.get("property", ""))):
@@ -3124,7 +3124,7 @@ func _scene_dependency_keys(scene_key: String, scene_root: Node) -> Dictionary:
 	var found: Dictionary = {}
 	var to_read: Array = [scene_key]
 	if scene_root != null:
-		for node in _iter_subtree(scene_root):
+		for node: Variant in _iter_subtree(scene_root):
 			if node == scene_root or node.scene_file_path == "":
 				continue
 			var instanced_key := _scene_file_key(node.scene_file_path)
@@ -3135,7 +3135,7 @@ func _scene_dependency_keys(scene_key: String, scene_root: Node) -> Dictionary:
 		var current: String = to_read.pop_back()
 		if not FileAccess.file_exists(current):
 			continue
-		for dep in ResourceLoader.get_dependencies(current):
+		for dep: String in ResourceLoader.get_dependencies(current):
 			var dep_path := _resolve_dep_path(dep)
 			if not _is_scene_path(dep_path):
 				continue
@@ -3152,9 +3152,9 @@ func _dependents_first(keys: Array, dependencies: Dictionary) -> Array:
 	var waiting: Array = keys.duplicate()
 	while not waiting.is_empty():
 		var picked := 0
-		for i in range(waiting.size()):
+		for i: int in range(waiting.size()):
 			var needed_by_another := false
-			for other in waiting:
+			for other: Variant in waiting:
 				if other != waiting[i] and dependencies[other].has(waiting[i]):
 					needed_by_another = true
 					break
@@ -3191,7 +3191,7 @@ func _apply_batch_save(scene_root: Node, scene_key: String, op: Dictionary, scen
 	var dependents: Array = []
 	var pending_dependents: Array = []
 	var dependencies: Dictionary = {}
-	for cached_key in scene_cache:
+	for cached_key: Variant in scene_cache:
 		if cached_key == target_key:
 			continue
 		var built_from: Dictionary = _scene_dependency_keys(cached_key, scene_cache[cached_key])
@@ -3202,7 +3202,7 @@ func _apply_batch_save(scene_root: Node, scene_key: String, op: Dictionary, scen
 		if not unsaved_results_by_scene.get(cached_key, []).is_empty():
 			pending_dependents.append(cached_key)
 	var also_saved: Array = []
-	for dependent_key in _dependents_first(pending_dependents, dependencies):
+	for dependent_key: Variant in _dependents_first(pending_dependents, dependencies):
 		if not save_scene_to_path(scene_cache[dependent_key], dependent_key):
 			return {
 				"ok": false,
@@ -3221,14 +3221,14 @@ func _apply_batch_save(scene_root: Node, scene_key: String, op: Dictionary, scen
 	elif replaces_cached_tree:
 		scene_cache[target_key].free()
 		scene_cache.erase(target_key)
-	for dependent_key in dependents:
+	for dependent_key: Variant in dependents:
 		scene_cache[dependent_key].free()
 		scene_cache.erase(dependent_key)
 	return {"ok": true, "error": "", "saved_path": _project_relative(target_key), "also_saved": also_saved}
 
 # Each scene is loaded once and cached by _scene_file_key; a tree leaves the cache only in _apply_batch_save.
 func batch_scene_operations(params: Dictionary) -> void:
-	var abort_on_error = params.get("abort_on_error", false)
+	var abort_on_error: Variant = params.get("abort_on_error", false)
 	var results: Array = []
 	var scene_cache: Dictionary = {}
 	var batch_warnings: Array = []
@@ -3240,17 +3240,17 @@ func batch_scene_operations(params: Dictionary) -> void:
 	var seen_paths: Dictionary = {}
 	var prepass_missing: Array = []
 	var prepass_needs_import: Array = []
-	for op in params.operations:
+	for op: Variant in params.operations:
 		if typeof(op) != TYPE_DICTIONARY:
 			continue
-		var op_name = op.get("operation", "")
+		var op_name: Variant = op.get("operation", "")
 
 		_prepass_path_param(str(op.get("scene_path", "")), true, seen_paths, prepass_needs_import, prepass_missing)
 		if op_name == "load_sprite":
 			_prepass_path_param(str(op.get("texture_path", "")), false, seen_paths, prepass_needs_import, prepass_missing)
 		elif op_name == "add_node":
 			# node_type may name a scene: _instantiate_node_type loads it directly, bypassing load_scene_instance's probe.
-			var node_type = str(op.get("node_type", ""))
+			var node_type: String = str(op.get("node_type", ""))
 			if _is_scene_path(node_type):
 				_prepass_path_param(node_type, true, seen_paths, prepass_needs_import, prepass_missing)
 
@@ -3258,37 +3258,37 @@ func batch_scene_operations(params: Dictionary) -> void:
 		return
 
 	var probe_scenes: Dictionary = {}
-	for op in params.operations:
+	for op: Variant in params.operations:
 		if typeof(op) != TYPE_DICTIONARY:
 			continue
 		var res_paths: Array = []
-		for value_root in _prepass_value_roots(op, op.get("operation", ""), probe_scenes):
+		for value_root: Variant in _prepass_value_roots(op, op.get("operation", ""), probe_scenes):
 			_collect_res_paths(value_root, res_paths)
-		for raw_path in res_paths:
+		for raw_path: Variant in res_paths:
 			_prepass_path_param(str(raw_path), false, seen_paths, prepass_needs_import, prepass_missing)
-	for probe_key in probe_scenes:
+	for probe_key: Variant in probe_scenes:
 		if probe_scenes[probe_key] != null:
 			probe_scenes[probe_key].free()
 	if _prepass_refuses(prepass_missing, prepass_needs_import):
 		return
 
-	for op in params.operations:
+	for op: Variant in params.operations:
 		if typeof(op) != TYPE_DICTIONARY:
 			results.append({"operation": "", "scenePath": "", "error": "operations[%d] must be an object" % results.size()})
 			if abort_on_error:
 				break
 			continue
 		# A non-string operation is treated as an omitted one (the hint path below names it).
-		var op_name = op.get("operation", "")
+		var op_name: Variant = op.get("operation", "")
 		if typeof(op_name) != TYPE_STRING:
 			op_name = ""
-		var scene_path = op.get("scene_path", "")
+		var scene_path: Variant = op.get("scene_path", "")
 		if typeof(scene_path) != TYPE_STRING:
 			results.append({"operation": op_name, "scenePath": "", "error": "scene_path must be a string"})
 			if abort_on_error:
 				break
 			continue
-		var result = {"operation": op_name, "scenePath": scene_path}
+		var result: Dictionary = {"operation": op_name, "scenePath": scene_path}
 
 		# Keyed on the file, not the spelling ("a.tscn", "./a.tscn", "A.tscn" where case is ignored): independent trees would be written over each other by the closing save.
 		var scene_key := ""
@@ -3302,7 +3302,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 				continue
 
 		if scene_key != "" and scene_key not in scene_cache:
-			var loaded_root = load_scene_instance(scene_key)
+			var loaded_root: Node = load_scene_instance(scene_key)
 			if loaded_root:
 				scene_cache[scene_key] = loaded_root
 			else:
@@ -3312,7 +3312,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 					break
 				continue
 
-		var scene_root = scene_cache.get(scene_key, null) if scene_key != "" else null
+		var scene_root: Variant = scene_cache.get(scene_key, null) if scene_key != "" else null
 
 		# KEEP IN SYNC with BATCH_OPERATION_NAMES in src/utils/arg-parsing.ts: the arms below and the list in the hint.
 		match op_name:
@@ -3320,7 +3320,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 				if scene_root == null:
 					result["error"] = "scene_path required for add_node"
 				else:
-					var apply_result = _apply_add_node(scene_root, op)
+					var apply_result: Dictionary = _apply_add_node(scene_root, op)
 					if _was_stopped(apply_result):
 						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					elif not apply_result.ok:
@@ -3328,13 +3328,13 @@ func batch_scene_operations(params: Dictionary) -> void:
 					else:
 						result["success"] = true
 						result.merge(apply_result.payload)
-						for add_warning in apply_result.warnings:
+						for add_warning: Variant in apply_result.warnings:
 							batch_warnings.append("operations[%d]: %s" % [results.size(), add_warning])
 			"load_sprite":
 				if scene_root == null:
 					result["error"] = "scene_path required for load_sprite"
 				else:
-					var apply_result = _apply_load_sprite(scene_root, op)
+					var apply_result: Dictionary = _apply_load_sprite(scene_root, op)
 					if _was_stopped(apply_result):
 						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					elif not apply_result.ok:
@@ -3348,7 +3348,7 @@ func batch_scene_operations(params: Dictionary) -> void:
 				elif not op.has("updates") or (op.updates is Array and op.updates.is_empty()):
 					result["error"] = "non-empty updates array required for set_node_properties"
 				else:
-					var apply_result = _apply_updates(scene_root, op.updates, op.get("abort_on_error", false))
+					var apply_result: Dictionary = _apply_updates(scene_root, op.updates, op.get("abort_on_error", false))
 					if _was_stopped(apply_result):
 						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					else:
@@ -3360,18 +3360,18 @@ func batch_scene_operations(params: Dictionary) -> void:
 							result["updates"] = apply_result.results
 						# The entry reads as a success once any update lands, so the failed ones would sit two levels down unseen.
 						var failed_updates := 0
-						for update_result in apply_result.results:
+						for update_result: Variant in apply_result.results:
 							if update_result.has("error"):
 								failed_updates += 1
 						if apply_result.any_set and failed_updates > 0:
 							batch_warnings.append("operations[%d]: %d of %d updates failed, see results[%d].updates" % [results.size(), failed_updates, apply_result.results.size(), results.size()])
-						for update_warning in apply_result.warnings:
+						for update_warning: Variant in apply_result.warnings:
 							batch_warnings.append("operations[%d]: %s" % [results.size(), update_warning])
 			"save":
 				if scene_root == null:
 					result["error"] = "scene_path required for save"
 				else:
-					var saved = _apply_batch_save(scene_root, scene_key, op, scene_cache, unsaved_results_by_scene)
+					var saved: Dictionary = _apply_batch_save(scene_root, scene_key, op, scene_cache, unsaved_results_by_scene)
 					if _was_stopped(saved):
 						result["error"] = "%s was %s" % [op_name, _STOPPED_BY_SCRIPT_ERROR]
 					else:
@@ -3381,11 +3381,11 @@ func batch_scene_operations(params: Dictionary) -> void:
 						else:
 							result["error"] = saved.error
 						# Written ahead of this save whether or not it succeeded: those operations are in their file now.
-						for dependent_label in saved.also_saved:
+						for dependent_label: Variant in saved.also_saved:
 							batch_warnings.append("operations[%d]: %s is built from the scene this item saves and held operations of this batch that were not written yet, so it was saved first" % [results.size(), dependent_label])
 			_:
 				# An omitted "operation" key is the common mistake: name the item index and hint at inference when the shape identifies the op.
-				var hint = ""
+				var hint: String = ""
 				if op_name == null or op_name == "":
 					hint = " - operations[%d] is missing the required 'operation' key (one of: add_node, load_sprite, set_node_properties, save)." % results.size()
 					# convertCamelToSnakeCase converts operations[] recursively, so keys arrive snake_cased here.
@@ -3409,8 +3409,8 @@ func batch_scene_operations(params: Dictionary) -> void:
 			break
 
 	# Operations after an abort start at results.size(); each is listed as skipped so results stays one entry per operation.
-	for skipped_index in range(results.size(), params.operations.size()):
-		var skipped_op = params.operations[skipped_index]
+	for skipped_index: int in range(results.size(), params.operations.size()):
+		var skipped_op: Variant = params.operations[skipped_index]
 		var skipped_entry := {"operation": "", "scenePath": "", "skipped": true}
 		if typeof(skipped_op) == TYPE_DICTIONARY:
 			if typeof(skipped_op.get("operation", "")) == TYPE_STRING:
@@ -3423,17 +3423,17 @@ func batch_scene_operations(params: Dictionary) -> void:
 	# Dependents first (see _apply_batch_save), not load order: packed after a scene it is built from was rewritten, it would save that file's old values as overrides.
 	var closing_keys: Array = []
 	var closing_dependencies: Dictionary = {}
-	for scene_key in scene_cache:
+	for scene_key: Variant in scene_cache:
 		if unsaved_results_by_scene.get(scene_key, []).is_empty():
 			continue
 		closing_keys.append(scene_key)
 		closing_dependencies[scene_key] = _scene_dependency_keys(scene_key, scene_cache[scene_key])
-	for scene_key in _dependents_first(closing_keys, closing_dependencies):
+	for scene_key: Variant in _dependents_first(closing_keys, closing_dependencies):
 		var unsaved: Array = unsaved_results_by_scene.get(scene_key, [])
 		if save_scene_to_path(scene_cache[scene_key], scene_key):
 			continue
 		var scene_label := _project_relative(scene_key)
-		for result_index in unsaved:
+		for result_index: Variant in unsaved:
 			var unsaved_entry: Dictionary = results[result_index]
 			unsaved_entry.erase("success")
 			unsaved_entry["error"] = "applied in memory but the scene could not be saved: " + scene_label

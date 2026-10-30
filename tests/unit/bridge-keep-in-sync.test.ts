@@ -36,6 +36,17 @@ import {
 
 const UTF8_MAX_BYTES_PER_CHAR = 4;
 
+// Regex fragments for reading the scripts as text whether or not a declaration carries a type
+// annotation. None captures, so backreferences in the patterns that use them keep their numbers.
+/** A GDScript type name, optionally with one bracketed element type: `int`, `Array[String]`. */
+const GD_TYPE = String.raw`[A-Za-z_][\w.]*(?:\[[^\]\n]*\])?`;
+/** The assignment of a `var` or `const`: inferred `:=` or annotated `: Type =`. */
+const GD_ASSIGN = String.raw`(?:\s*:=|\s*:\s*${GD_TYPE}\s*=)`;
+/** An optional parameter annotation, `: Type`. */
+const GD_PARAM_TYPE = String.raw`(?:\s*:\s*${GD_TYPE})?`;
+/** An optional return annotation, `-> Type`. */
+const GD_RETURN_TYPE = String.raw`(?:\s*->\s*${GD_TYPE})?`;
+
 const bridgeSource = readFileSync(
   new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
   'utf8',
@@ -43,7 +54,9 @@ const bridgeSource = readFileSync(
 
 /** The right-hand side of a `const NAME := <value>` declaration, verbatim. */
 function gdConst(name: string): string {
-  const match = bridgeSource.match(new RegExp(`^const ${name}\\s*:=\\s*(.+?)\\s*(?:#.*)?$`, 'm'));
+  const match = bridgeSource.match(
+    new RegExp(`^const ${name}${GD_ASSIGN}\\s*(.+?)\\s*(?:#.*)?$`, 'm'),
+  );
   expect(match, `mcp_bridge.gd must declare const ${name}`).not.toBeNull();
   return match![1]!;
 }
@@ -305,7 +318,7 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
 
   it('declares the same operation-result sentinel', () => {
     const match = operationsSource.match(
-      /^const OPERATION_RESULT_SENTINEL\s*:=\s*(.+?)\s*(?:#.*)?$/m,
+      new RegExp(String.raw`^const OPERATION_RESULT_SENTINEL${GD_ASSIGN}\s*(.+?)\s*(?:#.*)?$`, 'm'),
     );
     expect(
       match,
@@ -319,7 +332,7 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
     ['OPERATION_RESULT_TOKEN_END', OPERATION_RESULT_TOKEN_END],
   ])('declares the same %s', (name, expected) => {
     const match = operationsSource.match(
-      new RegExp(`^const ${name}\\s*:=\\s*(.+?)\\s*(?:#.*)?$`, 'm'),
+      new RegExp(`^const ${name}${GD_ASSIGN}\\s*(.+?)\\s*(?:#.*)?$`, 'm'),
     );
     expect(match, `godot_operations.gd must declare const ${name}`).not.toBeNull();
     expect(match![1]).toBe(`"${expected}"`);
@@ -332,8 +345,10 @@ describe('godot_operations.gd agrees with the TypeScript result sentinel', () =>
     expect(emitterLine?.trim()).toBe(
       'print(OPERATION_RESULT_SENTINEL + token_part + JSON.stringify(payload))',
     );
-    expect(operationsSource).toContain(
-      'var token_part := "" if result_token.is_empty() else result_token + OPERATION_RESULT_TOKEN_END',
+    expect(operationsSource).toMatch(
+      new RegExp(
+        String.raw`var token_part${GD_ASSIGN} "" if result_token\.is_empty\(\) else result_token \+ OPERATION_RESULT_TOKEN_END`,
+      ),
     );
     expect(operationsSource).toContain(
       'result_token = OS.get_environment(OPERATION_RESULT_TOKEN_ENV)',
@@ -405,7 +420,10 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     const marker = runnerSource.match(/^const OPERATION_STARTED_MARKER = '([^']*)';$/m);
     expect(marker, 'godot-runner.ts must declare OPERATION_STARTED_MARKER').not.toBeNull();
     const logPrefix = operationsSource.match(
-      /^func log_info\(message\):\s*printerr\("([^"]*)" \+ message\)$/m,
+      new RegExp(
+        String.raw`^func log_info\(message${GD_PARAM_TYPE}\)${GD_RETURN_TYPE}:\s*printerr\("([^"]*)" \+ message\)$`,
+        'm',
+      ),
     );
     expect(logPrefix, 'godot_operations.gd log_info must print a quoted prefix').not.toBeNull();
     const started = operationsSource.match(/^\tlog_info\("([^"]*)" \+ operation\)$/m);
@@ -417,7 +435,10 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
     // Red when the marker text or the log_error prefix changes on one side only:
     // a cold project would fail every scene operation instead of importing and retrying.
     const errorPrefix = operationsSource.match(
-      /^func log_error\(message\):\s*printerr\("([^"]*)" \+ message\)$/m,
+      new RegExp(
+        String.raw`^func log_error\(message${GD_PARAM_TYPE}\)${GD_RETURN_TYPE}:\s*printerr\("([^"]*)" \+ message\)$`,
+        'm',
+      ),
     );
     expect(errorPrefix, 'godot_operations.gd log_error must print a quoted prefix').not.toBeNull();
     const request = operationsSource.match(
@@ -431,7 +452,7 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   it('promotes the same add_node parameters on both sides', () => {
     // Red when one list gains or loses a name: a top-level parameter would be applied by the standalone tool and ignored inside a batch, or the reverse.
     const gdList = operationsSource.match(
-      /^const _PROMOTED_SPATIAL_PARAMS: Array = \[([^\]]*)\]$/m,
+      new RegExp(String.raw`^const _PROMOTED_SPATIAL_PARAMS${GD_ASSIGN} \[([^\]]*)\]$`, 'm'),
     );
     expect(gdList, 'godot_operations.gd must declare _PROMOTED_SPATIAL_PARAMS').not.toBeNull();
     const tsList = sceneToolsSource.match(
@@ -446,7 +467,9 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   it('takes the same suffixes for a node type that names a scene', () => {
     // Red when one list gains or loses a suffix: the path check would then
     // resolve a node type the script instantiates as a class, or the reverse.
-    const gdList = operationsSource.match(/^const _SCENE_SUFFIXES: Array = \[([^\]]*)\]$/m);
+    const gdList = operationsSource.match(
+      new RegExp(String.raw`^const _SCENE_SUFFIXES${GD_ASSIGN} \[([^\]]*)\]$`, 'm'),
+    );
     expect(gdList, 'godot_operations.gd must declare _SCENE_SUFFIXES').not.toBeNull();
     const tsList = pathValidationSource.match(
       /^const NODE_TYPE_SCENE_SUFFIXES: readonly string\[\] = \[([^\]]*)\];$/m,
@@ -500,7 +523,9 @@ describe('mcp_bridge.gd serializes values in the shapes godot_operations.gd read
   );
 
   function packedReadTypes(source: string, file: string): string[] {
-    const match = source.match(/^const _PACKED_READ_TYPES: Array = \[([^\]]*)\]/m);
+    const match = source.match(
+      new RegExp(String.raw`^const _PACKED_READ_TYPES${GD_ASSIGN} \[([^\]]*)\]`, 'm'),
+    );
     expect(match, `${file} must declare const _PACKED_READ_TYPES`).not.toBeNull();
     return [...match![1]!.matchAll(/TYPE_PACKED_\w+/g)].map((type) => type[0]).sort();
   }
@@ -597,11 +622,16 @@ describe('mcp_bridge.gd input batches', () => {
     const body = gdFunctionBody('_run_action');
     const calls = body.match(SERIALIZER_CALL) ?? [];
     expect(calls.length).toBeGreaterThan(0);
-    expect(body.match(/var \w+ := _non_finite_count\n/g)).toHaveLength(calls.length);
+    expect(
+      body.match(new RegExp(String.raw`var \w+${GD_ASSIGN} _non_finite_count\n`, 'g')),
+    ).toHaveLength(calls.length);
     expect(body.match(/_move_tally_to_batch\(batch, \w+\)/g)).toHaveLength(calls.length);
     // Each call sits between its own `before` read and its own move.
     const sandwiches = body.match(
-      /var (\w+) := _non_finite_count\n[^\n]*(?:_sample_watch\(|_serialize_value\()[^\n]*\n\t+_move_tally_to_batch\(batch, \1\)/g,
+      new RegExp(
+        String.raw`var (\w+)${GD_ASSIGN} _non_finite_count\n[^\n]*(?:_sample_watch\(|_serialize_value\()[^\n]*\n\t+_move_tally_to_batch\(batch, \1\)`,
+        'g',
+      ),
     );
     expect(sandwiches).toHaveLength(calls.length);
   });
@@ -610,7 +640,9 @@ describe('mcp_bridge.gd input batches', () => {
   it('adds the batch tally to the shared count only when a reader is left', () => {
     const body = gdFunctionBody('_handle_input');
     expect(body).toMatch(
-      /if not abandoned:\n\t+_non_finite_count \+= batch\.non_finite_count\n\t+var still_held := _read_still_held\(batch\)/,
+      new RegExp(
+        String.raw`if not abandoned:\n\t+_non_finite_count \+= batch\.non_finite_count\n\t+var still_held${GD_ASSIGN} _read_still_held\(batch\)`,
+      ),
     );
     expect(body.match(/_non_finite_count \+= /g)).toHaveLength(1);
   });
