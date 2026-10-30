@@ -106,7 +106,6 @@ export const validateToolDefinitions = [
     name: 'validate',
     description:
       "Validate GDScript syntax or scene integrity in headless Godot. Use before attach_script or run_script. Give exactly one of scriptPath, source or scenePath, or a targets array (one process); an unknown key is an error. checks needs scenePath and instantiates the scene, running each attached script's _init(). Returns: { warnings?, valid, errors } for one target, { warnings?, results: [{ target, valid, errors }] } for targets; an invalid result always has an error.",
-    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {

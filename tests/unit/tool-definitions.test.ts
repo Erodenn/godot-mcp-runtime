@@ -154,3 +154,13 @@ describe('simulate_input actions property description', () => {
     expect(actions.length).toBeLessThanOrEqual(DESCRIPTION_MAX_CHARS);
   });
 });
+
+describe('validate annotations', () => {
+  // Red when readOnlyHint returns: validate can create or append the project's .gitignore.
+  it('does not claim to be read-only', () => {
+    const validate = validateToolDefinitions.find((t) => t.name === 'validate')!;
+    expect(
+      (validate as { annotations?: { readOnlyHint?: boolean } }).annotations?.readOnlyHint,
+    ).not.toBe(true);
+  });
+});
