@@ -1,5 +1,5 @@
 /** .tscn parsing for the run-script security pipeline: one scanner following Godot's own statement grammar, and a transitive collection of the scripts a scene brings with it, reporting what it cannot read rather than skipping it.
- * Not read (see `docs/security.md`): any resource file that is not a script, a scene or a known script-inert kind (`.res`, `.material`, ...), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
+ * Not read (see `docs/security.md`): resource files other than scripts, scenes and `SCRIPT_INERT_EXTENSIONS` (so a `.res` or `.material` is reported), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -11,9 +11,8 @@ const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
 /** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says: `.tres` and `.escn` share the statement grammar; a binary `.scn` is walked and reported as not text. */
 const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
-/** Path extensions of files that hold only pixels, samples, glyphs or shader code, so they cannot carry a script. Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
+/** Image, audio, font and shader extensions, trusted by extension and never reported: an imported one's `.import` remap is not read (`docs/security.md`, "What this does NOT do"). Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
 const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
-  // Images
   '.png',
   '.jpg',
   '.jpeg',
@@ -26,16 +25,13 @@ const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
   '.hdr',
   '.dds',
   '.ktx',
-  // Audio
   '.ogg',
   '.wav',
   '.mp3',
-  // Fonts
   '.ttf',
   '.otf',
   '.woff',
   '.woff2',
-  // Shaders
   '.gdshader',
   '.gdshaderinc',
   '.shader',
