@@ -10,8 +10,12 @@ import { useTmpDirs } from '../helpers/tmp.js';
 import { minimalPng, invalidPng } from '../helpers/png-fixtures.js';
 import { stripExitLeakNoise } from '../helpers/engine-noise.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { handleAddNode } from '../../src/tools/scene-tools.js';
+import { hasError, errorText, unwrap } from '../helpers/assertions.js';
 
 const IMPORT_TEST_TIMEOUT_MS = 180000;
+
+const COLD_INSTANCE_SCENE = 'cold_instance.tscn';
 
 let runner: GodotRunner;
 
@@ -195,6 +199,60 @@ describe('reactive import on demand (integration)', () => {
 
       // Godot exits 0 even when the asset fails to import; only stderr knows.
       await expect(runner.importAssets(project)).rejects.toThrow(/broken\.png/);
+    },
+    IMPORT_TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'standalone add_node of a scene nodeType whose own asset is cold imports and retries instead of failing to load',
+    async () => {
+      const project = tmp.make('godot-mcp-test-');
+      cpSync(fixtureProjectPath, project, { recursive: true });
+
+      const assetsDir = join(project, 'assets');
+      mkdirSync(assetsDir, { recursive: true });
+      writeFileSync(join(assetsDir, 'test_texture.png'), minimalPng());
+      writeFileSync(join(project, 'placeholder.png'), minimalPng());
+      rmSync(join(project, '.godot', 'imported'), { recursive: true, force: true });
+
+      writeFileSync(
+        join(project, COLD_INSTANCE_SCENE),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '',
+          '[ext_resource type="Texture2D" path="res://assets/test_texture.png" id="1"]',
+          '',
+          '[node name="Cold" type="Sprite2D"]',
+          'texture = ExtResource("1")',
+          '',
+        ].join('\n'),
+      );
+
+      const result = await handleAddNode(runner, {
+        projectPath: project,
+        scenePath: 'main.tscn',
+        nodeType: COLD_INSTANCE_SCENE,
+        nodeName: 'ColdInstance',
+      });
+
+      if (hasError(result)) throw new Error(errorText(result) ?? 'add_node returned an error');
+      const payload = unwrap(result).structuredContent as { nodeName: string };
+      expect(payload.nodeName).toBe('ColdInstance');
+      expect(existsSync(join(project, '.godot', 'imported'))).toBe(true);
+      // Godot may write extra attributes (unique_id) on the node line, so tie the
+      // instance to the cold scene's ext_resource id rather than to attribute order.
+      const mainScene = readFileSync(join(project, 'main.tscn'), 'utf-8');
+      const extResource = mainScene.match(
+        new RegExp(
+          `\\[ext_resource type="PackedScene"[^\\]]*path="res://${COLD_INSTANCE_SCENE.replace('.', '\\.')}"[^\\]]*id="([^"]+)"`,
+        ),
+      );
+      expect(extResource).not.toBeNull();
+      const coldId = extResource![1];
+      const nodeLine = mainScene.match(/^\[node name="ColdInstance"[^\]]*\]$/m)?.[0];
+      expect(nodeLine).toBeDefined();
+      expect(nodeLine).toContain('parent="."');
+      expect(nodeLine).toContain(`instance=ExtResource("${coldId}")`);
     },
     IMPORT_TEST_TIMEOUT_MS,
   );

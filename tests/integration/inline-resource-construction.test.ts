@@ -18,6 +18,8 @@ function makeTmpProject(): string {
   return dst;
 }
 
+const ESCAPING_RESOURCE_PATH = 'res://../x.gd';
+
 const tmpDirs: string[] = [];
 
 let runner: GodotRunner;
@@ -236,6 +238,71 @@ describe('inline Resource construction (typed-dict form)', () => {
 
       expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen).toMatch(/expects|texture|RectangleShape2D/i);
+    },
+    60000,
+  );
+
+  itGodot(
+    'refuses a resource_path that escapes the project and leaves the scene file unchanged',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      const before = readFileSync(scenePath, 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: '.',
+              property: 'script',
+              value: { type: 'GDScript', resource_path: ESCAPING_RESOURCE_PATH },
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBeUndefined();
+      expect(parsed.results[0].error).toContain(ESCAPING_RESOURCE_PATH);
+      expect(readFileSync(scenePath, 'utf-8')).toBe(before);
+    },
+    60000,
+  );
+
+  itGodot(
+    'refuses an escaping resource_path on an inline resource nested inside another',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      const before = readFileSync(scenePath, 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [
+            {
+              nodePath: 'Sprite2D',
+              property: 'material',
+              value: {
+                type: 'ShaderMaterial',
+                shader: { type: 'Shader', resource_path: ESCAPING_RESOURCE_PATH },
+              },
+            },
+          ],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBeUndefined();
+      expect(parsed.results[0].error).toContain(ESCAPING_RESOURCE_PATH);
+      expect(readFileSync(scenePath, 'utf-8')).toBe(before);
     },
     60000,
   );

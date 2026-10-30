@@ -1,18 +1,25 @@
 /** Godot reports a script's parse error against its simplified res:// path, so a target written another way ("./a.gd", a backslash, a directory with a space) matched no diagnostic. */
 
-import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
+import { describe, it, beforeAll, beforeEach, afterAll, expect } from 'vitest';
 import { appendFileSync, cpSync, mkdirSync, writeFileSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { itGodot } from '../helpers/godot-skip.js';
+import { itGodot, hasGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { foldsPathCase } from '../../src/utils/path-validation.js';
+import { extractJson } from '../../src/utils/output-parsing.js';
 import { handleValidate } from '../../src/tools/validate-tools.js';
 
 const CASE_TIMEOUT_MS = 120000;
+
+const itGodotFoldingCase = it.skipIf(!hasGodot || !foldsPathCase());
+
+const CASED_SCRIPT_FILE = 'CasedProbe.gd';
+const MISCASED_SCRIPT_PATH = 'casedprobe.gd';
 
 const VALID_SCRIPT = 'extends Node\n';
 const AUTOLOAD_SECTION = '\n[autoload]\n\nBrokenAuto="*res://bad_auto.gd"\n';
@@ -180,6 +187,25 @@ describe('validate single-target attribution against a real engine', () => {
       expect(single.valid).toBe(false);
       expect((single.errors as unknown[]).length).toBeGreaterThan(0);
       expect(single.warnings).toBeUndefined();
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodotFoldingCase(
+    'a script written with a different case is reported under the spelling it has on disk',
+    async () => {
+      writeFileSync(join(projectPath, CASED_SCRIPT_FILE), VALID_SCRIPT);
+      const { stdout } = await runner.executeOperation(
+        'validate_batch',
+        { targets: [{ scriptPath: MISCASED_SCRIPT_PATH }] },
+        projectPath,
+        CASE_TIMEOUT_MS,
+      );
+      const parsed = JSON.parse(extractJson(stdout)) as {
+        results: Array<{ valid: boolean; resolvedPath?: string }>;
+      };
+      expect(parsed.results[0]!.valid).toBe(true);
+      expect(parsed.results[0]!.resolvedPath).toBe(`res://${CASED_SCRIPT_FILE}`);
     },
     CASE_TIMEOUT_MS,
   );

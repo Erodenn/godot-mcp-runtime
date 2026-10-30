@@ -730,7 +730,7 @@ func _ensure_res_dir(full_res_path: String) -> bool:
 	var dir = DirAccess.open("res://")
 	if not dir:
 		return false
-	var relative_dir = dir_path.substr(6) if dir_path.begins_with("res://") else dir_path
+	var relative_dir = dir_path.trim_prefix("res://")
 	if relative_dir.is_empty() or dir.dir_exists(relative_dir):
 		return true
 	_forget_scene_file_keys()
@@ -854,6 +854,11 @@ func _instantiate_node_type(type_or_path: String) -> Dictionary:
 		return {"ok": false, "error": "Scene path escapes the project root: " + type_or_path}
 	if not FileAccess.file_exists(scene_full_path):
 		return {"ok": false, "error": "Scene file does not exist: " + scene_full_path}
+	var probe = _probe_scene_deps(scene_full_path)
+	if probe.missing.size() > 0:
+		return {"ok": false, "error": "Scene references files that do not exist on disk, refusing to load so the references are not stripped on save: " + ", ".join(probe.missing)}
+	if probe.needs_import.size() > 0:
+		return {"ok": false, "error": _report_import_needed(type_or_path, ", ".join(probe.needs_import))}
 	var packed = load(scene_full_path)
 	if packed == null or not (packed is PackedScene):
 		return {"ok": false, "error": "Failed to load scene: " + scene_full_path}
@@ -2257,8 +2262,6 @@ const _INT_VECTOR_COMPONENTS: Dictionary = {
 	TYPE_VECTOR4I: ["x", "y", "z", "w"],
 }
 
-const _INT_VECTOR_COMPONENT_RANGE: Array = [-2147483648, 2147483647]
-
 # _coerce_property_value makes a float vector (32-bit floats): a whole number above 2^24 is rounded there and one outside the 32-bit range wraps in the typed setter, silently. Here each component is checked as the JSON number it is.
 # built is false with an empty problem when the shape does not match or a component is fractional: the caller continues with the coerced float vector, whose checks report those.
 func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
@@ -2272,9 +2275,9 @@ func _int_vector_from_json(vector_type: int, raw: Dictionary) -> Dictionary:
 		if not _is_json_number(component) or _is_fractional_float(component):
 			return not_built
 		var problem := _json_int_problem(component)
-		if problem == "" and (int(component) < _INT_VECTOR_COMPONENT_RANGE[0] or int(component) > _INT_VECTOR_COMPONENT_RANGE[1]):
+		if problem == "" and (int(component) < _INT32_MIN or int(component) > _INT32_MAX):
 			problem = "is outside the range a component of %s holds (%d to %d)" % [
-				type_string(vector_type), _INT_VECTOR_COMPONENT_RANGE[0], _INT_VECTOR_COMPONENT_RANGE[1]]
+				type_string(vector_type), _INT32_MIN, _INT32_MAX]
 		if problem != "":
 			not_built["problem"] = "component %s (%s) %s" % [key, str(component), problem]
 			return not_built
@@ -2300,7 +2303,7 @@ const _INT_VECTOR_TYPES: Array = [TYPE_VECTOR2I, TYPE_VECTOR3I, TYPE_VECTOR4I]
 # The 64-bit minimum is a sum because its magnitude does not fit an int literal.
 const _PACKED_INT_RANGE: Dictionary = {
 	TYPE_PACKED_BYTE_ARRAY: [0, 255],
-	TYPE_PACKED_INT32_ARRAY: [-2147483648, 2147483647],
+	TYPE_PACKED_INT32_ARRAY: [_INT32_MIN, _INT32_MAX],
 	TYPE_PACKED_INT64_ARRAY: [-9223372036854775807 - 1, 9223372036854775807],
 }
 
@@ -2515,6 +2518,11 @@ func _construct_inline_resource(node: Object, property: String, spec: Dictionary
 	if not hint_check.ok:
 		return {"ok": false, "value": null, "error": hint_check.error}
 
+	# resource_path is a plain String property, so nothing downstream treats it as a path; Godot resolves res://../x outward and pack() would write it as an ext_resource.
+	var spec_resource_path = spec.get("resource_path", "")
+	if typeof(spec_resource_path) == TYPE_STRING and spec_resource_path != "" and normalize_scene_path(spec_resource_path).is_empty():
+		return {"ok": false, "value": null, "error": "Cannot construct resource for property '%s': resource_path '%s' escapes the project root" % [property, spec_resource_path]}
+
 	# Plain properties first: virtual keys such as ShaderMaterial shader_parameter/<uniform> exist only once the resource they depend on is assigned.
 	var ordered_keys: Array = []
 	var virtual_keys: Array = []
@@ -2648,9 +2656,11 @@ const _JSON_KEY_TYPES: Array = [TYPE_NIL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYP
 func _engine_has_typed_dictionaries() -> bool:
 	return _engine_minor_at_least(_TYPED_DICTIONARY_MIN_MINOR)
 
+const _ENGINE_MAJOR := 4
+
 func _engine_minor_at_least(minor: int) -> bool:
 	var version := Engine.get_version_info()
-	return int(version.major) > 4 or (int(version.major) == 4 and int(version.minor) >= minor)
+	return int(version.major) > _ENGINE_MAJOR or (int(version.major) == _ENGINE_MAJOR and int(version.minor) >= minor)
 
 func _typed_dictionary_error(message: String) -> Dictionary:
 	return {"ok": false, "value": null, "error": message, "typed": false}
@@ -2932,6 +2942,8 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 		else:
 			default_node = instantiate_class(klass)
 			defaults_cache[klass] = default_node
+			if default_node == null:
+				result_warnings.append("changedOnly could not build a default %s to compare against, so every property of a %s node is listed as changed" % [klass, klass])
 
 	var properties = {}
 	var property_list = node.get_property_list()
@@ -2954,7 +2966,7 @@ func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Di
 # "resolvedPath" is the normalized path the engine reports diagnostics against, so the TS layer can match stderr to this target.
 func _validate_single(target: Dictionary) -> Dictionary:
 	if target.has("script_path") and target.script_path != "":
-		var path = normalize_scene_path(target.script_path)
+		var path = _scene_file_key(target.script_path)
 		if path.is_empty():
 			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.script_path}], "target": target.script_path}
 		if not FileAccess.file_exists(path):
@@ -2975,7 +2987,7 @@ func _validate_single(target: Dictionary) -> Dictionary:
 			script_valid = resource.can_instantiate() or (resource.has_method("is_abstract") and resource.is_abstract())
 		return {"valid": script_valid, "errors": [], "target": target.script_path, "resolvedPath": path}
 	elif target.has("scene_path") and target.scene_path != "":
-		var path = normalize_scene_path(target.scene_path)
+		var path = _scene_file_key(target.scene_path)
 		if path.is_empty():
 			return {"valid": false, "errors": [{"message": "Path escapes the project root: " + target.scene_path}], "target": target.scene_path}
 		if not FileAccess.file_exists(path):

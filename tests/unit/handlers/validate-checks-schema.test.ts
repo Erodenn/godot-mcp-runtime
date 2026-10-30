@@ -60,3 +60,33 @@ describe('handleValidate - nested structure schema validation', () => {
     expect(fake.calls[0]!.params).toEqual({ targets: [{ scene_path: SCENE, checks }] });
   });
 });
+
+describe('handleValidate - signals check node spelling', () => {
+  it('refuses a signals check that carries both nodePath and node_path', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: SCENE,
+      checks: [{ type: 'signals', nodePath: 'root/HUD', node_path: 'root/Other' }],
+    });
+
+    expectErrorMatching(result, /nodePath or node_path, not both/);
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('refuses the pair on a targets item as well', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        {
+          scenePath: SCENE,
+          checks: [{ type: 'signals', nodePath: 'root/HUD', node_path: 'root' }],
+        },
+      ],
+    });
+
+    expect(fake.calls).toEqual([]);
+    expect(JSON.stringify(result)).toMatch(/nodePath or node_path, not both/);
+  });
+});
