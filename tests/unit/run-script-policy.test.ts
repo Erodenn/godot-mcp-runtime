@@ -55,14 +55,14 @@ describe('evaluateScript: Tier 1 hard_block', () => {
     expect(evalLine('var v = str_to_var(data)').decision).toBe('hard_block');
   });
 
-  it('blocks load() with a non-literal first argument', () => {
+  it('asks about load() with a non-literal first argument', () => {
     const d = evalLine('var r = load(path_var)');
-    expect(d.decision).toBe('hard_block');
-    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
   });
 
-  it('blocks ResourceLoader.load with non-literal first arg', () => {
-    expect(evalLine('var r = ResourceLoader.load(var_path)').decision).toBe('hard_block');
+  it('asks about ResourceLoader.load with non-literal first arg', () => {
+    expect(evalLine('var r = ResourceLoader.load(var_path)').decision).toBe('elicit_required');
   });
 
   it('does NOT block load() with a literal string (Tier 3 warn instead)', () => {
@@ -379,8 +379,8 @@ describe('evaluateScript: whole-first-argument classification', () => {
   // `load("res://" + evil)` must stay Tier 1 (non-literal), not drop to Tier 3 on the leading literal.
   it('blocks load("res://" + x) as non-literal, not warn', () => {
     const d = evalLine('var r = load("res://" + x)');
-    expect(d.decision).toBe('hard_block');
-    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
     expect(d.matches.some((m) => m.ruleId === 'tier3.literal.load')).toBe(false);
   });
 
@@ -399,13 +399,13 @@ describe('evaluateScript: whole-first-argument classification', () => {
 
   it('regression: load(some_var) stays hard_block', () => {
     const d = evalLine('var r = load(some_var)');
-    expect(d.decision).toBe('hard_block');
-    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
   });
 
   it('regression: load() with no argument does not match the non-literal rule', () => {
     const d = evalLine('var r = load()');
-    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(false);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(false);
     expect(d.decision).toBe('ok');
   });
 });
@@ -680,16 +680,16 @@ describe('evaluateScript: ConfigFile instance usage', () => {
 
   it('bare load(path) with a non-literal argument still matches only the indirect rule', () => {
     const d = evalLine('var r = load(path)');
-    expect(d.decision).toBe('hard_block');
+    expect(d.decision).toBe('elicit_required');
     expect(d.matches).toHaveLength(1);
-    expect(d.matches[0]?.ruleId).toBe('tier1.indirect.load.nonliteral');
+    expect(d.matches[0]?.ruleId).toBe('tier2.indirect.load.nonliteral');
   });
 
   it('ResourceLoader.load(non_literal) still matches its own rule', () => {
     const d = evalLine('ResourceLoader.load(var_path)');
-    expect(d.decision).toBe('hard_block');
+    expect(d.decision).toBe('elicit_required');
     expect(d.matches).toHaveLength(1);
-    expect(d.matches[0]?.ruleId).toBe('tier1.indirect.ResourceLoader.load.nonliteral');
+    expect(d.matches[0]?.ruleId).toBe('tier2.indirect.ResourceLoader.load.nonliteral');
   });
 
   it('ResourceLoader.load("literal") still warns via its own Tier 3 rule', () => {
@@ -765,11 +765,11 @@ describe('evaluateScript: global-function rules ignore method calls', () => {
     expect(evalLine('slots[i].load(d)').decision).toBe('ok');
   });
 
-  it('still hard-blocks the bare global functions', () => {
+  it('still flags the bare global functions', () => {
     const load = evalLine('var r = load(path_var)');
-    expect(load.decision).toBe('hard_block');
-    expect(load.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
-    expect(evalLine('var r = preload(x)').decision).toBe('hard_block');
+    expect(load.decision).toBe('elicit_required');
+    expect(load.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
+    expect(evalLine('var r = preload(x)').decision).toBe('elicit_required');
     expect(evalLine('var r = str_to_var(s)').decision).toBe('hard_block');
     expect(evalLine('var r = bytes_to_var_with_objects(b)').decision).toBe('hard_block');
   });
@@ -780,7 +780,7 @@ describe('evaluateScript: global-function rules ignore method calls', () => {
 
   it('still blocks a global load that follows a statement ending in a dot-free line', () => {
     expect(evaluateScript(VALID_PREFIX + 'var a = 1\n\tvar r = load(p)\n').decision).toBe(
-      'hard_block',
+      'elicit_required',
     );
   });
 
@@ -864,9 +864,9 @@ describe('evaluateScript: a declaration is not a call', () => {
 
   it('still fires on a call inside the declared function', () => {
     const d = evaluateScript('func load(slot):\n\treturn load(path_for(slot))\n');
-    expect(d.decision).toBe('hard_block');
+    expect(d.decision).toBe('elicit_required');
     expect(d.matches.map((m) => [m.ruleId, m.line])).toEqual([
-      ['tier1.indirect.load.nonliteral', 2],
+      ['tier2.indirect.load.nonliteral', 2],
     ]);
   });
 
@@ -923,19 +923,19 @@ describe('evaluateScript: a reflective call with a literal method name is the ca
   it('classifies the argument the called method receives', () => {
     const ruleOf = (line: string) => evalLine(line).matches.map((m) => m.ruleId);
     expect(ruleOf('ResourceLoader.call("load", path_var)')).toEqual([
-      'tier1.indirect.ResourceLoader.load.nonliteral',
+      'tier2.indirect.ResourceLoader.load.nonliteral',
     ]);
     expect(ruleOf('ResourceLoader.call("load", "res://a.tscn")')).toEqual([
       'tier3.literal.ResourceLoader.load',
     ]);
     expect(ruleOf('ResourceLoader.callv("load", [path_var])')).toEqual([
-      'tier1.indirect.ResourceLoader.load.nonliteral',
+      'tier2.indirect.ResourceLoader.load.nonliteral',
     ]);
     expect(ruleOf('ResourceLoader.callv("load", ["res://a.tscn"])')).toEqual([
       'tier3.literal.ResourceLoader.load',
     ]);
     expect(ruleOf('ResourceLoader.callv("load", args)')).toEqual([
-      'tier1.indirect.ResourceLoader.load.nonliteral',
+      'tier2.indirect.ResourceLoader.load.nonliteral',
     ]);
   });
 
@@ -1007,7 +1007,13 @@ describe('evaluateScript: a reflective call with a literal method name is the ca
 });
 
 describe('evaluateScript: a non-literal method name on a Tier 1 receiver', () => {
-  const DISPATCH_METHODS = ['call', 'callv', 'call_deferred'];
+  const DISPATCH_METHODS = [
+    'call',
+    'callv',
+    'call_deferred',
+    'call_deferred_thread_group',
+    'call_thread_safe',
+  ];
 
   it.each(TIER1_DISPATCH_RECEIVERS.flatMap((r) => DISPATCH_METHODS.map((m) => [r, m] as const)))(
     'hard-blocks %s.%s(method_name)',
@@ -1031,7 +1037,7 @@ describe('evaluateScript: a non-literal method name on a Tier 1 receiver', () =>
       ['tier2.generic.call.nonliteral', 2],
     ]);
     expect(evalLine('some_node.callv(method_name, [])').matches.map((m) => m.tier)).toEqual([2]);
-    expect(evalLine('some_node.call_deferred(method_name)').decision).toBe('ok');
+    expect(evalLine('some_node.call_deferred(method_name)').decision).toBe('elicit_required');
   });
 
   it('covers every receiver that carries a Tier 1 chain-prefix rule', () => {
@@ -1191,12 +1197,12 @@ describe('evaluateScript: OS.create_instance and GDExtensionManager.load_extensi
 });
 
 describe('evaluateScript: ResourceLoader.load_threaded_request', () => {
-  it('hard-blocks a non-literal path, as ResourceLoader.load does', () => {
+  it('asks about a non-literal path, as ResourceLoader.load does', () => {
     expect(
       evalLine('ResourceLoader.load_threaded_request(path_var)').matches.map((m) => m.ruleId),
-    ).toEqual(['tier1.indirect.ResourceLoader.load_threaded_request.nonliteral']);
+    ).toEqual(['tier2.indirect.ResourceLoader.load_threaded_request.nonliteral']);
     expect(evalLine('ResourceLoader.load_threaded_request("res://" + name)').decision).toBe(
-      'hard_block',
+      'elicit_required',
     );
   });
 
@@ -1286,7 +1292,7 @@ describe('evaluateScript: a dispatch that names another dispatch', () => {
     expect(found('some_loader.call("call", "load", path)')).toEqual([]);
     expect(
       evalLine('ResourceLoader.call("call", "load", path)').matches.map((m) => m.ruleId),
-    ).toEqual(['tier1.indirect.ResourceLoader.load.nonliteral']);
+    ).toEqual(['tier2.indirect.ResourceLoader.load.nonliteral']);
     expect(
       evalLine('ResourceLoader.callv("call", ["load", "res://a.tres"])').matches.map(
         (m) => m.ruleId,
@@ -1476,12 +1482,12 @@ describe('evaluateScript: a raw or prefixed string is a literal', () => {
   });
 
   it('a raw string joined to something else is still non-literal', () => {
-    expect(tiers('load(r"res://" + name)')).toEqual([['tier1.indirect.load.nonliteral', 1]]);
-    expect(tiers('load(r + "x")')).toEqual([['tier1.indirect.load.nonliteral', 1]]);
+    expect(tiers('load(r"res://" + name)')).toEqual([['tier2.indirect.load.nonliteral', 2]]);
+    expect(tiers('load(r + "x")')).toEqual([['tier2.indirect.load.nonliteral', 2]]);
   });
 
   it('a variable named r is not a string prefix', () => {
-    expect(tiers('load(r)')).toEqual([['tier1.indirect.load.nonliteral', 1]]);
+    expect(tiers('load(r)')).toEqual([['tier2.indirect.load.nonliteral', 2]]);
     expect(evalLine('var r = 1\n\tprint(r, "x")').decision).toBe('ok');
   });
 
@@ -1569,10 +1575,10 @@ describe('evaluateScript: the scan work is bounded', () => {
         `${VALID_PREFIX}` + 'a.call('.repeat(NESTING) + 'load("x")' + ')'.repeat(NESTING) + '\n';
       const decision = evaluateScript(source);
       // Past the budget the innermost load("x") answers nonliteral: the fail-closed side.
-      expect(decision.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(
+      expect(decision.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(
         true,
       );
-      expect(decision.decision).toBe('hard_block');
+      expect(decision.decision).toBe('elicit_required');
     },
     BOUNDED_SCAN_TIMEOUT_MS,
   );
@@ -1603,5 +1609,63 @@ describe('evaluateScript: the scan work is bounded', () => {
     ]);
     expect(evalLine('OS.call("execute", "ls")').decision).toBe('hard_block');
     expect(evalLine('OS.callv("execute", ["ls"])').decision).toBe('hard_block');
+  });
+});
+
+describe('evaluateScript: every by-name dispatch method has a generic Tier 2 rule', () => {
+  it.each([
+    ['node.call_deferred(m)', 'tier2.generic.call_deferred.nonliteral'],
+    ['call_thread_safe(m)', 'tier2.generic.call_thread_safe.nonliteral'],
+    ['x.call_deferred_thread_group(m)', 'tier2.generic.call_deferred_thread_group.nonliteral'],
+  ])('%s matches %s at Tier 2', (line, ruleId) => {
+    expect(evalLine(line).matches.map((m) => [m.ruleId, m.tier])).toEqual([[ruleId, 2]]);
+  });
+
+  it('keeps Tier 1 on a Tier 1 receiver', () => {
+    expect(evalLine('OS.call_thread_safe(m)').matches.map((m) => [m.ruleId, m.tier])).toEqual([
+      ['tier1.indirect.OS.call_thread_safe.nonliteral', 1],
+    ]);
+  });
+
+  it('matches nothing new on a literal or no-argument form', () => {
+    expect(evalLine('node.call_deferred("update")').decision).toBe('ok');
+    expect(evalLine('node.call_thread_safe("update")').decision).toBe('ok');
+    expect(evalLine('x.call_deferred_thread_group()').decision).toBe('ok');
+    expect(evalLine('call_thread_safe()').decision).toBe('ok');
+  });
+});
+
+describe('evaluateScript: a lone number, true, false or null cannot name a method', () => {
+  it.each(['f.call(5)', 'f.call(true)', 'f.call(false)', 'f.call(null)', 'f.call_deferred(5)'])(
+    '%s matches nothing',
+    (line) => {
+      expect(evalLine(line).matches).toEqual([]);
+    },
+  );
+
+  it('matches nothing on a Tier 1 receiver either', () => {
+    expect(evalLine('OS.call(5)').matches).toEqual([]);
+  });
+
+  it('still flags a computed argument', () => {
+    expect(evalLine('f.call(x + 5)').matches.map((m) => m.ruleId)).toEqual([
+      'tier2.generic.call.nonliteral',
+    ]);
+  });
+});
+
+describe('evaluateScript: load and preload with a non-literal path are Tier 2', () => {
+  it.each([
+    ['load(p)', 'tier2.indirect.load.nonliteral'],
+    ['preload(C)', 'tier2.indirect.preload.nonliteral'],
+    ['ResourceLoader.load(p)', 'tier2.indirect.ResourceLoader.load.nonliteral'],
+    [
+      'ResourceLoader.load_threaded_request(p)',
+      'tier2.indirect.ResourceLoader.load_threaded_request.nonliteral',
+    ],
+  ])('%s is %s in default mode', (line, ruleId) => {
+    const d = evalLine(line);
+    expect(d.matches.map((m) => [m.ruleId, m.tier])).toEqual([[ruleId, 2]]);
+    expect(d.decision).toBe('elicit_required');
   });
 });

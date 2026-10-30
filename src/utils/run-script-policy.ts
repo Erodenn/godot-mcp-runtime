@@ -48,7 +48,8 @@ interface PolicyRule {
   solutions: string[];
 }
 
-export type ArgumentClassification = 'literal' | 'nonliteral' | 'none';
+/** `scalar` is one number, `true`, `false` or `null` token: it cannot name a method or a resource path, so it matches neither `literal` nor `nonliteral` (`f.call(5)` passes 5 to a Callable). */
+export type ArgumentClassification = 'literal' | 'nonliteral' | 'scalar' | 'none';
 
 /** Token visits per script token that argument scanning may spend: nested calls re-scan the inner region at every level, so the budget keeps the total linear. */
 const SCAN_BUDGET_PER_TOKEN = 64;
@@ -94,12 +95,20 @@ function argumentsOf(
   return args;
 }
 
-/** No tokens is 'none' (a no-arg call must not match a non-literal rule); one string literal is 'literal'; anything else is 'nonliteral'. */
+/** The identifier tokens that are scalar values on their own. */
+const SCALAR_KEYWORDS: ReadonlySet<string> = new Set(['true', 'false', 'null']);
+
+/** No tokens is 'none' (a no-arg call must not match a non-literal rule); one string literal is 'literal'; one number, `true`, `false` or `null` token is 'scalar'; anything else is 'nonliteral'. */
 const UNREADABLE_ARGUMENT: ArgumentClassification = 'nonliteral';
+
+function isScalarToken(tok: Token): boolean {
+  return tok.kind === 'number' || (tok.kind === 'identifier' && SCALAR_KEYWORDS.has(tok.text));
+}
 
 function classifyArgument(argument: readonly Token[]): ArgumentClassification {
   if (argument.length === 0) return 'none';
   if (argument.length === 1 && argument[0]!.kind === 'string') return 'literal';
+  if (argument.length === 1 && isScalarToken(argument[0]!)) return 'scalar';
   return 'nonliteral';
 }
 
@@ -127,17 +136,25 @@ export const TIER1_DISPATCH_RECEIVERS: readonly string[] = [
   'GDExtensionManager',
 ];
 
-const OBJECT_DISPATCH_METHODS: readonly string[] = ['call', 'callv', 'call_deferred'];
+/** Every method that calls a method named by its first argument. */
+const DISPATCH_METHODS: readonly string[] = [
+  'call',
+  'callv',
+  'call_deferred',
+  'call_deferred_thread_group',
+  'call_thread_safe',
+];
 
 /** The dispatch method whose forwarded arguments are the elements of an array. */
 const ARRAY_DISPATCH_METHOD = 'callv';
 
 /** Every method that calls a method named by its first argument; a literal name is evaluated as the call it makes (`reflectiveCallTarget`). */
-const REFLECTIVE_DISPATCH_METHODS: ReadonlySet<string> = new Set([
-  ...OBJECT_DISPATCH_METHODS,
-  'call_deferred_thread_group',
-  'call_thread_safe',
-]);
+const REFLECTIVE_DISPATCH_METHODS: ReadonlySet<string> = new Set(DISPATCH_METHODS);
+
+/** The dispatch methods that get their own generic Tier 2 rule; `call` and `callv` keep their hand-written ones. */
+const GENERIC_DISPATCH_RULE_METHODS: readonly string[] = DISPATCH_METHODS.filter(
+  (method) => method !== 'call' && method !== 'callv',
+);
 
 const METHOD_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -173,7 +190,7 @@ function aliasRules(): PolicyRule[] {
 function reflectiveDispatchRules(tier: 1 | 3): PolicyRule[] {
   const rules: PolicyRule[] = [];
   for (const receiver of TIER1_DISPATCH_RECEIVERS) {
-    for (const method of OBJECT_DISPATCH_METHODS) {
+    for (const method of DISPATCH_METHODS) {
       rules.push(
         tier === 1
           ? {
@@ -468,9 +485,10 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Remove the ConfigFile.parse call'],
   },
 
+  // Tier 2, not Tier 1: a non-literal path is ordinary in game code (`load(path)` over a save slot or a level list), and the elicitation prompt is the right answer for it.
   {
-    id: 'tier1.indirect.load.nonliteral',
-    tier: 1,
+    id: 'tier2.indirect.load.nonliteral',
+    tier: 2,
     chain: ['load'],
     matchAsBareIdentifier: true,
     globalFunctionOnly: true,
@@ -479,8 +497,8 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Pass a literal `res://...` path string to load()'],
   },
   {
-    id: 'tier1.indirect.preload.nonliteral',
-    tier: 1,
+    id: 'tier2.indirect.preload.nonliteral',
+    tier: 2,
     chain: ['preload'],
     matchAsBareIdentifier: true,
     globalFunctionOnly: true,
@@ -489,16 +507,16 @@ export const policyRules: readonly PolicyRule[] = [
     solutions: ['Pass a literal `res://...` path string to preload()'],
   },
   {
-    id: 'tier1.indirect.ResourceLoader.load.nonliteral',
-    tier: 1,
+    id: 'tier2.indirect.ResourceLoader.load.nonliteral',
+    tier: 2,
     chain: ['ResourceLoader', 'load'],
     argumentKind: 'nonliteral',
     reason: 'ResourceLoader.load with a non-literal path can be redirected',
     solutions: ['Pass a literal `res://...` path to ResourceLoader.load'],
   },
   {
-    id: 'tier1.indirect.ResourceLoader.load_threaded_request.nonliteral',
-    tier: 1,
+    id: 'tier2.indirect.ResourceLoader.load_threaded_request.nonliteral',
+    tier: 2,
     chain: ['ResourceLoader', 'load_threaded_request'],
     argumentKind: 'nonliteral',
     reason: 'ResourceLoader.load_threaded_request with a non-literal path can be redirected',
@@ -920,6 +938,19 @@ export const policyRules: readonly PolicyRule[] = [
       'A non-literal .callv on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
     solutions: ['Call the method directly by name'],
   },
+  // Same shape as `tier2.generic.call.nonliteral` for the other methods that call a method by name.
+  ...GENERIC_DISPATCH_RULE_METHODS.map(
+    (method): PolicyRule => ({
+      id: `tier2.generic.${method}.nonliteral`,
+      tier: 2,
+      chain: [method],
+      matchLastSegment: true,
+      matchAsBareIdentifier: true,
+      argumentKind: 'nonliteral',
+      reason: `A non-literal .${method} on an arbitrary receiver is dynamic dispatch that bypasses static analysis`,
+      solutions: ['Call the method directly by name'],
+    }),
+  ),
 ];
 
 /** Index of the `(` following token `i` (newlines allowed between), or -1. */
@@ -1070,6 +1101,8 @@ function resolveReflectiveCall(
   if (firstScan === null) return OPAQUE_DISPATCH;
   let args: Token[][] = firstScan;
   if ((args[0] ?? []).length === 0) return null;
+  // A number, `true`, `false` or `null` cannot name a method: `f.call(5)` is a Callable call passing 5.
+  if (classifyArgument(args[0] ?? []) === 'scalar') return null;
 
   const names: string[] = [];
   for (let depth = 0; depth < MAX_DISPATCH_DEPTH; depth++) {
