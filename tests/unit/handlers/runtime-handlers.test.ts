@@ -2342,6 +2342,11 @@ describe('handleRunScript security policy', () => {
     );
     expect(JSON.stringify(result)).not.toMatch(/does not support elicitation/);
     expect(fake.bridgeCalls).toHaveLength(0);
+    // Red when the catch writes elicit_denied for every throw again.
+    const scriptsDir = auditScriptsDir(dir);
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_cancelled');
   });
 
   it('falls back to denial when the client lacks elicitation', async () => {

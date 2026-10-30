@@ -65,7 +65,11 @@ import {
   BridgeAutoloadCollisionError,
   BridgeRegistryUnreadableError,
 } from '../utils/bridge-manager.js';
-import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
+import {
+  ELICITATION_OPT_OUT_SOLUTION,
+  rejectNonSceneLaunchArg,
+  runLaunchGate,
+} from '../utils/launch-gate.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 import {
   MAX_RUNTIME_TIMEOUT_MS,
@@ -280,6 +284,7 @@ export const runtimeToolDefinitions = [
       properties: {
         limit: {
           type: 'number',
+          minimum: MIN_DEBUG_OUTPUT_LIMIT,
           description: `Max lines to return, a whole number of ${MIN_DEBUG_OUTPUT_LIMIT} or more (default: ${DEFAULT_DEBUG_OUTPUT_LIMIT}, from end of output)`,
         },
       },
@@ -367,6 +372,8 @@ export const runtimeToolDefinitions = [
       properties: {
         timeout: {
           type: 'number',
+          minimum: MIN_RUNTIME_TIMEOUT_MS,
+          maximum: MAX_RUNTIME_TIMEOUT_MS,
           description: `Timeout in milliseconds to wait for the screenshot, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
         },
         responseMode: {
@@ -693,6 +700,8 @@ export const runtimeToolDefinitions = [
         },
         timeout: {
           type: 'number',
+          minimum: MIN_RUNTIME_TIMEOUT_MS,
+          maximum: MAX_RUNTIME_TIMEOUT_MS,
           description: `Timeout in ms, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
         },
       },
@@ -775,10 +784,6 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
     target.warnings = capRuntimeErrorLines(runtimeErrors);
   }
 }
-
-/** KEEP IN SYNC with the same solution in `runLaunchGate` (src/utils/launch-gate.ts). */
-const ELICITATION_OPT_OUT_SOLUTION =
-  'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
 
 // elicit_cancelled is a dismissed prompt, not a refusal; elicit_bypassed ran unprompted (elicitation disabled).
 // not_sent: admitted but never reached the bridge; admitted_as holds what the decision would have been.
@@ -2454,12 +2459,8 @@ export async function handleRunScript(
   let admitted: { policy: PolicyDecision; decision: AdmittedAuditDecision } | null = null;
   if (!ctx.disableSecurity) {
     const policy = evaluateScript(script, ctx.strictMode);
-    const projectPath = sessionProjectPath;
-
     if (policy.decision === 'hard_block') {
-      if (projectPath) {
-        writeAuditSidecar(projectPath, script, 'hard_block', policy, ctx.strictMode);
-      }
+      writeAuditSidecar(sessionProjectPath, script, 'hard_block', policy, ctx.strictMode);
       return err(
         createErrorResponse(formatBlockMessage(policy.matches), collectSolutions(policy.matches)),
       );
@@ -2487,10 +2488,16 @@ export async function handleRunScript(
             },
           });
         } catch (error) {
-          if (projectPath) {
-            writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
-          }
-          if (!(error instanceof ElicitationUnsupportedError)) {
+          // An unanswered prompt is audited like a dismissed one (the launch gate does the same); only a client without the capability is a denial.
+          const unsupported = error instanceof ElicitationUnsupportedError;
+          writeAuditSidecar(
+            sessionProjectPath,
+            script,
+            unsupported ? 'elicit_denied' : 'elicit_cancelled',
+            policy,
+            ctx.strictMode,
+          );
+          if (!unsupported) {
             return err(
               createErrorResponse(
                 `run_script confirmation was not answered (${getErrorMessage(error)}). The script was not run.`,
@@ -2515,15 +2522,13 @@ export async function handleRunScript(
         if (!isElicitAccepted(elicitResult)) {
           // A `cancel` is a dismissed prompt (some clients auto-cancel unseen), not a `decline`; worded as in the launch gate, pointing at the opt-out.
           const cancelled = elicitResult.action === 'cancel';
-          if (projectPath) {
-            writeAuditSidecar(
-              projectPath,
-              script,
-              cancelled ? 'elicit_cancelled' : 'elicit_denied',
-              policy,
-              ctx.strictMode,
-            );
-          }
+          writeAuditSidecar(
+            sessionProjectPath,
+            script,
+            cancelled ? 'elicit_cancelled' : 'elicit_denied',
+            policy,
+            ctx.strictMode,
+          );
           const finding = summarizeMatch(policy.matches[0]!);
           return err(
             createErrorResponse(
@@ -2555,7 +2560,7 @@ export async function handleRunScript(
   let audited = false;
   let admittedSidecarFile: string | null = null;
   const auditAdmitted = (sent: boolean): void => {
-    if (admitted === null || audited || !sessionProjectPath) return;
+    if (admitted === null || audited) return;
     audited = true;
     if (sent) {
       admittedSidecarFile = writeAuditSidecar(
@@ -2579,7 +2584,7 @@ export async function handleRunScript(
 
   // The record precedes the send; a send whose frame was never written is rewritten as `not_sent`.
   const markNotSent = (): void => {
-    if (admitted === null || admittedSidecarFile === null || !sessionProjectPath) return;
+    if (admitted === null || admittedSidecarFile === null) return;
     writeAuditSidecar(
       sessionProjectPath,
       script,

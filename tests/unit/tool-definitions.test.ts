@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { runtimeToolDefinitions } from '../../src/tools/runtime-tools.js';
+import {
+  handleGetDebugOutput,
+  parseTimeoutMsArg,
+  runtimeToolDefinitions,
+} from '../../src/tools/runtime-tools.js';
+import { createFakeRunner } from '../helpers/fake-runner.js';
+import { hasError } from '../helpers/assertions.js';
 import { renderToolDefinitions } from '../../src/tools/render-tools.js';
 import { autoloadToolDefinitions } from '../../src/tools/autoload-tools.js';
 import { projectToolDefinitions } from '../../src/tools/project-tools.js';
@@ -162,5 +168,66 @@ describe('validate annotations', () => {
     expect(
       (validate as { annotations?: { readOnlyHint?: boolean } }).annotations?.readOnlyHint,
     ).not.toBe(true);
+  });
+});
+
+type NumericBound = { type?: string; minimum?: number; maximum?: number };
+
+/** Every input property named `timeout` or `limit`, at any depth of an inputSchema. */
+function collectBoundedInputs(
+  node: unknown,
+  tool: string,
+  out: Array<{ tool: string; name: string; schema: NumericBound }> = [],
+): Array<{ tool: string; name: string; schema: NumericBound }> {
+  if (typeof node !== 'object' || node === null) return out;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if ((key === 'timeout' || key === 'limit') && typeof value === 'object' && value !== null) {
+      const schema = value as NumericBound;
+      if (schema.type === 'number' || schema.type === 'integer')
+        out.push({ tool, name: key, schema });
+    }
+    collectBoundedInputs(value, tool, out);
+  }
+  return out;
+}
+
+describe('timeout and limit input schemas', () => {
+  const bounded = allDefinitions.flatMap((t) => collectBoundedInputs(t.inputSchema, t.name));
+
+  it('finds the timeout and limit properties', () => {
+    expect(bounded.map((b) => `${b.tool}.${b.name}`).sort()).toEqual([
+      'get_debug_output.limit',
+      'run_script.timeout',
+      'take_screenshot.timeout',
+    ]);
+  });
+
+  // Red when a timeout or limit property loses its minimum.
+  it.each(bounded.map((b) => [`${b.tool}.${b.name}`, b] as const))(
+    '%s carries minimum',
+    (_n, b) => {
+      expect(typeof b.schema.minimum).toBe('number');
+    },
+  );
+
+  // Red when the schema range drifts from the range the handler accepts.
+  it.each(bounded.filter((b) => b.name === 'timeout').map((b) => [b.tool, b] as const))(
+    '%s timeout schema range equals the handler range',
+    (_n, b) => {
+      const accepts = (ms: number) => parseTimeoutMsArg({ timeout: ms }, 'timeout', 1).ok;
+      expect(accepts(b.schema.minimum!)).toBe(true);
+      expect(accepts(b.schema.minimum! - 1)).toBe(false);
+      expect(accepts(b.schema.maximum!)).toBe(true);
+      expect(accepts(b.schema.maximum! + 1)).toBe(false);
+    },
+  );
+
+  it('get_debug_output limit schema range equals the handler range (a minimum, no maximum)', () => {
+    const limit = bounded.find((b) => b.tool === 'get_debug_output')!.schema;
+    expect(limit.maximum).toBeUndefined();
+    const fake = createFakeRunner();
+    expect(hasError(handleGetDebugOutput(fake.asRunner, { limit: limit.minimum! - 1 }))).toBe(true);
+    const hugeResult = handleGetDebugOutput(fake.asRunner, { limit: 1_000_000_000 });
+    expect(JSON.stringify(hugeResult)).not.toMatch(/limit/i);
   });
 });

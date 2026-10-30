@@ -53,7 +53,7 @@ const NON_CANONICAL_PROJECT_FILE_CAUSE =
 const STRICT_MODE_IS_OPERATOR_SETTING =
   'Strict mode (GODOT_MCP_STRICT) is an operator setting: report this refusal to the user rather than changing it';
 /** Offered only for a prompt the client dismissed by itself, never for a user's decline. */
-const ELICITATION_OPT_OUT_SOLUTION =
+export const ELICITATION_OPT_OUT_SOLUTION =
   'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
 
 /** Refuses a `scene` argument the engine would not run as a scene: Godot silently runs the main scene instead, so the gate would scan one file and launch another. Called by every launcher before the gate. */
