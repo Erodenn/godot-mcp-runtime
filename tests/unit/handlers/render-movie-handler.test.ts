@@ -595,7 +595,7 @@ describe('render_movie and a start on the same project', () => {
       const refused = await waited(TEST_FRAMES);
       expectErrorMatching(
         refused.result,
-        /render_movie waited 28000 ms for run_project to finish, and the call can take up to 38000 ms/,
+        /render_movie waited 28000 ms for run_project to finish, and the call can take up to 43000 ms/,
       );
       expect(refused.ctx.stub.calls.length).toBe(0);
       expect(refused.ctx.fake.movieRuns).toEqual([]);
@@ -608,6 +608,31 @@ describe('render_movie and a start on the same project', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Red when the response margin or the Windows kill time leaves the worst case: a run sized at the edge of the request timeout is spawned and answers late.
+  it('refuses a run whose worst case leaves its answer no room before the request timeout, with nothing written, even with no wait', async () => {
+    const FRAMES_AT_THE_CEILING = 76;
+    const FRAMES_PAST_THE_CEILING = FRAMES_AT_THE_CEILING + 1;
+    const edge = setup();
+    const refused = await edge.handler(
+      edge.runner,
+      { projectPath: edge.dir, frames: FRAMES_PAST_THE_CEILING },
+      NO_GATE,
+    );
+    expectErrorMatching(refused, /render_movie can take up to \d+ ms.*Nothing was sent/);
+    expect(edge.stub.calls.length).toBe(0);
+    expect(existsSync(moviesDir(resolve(edge.dir)))).toBe(false);
+
+    const inside = setup();
+    payloadOf(
+      await inside.handler(
+        inside.runner,
+        { projectPath: inside.dir, frames: FRAMES_AT_THE_CEILING },
+        NO_GATE,
+      ),
+    );
+    expect(inside.stub.calls.length).toBe(1);
   });
 
   it('makes the second session check inside the queue step, and registers nothing when it refuses', async () => {

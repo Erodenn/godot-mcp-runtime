@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { CLIENT_REQUEST_TIMEOUT_MS, type GodotRunner } from '../../src/utils/godot-runner.js';
-import { QUEUE_CHARGED_COMMAND_FLOOR_MS, chargeQueueWait } from '../../src/utils/session-report.js';
+import {
+  CLIENT_ANSWER_CEILING_MS,
+  CLIENT_RESPONSE_MARGIN_MS,
+  QUEUE_CHARGED_COMMAND_FLOOR_MS,
+  chargeQueueWait,
+  timeoutLeavesNoAnswerMargin,
+} from '../../src/utils/session-report.js';
 import { hasError } from '../helpers/assertions.js';
 import {
   SESSION_QUEUE_WAIT_TIMEOUT_MS,
@@ -243,7 +249,7 @@ describe('chargeQueueWait', () => {
   });
 
   it('refuses a fixed worst case that fit the request timeout alone and no longer does', () => {
-    const worstCaseMs = CLIENT_REQUEST_TIMEOUT_MS - WAITED_MS;
+    const worstCaseMs = CLIENT_ANSWER_CEILING_MS - WAITED_MS;
     expect(
       chargeQueueWait(runnerWaited(WAITED_MS), 'profile_project', { kind: 'fixed', worstCaseMs }),
     ).toEqual({ ok: true, value: worstCaseMs });
@@ -257,6 +263,23 @@ describe('chargeQueueWait', () => {
     ).toBe(true);
   });
 
+  // Red when the margin comes out of chargeQueueWait: a call sized at the edge of the request timeout is sent and answers late.
+  it('refuses, with nothing sent, a fixed worst case that fits the request timeout but leaves no room for the answer, with no wait at all', () => {
+    const edge = CLIENT_REQUEST_TIMEOUT_MS;
+    const refused = chargeQueueWait(runnerWaited(0), 'simulate_input', {
+      kind: 'fixed',
+      worstCaseMs: edge,
+    });
+    expect(hasError(refused)).toBe(true);
+    expect(JSON.stringify(refused)).toContain(`${CLIENT_RESPONSE_MARGIN_MS} ms its answer needs`);
+    expect(
+      chargeQueueWait(runnerWaited(0), 'simulate_input', {
+        kind: 'fixed',
+        worstCaseMs: CLIENT_ANSWER_CEILING_MS,
+      }),
+    ).toEqual({ ok: true, value: CLIENT_ANSWER_CEILING_MS });
+  });
+
   it('never refuses a fixed worst case already over the request timeout, or a call outside a turn', () => {
     const over = CLIENT_REQUEST_TIMEOUT_MS + 1;
     expect(
@@ -268,6 +291,15 @@ describe('chargeQueueWait', () => {
     expect(
       chargeQueueWait(runnerWaited(null), 'simulate_input', { kind: 'fixed', worstCaseMs: over }),
     ).toEqual({ ok: true, value: over });
+  });
+});
+
+describe('timeoutLeavesNoAnswerMargin', () => {
+  it('refuses a timeout inside the margin of the request timeout and no other', () => {
+    expect(timeoutLeavesNoAnswerMargin('run_script', CLIENT_ANSWER_CEILING_MS)).toBeNull();
+    expect(timeoutLeavesNoAnswerMargin('run_script', CLIENT_ANSWER_CEILING_MS + 1)).not.toBeNull();
+    expect(timeoutLeavesNoAnswerMargin('run_script', CLIENT_REQUEST_TIMEOUT_MS)).not.toBeNull();
+    expect(timeoutLeavesNoAnswerMargin('run_script', CLIENT_REQUEST_TIMEOUT_MS + 1)).toBeNull();
   });
 });
 

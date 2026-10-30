@@ -22,7 +22,12 @@ import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
 import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
-import { chargeQueueWait, liveSessionRemedy, sessionBusyError } from '../utils/session-report.js';
+import {
+  CLIENT_ANSWER_CEILING_MS,
+  chargeQueueWait,
+  liveSessionRemedy,
+  sessionBusyError,
+} from '../utils/session-report.js';
 import { SessionQueueTimeoutError } from '../utils/session-queue.js';
 import {
   BRIDGE_AUTOLOAD_NAME,
@@ -42,6 +47,7 @@ import {
 } from '../utils/artifact-paths.js';
 import {
   MOVIE_KILL_GRACE_MS,
+  MOVIE_KILL_WORST_CASE_MS,
   runMovieProcess,
   type MovieProcessResult,
   type RunMovieProcess,
@@ -89,10 +95,15 @@ export const MOVIE_WARMUP_FRAMES = 5;
 export const MOVIE_FRAME_PATHS_LISTED_MAX = 60;
 export const MOVIE_TIMEOUT_BASE_MS = 30000;
 export const MOVIE_TIMEOUT_PER_FRAME_MS = 250;
-/** Frame count at which a timed-out run's worst case (budget plus kill grace) reaches the client's request timeout. */
+/** Frame count at which a timed-out run's worst case (budget plus the time to stop it) reaches the client's request timeout. */
 const MOVIE_CLIENT_TIMEOUT_FRAMES =
-  (CLIENT_REQUEST_TIMEOUT_MS - MOVIE_TIMEOUT_BASE_MS - MOVIE_KILL_GRACE_MS) /
+  (CLIENT_REQUEST_TIMEOUT_MS - MOVIE_TIMEOUT_BASE_MS - MOVIE_KILL_WORST_CASE_MS) /
   MOVIE_TIMEOUT_PER_FRAME_MS;
+/** Frame count from which a run's worst case leaves its answer less than the response margin before the client's request timeout, so the call is refused. */
+const MOVIE_MARGIN_REFUSED_FRAMES =
+  (CLIENT_ANSWER_CEILING_MS - MOVIE_TIMEOUT_BASE_MS - MOVIE_KILL_WORST_CASE_MS) /
+    MOVIE_TIMEOUT_PER_FRAME_MS +
+  1;
 const MOVIE_STDERR_TAIL_LINES = 20;
 // Measurement and launch-gate warnings are never cut, so a stderr flood cannot push a scan finding out of the payload.
 export const MOVIE_RUNTIME_WARNINGS_MAX = 30;
@@ -132,7 +143,7 @@ export const renderToolDefinitions = [
           type: 'integer',
           minimum: MIN_MOVIE_FRAMES,
           maximum: MAX_MOVIE_FRAMES,
-          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, and a run that overruns it takes up to ${MOVIE_KILL_GRACE_MS / MS_PER_SECOND}s more to stop, so at ${MOVIE_CLIENT_TIMEOUT_FRAMES} frames or more a client with a ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout may cut the call off before this server can report the timeout.`,
+          description: `Frames to render before Godot quits (default ${DEFAULT_MOVIE_FRAMES}, max ${MAX_MOVIE_FRAMES}). The first frames can be blank while the scene loads; likelyBlank is judged on the last one. The run is budgeted at ${MOVIE_TIMEOUT_BASE_MS / MS_PER_SECOND}s plus ${MOVIE_TIMEOUT_PER_FRAME_MS}ms per frame, and a run that overruns it takes up to ${MOVIE_KILL_WORST_CASE_MS / MS_PER_SECOND}s more to stop. A run of ${MOVIE_MARGIN_REFUSED_FRAMES} to ${MOVIE_CLIENT_TIMEOUT_FRAMES} frames is refused, with nothing run, because its answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout; above that a client may cut the call off before this server can report a timeout.`,
         },
         fps: {
           type: 'integer',
@@ -1053,7 +1064,7 @@ export function createRenderMovieHandler(
         // The wait for this turn counts against the client's request timeout.
         const charged = chargeQueueWait(runner, 'render_movie', {
           kind: 'fixed',
-          worstCaseMs: rc.timeoutMs + MOVIE_KILL_GRACE_MS,
+          worstCaseMs: rc.timeoutMs + MOVIE_KILL_WORST_CASE_MS,
         });
         if (!charged.ok) return charged;
         // The gate can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.

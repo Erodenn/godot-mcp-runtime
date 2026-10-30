@@ -70,7 +70,9 @@ import { measurePngFile } from '../utils/pixel-stats.js';
 import {
   MAX_RUNTIME_TIMEOUT_MS,
   QUEUE_CHARGED_COMMAND_FLOOR_MS,
+  CLIENT_ANSWER_CEILING_MS,
   chargeQueueWait,
+  timeoutLeavesNoAnswerMargin,
   noLiveCurrentSessionError,
   otherLiveSessionsClause,
   requireRuntimeSession,
@@ -79,7 +81,7 @@ import {
   runtimeToolWording,
   type NoSessionWording,
 } from '../utils/session-report.js';
-import { commandWasNotSent, sessionKey } from '../utils/godot-runner.js';
+import { CLIENT_REQUEST_TIMEOUT_MS, commandWasNotSent, sessionKey } from '../utils/godot-runner.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -365,7 +367,7 @@ export const runtimeToolDefinitions = [
       properties: {
         timeout: {
           type: 'number',
-          description: `Timeout in milliseconds to wait for the screenshot, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}). Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
+          description: `Timeout in milliseconds to wait for the screenshot, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
         },
         responseMode: {
           type: 'string',
@@ -691,7 +693,7 @@ export const runtimeToolDefinitions = [
         },
         timeout: {
           type: 'number',
-          description: `Timeout in ms, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}). Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
+          description: `Timeout in ms, a whole number from 1 to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
         },
       },
       required: ['script'],
@@ -1860,6 +1862,8 @@ async function takeScreenshot(runner: GodotRunner, args: OperationParams): Promi
   const timeoutResult = parseTimeoutMsArg(args, 'timeout', SCREENSHOT_DEFAULT_TIMEOUT_MS);
   if (!timeoutResult.ok) return timeoutResult;
   const requestedTimeoutMs = timeoutResult.value;
+  const noMargin = timeoutLeavesNoAnswerMargin('take_screenshot', requestedTimeoutMs);
+  if (noMargin) return err(noMargin);
   const responseMode = parseScreenshotResponseMode(args.responseMode);
   if (responseMode === null) {
     return err(
@@ -2441,6 +2445,8 @@ export async function handleRunScript(
   const timeoutResult = parseTimeoutMsArg(args, 'timeout', RUN_SCRIPT_DEFAULT_TIMEOUT_MS);
   if (!timeoutResult.ok) return timeoutResult;
   const requestedTimeoutMs = timeoutResult.value;
+  const noMargin = timeoutLeavesNoAnswerMargin('run_script', requestedTimeoutMs);
+  if (noMargin) return err(noMargin);
 
   // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set: no scan, decision, prompt, warnings or sidecar, and Tier 1 blocks included.
   let warningsFromPolicy: string[] = [];

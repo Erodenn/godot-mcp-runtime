@@ -6,12 +6,14 @@ import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 import { normalizeExitCode } from './output-parsing.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
-import { killProcessTree } from './process-tree.js';
+import { killProcessTree, TASKKILL_TIMEOUT_MS } from './process-tree.js';
 
 /** Each captured stream keeps only its last this many characters. */
 export const MOVIE_OUTPUT_CAPTURE_MAX_CHARS = 64 * 1024;
 /** After a timeout kill, how long to wait for the process to report closing before giving up. */
 export const MOVIE_KILL_GRACE_MS = 5000;
+/** The longest a timed-out run takes to stop: the synchronous Windows tree kill, then the grace. */
+export const MOVIE_KILL_WORST_CASE_MS = TASKKILL_TIMEOUT_MS + MOVIE_KILL_GRACE_MS;
 
 export interface MovieProcessResult {
   /** Normalized exit code; null when the process did not exit on its own or never started. */

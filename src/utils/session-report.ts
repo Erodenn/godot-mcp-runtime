@@ -111,7 +111,28 @@ export type QueueChargeNeed =
   | { kind: 'shorten'; budgetMs: number }
   | { kind: 'fixed'; worstCaseMs: number };
 
-/** Charge the queue wait against a command and return the milliseconds it may use; call inside `runSessionExclusive` after the gate and before the send. `shorten` refuses under `QUEUE_CHARGED_COMMAND_FLOOR_MS`; `fixed` refuses when the worst case fits the client timeout alone but not after the wait (a worst case already over it is not refused for waiting). */
+/** What a charged call keeps back from the client's request timeout for its answer to be built and delivered (the 250 ms stderr drain, a PNG read, the reply itself): a call whose worst case needs more of the timeout than `CLIENT_REQUEST_TIMEOUT_MS` less this is refused, because a reply that lands after the client gave up is never read. */
+export const CLIENT_RESPONSE_MARGIN_MS = 1000;
+
+/** The largest worst case a call may have and still answer inside the client's request timeout. */
+export const CLIENT_ANSWER_CEILING_MS = CLIENT_REQUEST_TIMEOUT_MS - CLIENT_RESPONSE_MARGIN_MS;
+
+/** Refusal for a `timeout` argument that fits the client's request timeout but leaves its answer no room; null when it does not. Call it with the caller's value before any prompt or send. */
+export function timeoutLeavesNoAnswerMargin(
+  toolName: string,
+  timeoutMs: number,
+): ToolResponse | null {
+  if (timeoutMs <= CLIENT_ANSWER_CEILING_MS || timeoutMs > CLIENT_REQUEST_TIMEOUT_MS) return null;
+  return createErrorResponse(
+    `${toolName} timeout ${timeoutMs} ms leaves under ${CLIENT_RESPONSE_MARGIN_MS} ms of the ${CLIENT_REQUEST_TIMEOUT_MS} ms after which a client that sent no progress token abandons the request, so the answer could arrive after it was given up on. Nothing was sent.`,
+    [
+      `Use a timeout of ${CLIENT_ANSWER_CEILING_MS} ms or less`,
+      'A longer timeout is only useful to a client that waits past 60 s for a tool call',
+    ],
+  );
+}
+
+/** Charge the queue wait against a command and return the milliseconds it may use; call inside `runSessionExclusive` after the gate and before the send. `shorten` refuses under `QUEUE_CHARGED_COMMAND_FLOOR_MS`; `fixed` refuses when the worst case fits the client timeout alone but not after the wait and the response margin (a worst case already over the client timeout is not refused: it never was promised an answer in that time). */
 export function chargeQueueWait(
   runner: GodotRunner,
   toolName: string,
@@ -144,10 +165,21 @@ export function chargeQueueWait(
 
   if (
     need.worstCaseMs <= CLIENT_REQUEST_TIMEOUT_MS &&
-    waitedMs + need.worstCaseMs > CLIENT_REQUEST_TIMEOUT_MS
+    waitedMs + need.worstCaseMs > CLIENT_ANSWER_CEILING_MS
   ) {
+    if (waitedMs === 0) {
+      return err(
+        createErrorResponse(
+          `${toolName} can take up to ${need.worstCaseMs} ms, which leaves under the ${CLIENT_RESPONSE_MARGIN_MS} ms its answer needs before the ${CLIENT_REQUEST_TIMEOUT_MS} ms after which a client that sent no progress token abandons the request. Nothing was sent.`,
+          [
+            `Shorten the call so its worst case is ${CLIENT_ANSWER_CEILING_MS} ms or less`,
+            'Or lengthen it past the client timeout, for a client that waits longer than 60 s for a tool call',
+          ],
+        ),
+      );
+    }
     return refuse(
-      `and the call can take up to ${need.worstCaseMs} ms, which together pass the ${CLIENT_REQUEST_TIMEOUT_MS} ms after which a client that sent no progress token abandons the request.`,
+      `and the call can take up to ${need.worstCaseMs} ms, which together with the ${CLIENT_RESPONSE_MARGIN_MS} ms its answer needs pass the ${CLIENT_REQUEST_TIMEOUT_MS} ms after which a client that sent no progress token abandons the request.`,
     );
   }
   return ok(need.worstCaseMs);

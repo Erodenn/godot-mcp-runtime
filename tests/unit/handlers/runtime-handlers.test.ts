@@ -4479,6 +4479,21 @@ describe('the queue wait is charged against the command it delayed', () => {
     },
   );
 
+  // Red when the margin check is dropped from either handler: a timeout of 59900 ms is sent and its answer lands after a 60 s client gave up.
+  it('run_script and take_screenshot refuse a timeout that leaves no room to answer inside the request timeout, sending nothing', async () => {
+    const EDGE_TIMEOUT_MS = 59900;
+    const fake = spawnedFake();
+    const script = await handleRunScript(
+      fake.asRunner,
+      { script: BENIGN_SCRIPT, timeout: EDGE_TIMEOUT_MS },
+      makeContext(),
+    );
+    const shot = await handleTakeScreenshot(fake.asRunner, { timeout: EDGE_TIMEOUT_MS });
+    expectErrorMatching(script, /run_script timeout 59900 ms leaves under 1000 ms/);
+    expectErrorMatching(shot, /take_screenshot timeout 59900 ms leaves under 1000 ms/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
   it.each(BAD_LIMITS)('get_debug_output refuses limit %s naming the parameter', (bad) => {
     const fake = spawnedFake();
     const result = handleGetDebugOutput(fake.asRunner, { limit: bad });

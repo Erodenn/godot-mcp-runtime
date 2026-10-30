@@ -4,7 +4,8 @@ import { spawnSync, type ChildProcess } from 'child_process';
 import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 
-const TASKKILL_TIMEOUT_MS = 5000;
+/** The longest a Windows `taskkill` blocks the event loop before the kill returns. */
+export const TASKKILL_TIMEOUT_MS = 5000;
 const TASKKILL_STATUS_NOT_FOUND = 128;
 const TASKKILL_STATUS_OK = 0;
 
