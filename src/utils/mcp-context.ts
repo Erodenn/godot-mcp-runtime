@@ -131,11 +131,6 @@ export function describeIgnoredFlagValues(env: Record<string, string | undefined
   return lines;
 }
 
-/** Normalizes an absolute project path as a `runProjectConfirmed` key: Windows paths are case-insensitive, so `D:\proj` and `d:\proj` would each elicit; lowercasing on win32 collapses them. */
-export function normalizeProjectKey(absPath: string): string {
-  return process.platform === 'win32' ? absPath.toLowerCase() : absPath;
-}
-
 /** A no-op context for tests; the elicitor always declines, so accept paths need a scripted elicitor. */
 export function createNullContext(overrides?: Partial<McpContext>): McpContext {
   return {

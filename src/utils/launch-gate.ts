@@ -10,7 +10,6 @@ import { createErrorResponse, getErrorMessage } from './error-response.js';
 import {
   ElicitationUnsupportedError,
   isElicitAccepted,
-  normalizeProjectKey,
   type ElicitorResult,
   type McpContext,
 } from './mcp-context.js';
@@ -24,6 +23,7 @@ import {
   resolveProjectPath,
   type ResolvedProjectPath,
 } from './path-validation.js';
+import { projectPathKey } from './output-parsing.js';
 import { ok, err, type Result } from './result.js';
 import { evaluateScript, type PolicyMatch } from './run-script-policy.js';
 import { collectSceneScripts } from './scene-parsing.js';
@@ -35,6 +35,8 @@ import {
 } from './launch-scene.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
+const LAUNCH_PROMPT_MESSAGE =
+  'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?';
 /** Cap on the findings a gate outcome carries before the `+N more` tail. */
 export const MAX_SCAN_WARNINGS_SHOWN = 10;
 /** Cap on scan warnings, counted apart from findings so a long list of findings never pushes an incomplete-scan notice out. */
@@ -120,10 +122,27 @@ function scanScriptFile(
   return { findings: decision.matches, warning: null, readFailed: false };
 }
 
+/** The confirmation prompt: the fixed warning, then what the pre-flight scan found (up to `MAX_SCAN_WARNINGS_SHOWN`) so the person answering sees it. */
+function confirmationPromptMessage(scanFindings: readonly ScanFinding[]): string {
+  if (scanFindings.length === 0) return LAUNCH_PROMPT_MESSAGE;
+  const shown = scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map(formatScanFinding);
+  const lines = [
+    LAUNCH_PROMPT_MESSAGE,
+    '',
+    'The pre-flight scan found:',
+    ...shown.map((f) => `- ${f}`),
+  ];
+  if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
+    lines.push(`- +${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+  }
+  return lines.join('\n');
+}
+
 /** Runs the launch gate: warnings for the caller's success payload, or the refusal to return as is. `request.confirm: false` is for a caller that launches nothing: scan and strict refusal run, but no elicitation and no confirmed-project write. */
 export async function runLaunchGate(
   request: LaunchGateRequest,
   ctx: McpContext,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<Result<LaunchGateOutcome, ToolResponse>> {
   // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set (no-op including Tier 1 and the prompt; see McpContext.disableSecurity).
   if (ctx.disableSecurity) return ok({ warnings: [] });
@@ -313,12 +332,11 @@ export async function runLaunchGate(
 
   const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
   if (ctx.strictMode && hasTier1) {
-    const top = scanFindings
-      .filter((f) => f.match.tier === 1)
-      .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
+    const tier1Findings = scanFindings.filter((f) => f.match.tier === 1);
+    const top = tier1Findings.slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
     const summary = top.map(formatScanFinding);
     const more =
-      scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
+      tier1Findings.length > top.length ? ` (+${tier1Findings.length - top.length} more)` : '';
     return err(
       createErrorResponse(
         [
@@ -378,7 +396,7 @@ export async function runLaunchGate(
   }
 
   // One elicitation per absolute projectPath per server session; skipped for `confirm: false` and for an already confirmed project.
-  const projectKey = normalizeProjectKey(absProjectPath);
+  const projectKey = projectPathKey(absProjectPath, platform);
   if (request.confirm && !ctx.sessionState.runProjectConfirmed.has(projectKey)) {
     if (ctx.disableElicitation) {
       // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION): launch with a recorded warning; the tiered scan is the real security boundary, the gate is UX.
@@ -390,8 +408,7 @@ export async function runLaunchGate(
       let elicitResult: ElicitorResult;
       try {
         elicitResult = await ctx.elicitor({
-          message:
-            'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
+          message: confirmationPromptMessage(scanFindings),
           requestedSchema: {
             type: 'object',
             properties: {

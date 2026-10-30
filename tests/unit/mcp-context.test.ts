@@ -1,5 +1,3 @@
-/** Runs only on win32 (`it.runIf`): the function branches on `process.platform`, which vitest cannot safely override mid-run. */
-
 import { describe, it, expect } from 'vitest';
 import {
   clientSupportsFormElicitation,
@@ -8,19 +6,9 @@ import {
   ElicitationUnsupportedError,
   type ElicitationClient,
   describeIgnoredFlagValues,
-  normalizeProjectKey,
   resolveDisableSecurity,
 } from '../../src/utils/mcp-context.js';
 import { CLIENT_REQUEST_TIMEOUT_MS } from '../../src/utils/godot-runner.js';
-
-describe('normalizeProjectKey', () => {
-  it.runIf(process.platform === 'win32')(
-    'lowercases the path on win32 so case-differing paths collapse to the same key',
-    () => {
-      expect(normalizeProjectKey('D:\\proj')).toBe(normalizeProjectKey('d:\\proj'));
-    },
-  );
-});
 
 // Breaks when the predicate reads any declared `elicitation` object as promptable.
 describe('clientSupportsFormElicitation', () => {

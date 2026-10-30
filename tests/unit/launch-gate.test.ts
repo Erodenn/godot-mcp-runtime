@@ -554,3 +554,106 @@ describe('runLaunchGate with a launch scene the scan does not read', () => {
     }
   });
 });
+
+describe('runLaunchGate confirmation prompt', () => {
+  const acceptingElicitor = (messages: string[]): Elicitor => {
+    return async (params) => {
+      messages.push(params.message);
+      return { action: 'accept', content: { confirm: true } };
+    };
+  };
+  const request = (dir: string) => ({
+    projectPath: dir,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+
+  it('names a seeded scan finding in the prompt message', async () => {
+    const dir = makeProjectWithAutoload('gate-prompt-finding-', TIER1_AUTOLOAD, MAIN_SCENE_SETTING);
+    writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    const messages: string[] = [];
+
+    await runLaunchGate(request(dir), makeContext({ elicit: acceptingElicitor(messages) }));
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(/auto\.gd:3 OS\.execute/);
+    expect(messages[0]).toMatch(/^Launching a Godot project executes arbitrary code/);
+  });
+
+  it('is the fixed sentence alone when the scan found nothing', async () => {
+    const dir = tmp.makeProject('gate-prompt-clean-');
+    const messages: string[] = [];
+
+    await runLaunchGate(request(dir), makeContext({ elicit: acceptingElicitor(messages) }));
+
+    expect(messages[0]).not.toMatch(/pre-flight scan found/);
+  });
+
+  it('lists at most MAX_SCAN_WARNINGS_SHOWN findings and counts the rest', async () => {
+    const extra = 3;
+    const autoload =
+      'extends Node\n' +
+      'func _ready():\n' +
+      '\tOS.execute("x")\n'.repeat(MAX_SCAN_WARNINGS_SHOWN + extra);
+    const dir = makeProjectWithAutoload('gate-prompt-cap-', autoload, MAIN_SCENE_SETTING);
+    writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+    const messages: string[] = [];
+
+    await runLaunchGate(request(dir), makeContext({ elicit: acceptingElicitor(messages) }));
+
+    expect(messages[0]?.match(/^- auto\.gd:/gm)).toHaveLength(MAX_SCAN_WARNINGS_SHOWN);
+    expect(messages[0]).toContain(`+${extra} more`);
+  });
+});
+
+describe('runLaunchGate strict refusal count', () => {
+  it('counts only the Tier 1 findings it left out of the list', async () => {
+    const autoload =
+      'extends Node\nfunc _ready():\n\tOS.execute("x")\n\tload("res://a.tscn")\n\tload("res://b.tscn")\n';
+    const dir = makeProjectWithAutoload('gate-strict-count-', autoload, MAIN_SCENE_SETTING);
+    writeFileSync(join(dir, 'main.tscn'), SCRIPTLESS_SCENE, 'utf8');
+
+    const result = await runLaunchGate(
+      { projectPath: dir, confirm: true, launchedByServer: true, toolName: 'run_project' },
+      makeContext({ strict: true }),
+    );
+
+    const text = unwrap(result).content[0]?.text ?? '';
+    expect(text).toMatch(/Strict mode: refusing to launch/);
+    expect(text).not.toMatch(/more\)/);
+  });
+});
+
+describe('runLaunchGate confirmation key', () => {
+  const request = (projectPath: string) => ({
+    projectPath,
+    confirm: true,
+    launchedByServer: true,
+    toolName: 'run_project',
+  });
+  const swapCase = (path: string): string =>
+    path.replace(/[a-z]/gi, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+
+  it('does not prompt again under another case spelling where the platform folds case', async () => {
+    const dir = tmp.makeProject('gate-key-fold-');
+    const counting = countingElicitor({ action: 'accept', content: { confirm: true } });
+    const ctx = makeContext({ elicit: counting.elicit });
+
+    await runLaunchGate(request(dir), ctx, 'win32');
+    await runLaunchGate(request(swapCase(dir)), ctx, 'win32');
+
+    expect(counting.calls()).toBe(1);
+  });
+
+  it('prompts again under another case spelling where the platform does not fold case', async () => {
+    const dir = tmp.makeProject('gate-key-nofold-');
+    const counting = countingElicitor({ action: 'accept', content: { confirm: true } });
+    const ctx = makeContext({ elicit: counting.elicit });
+
+    await runLaunchGate(request(dir), ctx, 'linux');
+    await runLaunchGate(request(swapCase(dir)), ctx, 'linux');
+
+    expect(counting.calls()).toBe(2);
+  });
+});

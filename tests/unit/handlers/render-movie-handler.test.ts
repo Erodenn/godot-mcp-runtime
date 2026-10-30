@@ -15,7 +15,7 @@ import {
 } from '../../../src/tools/render-tools.js';
 import { moviesDir } from '../../../src/utils/artifact-paths.js';
 import { BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
-import { normalizeProjectKey } from '../../../src/utils/mcp-context.js';
+import { projectPathKey } from '../../../src/utils/output-parsing.js';
 import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import type { MovieProcessResult, RunMovieProcess } from '../../../src/utils/movie-process.js';
@@ -846,7 +846,7 @@ describe('render_movie launch gate', () => {
       return { action: 'accept' as const, content: { confirm: true } };
     };
     const { dir, runner, handler } = setup();
-    const key = normalizeProjectKey(resolve(dir));
+    const key = projectPathKey(resolve(dir));
 
     const preConfirmed = makeContext({ elicit: countingElicit });
     preConfirmed.sessionState.runProjectConfirmed.add(key);
