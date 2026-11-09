@@ -801,6 +801,9 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			if type == "click_element" and is_instance_valid(target):
 				if not (target == hit_control or target.is_ancestor_of(hit_control)):
 					entry["error"] = "occluded by %s" % str(hit_control.get_path())
+		elif type == "click_element" and _has_hover_api() and is_instance_valid(target) and target.is_visible_in_tree() and fired.is_empty():
+			# No control is hovered after the settle frame: the click went nowhere. A target that fired a signal, or that its own handler freed or hid, is excluded above, so this is only a click that reached nothing.
+			entry["error"] = "no UI element received the click at the center of '%s' (a mouse_filter of ignore, or a point outside the window)" % str(target.get_path())
 
 	if type == "key" or type == "text":
 		var focus_now := _focus_path()
@@ -934,10 +937,23 @@ func _resolve_button_name(button_name: String) -> Array:
 		_:
 			return [MOUSE_BUTTON_NONE, "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name]
 
+# Input.parse_input_event takes window pixels, and a content-scale stretch makes those differ from viewport pixels. The documented contract is viewport pixels, so every positioned injection converts here, once; the transform is identity without a stretch.
+func _viewport_to_window(pos: Vector2) -> Vector2:
+	var viewport := get_viewport()
+	if viewport == null:
+		return pos
+	return viewport.get_final_transform() * pos
+
+func _viewport_to_window_delta(delta: Vector2) -> Vector2:
+	var viewport := get_viewport()
+	if viewport == null:
+		return delta
+	return viewport.get_final_transform().basis_xform(delta)
+
 func _inject_mouse_button(action: Dictionary, pressed: bool) -> void:
 	var button_result := _resolve_button_name(str(action.get("button", "left")))
 	var button_index: MouseButton = button_result[0]
-	var pos := Vector2(action.get("x", 0), action.get("y", 0))
+	var pos := _viewport_to_window(Vector2(action.get("x", 0), action.get("y", 0)))
 	var event := InputEventMouseButton.new()
 	event.button_index = button_index
 	event.pressed = pressed
@@ -948,9 +964,9 @@ func _inject_mouse_button(action: Dictionary, pressed: bool) -> void:
 
 func _inject_mouse_motion(action: Dictionary) -> void:
 	var event: InputEventMouseMotion = InputEventMouseMotion.new()
-	event.position = Vector2(action.get("x", 0), action.get("y", 0))
+	event.position = _viewport_to_window(Vector2(action.get("x", 0), action.get("y", 0)))
 	event.global_position = event.position
-	event.relative = Vector2(action.get("relative_x", 0), action.get("relative_y", 0))
+	event.relative = _viewport_to_window_delta(Vector2(action.get("relative_x", 0), action.get("relative_y", 0)))
 	Input.parse_input_event(event)
 
 # Flushed at once: a tap's release lands after the hold's physics_frame, and left buffered it would still read as pressed after the settle frame.
@@ -965,7 +981,7 @@ func _inject_action(action: Dictionary, pressed: bool) -> void:
 func _inject_click_element(action: Dictionary, target: Control, pressed: bool) -> void:
 	var button_result := _resolve_button_name(str(action.get("button", "left")))
 	var button_index: MouseButton = button_result[0]
-	var center := target.get_global_rect().get_center()
+	var center := _viewport_to_window(target.get_global_rect().get_center())
 	var event := InputEventMouseButton.new()
 	event.button_index = button_index
 	event.pressed = pressed
@@ -1154,6 +1170,10 @@ func _poll_track() -> void:
 	_track_non_finite += _non_finite_count - tally_before
 	_non_finite_count = tally_before
 	_track_samples.append({"frame": Engine.get_process_frames(), "values": values})
+
+func _has_hover_api() -> bool:
+	var viewport := get_viewport()
+	return viewport != null and viewport.has_method("gui_get_hovered_control")
 
 # Reached through call() so this script parses on 4.x builds that predate the method; callers omit `hit` when this returns null.
 func _hit_control() -> Variant:

@@ -10,6 +10,9 @@ export const authoredFixtureProjectPath = join(here, '..', 'fixtures', 'godot-au
 
 export const profilingFixtureProjectPath = join(here, '..', 'fixtures', 'godot-profiling-project');
 
+/** A 720x1280 viewport under `canvas_items` stretch in a 540x960 window; copy it before launching. */
+export const stretchFixtureProjectPath = join(here, '..', 'fixtures', 'godot-stretch-project');
+
 export const fixtureScenePath = 'main.tscn';
 
 export const fixtureSceneAbsPath = join(fixtureProjectPath, fixtureScenePath);

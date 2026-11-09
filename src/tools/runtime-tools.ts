@@ -488,12 +488,12 @@ export const runtimeToolDefinitions = [
               x: {
                 type: 'number',
                 description:
-                  '[mouse_button, mouse_motion] X position in viewport pixels (0,0 = top-left)',
+                  '[mouse_button, mouse_motion] X position in viewport pixels (0,0 = top-left), as get_ui_elements reports them; a stretch mode is converted',
               },
               y: {
                 type: 'number',
                 description:
-                  '[mouse_button, mouse_motion] Y position in viewport pixels (0,0 = top-left)',
+                  '[mouse_button, mouse_motion] Y position in viewport pixels (0,0 = top-left), as get_ui_elements reports them; a stretch mode is converted',
               },
               relative_x: {
                 type: 'number',

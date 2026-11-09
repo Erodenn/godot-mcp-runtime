@@ -1,0 +1,24 @@
+; Engine configuration file.
+; Stretch fixture for godot-mcp-runtime tests: the window override differs from the viewport.
+; See tests/fixtures/README.md for usage.
+
+config_version=5
+
+[application]
+
+config/name="godot-mcp-runtime stretch fixture"
+run/main_scene="res://stretch_probe.tscn"
+config/features=PackedStringArray("4.4")
+
+[display]
+
+window/size/viewport_width=720
+window/size/viewport_height=1280
+window/size/window_width_override=540
+window/size/window_height_override=960
+window/stretch/mode="canvas_items"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

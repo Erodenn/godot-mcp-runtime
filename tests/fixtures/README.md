@@ -32,6 +32,14 @@ Contents and what each file is for:
 - `unbind_host.tscn`, `unbind_host.gd`: a `Toggle` `CheckButton` whose `toggled` signal is connected to a root method that takes no argument, with `unbinds=1`. For the `duplicate_node` test that the copy's connection keeps its unbound argument count
 - `notes.txt`: a plain text file under `res://`, not an importable resource
 
+## `godot-stretch-project/`
+
+A 720x1280 viewport under `canvas_items` stretch with a 540x960 window override, so window pixels and viewport pixels differ by a factor of 0.75 (the shape of issue #76). Copy it to a tmp dir before launching (`stretchFixtureProjectPath` in `tests/helpers/fixture-paths.ts`). `stretch_probe.tscn` is the main scene; `stretch_probe.gd` types its exports.
+
+Contents:
+- `project.godot`: the `[display]` section with the viewport size, the window override and `window/stretch/mode="canvas_items"`
+- `stretch_probe.tscn`, `stretch_probe.gd`: a `ClickBtn` Button whose `pressed` handler increments `press_count`, and a `GhostBtn` Button with `mouse_filter` ignore (nothing can reach it, and no control lies behind it) whose handler increments `ghost_press_count`. The root `Control` ignores the mouse too
+
 ## `godot-profiling-project/`
 
 The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).
