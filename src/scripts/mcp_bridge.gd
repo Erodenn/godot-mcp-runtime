@@ -82,6 +82,7 @@ const MAX_UI_DELTA_ENTRIES := 20
 const MAX_BATCH_WAIT_MS := 600000
 # Longest text reported for one Control; a TextEdit can hold a whole document.
 const MAX_UI_TEXT_CHARS := 2000
+const MOTION_UNOBSERVED_NOTE := "no mouse motion reached the root viewport's input stage within the settle frame (an earlier node may have handled it), so position is omitted"
 # Most actions one batch may hold. The server's time budget admits fewer; this bounds the reduced entries, which the byte budget below does not.
 const MAX_BATCH_ACTIONS := 10000
 # Bytes the full entries of one input reply may add up to (a quarter of the frame limit). Past it an entry is reduced to REDUCED_ENTRY_KEYS and marked `details_dropped`,
@@ -209,6 +210,10 @@ var _shutting_down: bool = false  # One-shot: never reset, the autoload is recre
 # Cancellation token for input batches, bumped on two client-initiated events: the first frame of a connection that passes the token check, and a new batch starting. The Node client holds one socket and sends one command at a time, so either proves an older batch has no reader.
 # Not bumped at accept (anything local can open the port) and not tied to peer status (poll() may not report a destroyed peer): an abandoned batch then injects nothing further, but one parked in a long wait while the client idles may still finish.
 var _input_batch_generation: int = 0
+
+# One-shot observer for a mouse_motion action: armed just before the injection, read and disarmed right after the settle frame. `_input` sees the event after the root viewport's final transform, so the position is what the game received, not the request and not the OS cursor.
+var _motion_observer_armed: bool = false
+var _motion_observed: Variant = null
 
 # _track_active holds from track_start to track_stop; _track_watch empties once sampling ends, so _process stops polling while samples wait for track_stop.
 var _track_active: bool = false
@@ -781,6 +786,8 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 				await _tap_hold(dict, false)
 				_inject_mouse_button(dict, false)
 		"mouse_motion":
+			_motion_observed = null
+			_motion_observer_armed = true
 			_inject_mouse_motion(dict)
 		"click_element":
 			# Zero gap by design (hold_ms is rejected for this type): no frame elapses between the two events. The validity guard covers a freed target.
@@ -811,6 +818,11 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 	# A wait injects nothing and adds none, so its frame count is exactly the frames it waited.
 	if type != "wait":
 		await get_tree().process_frame
+
+	# Disarmed before anything else can raise; the armed window holds only the injection and the settle frame.
+	var motion_observed: Variant = _motion_observed
+	_motion_observer_armed = false
+	_motion_observed = null
 
 	# Every post-read on the target is validity-guarded: a handler may free the node it fired from.
 	var fired: Array = observed.duplicate()
@@ -843,11 +855,13 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 		entry["pressed"] = Input.is_action_pressed(str(dict.get("action", "")))
 
 	if type == "mouse_motion":
-		var viewport := get_viewport()
-		if viewport != null:
+		# Never the viewport's mouse position: that reads the OS cursor, which an injected event does not move.
+		if motion_observed is Vector2:
 			var position_tally_before := _non_finite_count
-			entry["position"] = _serialize_value(viewport.get_mouse_position())
+			entry["position"] = _serialize_value(motion_observed)
 			_move_tally_to_batch(batch, position_tally_before)
+		else:
+			entry["note"] = MOTION_UNOBSERVED_NOTE
 
 	if type == "text":
 		var focus_node := _focus_owner()
@@ -1029,6 +1043,10 @@ func _scroll_into_view(target: Control) -> Array:
 	if not moved.is_empty():
 		await get_tree().process_frame
 	return moved
+
+func _input(event: InputEvent) -> void:
+	if _motion_observer_armed and event is InputEventMouseMotion:
+		_motion_observed = (event as InputEventMouseMotion).position
 
 func _inject_motion_at(viewport_pos: Vector2) -> void:
 	var event := InputEventMouseMotion.new()

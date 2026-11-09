@@ -438,7 +438,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      'Send input actions in order. key, mouse_button, action: omit `pressed` to tap, set it to hold or release. click_element takes a node path or name (see get_ui_elements), not text; it scrolls a ScrollContainer target into view. Returns: projectPath, success, results[] per action: ok, hit, scrolled, signals, UI `changes`, `watch`, `errors` (spawned only); warnings leads if `errors` is partial. An invalid batch injects nothing; a runtime failure skips the rest. A covered or clipped click is refused.',
+      'Send input actions. key, mouse_button, action: omit `pressed` to tap; set it to hold or release. click_element takes a node path or name (see get_ui_elements), not text, and scrolls its target into view. Returns: projectPath, success, results[]: ok, hit, scrolled, signals, `changes`, `watch`, mouse_motion `position` (as delivered), `errors` (spawned only); warnings leads if `errors` is partial. An invalid batch injects nothing; a failure skips the rest. A covered or clipped click is refused.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -596,7 +596,10 @@ export const runtimeToolDefinitions = [
               position: {
                 type: 'object',
                 properties: { x: { type: 'number' }, y: { type: 'number' } },
+                description:
+                  '[mouse_motion] Viewport position the injected event reached the root viewport at. Omitted, with `note` saying why, when no motion event arrived.',
               },
+              note: { type: 'string', description: 'Why a field is absent from this entry.' },
               pressed: {
                 type: 'boolean',
                 description: 'Whether the input action is still held after this entry.',

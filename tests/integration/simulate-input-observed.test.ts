@@ -20,6 +20,9 @@ function p(sub: string): string {
   return `${PROBE_ROOT}/${sub}`;
 }
 
+const MOTION_X = 300;
+const MOTION_Y = 200;
+const MOTION_TOLERANCE_PX = 1;
 const MOVER_START_X = 400;
 const MOVER_WATCH = `${p('Mover')}:position:x`;
 const WAIT_FRAMES_EXACT = 10;
@@ -152,6 +155,26 @@ describe('simulate_input observed results (live bridge)', () => {
       } else {
         expect(entry.hit).toBeUndefined();
       }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'mouse_motion reports the position the event reached the viewport at, not the OS cursor',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const payload = await simulate({
+        actions: [{ type: 'mouse_motion', x: MOTION_X, y: MOTION_Y }],
+      });
+      const entry = payload.results[0]!;
+      const position = entry.position as { x: number; y: number } | undefined;
+
+      expect(entry.ok, `entry=${JSON.stringify(entry)}`).toBe(true);
+      expect(position, `entry=${JSON.stringify(entry)}`).toBeDefined();
+      expect(Math.abs(position!.x - MOTION_X)).toBeLessThanOrEqual(MOTION_TOLERANCE_PX);
+      expect(Math.abs(position!.y - MOTION_Y)).toBeLessThanOrEqual(MOTION_TOLERANCE_PX);
+      expect(entry.note).toBeUndefined();
     },
     TEST_TIMEOUT_MS,
   );

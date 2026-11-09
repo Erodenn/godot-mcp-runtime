@@ -20,6 +20,9 @@ const GHOST_BTN = `${PROBE_ROOT}/GhostBtn`;
 const BRIDGE_CMD_TIMEOUT_MS = 15000;
 const TEST_TIMEOUT_MS = 60000;
 /** The request is in viewport pixels and inside the 720x1280 viewport; its window-pixel image is a factor of 0.75 smaller. */
+const MOTION_X = 500;
+const MOTION_Y = 900;
+const MOTION_TOLERANCE_PX = 1;
 
 type InputEntry = Record<string, unknown>;
 
@@ -162,6 +165,24 @@ describe('simulate_input under canvas_items stretch (live bridge)', () => {
 
       expect(payload.success, `payload=${JSON.stringify(payload)}`).toBe(true);
       expect(await pressCounts()).toEqual({ press: 1, ghost: 0 });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'mouse_motion to viewport coordinates reports a position within 1 px of the request',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, currentProject());
+
+      const payload = await simulate({
+        actions: [{ type: 'mouse_motion', x: MOTION_X, y: MOTION_Y }],
+      });
+      const entry = payload.results[0]!;
+      const position = entry.position as { x: number; y: number } | undefined;
+
+      expect(position, `entry=${JSON.stringify(entry)}`).toBeDefined();
+      expect(Math.abs(position!.x - MOTION_X)).toBeLessThanOrEqual(MOTION_TOLERANCE_PX);
+      expect(Math.abs(position!.y - MOTION_Y)).toBeLessThanOrEqual(MOTION_TOLERANCE_PX);
     },
     TEST_TIMEOUT_MS,
   );
