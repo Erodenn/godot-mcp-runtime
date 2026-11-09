@@ -48,6 +48,8 @@ function suggestParameter(
 export interface UnknownParameterOptions {
   /** Wrong names agents are known to reach for, lower-case, to the declared name that was meant. */
   aliases?: Readonly<Record<string, string>>;
+  /** Where the keys sit when they are not the call's own, such as `moves[2]`; leads the message. */
+  scope?: string;
 }
 
 /** An error response naming every top-level key of `args` (already through `normalizeParameters`) that `allowed` lacks, the declared keys and any key that was meant; null when every key is declared. */
@@ -67,7 +69,7 @@ export function unknownParameterError(
   const hint = hints.length === 0 ? '' : `; did you mean ${hints.join(', ')}?`;
   const named = unknown.map((key) => `"${key}"`).join(', ');
   return createErrorResponse(
-    `Unknown parameter${several ? 's' : ''} ${named} (allowed: ${allowed.join(', ')})${hint}`,
+    `${options.scope === undefined ? '' : `${options.scope}: `}Unknown parameter${several ? 's' : ''} ${named} (allowed: ${allowed.join(', ')})${hint}`,
     guesses.map(({ key, meant }) =>
       meant === undefined
         ? `Check the spelling of "${key}": an unknown parameter is refused instead of ignored`

@@ -27,6 +27,7 @@ import type { Result } from '../utils/result.js';
 import { ok, err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 import { inPlaceSceneWrite, updateTouches, type MovedNode } from '../utils/scene-loss-guard.js';
+import { unknownParameterError } from '../utils/unknown-params.js';
 
 /** Result of connect_signal and disconnect_signal. `connected` is read back from the saved scene. */
 const SIGNAL_RESULT_SCHEMA = {
@@ -361,7 +362,7 @@ export const nodeToolDefinitions = [
               newParentPath: {
                 type: 'string',
                 description:
-                  'Node path of the new parent. Omit to keep the current parent and only reorder. The node keeps its name; a child of that name already there is an error.',
+                  'Node path of the new parent ("root" for the scene root; an empty string is an error). Omit to keep the current parent and only reorder. The node keeps its name; a child of that name already there is an error.',
               },
               index: {
                 type: 'integer',
@@ -726,6 +727,8 @@ export async function handleDuplicateNode(
   );
 }
 
+const MOVE_ITEM_KEYS = ['nodePath', 'newParentPath', 'index'];
+
 /** Checks the items of move_nodes `moves`: { nodePath, newParentPath?, index? } with at least one of the last two. Returns the items to forward, keys normalized once. */
 function checkMoveItems(items: unknown[]): Result<OperationParams[], ToolResponse> {
   const checked: OperationParams[] = [];
@@ -740,6 +743,8 @@ function checkMoveItems(items: unknown[]): Result<OperationParams[], ToolRespons
       );
     }
     const item = normalizeParameters(raw as OperationParams);
+    const unknownKey = unknownParameterError(item, MOVE_ITEM_KEYS, { scope: where });
+    if (unknownKey !== null) return err(unknownKey);
     if (typeof item.nodePath !== 'string' || item.nodePath === '') {
       return err(
         createErrorResponse(`${where}.nodePath is required and must be a non-empty string`, [
@@ -749,6 +754,13 @@ function checkMoveItems(items: unknown[]): Result<OperationParams[], ToolRespons
     }
     const nodePath = parseNodePath(item.nodePath, `${where}.nodePath`);
     if (!nodePath.ok) return nodePath;
+    if (item.newParentPath === '') {
+      return err(
+        createErrorResponse(`${where}.newParentPath is empty`, [
+          'Use "root" to move the node to the scene root, or omit newParentPath to only reorder',
+        ]),
+      );
+    }
     const newParentPath = parseOptionalNodePath(item, 'newParentPath');
     if (!newParentPath.ok) return newParentPath;
     const index = item.index;
