@@ -10,7 +10,7 @@ import { removeTmpDir } from '../../helpers/tmp.js';
 const HANDLER = '_on_button_pressed';
 const MAY_BE_CONNECTED = 'may be connected in code';
 const HUD_SCRIPT = `func ${HANDLER}():\n\tpass\n`;
-const DYNAMIC_WIRING = 'func _ready():\n\tconnect("pressed", Callable(self, "_on_" + name))\n';
+const DYNAMIC_WIRING = 'func _ready():\n\tconnect("pressed", Callable($Hud, "_on_" + name))\n';
 
 let project: string;
 
@@ -131,5 +131,90 @@ describe('validate signals check: orphaned_handler recognises code connections',
     const data = await validateWith([orphan(), missing]);
     expect(data.valid).toBe(false);
     expect(data.errors).toHaveLength(2);
+  });
+});
+
+describe('validate signals check: a dynamic Callable downgrades only the handlers it can reach', () => {
+  const TIMER_HANDLER = '_on_timer_timeout';
+
+  function timerOrphan(): Record<string, unknown> {
+    return { ...orphan(), method: TIMER_HANDLER, script: 'res://scripts/wiring.gd' };
+  }
+
+  function bySeverity(
+    errors: Array<Record<string, unknown>>,
+    method: string,
+  ): Record<string, unknown> | undefined {
+    return errors.find((e) => e.method === method);
+  }
+
+  it('warns for a handler the prefix fits and keeps an error for one it cannot reach', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript(
+      'wiring.gd',
+      `func _ready():\n\tconnect("pressed", Callable($Hud, "_on_button" + name))\nfunc ${TIMER_HANDLER}():\n\tpass\n`,
+    );
+    const data = await validateWith([orphan(), timerOrphan()]);
+    expect(bySeverity(data.errors, HANDLER)).toMatchObject({ severity: 'warning' });
+    const timer = bySeverity(data.errors, TIMER_HANDLER)!;
+    expect(timer).not.toHaveProperty('severity');
+    expect(data.valid).toBe(false);
+  });
+
+  it('names the script and line of the site in the warning', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript('wiring.gd', DYNAMIC_WIRING);
+    const data = await validateWith([orphan()]);
+    expect(String(data.errors[0]!.message)).toContain('res://scripts/wiring.gd line 3');
+  });
+
+  it('a format-string prefix and a literal suffix narrow the same way', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript(
+      'wiring.gd',
+      `func _ready():\n\tvar a = Callable($Hud, "_on_%s_pressed" % name)\n\tvar b = Callable($Hud, "_on_" + name + "_timeout")\nfunc ${TIMER_HANDLER}():\n\tpass\n`,
+    );
+    const data = await validateWith([orphan(), timerOrphan()]);
+    expect(data.errors.map((e) => e.severity)).toEqual(['warning', 'warning']);
+  });
+
+  it('a fully dynamic name downgrades every unconnected handler', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript(
+      'wiring.gd',
+      `func wire(method_name):\n\tconnect("pressed", Callable($Hud, method_name))\nfunc ${TIMER_HANDLER}():\n\tpass\n`,
+    );
+    const data = await validateWith([orphan(), timerOrphan()]);
+    expect(data.errors.map((e) => e.severity)).toEqual(['warning', 'warning']);
+    expect(data.valid).toBe(true);
+  });
+
+  it('a scene whose scripts hold no dynamic site keeps both errors', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript('wiring.gd', `func ${TIMER_HANDLER}():\n\tpass\n`);
+    const data = await validateWith([orphan(), timerOrphan()]);
+    expect(data.errors.map((e) => e.severity)).toEqual([undefined, undefined]);
+  });
+
+  it('a self-target dynamic site warns for its own script handler and leaves another script handler an error', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript(
+      'wiring.gd',
+      `func wire(method_name):\n\tconnect("pressed", Callable(self, method_name))\nfunc ${TIMER_HANDLER}():\n\tpass\n`,
+    );
+    const data = await validateWith([orphan(), timerOrphan()]);
+    expect(bySeverity(data.errors, TIMER_HANDLER)).toMatchObject({ severity: 'warning' });
+    expect(bySeverity(data.errors, HANDLER)).not.toHaveProperty('severity');
+    expect(data.valid).toBe(false);
+  });
+
+  it('a non-self target dynamic site still reaches a handler in another script', async () => {
+    writeScript('hud.gd', HUD_SCRIPT);
+    writeScript(
+      'wiring.gd',
+      'func wire(method_name):\n\tconnect("pressed", Callable(get_node("Hud"), method_name))\n',
+    );
+    const data = await validateWith([orphan()]);
+    expect(bySeverity(data.errors, HANDLER)).toMatchObject({ severity: 'warning' });
   });
 });

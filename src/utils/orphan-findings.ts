@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { classifyHandlerUseAcross } from './handler-references.js';
+import { classifyHandlerUseAcrossDetailed, type ScriptSource } from './handler-references.js';
 import { resolveProjectPath } from './path-validation.js';
 
 export interface SignalFinding {
@@ -11,7 +11,7 @@ export interface SignalFinding {
 export const ORPHANED_HANDLER_PROBLEM = 'orphaned_handler';
 export const WARNING_SEVERITY = 'warning';
 export const MAY_BE_CONNECTED_MESSAGE =
-  'orphaned_handler: may be connected in code (a script in this scene builds a Callable the check cannot resolve)';
+  'orphaned_handler: may be connected in code (a Callable built from a method name the check cannot resolve could reach this handler)';
 
 const SCENE_EXTENSION = '.tscn';
 /** One `[ext_resource ...]` header per line in a text scene; attribute order varies, so type and path are read independently. */
@@ -45,7 +45,7 @@ function sceneScriptPaths(projectPath: string, scenePath: string): string[] {
 
 /**
  * Re-judges each `orphaned_handler` finding against the scripts' tokens. The engine sees only scene-saved connections, so a handler wired in code looks orphaned.
- * Connected or referenced as a Callable in the node's script or any script the scene attaches: dropped. A Callable built from something unresolvable: kept, severity `warning`.
+ * Connected or referenced as a Callable in the node's script or any script the scene attaches: dropped. A dynamic Callable site that could reach the handler (its literal prefix/suffix fits, or its name is fully dynamic): kept, severity `warning`, message names the script and line. A handler no site can reach stays an error.
  * Every other finding passes through; the internal `script` field never leaves.
  */
 export function refineOrphanFindings(
@@ -70,15 +70,18 @@ export function refineOrphanFindings(
     sceneScripts ??= sceneScriptPaths(projectPath, scenePath);
     const scriptPaths = new Set(sceneScripts);
     if (typeof script === 'string' && script !== '') scriptPaths.add(script);
-    const sources: string[] = [];
+    const scripts: ScriptSource[] = [];
     for (const path of scriptPaths) {
       const source = sourceOf(path);
-      if (source !== null) sources.push(source);
+      if (source !== null) scripts.push({ path, source });
     }
-    const use = classifyHandlerUseAcross(sources, finding.method);
+    const { use, site } = classifyHandlerUseAcrossDetailed(scripts, finding.method);
     if (use === 'connected' || use === 'referenced') continue;
     if (use === 'maybe') {
-      refined.push({ ...rest, severity: WARNING_SEVERITY, message: MAY_BE_CONNECTED_MESSAGE });
+      const message = site
+        ? `${MAY_BE_CONNECTED_MESSAGE} at ${site.path ?? 'a script'} line ${site.line}`
+        : MAY_BE_CONNECTED_MESSAGE;
+      refined.push({ ...rest, severity: WARNING_SEVERITY, message });
     } else {
       refined.push(rest);
     }
