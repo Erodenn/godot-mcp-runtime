@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { declaredParameters, unknownParameterError } from '../utils/unknown-params.js';
 import {
   projectSubPathError,
   PROJECT_SUB_PATH_SOLUTIONS,
@@ -64,15 +65,6 @@ const UNEXPLAINED_FAILURE_MESSAGE =
   'The file failed to load, and the engine printed no diagnostic that names it.';
 
 const SCHEMA_NODE_KEYS: readonly string[] = ['type', 'children', 'hasProperty', 'has_property'];
-// Anything else is a misspelling that would be dropped without a word, and the call would validate nothing it was asked to.
-const VALIDATE_TOP_LEVEL_KEYS: readonly string[] = [
-  'projectPath',
-  'scriptPath',
-  'source',
-  'scenePath',
-  'checks',
-  'targets',
-];
 // Both spellings: `targets[]` items are not normalized.
 const VALIDATE_TARGET_KEYS: readonly string[] = [
   'scriptPath',
@@ -137,26 +129,31 @@ export const validateToolDefinitions = [
         targets: {
           type: 'array',
           description:
-            '[batch] Array of targets to validate in a single Godot process. Each item must have exactly one of: scriptPath, source, or scenePath. Cannot be combined with the top-level scriptPath, source, scenePath or checks.',
+            '[batch] Array of targets to validate in a single Godot process. Each item is an object with exactly one of scriptPath, source or scenePath, or a bare path string (.gd = scriptPath, .tscn or .scn = scenePath). Cannot be combined with the top-level scriptPath, source, scenePath or checks.',
           items: {
-            type: 'object',
-            properties: {
-              scriptPath: {
-                type: 'string',
-                description: 'Path to a .gd file relative to the project',
+            anyOf: [
+              { type: 'string', description: 'A path ending in .gd, .tscn or .scn' },
+              {
+                type: 'object',
+                properties: {
+                  scriptPath: {
+                    type: 'string',
+                    description: 'Path to a .gd file relative to the project',
+                  },
+                  source: { type: 'string', description: 'Inline GDScript source code' },
+                  scenePath: {
+                    type: 'string',
+                    description: 'Path to a .tscn scene file relative to the project',
+                  },
+                  checks: {
+                    type: 'array',
+                    description:
+                      '[requires scenePath] Structural / signal checks for this target, run in the same Godot process as the rest of the batch. Same shape as the top-level checks array.',
+                    items: CHECK_ITEM_SCHEMA,
+                  },
+                },
               },
-              source: { type: 'string', description: 'Inline GDScript source code' },
-              scenePath: {
-                type: 'string',
-                description: 'Path to a .tscn scene file relative to the project',
-              },
-              checks: {
-                type: 'array',
-                description:
-                  '[requires scenePath] Structural / signal checks for this target, run in the same Godot process as the rest of the batch. Same shape as the top-level checks array.',
-                items: CHECK_ITEM_SCHEMA,
-              },
-            },
+            ],
           },
         },
       },
@@ -383,7 +380,27 @@ function readBatchTarget(raw: unknown): BatchTarget | null {
   };
 }
 
+/** A bare path string stands for the object a caller would otherwise write: `.gd` is a scriptPath, `.tscn` and `.scn` a scenePath (case-insensitive). Any other value is returned as it came, for the per-target shape error. */
+const BARE_SCRIPT_EXTENSIONS: readonly string[] = ['.gd'];
+const BARE_SCENE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
+
+function expandBarePathTarget(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  const lower = raw.toLowerCase();
+  if (BARE_SCRIPT_EXTENSIONS.some((ext) => lower.endsWith(ext))) return { scriptPath: raw };
+  if (BARE_SCENE_EXTENSIONS.some((ext) => lower.endsWith(ext))) return { scenePath: raw };
+  return raw;
+}
+
 const TARGET_SHAPE_MESSAGE = 'Target must have exactly one of scriptPath, source, or scenePath';
+
+function bareTargetMessage(index: number, raw: unknown): string {
+  const shape =
+    'an object with exactly one of scriptPath, source, or scenePath, or a path string ending in .gd (scriptPath), .tscn or .scn (scenePath)';
+  return typeof raw === 'string'
+    ? `targets[${index}] "${raw}" has no .gd, .tscn or .scn extension: pass ${shape}`
+    : `targets[${index}] must be ${shape}`;
+}
 
 const MAX_NO_RESULT_DIAGNOSTICS_SHOWN = 5;
 
@@ -425,18 +442,12 @@ export async function handleValidate(
   if (!parsed.ok) return parsed;
   const { projectPath } = parsed.value;
 
-  const unknownKey = Object.keys(args).find((key) => !VALIDATE_TOP_LEVEL_KEYS.includes(key));
-  if (unknownKey !== undefined) {
-    return err(
-      createErrorResponse(
-        `Unknown parameter "${unknownKey}" (allowed: projectPath, scriptPath, source, scenePath, checks, targets)`,
-        [
-          `Check the spelling of "${unknownKey}": an unknown parameter is refused instead of ignored`,
-          'Give exactly one of scriptPath, source or scenePath, or a targets array',
-        ],
-      ),
-    );
-  }
+  // Anything undeclared is a misspelling that would be dropped without a word, and the call would validate nothing it was asked to.
+  const unknownParameter = unknownParameterError(
+    args,
+    declaredParameters(validateToolDefinitions[0]),
+  );
+  if (unknownParameter) return err(unknownParameter);
 
   // An unread `targets` would fall through to single mode and validate less than asked.
   if (args.targets !== undefined && !Array.isArray(args.targets)) {
@@ -475,7 +486,7 @@ export async function handleValidate(
       );
     }
 
-    const targets = args.targets as unknown[];
+    const targets = (args.targets as unknown[]).map(expandBarePathTarget);
     const tempFiles: string[] = [];
 
     try {
@@ -504,7 +515,7 @@ export async function handleValidate(
               {
                 message:
                   read === null
-                    ? `targets[${i}] must be an object with exactly one of scriptPath, source, or scenePath`
+                    ? bareTargetMessage(i, raw)
                     : `targets[${i}].${mistyped} must be a string`,
               },
             ],

@@ -1092,3 +1092,32 @@ describe('empty string on an optional parameter', () => {
     expect(withEmpty).not.toHaveProperty('structure');
   });
 });
+
+describe('handleSearchProject: a wrong parameter name', () => {
+  it.each(['query', 'regex', 'text', 'search', 'q', 'pattren'])(
+    'refuses "%s" and names pattern',
+    async (wrong) => {
+      const result = await handleSearchProject({
+        projectPath: fixtureProjectPath,
+        [wrong]: 'Node2D',
+      });
+      expectErrorMatching(result, new RegExp(`Unknown parameter "${wrong}"`));
+      expectErrorMatching(result, /did you mean "pattern"/);
+      expectErrorMatching(
+        result,
+        /allowed: projectPath, pattern, fileTypes, caseSensitive, maxResults/,
+      );
+    },
+  );
+
+  it('still accepts the snake_case spellings of its parameters', async () => {
+    const result = await handleSearchProject({
+      project_path: fixtureProjectPath,
+      pattern: 'Node2D',
+      case_sensitive: true,
+      file_types: ['tscn'],
+      max_results: 5,
+    });
+    expect(hasError(result)).toBe(false);
+  });
+});

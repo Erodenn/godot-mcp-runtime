@@ -1036,3 +1036,94 @@ describe('validate accepts every project path spelling', () => {
     ]);
   });
 });
+
+describe('handleValidate: bare path strings as targets', () => {
+  it('reads a .gd string as scriptPath and a .tscn or .scn string as scenePath', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          { target: 'placeholder.gd', valid: true, errors: [] },
+          { target: fixtureScenePath, valid: true, errors: [] },
+        ],
+      }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: ['placeholder.gd', fixtureScenePath],
+    });
+    expect(hasError(result)).toBe(false);
+    expect(fake.calls[0].params).toEqual({
+      targets: [{ script_path: 'placeholder.gd' }, { scene_path: fixtureScenePath }],
+    });
+  });
+
+  it('matches the extension without regard to case and accepts .scn', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'x', valid: true, errors: [] }] }),
+    });
+    await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: ['levels/x.SCN'],
+    });
+    expect(fake.calls[0].params).toEqual({ targets: [{ scene_path: 'levels/x.SCN' }] });
+  });
+
+  it('keeps the object form alongside strings', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          { target: 'a', valid: true, errors: [] },
+          { target: 'b', valid: true, errors: [] },
+        ],
+      }),
+    });
+    await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: ['placeholder.gd', { scenePath: fixtureScenePath }],
+    });
+    expect(fake.calls[0].params).toEqual({
+      targets: [{ script_path: 'placeholder.gd' }, { scene_path: fixtureScenePath }],
+    });
+  });
+
+  it('reports a string with no script or scene extension as its own failure that names the accepted forms', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ results: [{ target: 'placeholder.gd', valid: true, errors: [] }] }),
+    });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: ['placeholder.gd', 'notes.txt'],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{
+      valid: boolean;
+      errors: Array<{ message: string }>;
+    }>;
+    expect(results[0]?.valid).toBe(true);
+    expect(results[1]?.valid).toBe(false);
+    expect(results[1]?.errors[0]?.message).toMatch(
+      /targets\[1\].*"notes\.txt".*\.gd.*\.tscn.*scriptPath.*scenePath/,
+    );
+    expect(fake.calls[0].params).toEqual({ targets: [{ script_path: 'placeholder.gd' }] });
+  });
+
+  it('names the target shape when a target is neither a string nor an object', async () => {
+    const fake = createFakeRunner({ stdout: '{}' });
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      targets: [7],
+    });
+    const payload = expectMatchesOutputSchema('validate', result);
+    const results = payload.results as Array<{ errors: Array<{ message: string }> }>;
+    expect(results[0]?.errors[0]?.message).toMatch(/path string|\{ scriptPath/);
+  });
+
+  it('refuses a misspelled top-level key and names the one meant', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: projectCopyPath,
+      scenepath: fixtureScenePath,
+    });
+    expectErrorMatching(result, /Unknown parameter "scenepath".*did you mean "scenePath"/);
+  });
+});

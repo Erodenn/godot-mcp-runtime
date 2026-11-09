@@ -4,6 +4,7 @@ import type { GodotRunner, RuntimeSessionInfo } from '../utils/godot-runner.js';
 import { BRIDGE_PING_TIMEOUT_MS } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
+import { declaredParameters, unknownParameterError } from '../utils/unknown-params.js';
 import {
   validatePath,
   projectGodotPath,
@@ -216,13 +217,17 @@ export const projectToolDefinitions = [
   {
     name: 'search_project',
     description:
-      'Plain-text (substring) search across project files. Use to find references, callers or signatures. Default fileTypes is ["gd","tscn","cs","gdshader"]; caseSensitive default false; maxResults integer >= 1, default 100. Skips hidden entries and the .mcp directory. Returns: matches[] (project-relative file, 1-indexed lineNumber, line text), truncated, filesSearched and fileTypes. warnings leads when no file had a searched extension or a path could not be read. Errors if pattern holds a line break.',
+      'Plain-text (substring, not regex) search across project files; the text goes in `pattern`. Default fileTypes ["gd","tscn","cs","gdshader"]; caseSensitive false; maxResults integer >= 1, default 100. Skips hidden entries and .mcp. Returns: matches[] (project-relative file, 1-indexed lineNumber, line), truncated, filesSearched, fileTypes. warnings leads when no file had a searched extension or a path was unreadable. Errors if pattern holds a line break or a parameter is undeclared.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Path to the Godot project directory' },
-        pattern: { type: 'string', description: 'Plain-text string to search for' },
+        pattern: {
+          type: 'string',
+          description:
+            'Plain-text string to search for (required; there is no query or regex parameter)',
+        },
         fileTypes: {
           type: 'array',
           items: { type: 'string' },
@@ -1007,10 +1012,28 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Hand
   }
 }
 
+/** Names agents have reached for in place of `pattern`. */
+const SEARCH_PROJECT_ALIASES = {
+  query: 'pattern',
+  regex: 'pattern',
+  text: 'pattern',
+  search: 'pattern',
+  term: 'pattern',
+  needle: 'pattern',
+  q: 'pattern',
+  string: 'pattern',
+} as const;
+
 export async function handleSearchProject(args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
   const parsed = parseProjectArgs(args);
   if (!parsed.ok) return parsed;
+
+  const searchDefinition = projectToolDefinitions.find((d) => d.name === 'search_project')!;
+  const unknownParameter = unknownParameterError(args, declaredParameters(searchDefinition), {
+    aliases: SEARCH_PROJECT_ALIASES,
+  });
+  if (unknownParameter) return err(unknownParameter);
 
   const pattern = requireString(args, 'pattern');
   if (!pattern.ok) return pattern;
