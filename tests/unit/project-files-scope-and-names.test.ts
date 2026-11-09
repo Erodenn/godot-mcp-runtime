@@ -113,6 +113,27 @@ describe('get_project_files subfolder', () => {
     ) as unknown as Node;
     expect(payload.path).toBe('linked');
   });
+
+  // Red when the walk below a named link starts following links: the nested one would list its children.
+  it('lists a named linked folder but reports a link below it without following it', async () => {
+    const dir = makeTree();
+    const outside = tmp.make('mcp-outside-');
+    const inner = tmp.make('mcp-inner-');
+    put(inner, 'secret.gd');
+    put(outside, 'x.gd');
+    try {
+      symlinkSync(inner, join(outside, 'nested'), 'junction');
+      symlinkSync(outside, join(dir, 'linked'), 'junction');
+    } catch {
+      return;
+    }
+    const payload = expectMatchesOutputSchema(
+      'get_project_files',
+      await handleGetProjectFiles({ projectPath: dir, subfolder: 'linked' }),
+    ) as unknown as Node;
+    expect(payload.children?.find((c) => c.name === 'nested')).toMatchObject({ type: 'link' });
+    expect(paths(payload)).not.toContain('linked/nested/secret.gd');
+  });
 });
 
 describe('get_project_files extension filter pruning', () => {

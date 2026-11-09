@@ -1,4 +1,4 @@
-/** The scene a launch runs when the caller names none: `application/run/main_scene` from project.godot under whichever section split the file spells it. */
+/** The launch settings of project.godot under whichever section split the file spells them: `application/run/main_scene` (the scene a launch runs when the caller names none), its feature overrides, and the variants of any other launch setting. */
 
 import {
   closeSync,
@@ -11,11 +11,16 @@ import {
 } from 'fs';
 import { join } from 'path';
 import { projectGodotPath, resolveProjectPath } from './path-validation.js';
-import { findSetting, scanProjectFile } from './project-godot.js';
+import {
+  findSettingByPath,
+  findSettingWithOverrides,
+  MAIN_SCENE_SETTING,
+  scanProjectFile,
+  type ProjectFileScan,
+  type ProjectStatement,
+} from './project-godot.js';
 import { scanTscn } from './scene-parsing.js';
 
-const APPLICATION_SECTION = 'application';
-const MAIN_SCENE_KEY = 'run/main_scene';
 const UID_SCHEME = 'uid://';
 const UID_ATTRIBUTE = 'uid';
 const SCENE_EXTENSION = '.tscn';
@@ -34,8 +39,7 @@ function isFileNotFound(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
-/** Reads `application/run/main_scene`: the value when a non-empty string (a bare value in a hand-edited file is tolerated), else null; the last assignment under any spelling wins. Does NOT verify the file exists. */
-export function readMainSceneFromProject(projectDir: string): string | null {
+function readProjectScan(projectDir: string): ProjectFileScan | null {
   let content: string;
   try {
     content = readFileSync(projectGodotPath(projectDir), 'utf8');
@@ -43,9 +47,43 @@ export function readMainSceneFromProject(projectDir: string): string | null {
     if (isFileNotFound(err)) return null;
     throw err;
   }
-  const statement = findSetting(scanProjectFile(content), APPLICATION_SECTION, MAIN_SCENE_KEY);
+  return scanProjectFile(content);
+}
+
+/** A launch setting's value when a non-empty string (a bare value in a hand-edited file is tolerated), else null. */
+function launchSettingValue(statement: ProjectStatement | undefined): string | null {
   if (statement === undefined || statement.unterminated) return null;
   return typeof statement.value === 'string' && statement.value !== '' ? statement.value : null;
+}
+
+/** Reads `application/run/main_scene`: the value when a non-empty string, else null; the last assignment under any spelling wins. Does NOT verify the file exists. */
+export function readMainSceneFromProject(projectDir: string): string | null {
+  const scan = readProjectScan(projectDir);
+  return scan === null ? null : launchSettingValue(findSettingByPath(scan, MAIN_SCENE_SETTING));
+}
+
+export interface LaunchSettingValue {
+  /** The setting path as the file assigns it, e.g. `application/run/main_scene.windows`. */
+  setting: string;
+  value: string;
+}
+
+/** The non-empty string values the engine may read for `basePath` on some platform: each feature override (`basePath.<tag>`), after the setting itself when `includeBase`. Every override counts, not only the current platform's, since any may be the one a launch reads. */
+export function readSettingVariants(
+  projectDir: string,
+  basePath: string,
+  includeBase: boolean,
+): LaunchSettingValue[] {
+  const scan = readProjectScan(projectDir);
+  if (scan === null) return [];
+  const { base, overrides } = findSettingWithOverrides(scan, basePath);
+  const variants: LaunchSettingValue[] = [];
+  for (const statement of includeBase ? [base, ...overrides] : overrides) {
+    const value = launchSettingValue(statement);
+    if (statement !== undefined && value !== null)
+      variants.push({ setting: statement.path, value });
+  }
+  return variants;
 }
 
 export function isUidReference(value: string): boolean {
@@ -169,8 +207,15 @@ export function resolveLaunchScene(
   maxFiles: number = UID_SCAN_MAX_FILES,
 ): LaunchScene {
   const main = readMainSceneFromProject(projectDir);
-  if (main === null) return { kind: 'none' };
+  return main === null ? { kind: 'none' } : resolveSceneSetting(projectDir, main, maxFiles);
+}
 
+/** The files a main-scene value (a path or a `uid://`) names, as `resolveLaunchScene` resolves `run/main_scene`; used for its feature overrides too. */
+export function resolveSceneSetting(
+  projectDir: string,
+  main: string,
+  maxFiles: number = UID_SCAN_MAX_FILES,
+): Exclude<LaunchScene, { kind: 'none' }> {
   if (isUidReference(main)) {
     const { paths, complete } = findFilesByUid(projectDir, main, maxFiles);
     if (paths.length === 0) {

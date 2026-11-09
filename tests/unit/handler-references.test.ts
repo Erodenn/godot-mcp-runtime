@@ -1,12 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
-  classifyHandlerUse,
-  classifyHandlerUseAcross,
   classifyHandlerUseAcrossDetailed,
   classifyHandlerUseDetailed,
 } from '../../src/utils/handler-references.js';
 
 const HANDLER = '_on_button_pressed';
+
+function classifyHandlerUse(source: string, method: string) {
+  return classifyHandlerUseDetailed(source, method).use;
+}
+
+function classifyHandlerUseAcross(sources: readonly string[], method: string) {
+  const scripts = sources.map((source, index) => ({ path: String(index), source }));
+  return classifyHandlerUseAcrossDetailed(scripts, method).use;
+}
+
 const DECLARATION = `func ${HANDLER}():\n\tpass\n`;
 
 function script(body: string): string {

@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { classifyHandlerUseAcrossDetailed, type ScriptSource } from './handler-references.js';
 import { resolveProjectPath } from './path-validation.js';
+import { extractSceneScripts } from './scene-parsing.js';
 
 export interface SignalFinding {
   check?: string;
@@ -8,16 +9,13 @@ export interface SignalFinding {
   [key: string]: unknown;
 }
 
+// KEEP IN SYNC: ORPHANED_HANDLER_PROBLEM in src/scripts/godot_operations.gd
 export const ORPHANED_HANDLER_PROBLEM = 'orphaned_handler';
 export const WARNING_SEVERITY = 'warning';
 export const MAY_BE_CONNECTED_MESSAGE =
   'orphaned_handler: may be connected in code (a Callable built from a method name the check cannot resolve could reach this handler)';
 
 const SCENE_EXTENSION = '.tscn';
-/** One `[ext_resource ...]` header per line in a text scene; attribute order varies, so type and path are read independently. */
-const EXT_RESOURCE_LINE_RE = /^\[ext_resource\b[^\]]*\]/gm;
-const SCRIPT_TYPE_RE = /\btype="Script"/;
-const RES_PATH_RE = /\bpath="(res:\/\/[^"]+)"/;
 
 function readProjectFile(projectPath: string, userPath: string): string | null {
   const resolved = resolveProjectPath(projectPath, userPath, 'read');
@@ -29,25 +27,20 @@ function readProjectFile(projectPath: string, userPath: string): string | null {
   }
 }
 
-/** The scripts a text scene attaches (or inherits through an instanced scene's own resources), as res:// paths. A binary scene yields none. */
+/** The `.gd` scripts the scene's own text references, as res:// paths; none from a binary scene or an instanced scene's resources. */
 function sceneScriptPaths(projectPath: string, scenePath: string): string[] {
   if (!scenePath.toLowerCase().endsWith(SCENE_EXTENSION)) return [];
-  const text = readProjectFile(projectPath, scenePath);
-  if (text === null) return [];
+  const scene = resolveProjectPath(projectPath, scenePath, 'read');
+  if (!scene) return [];
   const paths: string[] = [];
-  for (const header of text.match(EXT_RESOURCE_LINE_RE) ?? []) {
-    if (!SCRIPT_TYPE_RE.test(header)) continue;
-    const path = RES_PATH_RE.exec(header)?.[1];
-    if (path) paths.push(path);
+  for (const abs of extractSceneScripts(scene.absPath, projectPath)) {
+    const script = resolveProjectPath(projectPath, abs, 'read');
+    if (script) paths.push(script.resPath);
   }
   return paths;
 }
 
-/**
- * Re-judges each `orphaned_handler` finding against the scripts' tokens. The engine sees only scene-saved connections, so a handler wired in code looks orphaned.
- * Connected or referenced as a Callable in the node's script or any script the scene attaches: dropped. A dynamic Callable site that could reach the handler (its literal prefix/suffix fits, or its name is fully dynamic): kept, severity `warning`, message names the script and line. A handler no site can reach stays an error.
- * Every other finding passes through; the internal `script` field never leaves.
- */
+/** Re-judges each `orphaned_handler` finding against the tokens of the node's script and the scripts the scene references: a code connection or Callable drops it, a reachable dynamic Callable lowers it to a warning, anything else stays; the internal `script` field never leaves. */
 export function refineOrphanFindings(
   findings: readonly SignalFinding[],
   projectPath: string,

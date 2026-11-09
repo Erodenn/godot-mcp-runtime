@@ -347,7 +347,7 @@ export const projectToolDefinitions = [
   {
     name: 'set_project_setting',
     description:
-      'Set one project.godot setting without launching Godot. Pass value (JSON string, number, boolean, array or object, converted to the Godot literal) or literal (raw Godot text, e.g. "Vector2i(1280, 720)" or "2.0"), not both. Rewrites the last assignment in place or adds the key, creating the section if missing; other lines stay byte for byte. Refuses autoload/* (use the autoload tools). Returns: { section, key, value read back, created, sectionCreated, previous? }.',
+      'Set one project.godot setting without launching Godot. Pass value (JSON, converted to a Godot literal) or literal (raw Godot text, e.g. "Vector2i(1280, 720)"), not both. Rewrites the last assignment in place or adds key/section; other lines stay byte for byte. Refuses keys that select code or the launch scene: autoload/*, editor_plugins/*, application/run/main_scene and main_loop_type with their .tag overrides. Returns: { section, key, value read back, created, sectionCreated, previous? }.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -370,7 +370,7 @@ export const projectToolDefinitions = [
         literal: {
           type: 'string',
           description:
-            'Raw Godot literal written as is, on one line, with no trailing comment: "str", 1.5, true, null, [1, 2], {"a": 1} or a constructor such as Vector2i(1, 2) or PackedStringArray("a"). Checked by reading it back as one complete value.',
+            'Raw Godot literal written as is, on one line, with no trailing comment: "str", 1.5, true, null, [1, 2], {"a": 1} or a constructor such as Vector2i(1, 2) or PackedStringArray("a"). Checked by reading it back as one complete value. Resource(...), Object(...), ExtResource(...) and SubResource(...) are refused: Godot may then fail to load project.godot.',
         },
       },
       required: ['projectPath', 'section', 'key'],
@@ -1213,8 +1213,8 @@ export async function handleSetProjectSetting(args: OperationParams): Promise<Ha
   const targetError = settingTargetError(section.value, key.value);
   if (targetError !== null) {
     return err(
-      createErrorResponse(`Cannot set ${section.value}/${key.value}: ${targetError}`, [
-        'Use get_project_settings to see the sections and keys that exist',
+      createErrorResponse(`Cannot set ${section.value}/${key.value}: ${targetError.message}`, [
+        targetError.solution,
       ]),
     );
   }

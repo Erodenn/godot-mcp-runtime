@@ -503,6 +503,25 @@ export function findSettingByPath(
   return undefined;
 }
 
+/** Separates a setting from the feature tags of an override of it (`application/run/main_scene.windows`); the engine reads the part before the first one as the setting. */
+export const FEATURE_OVERRIDE_SEPARATOR = '.';
+
+/** The assignment the engine keeps for `basePath` and for each feature override of it (`basePath.<tag>`, `basePath.<tag>.<tag>`), each under its own path, in file order. */
+export function findSettingWithOverrides(
+  scan: ProjectFileScan,
+  basePath: string,
+): { base: ProjectStatement | undefined; overrides: ProjectStatement[] } {
+  const overridePrefix = `${basePath}${FEATURE_OVERRIDE_SEPARATOR}`;
+  const winners = new Map<string, ProjectStatement>();
+  for (const statement of scan.statements) {
+    if (statement.path.startsWith(overridePrefix)) winners.set(statement.path, statement);
+  }
+  return {
+    base: findSettingByPath(scan, basePath),
+    overrides: [...winners.values()].sort((a, b) => a.startLine - b.startLine),
+  };
+}
+
 /** The statement that sets `key` of `section`, or undefined; found by the setting's full path, so another section split or the top level also matches. */
 export function findSetting(
   scan: ProjectFileScan,
@@ -549,8 +568,91 @@ export function readProjectSettings(content: string): ParsedSettings {
 
 /** Letters, digits, `_`, `.` and `-` in each `/`-separated part: the unquoted form Godot writes for a section name or a setting key, so no quoting rule has to be applied on write. */
 const SETTING_NAME_REGEX = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/;
-/** Leads the setting path of every autoload; those settings belong to the autoload tools. */
-const AUTOLOAD_SETTING_PREFIX = 'autoload/';
+/** The setting naming the scene a launch runs. */
+export const MAIN_SCENE_SETTING = 'application/run/main_scene';
+/** The setting naming the class the engine instantiates as its main loop. */
+export const MAIN_LOOP_TYPE_SETTING = 'application/run/main_loop_type';
+
+interface RefusedSetting {
+  /** A setting path, or with `prefix` the start of every path refused. */
+  path: string;
+  /** True: every setting whose path starts with `path`. False: `path` and each feature override of it. */
+  prefix: boolean;
+  why: string;
+  solution: string;
+}
+
+/** Settings `applySetting` never writes: each selects code or the scene that runs on launch, and a write through this tool is reviewed by no gate. Matched case-exactly, as the engine keys settings. */
+const REFUSED_SETTINGS: readonly RefusedSetting[] = [
+  {
+    path: 'autoload/',
+    prefix: true,
+    why: 'is an autoload entry, which add_autoload, update_autoload and remove_autoload manage',
+    solution: 'Use add_autoload, update_autoload or remove_autoload',
+  },
+  {
+    path: 'editor_plugins/',
+    prefix: true,
+    why: 'selects the editor plugins whose scripts run when the editor opens',
+    solution: 'Enable or disable the plugin in the Godot editor (Project Settings, Plugins)',
+  },
+  {
+    path: MAIN_SCENE_SETTING,
+    prefix: false,
+    why: 'selects the scene that runs on launch',
+    solution:
+      'Pass scene to run_project or render_movie to launch another scene, or set the main scene in the Godot editor',
+  },
+  {
+    path: MAIN_LOOP_TYPE_SETTING,
+    prefix: false,
+    why: 'selects the script class that runs as the main loop on launch',
+    solution: 'Set the main loop type in the Godot editor',
+  },
+];
+
+function refusedSettingFor(path: string): RefusedSetting | undefined {
+  return REFUSED_SETTINGS.find((rule) =>
+    rule.prefix
+      ? path.startsWith(rule.path)
+      : path === rule.path || path.startsWith(`${rule.path}${FEATURE_OVERRIDE_SEPARATOR}`),
+  );
+}
+
+/** Constructors the engine cannot read while it loads `project.godot` (no resource loader exists yet), so a file holding one does not load. Matched case-exactly, as the engine's parser does. */
+const UNLOADABLE_CONSTRUCTORS: ReadonlySet<string> = new Set([
+  'Resource',
+  'Object',
+  'ExtResource',
+  'SubResource',
+]);
+
+/** The first constructor in `UNLOADABLE_CONSTRUCTORS` called anywhere in `text` outside a string, nested or not, or null. */
+function unloadableConstructorIn(text: string): string | null {
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === QUOTE) {
+      const end = stringEnd(text, i);
+      if (end === -1) return null;
+      i = end;
+      continue;
+    }
+    if (!IDENTIFIER_START_REGEX.test(ch) || (i > 0 && IDENTIFIER_PART_REGEX.test(text[i - 1]!))) {
+      i++;
+      continue;
+    }
+    let end = i + 1;
+    while (end < text.length && IDENTIFIER_PART_REGEX.test(text[end]!)) end++;
+    const word = text.slice(i, end);
+    let next = end;
+    while (text[next] === ' ' || text[next] === '\t') next++;
+    if (text[next] === CONSTRUCTOR_OPEN && UNLOADABLE_CONSTRUCTORS.has(word)) return word;
+    i = end;
+  }
+  return null;
+}
+
 const PROBE_SECTION_HEADER = '[probe]';
 const PROBE_KEY = 'probe';
 const CARRIAGE_RETURN = '\r';
@@ -559,19 +661,40 @@ const CRLF = '\r\n';
 const LINE_WITH_ENDING_REGEX = /[^\n]*\n|[^\n]+$/g;
 const LINE_ENDING_REGEX = /\r?\n$/;
 
+export interface SettingTargetError {
+  message: string;
+  solution: string;
+}
+
+const SETTING_NAME_SOLUTION = 'Use get_project_settings to see the sections and keys that exist';
+
 /** Why `section` and `key` cannot be written by `applySetting`, or null when they can. */
-export function settingTargetError(section: string, key: string): string | null {
+export function settingTargetError(section: string, key: string): SettingTargetError | null {
   if (section === GLOBAL_SECTION) {
-    return `section "${GLOBAL_SECTION}" stands for keys before any header and cannot be written`;
+    return {
+      message: `section "${GLOBAL_SECTION}" stands for keys before any header and cannot be written`,
+      solution: SETTING_NAME_SOLUTION,
+    };
   }
   if (!SETTING_NAME_REGEX.test(section)) {
-    return `section "${section}" must be made of letters, digits, _ . - and / (no spaces, quotes or brackets)`;
+    return {
+      message: `section "${section}" must be made of letters, digits, _ . - and / (no spaces, quotes or brackets)`,
+      solution: SETTING_NAME_SOLUTION,
+    };
   }
   if (!SETTING_NAME_REGEX.test(key)) {
-    return `key "${key}" must be made of letters, digits, _ . - and / (no spaces, quotes or =)`;
+    return {
+      message: `key "${key}" must be made of letters, digits, _ . - and / (no spaces, quotes or =)`,
+      solution: SETTING_NAME_SOLUTION,
+    };
   }
-  if (settingPath(section, key).startsWith(AUTOLOAD_SETTING_PREFIX)) {
-    return `"${settingPath(section, key)}" is an autoload entry: use add_autoload, update_autoload or remove_autoload`;
+  const path = settingPath(section, key);
+  const refused = refusedSettingFor(path);
+  if (refused !== undefined) {
+    return {
+      message: `"${path}" ${refused.why}. This tool does not write a setting that selects code or the launch scene: the write itself would pass no security check`,
+      solution: refused.solution,
+    };
   }
   return null;
 }
@@ -604,12 +727,16 @@ export function godotLiteralFromJson(value: unknown): string {
   );
 }
 
-/** Why `literal` is not one complete single-line Godot value that reads back as written, or null when it is. Decided by reading it with `scanProjectFile` as the value of a probe statement. */
+/** Why `literal` is not one complete single-line Godot value that reads back as written and that the engine can load, or null when it is. Decided by reading it with `scanProjectFile` as the value of a probe statement. */
 export function checkSettingLiteral(literal: string): string | null {
   const text = literal.trim();
   if (text === '') return 'literal is empty';
   if (text.includes(LINE_FEED) || text.includes(CARRIAGE_RETURN)) {
     return 'literal must be on one line';
+  }
+  const constructor = unloadableConstructorIn(text);
+  if (constructor !== null) {
+    return `literal holds a ${constructor}(...) constructor, which is not written: Godot reads project.godot before any resource loader exists, and a file holding a Resource(...) or Object(...) value can fail to load, leaving the project unloadable: ${text}`;
   }
   const scan = scanProjectFile(
     `${PROBE_SECTION_HEADER}${LINE_FEED}${PROBE_KEY}=${text}${LINE_FEED}`,

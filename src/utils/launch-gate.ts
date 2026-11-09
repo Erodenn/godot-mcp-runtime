@@ -1,7 +1,7 @@
 /** Pre-flight security scan and once-per-project confirmation that run before this server starts or injects into a project; free of `GodotRunner` and `src/tools/` so any launcher can call it. */
 
 import { existsSync, readFileSync } from 'fs';
-import { relative, resolve } from 'path';
+import { isAbsolute, join, relative, resolve } from 'path';
 import type { ToolResponse } from '../mcp.types.js';
 import { isServerOwnedBridgePath } from './artifact-paths.js';
 import { parseAutoloadSection } from './autoload-ini.js';
@@ -30,9 +30,13 @@ import { collectSceneScripts } from './scene-parsing.js';
 import {
   findFilesByUid,
   isUidReference,
+  readSettingVariants,
   resolveLaunchScene,
+  resolveSceneSetting,
   UID_SEARCH_CUT_SHORT_CAUSE,
 } from './launch-scene.js';
+import { MAIN_LOOP_TYPE_SETTING, MAIN_SCENE_SETTING } from './project-godot.js';
+import { scanClassNames, type ClassNameMap } from './class-name-scan.js';
 
 const MAX_STRICT_REJECT_LINES_SHOWN = 5;
 const LAUNCH_PROMPT_MESSAGE =
@@ -45,6 +49,9 @@ const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
 const TEXT_RESOURCE_EXTENSION = '.tres';
 const IMPORT_FILE_EXTENSION = '.import';
+const RES_SCHEME = 'res://';
+/** Engine main loop classes, which run no project code. */
+const ENGINE_MAIN_LOOP_TYPES: ReadonlySet<string> = new Set(['SceneTree', 'MainLoop']);
 /** Why a reference the engine would still try to load was not scanned. */
 const UNRESOLVED_PATH_CAUSE = 'the path could not be resolved to a file inside the project';
 /** What a `project.godot` with lines Godot did not write means for the scan. */
@@ -123,18 +130,29 @@ function scanScriptFile(
   return { findings: decision.matches, warning: null, readFailed: false };
 }
 
-/** The confirmation prompt: the fixed warning, then what the pre-flight scan found (up to `MAX_SCAN_WARNINGS_SHOWN`) so the person answering sees it. */
-function confirmationPromptMessage(scanFindings: readonly ScanFinding[]): string {
-  if (scanFindings.length === 0) return LAUNCH_PROMPT_MESSAGE;
-  const shown = scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map(formatScanFinding);
-  const lines = [
-    LAUNCH_PROMPT_MESSAGE,
-    '',
-    'The pre-flight scan found:',
-    ...shown.map((f) => `- ${f}`),
-  ];
-  if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
-    lines.push(`- +${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+/** The confirmation prompt: the fixed warning, then the findings and the not-scanned notices, each capped as in the payload, so the person answering sees what was not checked. */
+function confirmationPromptMessage(
+  scanFindings: readonly ScanFinding[],
+  scanWarnings: readonly string[],
+): string {
+  const lines = [LAUNCH_PROMPT_MESSAGE];
+  if (scanFindings.length > 0) {
+    lines.push('', 'The pre-flight scan found:');
+    lines.push(
+      ...scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map((f) => `- ${formatScanFinding(f)}`),
+    );
+    if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
+      lines.push(`- +${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+    }
+  }
+  if (scanWarnings.length > 0) {
+    lines.push('', 'The pre-flight scan was incomplete:');
+    lines.push(...scanWarnings.slice(0, MAX_SCAN_INCOMPLETE_SHOWN).map((w) => `- ${w}`));
+    if (scanWarnings.length > MAX_SCAN_INCOMPLETE_SHOWN) {
+      lines.push(
+        `- +${scanWarnings.length - MAX_SCAN_INCOMPLETE_SHOWN} more files were not scanned`,
+      );
+    }
   }
   return lines.join('\n');
 }
@@ -148,7 +166,7 @@ export async function runLaunchGate(
   // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set (no-op including Tier 1 and the prompt; see McpContext.disableSecurity).
   if (ctx.disableSecurity) return ok({ warnings: [] });
 
-  // Pre-flight scan: autoloads plus the launch scene's scripts, recursing into instanced scenes and inline GDScript sub-resources.
+  // Pre-flight scan: autoloads, the main loop script and the launch scene's scripts, recursing into instanced scenes and inline GDScript sub-resources.
   // Findings and scan warnings both flow into the response warnings; strict mode + any Tier 1 finding rejects before launch.
   const scanWarnings: string[] = [];
   // What the caller is told about the confirmation step, kept apart from scan warnings so their cap cannot cut it.
@@ -219,17 +237,19 @@ export async function runLaunchGate(
   };
 
   // An explicit scene takes precedence over the main scene; `resolveLaunchScene` may answer with several files (one uid, several carriers) or none.
+  // With no scene argument, every `run/main_scene.<tag>` override is scanned too: any of them may be the one the engine reads.
   const scanLaunchScene = (): void => {
-    const scenes: string[] = [];
+    const scenes = new Set<string>();
     if (request.scene) {
       if (isUnscannedLaunchScenePath(request.scene.relPath)) {
         failUnscannedLaunchScene(request.scene.relPath);
         return;
       }
-      scenes.push(request.scene.absPath);
+      scenes.add(request.scene.absPath);
     } else {
+      const overrides = readSettingVariants(absProjectPath, MAIN_SCENE_SETTING, false);
       const launch = resolveLaunchScene(absProjectPath);
-      if (launch.kind === 'none') {
+      if (launch.kind === 'none' && overrides.length === 0) {
         failLaunchScene(
           'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
           true,
@@ -240,10 +260,21 @@ export async function runLaunchGate(
         failLaunchScene(
           `Launch scene ${launch.value} could not be resolved to a file (${launch.reason}); scene-script scan skipped.`,
         );
-        return;
+      } else if (launch.kind === 'scenes') {
+        scanWarnings.push(...launch.notes);
+        for (const path of launch.absPaths) scenes.add(path);
       }
-      scanWarnings.push(...launch.notes);
-      scenes.push(...launch.absPaths);
+      for (const override of overrides) {
+        const resolved = resolveSceneSetting(absProjectPath, override.value);
+        if (resolved.kind === 'unresolved') {
+          failLaunchScene(
+            `Launch scene ${override.value} (${override.setting}) could not be resolved to a file (${resolved.reason}); scene-script scan skipped.`,
+          );
+          continue;
+        }
+        scanWarnings.push(...resolved.notes);
+        for (const path of resolved.absPaths) scenes.add(path);
+      }
     }
     for (const scenePath of scenes) {
       if (!existsSync(scenePath)) {
@@ -252,6 +283,53 @@ export async function runLaunchGate(
         );
       } else {
         scanScene(scenePath);
+      }
+    }
+  };
+
+  // `application/run/main_loop_type` and its overrides name a class the engine instantiates at start, whatever scene runs.
+  const mainLoopFailures: string[] = [];
+  const failMainLoop = (message: string): void => {
+    scanWarnings.push(message);
+    mainLoopFailures.push(message);
+  };
+  let classNames: ClassNameMap | undefined;
+  const scanMainLoop = (): void => {
+    for (const { setting, value } of readSettingVariants(
+      absProjectPath,
+      MAIN_LOOP_TYPE_SETTING,
+      true,
+    )) {
+      if (ENGINE_MAIN_LOOP_TYPES.has(value)) continue;
+      const named = `Main loop ${value} (${setting})`;
+      if (value.startsWith(RES_SCHEME) || value.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) {
+        const file = resolveProjectPath(absProjectPath, value, 'read');
+        if (file === null) {
+          failMainLoop(`${named} was not scanned: ${UNRESOLVED_PATH_CAUSE}`);
+        } else if (!file.absPath.toLowerCase().endsWith(GDSCRIPT_EXTENSION)) {
+          failMainLoop(`${named} was not scanned: only ${GDSCRIPT_EXTENSION} scripts are scanned`);
+        } else if (!existsSync(file.absPath)) {
+          failMainLoop(`${named} was not scanned: ${file.relPath} was not found`);
+        } else {
+          scanScriptPath(file.absPath);
+        }
+        continue;
+      }
+      classNames ??= scanClassNames(absProjectPath);
+      const declaring = classNames.byName.get(value);
+      if (declaring === undefined) {
+        failMainLoop(
+          `${named} was not scanned: it is not SceneTree, MainLoop or a class_name declared by a project GDScript${classNames.complete ? '' : ' the class scan reached (it stopped early)'}; a C# or extension class is not scanned`,
+        );
+        continue;
+      }
+      if (!classNames.complete) {
+        scanWarnings.push(
+          `${named}: the class scan stopped early, so another script declaring it may not have been scanned`,
+        );
+      }
+      for (const file of declaring) {
+        scanScriptPath(isAbsolute(file) ? file : join(absProjectPath, file));
       }
     }
   };
@@ -324,6 +402,7 @@ export async function runLaunchGate(
         }
       }
     }
+    scanMainLoop();
     scanLaunchScene();
   } catch (error) {
     // Whatever the loop had not reached was not scanned and nothing names it: a failed scan, not a skipped kind.
@@ -342,7 +421,7 @@ export async function runLaunchGate(
     return err(
       createErrorResponse(
         [
-          `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
+          `Strict mode: refusing to launch project because autoload, main loop or launched-scene scripts contain Tier 1 primitives${more}.`,
           ...summary.map((s) => `- ${s}`),
         ].join('\n'),
         ['Remove or refactor the flagged primitives', STRICT_MODE_IS_OPERATOR_SETTING],
@@ -363,6 +442,21 @@ export async function runLaunchGate(
           ...refusedLaunchScene.map((failure) => `- ${failure.message}`),
         ].join('\n'),
         ['Set `run/main_scene` in project.godot or pass `scene`', STRICT_MODE_IS_OPERATOR_SETTING],
+      ),
+    );
+  }
+
+  if (ctx.strictMode && mainLoopFailures.length > 0) {
+    return err(
+      createErrorResponse(
+        [
+          `Strict mode: refusing to launch project because the main loop it names (${MAIN_LOOP_TYPE_SETTING}) could not be resolved to a GDScript the scan reads, so its code was not checked.`,
+          ...mainLoopFailures.slice(0, MAX_STRICT_REJECT_LINES_SHOWN).map((m) => `- ${m}`),
+        ].join('\n'),
+        [
+          'Point the setting at a class_name declared by a project GDScript, or remove it to use SceneTree',
+          STRICT_MODE_IS_OPERATOR_SETTING,
+        ],
       ),
     );
   }
@@ -410,7 +504,7 @@ export async function runLaunchGate(
       let elicitResult: ElicitorResult;
       try {
         elicitResult = await ctx.elicitor({
-          message: confirmationPromptMessage(scanFindings),
+          message: confirmationPromptMessage(scanFindings, scanWarnings),
           requestedSchema: {
             type: 'object',
             properties: {

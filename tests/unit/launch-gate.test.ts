@@ -590,6 +590,22 @@ describe('runLaunchGate confirmation prompt', () => {
     expect(messages[0]).not.toMatch(/pre-flight scan found/);
   });
 
+  // Red when confirmationPromptMessage stops taking the scan's incomplete notices.
+  it('names what the scan did not read, capped and counted', async () => {
+    const dir = tmp.makeProject('gate-prompt-unscanned-');
+    const scene = 'level.res';
+    writeFileSync(join(dir, scene), 'not read', 'utf8');
+    const messages: string[] = [];
+
+    await runLaunchGate(
+      { ...request(dir), scene: resolveProjectPath(dir, scene, 'read')! },
+      makeContext({ elicit: acceptingElicitor(messages) }),
+    );
+
+    expect(messages[0]).toMatch(/pre-flight scan was incomplete:\n- Not scanned: level\.res:/);
+    expect(messages[0]).not.toMatch(/pre-flight scan found/);
+  });
+
   it('lists at most MAX_SCAN_WARNINGS_SHOWN findings and counts the rest', async () => {
     const extra = 3;
     const autoload =

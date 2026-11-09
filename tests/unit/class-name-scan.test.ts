@@ -4,7 +4,6 @@ import { join } from 'path';
 import {
   declaredClassName,
   declaredExtends,
-  findClassNameDeclarations,
   findInheritedClassName,
   MAX_CLASS_SCAN_FILE_BYTES,
   MAX_EXTENDS_CHAIN_DEPTH,
@@ -14,6 +13,15 @@ import {
 import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();
+
+function findClassNameDeclarations(
+  dir: string,
+  name: string,
+  extraScripts: readonly string[] = [],
+) {
+  const map = scanClassNames(dir, extraScripts);
+  return { declaredIn: map.byName.get(name) ?? [], complete: map.complete };
+}
 
 function writeScript(dir: string, rel: string, text: string): void {
   const abs = join(dir, rel);
@@ -41,6 +49,23 @@ describe('declaredClassName', () => {
     ['class_name\n'],
   ])('finds no declaration in %j', (source) => {
     expect(declaredClassName(source)).toBeNull();
+  });
+});
+
+describe('scanClassNames folder cap', () => {
+  // Red when the walk stops counting folders: it would read all three scripts and report complete.
+  it('stops at the folder cap and reports itself incomplete, siblings included', () => {
+    const dir = tmp.makeProject('mcp-class-scan-');
+    for (const folder of ['a', 'b', 'c']) {
+      writeScript(dir, `${folder}/s.gd`, `class_name Cls${folder}\nextends Node\n`);
+    }
+    const capped = scanClassNames(dir, [], 2);
+    expect(capped.complete).toBe(false);
+    expect(capped.byName.size).toBeLessThan(3);
+
+    const open = scanClassNames(dir, [], 4);
+    expect(open.complete).toBe(true);
+    expect(open.byName.size).toBe(3);
   });
 });
 
