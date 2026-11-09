@@ -563,6 +563,41 @@ describe('mcp_bridge.gd serializes values in the shapes godot_operations.gd read
     );
   });
 
+  function floatTextFormTypes(source: string, file: string): string[] {
+    const match = source.match(
+      new RegExp(String.raw`^const _FLOAT_TEXT_FORM_TYPES${GD_ASSIGN} \[([^\]]*)\]`, 'm'),
+    );
+    expect(match, `${file} must declare const _FLOAT_TEXT_FORM_TYPES`).not.toBeNull();
+    return [...match![1]!.matchAll(/TYPE_\w+/g)].map((type) => type[0]).sort();
+  }
+
+  function detectorBody(source: string): string {
+    const start = source.indexOf('\nfunc _has_non_finite_text_form(');
+    expect(start, 'must define func _has_non_finite_text_form').toBeGreaterThanOrEqual(0);
+    return source.slice(start + 1).split(/\n(?=func |# |const |var )/)[0]!;
+  }
+
+  // Red when a text-form float type is added to or dropped from one list only: its inf/nan
+  // would be nulled and counted on one side and left in the text on the other.
+  it('lists the same float text-form types on both sides, with identical detectors', () => {
+    const bridge = floatTextFormTypes(bridgeSource, 'mcp_bridge.gd');
+    const operations = floatTextFormTypes(operationsSource, 'godot_operations.gd');
+    expect(bridge.length).toBeGreaterThan(0);
+    expect(bridge).toEqual(operations);
+    expect(detectorBody(bridgeSource)).toBe(detectorBody(operationsSource));
+  });
+
+  // Red when either text arm stops checking: a Rect2 holding INF would go out as text again, uncounted.
+  it('nulls a non-finite text-form value in both serializers', () => {
+    expect(gdFunctionBody('_serialize_bounded')).toMatch(
+      /if _has_non_finite_text_form\(value\):\n\t+_non_finite_count \+= 1\n\t+return null\n[^\n]*\n\t+return _bound_text\(str\(value\)\)/,
+    );
+    const toJson = operationsSource.slice(operationsSource.indexOf('\nfunc _variant_to_json('));
+    expect(toJson).toContain(
+      'if _has_non_finite_text_form(value):\n\t\treturn _NON_FINITE_TEXT_FORM\n\treturn str(value)',
+    );
+  });
+
   // Red when the Vector4 arms are removed: a Vector4 would fall to the text branch again.
   it('writes Vector4 and Vector4i as {x,y,z,w}', () => {
     const walker = gdFunctionBody('_serialize_bounded');

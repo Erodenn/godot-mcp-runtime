@@ -1663,6 +1663,20 @@ func _finite_or_null(number: float) -> Variant:
 	_non_finite_count += 1
 	return null
 
+# Types written as text whose text carries float components. A non-finite component cannot be nulled inside the text, so the whole value goes out as null and is counted, the rule every other float follows.
+# KEEP IN SYNC: _FLOAT_TEXT_FORM_TYPES and _has_non_finite_text_form in src/scripts/godot_operations.gd (tests/unit/bridge-keep-in-sync.test.ts compares them).
+const _FLOAT_TEXT_FORM_TYPES: Array = [
+	TYPE_RECT2, TYPE_TRANSFORM2D, TYPE_PLANE, TYPE_QUATERNION,
+	TYPE_AABB, TYPE_BASIS, TYPE_TRANSFORM3D, TYPE_PROJECTION,
+]
+
+# Godot prints a non-finite float as "inf" or "nan"; no other character run in these types' text contains either.
+func _has_non_finite_text_form(value: Variant) -> bool:
+	if not (typeof(value) in _FLOAT_TEXT_FORM_TYPES):
+		return false
+	var text := str(value)
+	return text.contains("inf") or text.contains("nan")
+
 func _cut_text(text: String, limit: int) -> String:
 	if text.length() <= limit:
 		return text
@@ -1823,6 +1837,9 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 		_:
 			if typeof(value) in _PACKED_READ_TYPES:
 				return _serialize_packed(value, depth)
+			if _has_non_finite_text_form(value):
+				_non_finite_count += 1
+				return null
 			# Everything else goes out as text (Rect2, Quaternion, transforms, a packed type outside _PACKED_READ_TYPES), bounded by the string limit.
 			return _bound_text(str(value))
 

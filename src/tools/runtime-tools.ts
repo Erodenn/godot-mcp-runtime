@@ -755,7 +755,7 @@ export const runtimeToolDefinitions = [
         projectPath: { type: 'string' },
         result: {
           description:
-            'The value execute returned. Vector2, Vector3 and Vector4 (and their int forms) are {x, y[, z, w]}, Color is {r, g, b, a}, and a packed array is a plain array of its elements, the shapes get_node_properties returns. A non-finite number (INF, NAN) is null and counted in warnings. Rect2, Quaternion, transforms and other types without a shape of their own are their text form. A Node is {class, name, path}, a Resource {class, path}, another Object its text, a freed Object "<Freed Object>".',
+            'The value execute returned. Vector2, Vector3 and Vector4 (and their int forms) are {x, y[, z, w]}, Color is {r, g, b, a}, and a packed array is a plain array of its elements, the shapes get_node_properties returns. A non-finite number (INF, NAN) is null and counted in warnings. Rect2, Quaternion, transforms and other types without a shape of their own are their text form (null and counted when a component is non-finite). A Node is {class, name, path}, a Resource {class, path}, another Object its text, a freed Object "<Freed Object>".',
         },
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },

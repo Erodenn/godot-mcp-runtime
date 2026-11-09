@@ -3513,7 +3513,25 @@ func _variant_to_json(value: Variant, enclosing: Array) -> Variant:
 		for item: Variant in value:
 			elements.append(_variant_to_json(item, enclosing))
 		return elements
+	if _has_non_finite_text_form(value):
+		return _NON_FINITE_TEXT_FORM
 	return str(value)
+
+# Types written as text whose text carries float components. A non-finite component cannot be nulled inside the text, so the value becomes _NON_FINITE_TEXT_FORM and _null_non_finite nulls it and names its path, the rule every other float follows.
+# KEEP IN SYNC: _FLOAT_TEXT_FORM_TYPES and _has_non_finite_text_form in src/scripts/mcp_bridge.gd (tests/unit/bridge-keep-in-sync.test.ts compares them).
+const _FLOAT_TEXT_FORM_TYPES: Array = [
+	TYPE_RECT2, TYPE_TRANSFORM2D, TYPE_PLANE, TYPE_QUATERNION,
+	TYPE_AABB, TYPE_BASIS, TYPE_TRANSFORM3D, TYPE_PROJECTION,
+]
+
+const _NON_FINITE_TEXT_FORM := NAN
+
+# Godot prints a non-finite float as "inf" or "nan"; no other character run in these types' text contains either.
+func _has_non_finite_text_form(value: Variant) -> bool:
+	if not (typeof(value) in _FLOAT_TEXT_FORM_TYPES):
+		return false
+	var text := str(value)
+	return text.contains("inf") or text.contains("nan")
 
 # changed_only compares against a default instance per class kept in defaults_cache; the caller frees the cache.
 func _collect_node_properties(node: Node, changed_only: bool, defaults_cache: Dictionary) -> Dictionary:

@@ -677,6 +677,41 @@ describe('headless scene saves', () => {
   );
 
   itGodot(
+    'run_script nulls and counts a Rect2 or Basis holding INF or NAN, and leaves finite ones as text',
+    async (ctx) => {
+      // Red when the bridge's text arm stops checking a text-form value: bad_rect and bad_basis would come back as strings carrying "inf" or "nan", and the warning count would be 0.
+      const project = runtimeCopy(FIXTURE_MAIN_SCENE);
+      await runProjectOrSkip(runner, ctx, project);
+
+      const claim = await handleRunScript(runner, {
+        script: [
+          'extends RefCounted',
+          'func execute(scene_tree: SceneTree) -> Variant:',
+          '\treturn {',
+          '\t\t"bad_rect": Rect2(Vector2(INF, 0.0), Vector2(1.0, 1.0)),',
+          '\t\t"bad_basis": Basis(Vector3(NAN, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0)),',
+          '\t\t"good_rect": Rect2(Vector2(1.0, 2.0), Vector2(3.0, 4.0)),',
+          '\t\t"good_basis": Basis.IDENTITY,',
+          '\t}',
+          '',
+        ].join('\n'),
+      });
+      expect(claim.ok, `a text-form INF broke the response; ${describeResult(claim)}`).toBe(true);
+      const payload = payloadOf(claim, 'run_script returning text-form values with INF');
+      const result = payload.result as Record<string, unknown>;
+      expect(result.bad_rect).toBeNull();
+      expect(result.bad_basis).toBeNull();
+      expect(typeof result.good_rect).toBe('string');
+      expect(result.good_rect).not.toMatch(/inf|nan/);
+      expect(typeof result.good_basis).toBe('string');
+      expect((payload.warnings as string[])[0]).toMatch(
+        /2 non-finite numbers \(INF, NAN\) were returned as null/,
+      );
+    },
+    RUNTIME_CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
     'get_node_properties on a script variable holding INF returns null and a warning',
     async () => {
       // Red when emit_result stops replacing a non-finite float with null or stops naming its path in a warning.
@@ -765,6 +800,35 @@ describe('headless scene saves', () => {
       expect(
         warnings.some((w) => /non-finite numbers.*results\[0\]\.properties\.xs\[0\]/.test(w)),
       ).toBe(true);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'get_node_properties nulls a Rect2 and a Transform2D holding INF or NAN, and leaves finite ones as text',
+    async () => {
+      // Red when _variant_to_json stops checking a text-form value: the Rect2 or Transform2D would come back as a string carrying "inf" or "nan", with no warning.
+      const { properties, warnings } = await readScriptedRoot(
+        'text_form_inf',
+        [
+          'extends Node',
+          '',
+          '@export var bad_rect := Rect2(Vector2(INF, 0.0), Vector2(1.0, 1.0))',
+          '@export var bad_xform := Transform2D(Vector2(1.0, 0.0), Vector2(0.0, 1.0), Vector2(0.0, NAN))',
+          '@export var good_rect := Rect2(Vector2(1.0, 2.0), Vector2(3.0, 4.0))',
+          '@export var good_xform := Transform2D.IDENTITY',
+          '',
+        ].join('\n'),
+      );
+      expect(properties.bad_rect).toBeNull();
+      expect(properties.bad_xform).toBeNull();
+      expect(typeof properties.good_rect).toBe('string');
+      expect(properties.good_rect).not.toMatch(/inf|nan/);
+      expect(typeof properties.good_xform).toBe('string');
+      const joined = warnings.join('\n');
+      expect(joined).toMatch(/2 non-finite numbers.*results\[0\]\.properties\.bad_rect/);
+      expect(joined).toContain('results[0].properties.bad_xform');
+      expect(joined).not.toContain('good_');
     },
     CASE_TIMEOUT_MS,
   );
