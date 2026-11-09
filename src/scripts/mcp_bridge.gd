@@ -709,10 +709,13 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			entry["error"] = "UI element '%s' is disabled" % identifier
 		else:
 			# Before any press: a click that would land on another control is refused here, so a failure never hides a side effect.
+			var scrolled := await _scroll_into_view(target)
+			if not scrolled.is_empty():
+				entry["scrolled"] = scrolled
 			var refusal := await _preflight_click(target)
 			if refusal != "":
 				entry["error"] = refusal
-				if is_instance_valid(target):
+				if refusal.begins_with("occluded") and is_instance_valid(target):
 					var occluder: Variant = _hit_control()
 					if occluder != null and not (target == occluder or target.is_ancestor_of(occluder)):
 						entry["hit"] = str((occluder as Control).get_path())
@@ -953,7 +956,7 @@ func _resolve_button_name(button_name: String) -> Array:
 # Resolves which control would receive the click before anything is pressed. A mouse motion to the target centre makes the viewport resolve hover on the next frame; the centre is re-read each pass because a layout refresh (a container re-sort after the previous action) can move the target after the last read. Returns "" when the click may go ahead, otherwise the error text. Without the hovered-control API there is nothing to ask, so it returns "" and the post-click verdict stays the only check.
 func _preflight_click(target: Control) -> String:
 	if not _has_hover_api():
-		return ""
+		return _clip_refusal(target)
 	var settled := false
 	for _pass: int in CLICK_PREFLIGHT_MAX_PASSES:
 		if not is_instance_valid(target) or not target.is_visible_in_tree():
@@ -968,6 +971,9 @@ func _preflight_click(target: Control) -> String:
 			break
 	if not settled:
 		return "UI element '%s' kept moving (layout did not settle), so no click was sent" % str(target.get_path())
+	var clip_refusal := _clip_refusal(target)
+	if clip_refusal != "":
+		return clip_refusal
 	var hit: Variant = _hit_control()
 	if hit == null:
 		return "no UI element would receive the click at the center of '%s' (a mouse_filter of ignore, or a point outside the window); nothing was pressed" % str(target.get_path())
@@ -975,6 +981,41 @@ func _preflight_click(target: Control) -> String:
 	if target == hit_control or target.is_ancestor_of(hit_control):
 		return ""
 	return "occluded by %s; nothing was pressed" % str(hit_control.get_path())
+
+# The nearest ancestor that clips the point away: a ScrollContainer or a clip_contents Control whose rect does not hold it. Geometry only, so it answers on engines without the hovered-control API.
+func _clipping_ancestor(target: Control, point: Vector2) -> Control:
+	var ancestor := target.get_parent()
+	while ancestor is Control:
+		var ctrl := ancestor as Control
+		if _clips_children(ctrl) and not ctrl.get_global_rect().has_point(point):
+			return ctrl
+		if ctrl.top_level:
+			break
+		ancestor = ctrl.get_parent()
+	return null
+
+func _clip_refusal(target: Control) -> String:
+	var clipper := _clipping_ancestor(target, target.get_global_rect().get_center())
+	if clipper == null:
+		return ""
+	return "clipped by %s (%s); nothing was pressed" % [str(clipper.get_path()), "scroll it or enlarge it" if clipper is ScrollContainer else "clip_contents hides the target centre"]
+
+# Brings a target clipped by a ScrollContainer into view with the container's own ensure_control_visible, innermost container first, so the click the preflight then checks lands on it. Returns the paths of the containers whose scroll position changed; the frame it waits for lets them re-lay out.
+func _scroll_into_view(target: Control) -> Array:
+	var moved: Array = []
+	var ancestor := target.get_parent()
+	while ancestor is Control:
+		if ancestor is ScrollContainer and is_instance_valid(target):
+			var scroller := ancestor as ScrollContainer
+			if not scroller.get_global_rect().has_point(target.get_global_rect().get_center()):
+				var before := Vector2i(scroller.scroll_horizontal, scroller.scroll_vertical)
+				scroller.ensure_control_visible(target)
+				if before != Vector2i(scroller.scroll_horizontal, scroller.scroll_vertical):
+					moved.append(str(scroller.get_path()))
+		ancestor = ancestor.get_parent()
+	if not moved.is_empty():
+		await get_tree().process_frame
+	return moved
 
 func _inject_motion_at(viewport_pos: Vector2) -> void:
 	var event := InputEventMouseMotion.new()
@@ -1284,46 +1325,76 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 func _rect_number(number: float) -> Variant:
 	return number if is_finite(number) else null
 
-func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "") -> void:
+# A Control clips its children when it says so or when it is a ScrollContainer (which always clips). `clip` is the screen region the ancestors leave visible so far; `has_clip` tells an unset region from an empty one.
+func _clips_children(ctrl: Control) -> bool:
+	return ctrl.clip_contents or ctrl is ScrollContainer
+
+# Whether any of the control's rect is reachable on screen, and the part of it that is. A rect with no area of its own (a spacer) counts as on screen when its point is inside the region. A non-finite rect is never claimed off screen.
+func _visible_part(rect: Rect2, region: Rect2) -> Variant:
+	if not (is_finite(rect.position.x) and is_finite(rect.position.y) and is_finite(rect.size.x) and is_finite(rect.size.y)):
+		return rect
+	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+		return rect if region.has_point(rect.position) else null
+	if not region.intersects(rect):
+		return null
+	return region.intersection(rect)
+
+func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "", clip: Rect2 = Rect2(), has_clip: bool = false) -> void:
+	var child_clip := clip
+	var child_has_clip := has_clip
 	if node is Control:
 		var ctrl := node as Control
 		if visible_only and not ctrl.is_visible_in_tree():
 			return
-		if type_filter != "" and not ctrl.is_class(type_filter):
-			for child: Node in node.get_children():
-				_collect_control_nodes(child, elements, visible_only, type_filter)
-			return
+		if ctrl.top_level:
+			child_has_clip = false
 		var rect := ctrl.get_global_rect()
-		var element := {
-			"name": String(ctrl.name),
-			"type": ctrl.get_class(),
-			"path": str(ctrl.get_path()),
-			"rect": {
-				"x": _rect_number(rect.position.x),
-				"y": _rect_number(rect.position.y),
-				"width": _rect_number(rect.size.x),
-				"height": _rect_number(rect.size.y),
-			},
-			"visible": ctrl.is_visible_in_tree(),
-		}
-		if ctrl is Button:
-			element["text"] = (ctrl as Button).text
-		elif ctrl is Label:
-			element["text"] = (ctrl as Label).text
-		elif ctrl is LineEdit:
-			element["text"] = (ctrl as LineEdit).text
-			element["placeholder"] = (ctrl as LineEdit).placeholder_text
-		elif ctrl is TextEdit:
-			element["text"] = (ctrl as TextEdit).text
-		elif ctrl is RichTextLabel:
-			element["text"] = (ctrl as RichTextLabel).text
-		if ctrl is BaseButton:
-			element["disabled"] = (ctrl as BaseButton).disabled
-		if ctrl.tooltip_text != "":
-			element["tooltip"] = ctrl.tooltip_text
-		elements.append(element)
+		var region := ctrl.get_viewport().get_visible_rect()
+		if has_clip and not ctrl.top_level:
+			region = region.intersection(clip)
+		var visible_part: Variant = _visible_part(rect, region)
+		var on_screen: bool = visible_part != null
+		if _clips_children(ctrl):
+			child_clip = rect if not child_has_clip else child_clip.intersection(rect)
+			child_has_clip = true
+		var listed := type_filter == "" or ctrl.is_class(type_filter)
+		if visible_only and not on_screen:
+			listed = false
+		if listed:
+			var element := {
+				"name": String(ctrl.name),
+				"type": ctrl.get_class(),
+				"path": str(ctrl.get_path()),
+				"rect": {
+					"x": _rect_number(rect.position.x),
+					"y": _rect_number(rect.position.y),
+					"width": _rect_number(rect.size.x),
+					"height": _rect_number(rect.size.y),
+				},
+				"visible": ctrl.is_visible_in_tree(),
+				"onScreen": on_screen,
+			}
+			if on_screen and visible_part != rect:
+				var part: Rect2 = visible_part
+				element["visibleRect"] = {"x": part.position.x, "y": part.position.y, "width": part.size.x, "height": part.size.y}
+			if ctrl is Button:
+				element["text"] = (ctrl as Button).text
+			elif ctrl is Label:
+				element["text"] = (ctrl as Label).text
+			elif ctrl is LineEdit:
+				element["text"] = (ctrl as LineEdit).text
+				element["placeholder"] = (ctrl as LineEdit).placeholder_text
+			elif ctrl is TextEdit:
+				element["text"] = (ctrl as TextEdit).text
+			elif ctrl is RichTextLabel:
+				element["text"] = (ctrl as RichTextLabel).text
+			if ctrl is BaseButton:
+				element["disabled"] = (ctrl as BaseButton).disabled
+			if ctrl.tooltip_text != "":
+				element["tooltip"] = ctrl.tooltip_text
+			elements.append(element)
 	for child: Node in node.get_children():
-		_collect_control_nodes(child, elements, visible_only, type_filter)
+		_collect_control_nodes(child, elements, visible_only, type_filter, child_clip, child_has_clip)
 
 func _find_control_by_identifier(identifier: String) -> Control:
 	var root := get_tree().root

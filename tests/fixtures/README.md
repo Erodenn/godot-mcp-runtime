@@ -9,6 +9,7 @@ Contents:
 - `main.tscn`: `Node2D` root with `Label` and `Sprite2D` children
 - `placeholder.gd`, `placeholder.png`: empty placeholder files used by handler tests that exercise `attach_script` / `load_sprite` runner-throws paths
 - `input_probe.tscn`, `input_probe.gd` - sibling probe scene for the `simulate_input` integration tests: buttons that are plain, toggling, disabled, occluded, panel-opening, error-raising and self-freeing, plus a `LineEdit`, a `Node2D` moved by an `is_action_pressed` poll, and a `move_events` counter of `probe_move` presses seen in `_input`
+- `input_probe_scroll.tscn`, `input_probe_scroll.gd` - sibling scene for the scroll and clipping tests: a 200x100 `ScrollContainer` holding ten 30 px buttons (`Item0` to `Item9`, the later ones scrolled out of view), and a 100x50 `clip_contents` `Panel` holding `Partial` (centre clipped, part visible) and `Hidden` (fully clipped, nothing scrolls it). The root script counts presses by button name
 - `blank.tscn` - empty `Node` root that renders only the clear color; the blank case for the pixel statistics tests. Launched by rewriting `run/main_scene` in a temp copy
 - `motion_animated.tscn`, `motion_animated.gd`, `motion_static.tscn` - sibling scenes for the `render_movie` motion tests: a `ColorRect` moved every frame by `motion_animated.gd`, and the same rect with no script
 

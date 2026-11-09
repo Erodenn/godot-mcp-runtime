@@ -23,6 +23,8 @@ export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePa
 
 export const inputOcclusionScenePath = 'input_probe_occlusion.tscn';
 
+export const inputScrollScenePath = 'input_probe_scroll.tscn';
+
 export const blankScenePath = 'blank.tscn';
 
 export const blankSceneAbsPath = join(fixtureProjectPath, blankScenePath);

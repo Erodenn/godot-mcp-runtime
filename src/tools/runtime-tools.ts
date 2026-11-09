@@ -434,7 +434,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'simulate_input',
     description:
-      'Send input actions in order. For key, mouse_button, action: omit `pressed` to tap, set it to hold or release. click_element takes a node path or name (see get_ui_elements), not visible text. Returns: projectPath, success, results[] per action: ok, hit, signals, UI `changes`, `watch` samples, handler `errors` (spawned only); warnings leads when `errors` is incomplete. An invalid batch injects nothing; a runtime failure skips the rest. A covered click_element is refused unpressed.',
+      'Send input actions in order. key, mouse_button, action: omit `pressed` to tap, set it to hold or release. click_element takes a node path or name (see get_ui_elements), not text; it scrolls a ScrollContainer target into view. Returns: projectPath, success, results[] per action: ok, hit, scrolled, signals, UI `changes`, `watch`, `errors` (spawned only); warnings leads if `errors` is partial. An invalid batch injects nothing; a runtime failure skips the rest. A covered or clipped click is refused.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -581,6 +581,12 @@ export const runtimeToolDefinitions = [
                 type: 'string',
                 description: 'Path of the Control under the pointer after the action settled.',
               },
+              scrolled: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  '[click_element] Paths of the ScrollContainers scrolled to bring the target into view before the click. Absent when none moved.',
+              },
               focus: { type: 'string', description: 'Path of the focus owner after the action.' },
               value: { type: 'string', description: 'Resulting text of the focused text Control.' },
               position: {
@@ -632,7 +638,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_ui_elements',
     description:
-      'Walk the running scene tree and return all Control nodes with positions, sizes, types, and text content. Always call this before simulate_input click_element actions to discover valid element names and paths. Requires an active runtime session (run_project). visibleOnly defaults true; pass false to include hidden Controls. filter narrows by class. Returns: projectPath and elements[] with path/type/rect/visible plus optional text/disabled/tooltip. Errors if filter is not a Control class name.',
+      'List the running scene Controls with rect, type and text. Call before simulate_input click_element to find names and paths. Needs a runtime session (run_project). visibleOnly (default true) drops hidden Controls and ones clipped out of view; false lists them. filter narrows by class. Returns: projectPath, elements[] with path/type/rect/visible/onScreen (visibleRect if clipped), optional text/disabled/tooltip. Errors on a non-Control filter.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -640,7 +646,7 @@ export const runtimeToolDefinitions = [
         visibleOnly: {
           type: 'boolean',
           description:
-            'Only return nodes where Control.visible is true (default: true). Set false to include hidden elements.',
+            'Only return Controls that are visible in the tree and have area on screen, not clipped away by a ScrollContainer, a clip_contents ancestor or the viewport (default: true). Set false to include the rest.',
         },
         filter: {
           type: 'string',
@@ -672,6 +678,22 @@ export const runtimeToolDefinitions = [
                 },
               },
               visible: { type: 'boolean' },
+              onScreen: {
+                type: 'boolean',
+                description:
+                  'Whether any of the rect is reachable on screen after every clipping ancestor and the viewport. A Control with no area counts when its point is inside.',
+              },
+              visibleRect: {
+                type: 'object',
+                description:
+                  'The part of rect that is on screen, present only when onScreen is true and the rect is clipped.',
+                properties: {
+                  x: { type: 'number' },
+                  y: { type: 'number' },
+                  width: { type: 'number' },
+                  height: { type: 'number' },
+                },
+              },
               text: { type: 'string' },
               placeholder: { type: 'string' },
               disabled: { type: 'boolean' },
