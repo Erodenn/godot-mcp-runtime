@@ -26,7 +26,7 @@ import type { NodePath, ProjectPath, ScenePath } from '../utils/branded.js';
 import type { Result } from '../utils/result.js';
 import { ok, err } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
-import { inPlaceSceneWrite, updateTouches } from '../utils/scene-loss-guard.js';
+import { inPlaceSceneWrite, updateTouches, type MovedNode } from '../utils/scene-loss-guard.js';
 
 /** Result of connect_signal and disconnect_signal. `connected` is read back from the saved scene. */
 const SIGNAL_RESULT_SCHEMA = {
@@ -774,6 +774,12 @@ function checkMoveItems(items: unknown[]): Result<OperationParams[], ToolRespons
   return ok(checked);
 }
 
+/** The node's own name: the last segment of its path, without a `%` unique-name prefix. */
+function nodeNameOf(nodePath: string): string {
+  const segments = nodePath.split('/').filter((segment) => segment !== '');
+  return (segments[segments.length - 1] ?? '').replace(/^%/, '');
+}
+
 export async function handleMoveNodes(
   runner: GodotRunner,
   args: OperationParams,
@@ -788,10 +794,13 @@ export async function handleMoveNodes(
   if (!checkedMoves.ok) return checkedMoves;
 
   const params = { scenePath: parsed.value.scenePath, moves: checkedMoves.value };
-  // A reparent changes the file path of the whole subtree, so the old place is exempt like a deletion; the node is read back at its new place by the tests, not by the guard.
-  const reparented = checkedMoves.value
+  // A reparent changes the file path of the whole subtree; the guard follows the subtree to its new place and still compares it there. A pure reorder moves no path, and the guard does not compare child order.
+  const reparented: MovedNode[] = checkedMoves.value
     .filter((move) => move.newParentPath !== undefined)
-    .map((move) => move.nodePath as NodePath);
+    .map((move) => ({
+      from: move.nodePath as NodePath,
+      to: `${move.newParentPath as NodePath}/${nodeNameOf(move.nodePath as NodePath)}`,
+    }));
   return executeSceneOp(
     runner,
     'move_nodes',
@@ -803,7 +812,7 @@ export async function handleMoveNodes(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { deletedNodes: reparented }),
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { movedNodes: reparented }),
     },
   );
 }

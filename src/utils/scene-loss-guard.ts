@@ -57,10 +57,18 @@ export interface SceneConnection {
   method: string;
 }
 
+/** One reparent: the node at `from` (tool-form path) now sits at `to`, its whole subtree with it. */
+export interface MovedNode {
+  from: string;
+  to: string;
+}
+
 export interface SceneChangeIntent {
   /** Tool-form node paths ("root/A", "Main/A", "A", "./A", "%A") the operation may rewrite as a whole. */
   touchedNodes: string[];
   deletedNodes: string[];
+  /** Reparents in the order they ran; each `from` is the path the tree had when that move began. The subtree is compared at its new place, so a loss inside it is reported and the move itself is not. A `%Name` path is not followed. */
+  movedNodes?: MovedNode[];
   /** Single properties the operation assigns. Everything else on those nodes is still compared. */
   touchedProperties?: TouchedProperty[];
   removedConnections?: SceneConnection[];
@@ -494,6 +502,55 @@ function compareInlineRefs(
   return items;
 }
 
+/** Where each node of `model` sits once `moves` have run, and `model` rebuilt with every node, connection end and `[editable]` path at its new place. The moves apply one after another, so a node moved after its ancestor is followed through both.
+ * A path with a `%Name` segment is skipped: it cannot be resolved without the tree as it stood at that move, and an unmapped move only makes the guard report more. */
+function relocateMovedNodes(
+  model: SceneModel,
+  moves: readonly MovedNode[],
+): { model: SceneModel; remap: (path: string) => string } {
+  const placed = new Map<string, string>();
+  for (const path of model.nodes.keys()) placed.set(path, path);
+  const isSpelledOut = (toolPath: string): boolean =>
+    !toolPath.split('/').some((segment) => segment.startsWith(UNIQUE_NAME_PREFIX));
+  let anyMoved = false;
+  for (const move of moves) {
+    if (!isSpelledOut(move.from) || !isSpelledOut(move.to)) continue;
+    const from = toolPathToFilePath(move.from, model.rootName);
+    const to = toolPathToFilePath(move.to, model.rootName);
+    if (from === ROOT_FILE_PATH || to === ROOT_FILE_PATH || from === to || isAtOrUnder(to, from)) {
+      continue;
+    }
+    for (const [original, current] of placed) {
+      if (!isAtOrUnder(current, from)) continue;
+      placed.set(original, `${to}${current.slice(from.length)}`);
+      anyMoved = true;
+    }
+  }
+  const remap = (path: string): string => placed.get(path) ?? path;
+  if (!anyMoved) return { model, remap };
+
+  const moved: SceneModel = {
+    ...model,
+    nodes: new Map(),
+    connections: new Map(),
+    editable: new Set(),
+  };
+  for (const node of model.nodes.values()) {
+    const path = remap(node.path);
+    moved.nodes.set(path, { ...node, path });
+  }
+  for (const connection of model.connections.values()) {
+    const placedConnection = {
+      ...connection,
+      from: remap(connection.from),
+      to: remap(connection.to),
+    };
+    moved.connections.set(connectionKey(placedConnection), placedConnection);
+  }
+  for (const path of model.editable) moved.editable.add(remap(path));
+  return { model: moved, remap };
+}
+
 function uncheckedOverridesItem(count: number, holderLabel: string, against: string): string {
   const subject = count === 1 ? '1 stored override' : `${count} stored overrides`;
   const verb = count === 1 ? 'is' : 'are';
@@ -507,19 +564,23 @@ export function compareSceneText(
   intent: SceneDiffOptions,
   failedScripts: ReadonlySet<string>,
 ): SceneComparison {
-  const beforeModel = buildSceneModel(before);
-  if (beforeModel === null) return { losses: [], notChecked: NOT_TEXT_SCENE_BEFORE };
+  const originalBefore = buildSceneModel(before);
+  if (originalBefore === null) return { losses: [], notChecked: NOT_TEXT_SCENE_BEFORE };
   const afterModel = buildSceneModel(after);
   if (afterModel === null) return { losses: [], notChecked: NOT_TEXT_SCENE_AFTER };
 
+  // The before scene is compared with every moved subtree already at its new place; the intent is spelled in the paths the scene had, so its resolved paths follow the nodes there.
+  const { model: beforeModel, remap } = relocateMovedNodes(originalBefore, intent.movedNodes ?? []);
   const context: DiffContext = { before: beforeModel, after: afterModel, failedScripts };
   const items: string[] = [];
   const lookup: BaseLookup = { readScene: intent.readScene, models: new Map() };
-  const toFile = (toolPath: string): string[] => filePathCandidates(toolPath, beforeModel, true);
+  const toFile = (toolPath: string): string[] =>
+    filePathCandidates(toolPath, originalBefore, true).map(remap);
   // A deletion exempts its whole subtree, so it counts only where the path is known: an unresolvable `%Name` exempts nothing and the node is reported gone.
   // The root cannot be deleted, so a root entry exempts nothing.
   const deleted = intent.deletedNodes
-    .flatMap((toolPath) => filePathCandidates(toolPath, beforeModel, false))
+    .flatMap((toolPath) => filePathCandidates(toolPath, originalBefore, false))
+    .map(remap)
     .filter((path) => path !== ROOT_FILE_PATH);
   const wholeNodes = new Set(intent.touchedNodes.flatMap(toFile));
   const touchedKeys = new Map<string, Set<string>>();
@@ -814,7 +875,32 @@ function readResolvedPaths(
   return { resolved, succeeded };
 }
 
-/** `intents` restated from the operation's report: each resolved path is replaced by the node it led to (so `%Name` need not be guessed), and a deletion not reported as a success is dropped, since nothing was deleted. */
+/** `moved` restated from a `move_nodes` report: each move is matched, in order, to the result entry for its `from`; a success becomes the path the node was found at and the path it reached, a failure is dropped, and a move the report does not mention stays as requested. */
+function restateMoves(moved: readonly MovedNode[], results: unknown): MovedNode[] {
+  if (!Array.isArray(results)) return [...moved];
+  const entries = results as unknown[];
+  const restated: MovedNode[] = [];
+  let next = 0;
+  for (const move of moved) {
+    let found = -1;
+    for (let at = next; at < entries.length && found === -1; at++) {
+      if (stringField(asRecord(entries[at]) ?? {}, 'nodePath', 'node_path') === move.from)
+        found = at;
+    }
+    const entry = found === -1 ? null : asRecord(entries[found]);
+    if (entry === null) {
+      restated.push(move);
+      continue;
+    }
+    next = found + 1;
+    const from = stringField(entry, 'resolvedNodePath', 'resolved_node_path');
+    const to = stringField(entry, 'newNodePath', 'new_node_path');
+    if (entry.success === true && from !== null && to !== null) restated.push({ from, to });
+  }
+  return restated;
+}
+
+/** `intents` restated from the operation's report: each resolved path is replaced by the node it led to (so `%Name` need not be guessed), and a deletion or move not reported as a success is dropped, since nothing was deleted or moved. */
 export function resolveIntentPaths(
   intents: SceneWriteIntent[],
   payload: Record<string, unknown>,
@@ -826,6 +912,9 @@ export function resolveIntentPaths(
   return intents.map((intent) => ({
     ...intent,
     touchedNodes: intent.touchedNodes.map(place),
+    ...(intent.movedNodes === undefined
+      ? {}
+      : { movedNodes: restateMoves(intent.movedNodes, payload.results) }),
     deletedNodes: intent.deletedNodes
       .filter((nodePath) => succeeded.get(nodePath) !== false)
       .map(place),
@@ -865,7 +954,8 @@ function sceneFileRef(projectPath: string, scenePath: string): SceneFileRef | nu
   };
 }
 
-type FullSceneWriteIntent = Required<Omit<SceneWriteIntent, 'replacesFile'>>;
+/** A batch cannot move nodes, so its intents carry no `movedNodes`. */
+type FullSceneWriteIntent = Required<Omit<SceneWriteIntent, 'replacesFile' | 'movedNodes'>>;
 
 function emptyIntent(source: string, target: string): FullSceneWriteIntent {
   return {
@@ -988,6 +1078,7 @@ function recordWrites(guard: SceneGuard, intents: SceneWriteIntent[], readFiles:
       targetKey: target.key,
       touchedNodes: [],
       deletedNodes: [],
+      movedNodes: [],
       touchedProperties: [],
       removedConnections: [],
       replacesFile: false,
@@ -995,6 +1086,7 @@ function recordWrites(guard: SceneGuard, intents: SceneWriteIntent[], readFiles:
     write.replacesFile ||= intent.replacesFile === true;
     write.touchedNodes.push(...intent.touchedNodes);
     write.deletedNodes.push(...intent.deletedNodes);
+    write.movedNodes.push(...(intent.movedNodes ?? []));
     write.touchedProperties.push(...(intent.touchedProperties ?? []));
     write.removedConnections.push(...(intent.removedConnections ?? []));
     guard.writes.set(key, write);
