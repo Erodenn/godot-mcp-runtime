@@ -8,12 +8,7 @@ import { Server, type CallToolResult, type ListToolsResult } from '@modelcontext
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 
 import { dispatchToolCall } from '../../src/dispatch.js';
-import { runtimeToolDefinitions } from '../../src/tools/runtime-tools.js';
-import { autoloadToolDefinitions } from '../../src/tools/autoload-tools.js';
-import { projectToolDefinitions } from '../../src/tools/project-tools.js';
-import { sceneToolDefinitions } from '../../src/tools/scene-tools.js';
-import { nodeToolDefinitions } from '../../src/tools/node-tools.js';
-import { validateToolDefinitions } from '../../src/tools/validate-tools.js';
+import { allToolDefinitions } from '../../src/server.js';
 
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
@@ -23,15 +18,6 @@ import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
 const RESOURCE_CASE_TIMEOUT_MS = 120_000;
 
 const tmp = useTmpDirs();
-
-const allToolDefinitions = [
-  ...runtimeToolDefinitions,
-  ...autoloadToolDefinitions,
-  ...projectToolDefinitions,
-  ...sceneToolDefinitions,
-  ...nodeToolDefinitions,
-  ...validateToolDefinitions,
-];
 
 async function makeLinkedPair() {
   const runner = new GodotRunner();
