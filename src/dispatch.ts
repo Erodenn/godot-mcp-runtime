@@ -33,6 +33,7 @@ import {
   handleSearchProject,
   handleGetSceneDependencies,
   handleGetProjectSettings,
+  handleSetProjectSetting,
 } from './tools/project-tools.js';
 
 import {
@@ -89,6 +90,7 @@ export const toolDispatch = {
   search_project: (_runner, args) => handleSearchProject(args),
   get_scene_dependencies: (_runner, args) => handleGetSceneDependencies(args),
   get_project_settings: (_runner, args) => handleGetProjectSettings(args),
+  set_project_setting: (_runner, args) => handleSetProjectSetting(args),
 
   render_movie: handleRenderMovie,
 

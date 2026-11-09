@@ -86,6 +86,25 @@ describe('MCP outputSchema contract (issue #18)', () => {
     }
   });
 
+  it('set_project_setting: returns structuredContent matching outputSchema', async () => {
+    const project = tmp.makeProject('godot-mcp-schema-setting-');
+    const { client, server } = await makeLinkedPair();
+
+    try {
+      const result = (await client.callTool({
+        name: 'set_project_setting',
+        arguments: { projectPath: project, section: 'display', key: 'window/size/width', value: 8 },
+      })) as { structuredContent?: { value?: unknown; created?: boolean }; isError?: boolean };
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent?.value).toBe(8);
+      expect(result.structuredContent?.created).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('get_scene_dependencies: returns structuredContent matching outputSchema', async () => {
     const { client, server } = await makeLinkedPair();
 

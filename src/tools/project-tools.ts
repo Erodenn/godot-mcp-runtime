@@ -20,7 +20,16 @@ import { err } from '../utils/result.js';
 import { SessionQueueTimeoutError } from '../utils/session-queue.js';
 import { logDebug } from '../utils/logger.js';
 import { scanTscn } from '../utils/scene-parsing.js';
-import { findSetting, readProjectSettings, scanProjectFile } from '../utils/project-godot.js';
+import {
+  checkSettingLiteral,
+  describeNonCanonical,
+  findSetting,
+  godotLiteralFromJson,
+  readProjectSettings,
+  scanProjectFile,
+  settingTargetError,
+  writeProjectSetting,
+} from '../utils/project-godot.js';
 import { engineNewerThanProject } from '../utils/engine-version.js';
 
 function fileExtension(name: string): string {
@@ -310,6 +319,70 @@ export const projectToolDefinitions = [
         },
       },
       required: ['settings'],
+    },
+  },
+  {
+    name: 'set_project_setting',
+    description:
+      'Set one project.godot setting without launching Godot. Pass value (JSON string, number, boolean, array or object, converted to the Godot literal) or literal (raw Godot text, e.g. "Vector2i(1280, 720)" or "2.0"), not both. Rewrites the last assignment in place or adds the key, creating the section if missing; other lines stay byte for byte. Refuses autoload/* (use the autoload tools). Returns: { section, key, value read back, created, sectionCreated, previous? }.',
+    annotations: { idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        section: {
+          type: 'string',
+          description:
+            'INI section, e.g. "display" or "application". Letters, digits and _ . - /, no spaces.',
+        },
+        key: {
+          type: 'string',
+          description:
+            'Setting key within the section, e.g. "window/size/viewport_width". Same character set as section.',
+        },
+        value: {
+          description:
+            'JSON value converted to a Godot literal: a string is quoted, an integer-valued number is an int (write 2 as literal "2.0" for a float), a boolean is true/false, an array becomes [a, b], an object a dictionary. null is not accepted; use literal "null".',
+        },
+        literal: {
+          type: 'string',
+          description:
+            'Raw Godot literal written as is, on one line, with no trailing comment: "str", 1.5, true, null, [1, 2], {"a": 1} or a constructor such as Vector2i(1, 2) or PackedStringArray("a"). Checked by reading it back as one complete value.',
+        },
+      },
+      required: ['projectPath', 'section', 'key'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Present only when there is something to say, e.g. project.godot has lines not in the form Godot writes.',
+        },
+        section: { type: 'string' },
+        key: { type: 'string' },
+        value: {
+          type: ['string', 'number', 'boolean', 'null'],
+          description:
+            'The setting as get_project_settings reads it back after the write: a string unescaped, a number or boolean typed, anything else its raw text.',
+        },
+        created: {
+          type: 'boolean',
+          description:
+            'True when the key was added, false when an existing assignment was rewritten.',
+        },
+        sectionCreated: {
+          type: 'boolean',
+          description: 'True when the section did not exist and was appended.',
+        },
+        previous: {
+          type: ['string', 'number', 'boolean', 'null'],
+          description: 'The value that was replaced; absent when created.',
+        },
+      },
+      required: ['section', 'key', 'value', 'created', 'sectionCreated'],
     },
   },
 ] as const satisfies readonly ToolDefinition[];
@@ -1043,6 +1116,100 @@ export async function handleGetProjectSettings(args: OperationParams): Promise<H
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get project settings: ${getErrorMessage(error)}`, [
+        'Check if project.godot is accessible',
+      ]),
+    );
+  }
+}
+
+export async function handleSetProjectSetting(args: OperationParams): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+
+  const section = requireString(args, 'section');
+  if (!section.ok) return section;
+  const key = requireString(args, 'key');
+  if (!key.ok) return key;
+  const literalArg = optionalString(args, 'literal');
+  if (!literalArg.ok) return literalArg;
+
+  const targetError = settingTargetError(section.value, key.value);
+  if (targetError !== null) {
+    return err(
+      createErrorResponse(`Cannot set ${section.value}/${key.value}: ${targetError}`, [
+        'Use get_project_settings to see the sections and keys that exist',
+      ]),
+    );
+  }
+
+  const hasValue = args.value !== undefined;
+  const hasLiteral = literalArg.value !== undefined;
+  if (hasValue === hasLiteral) {
+    return err(
+      createErrorResponse(
+        hasValue
+          ? 'Pass either value or literal, not both'
+          : 'Pass value (a JSON value) or literal (raw Godot text)',
+        ['Use value for strings, numbers, booleans, arrays and objects; literal for typed values'],
+      ),
+    );
+  }
+
+  let literal: string;
+  if (hasLiteral) {
+    literal = literalArg.value!.trim();
+  } else {
+    try {
+      literal = godotLiteralFromJson(args.value);
+    } catch (error: unknown) {
+      return err(
+        createErrorResponse(getErrorMessage(error), ['Use literal for a raw Godot value']),
+      );
+    }
+  }
+  const literalError = checkSettingLiteral(literal);
+  if (literalError !== null) {
+    return err(
+      createErrorResponse(`Cannot set ${section.value}/${key.value}: ${literalError}`, [
+        'Write one complete Godot value on a single line',
+      ]),
+    );
+  }
+
+  try {
+    const projectFile = projectGodotPath(parsed.value.projectPath);
+    const content = readFileSync(projectFile, 'utf8');
+    const nonCanonical = describeNonCanonical(scanProjectFile(content));
+    const written = writeProjectSetting(projectFile, section.value, key.value, literal, content);
+
+    const readBack = findSetting(
+      scanProjectFile(readFileSync(projectFile, 'utf8')),
+      section.value,
+      key.value,
+    );
+    if (readBack === undefined || readBack.raw !== literal) {
+      return err(
+        createErrorResponse(
+          `Setting ${section.value}/${key.value} was written but does not read back as written`,
+          ['Open project.godot and check the line for a malformed neighbour'],
+        ),
+      );
+    }
+    return createStructuredResponse(
+      leadWithWarnings({
+        warnings: nonCanonical === null ? [] : [nonCanonical],
+        section: section.value,
+        key: key.value,
+        value: readBack.value,
+        created: written.created,
+        sectionCreated: written.sectionCreated,
+        ...(written.created ? {} : { previous: written.previous }),
+      }),
+    );
+  } catch (error: unknown) {
+    return err(
+      createErrorResponse(`Failed to set project setting: ${getErrorMessage(error)}`, [
         'Check if project.godot is accessible',
       ]),
     );

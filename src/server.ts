@@ -47,7 +47,7 @@ Tool categories:
 - Runtime (requires run_project): take_screenshot, simulate_input, get_ui_elements, run_script
 - Render check (no runtime session): render_movie
 - Profiling (requires run_project with profiling: true): profile_project, start_profiler, stop_profiler
-- Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings
+- Project config (no Godot process): list_autoloads, add_autoload, remove_autoload, update_autoload, get_project_files, search_project, get_scene_dependencies, get_project_settings, set_project_setting
 - Validation: validate
 
 Key behaviors:

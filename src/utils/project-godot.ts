@@ -1,6 +1,8 @@
 /** The one reader of `project.godot`: accepts the canonical form Godot writes and lists anything else in `nonCanonical`; a caller deciding from the file must treat a non-empty list as 'not read reliably'. A setting's identity is its full path (`section/key`), the last assignment wins, and lookups go by path.
  * May import from `scene-parsing.ts`; that file must never import this one back. */
 
+import { readFileSync } from 'fs';
+import { writeFileAtomicSync } from './atomic-write.js';
 import { readQuoted } from './scene-parsing.js';
 
 export type SettingsValue = string | number | boolean | null;
@@ -543,4 +545,172 @@ export function readProjectSettings(content: string): ParsedSettings {
   const nonCanonical = describeNonCanonical(scan);
   if (nonCanonical !== null) warnings.push(nonCanonical);
   return { settings, warnings };
+}
+
+/** Letters, digits, `_`, `.` and `-` in each `/`-separated part: the unquoted form Godot writes for a section name or a setting key, so no quoting rule has to be applied on write. */
+const SETTING_NAME_REGEX = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/;
+/** Leads the setting path of every autoload; those settings belong to the autoload tools. */
+const AUTOLOAD_SETTING_PREFIX = 'autoload/';
+const PROBE_SECTION_HEADER = '[probe]';
+const PROBE_KEY = 'probe';
+const CARRIAGE_RETURN = '\r';
+const LINE_FEED = '\n';
+const CRLF = '\r\n';
+const LINE_WITH_ENDING_REGEX = /[^\n]*\n|[^\n]+$/g;
+const LINE_ENDING_REGEX = /\r?\n$/;
+
+/** Why `section` and `key` cannot be written by `applySetting`, or null when they can. */
+export function settingTargetError(section: string, key: string): string | null {
+  if (section === GLOBAL_SECTION) {
+    return `section "${GLOBAL_SECTION}" stands for keys before any header and cannot be written`;
+  }
+  if (!SETTING_NAME_REGEX.test(section)) {
+    return `section "${section}" must be made of letters, digits, _ . - and / (no spaces, quotes or brackets)`;
+  }
+  if (!SETTING_NAME_REGEX.test(key)) {
+    return `key "${key}" must be made of letters, digits, _ . - and / (no spaces, quotes or =)`;
+  }
+  if (settingPath(section, key).startsWith(AUTOLOAD_SETTING_PREFIX)) {
+    return `"${settingPath(section, key)}" is an autoload entry: use add_autoload, update_autoload or remove_autoload`;
+  }
+  return null;
+}
+
+function escapeSettingString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
+/** Converts a JSON value to the Godot literal `project.godot` holds: a string is quoted and escaped, an integer-valued number is an int, any other finite number a float, a boolean is `true`/`false`, an array is `[a, b]` and a plain object is a dictionary `{"k": v}`. Throws on `null`, a non-finite number or any other type; a typed value (`Vector2(1, 2)`, a float written `2.0`) goes through `checkSettingLiteral` instead. */
+export function godotLiteralFromJson(value: unknown): string {
+  if (typeof value === 'string') return `"${escapeSettingString(value)}"`;
+  if (typeof value === 'boolean') return String(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('value must be a finite number');
+    return String(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(godotLiteralFromJson).join(', ')}]`;
+  if (value !== null && typeof value === 'object') {
+    const pairs = Object.entries(value).map(
+      ([name, item]) => `"${escapeSettingString(name)}": ${godotLiteralFromJson(item)}`,
+    );
+    return `{${pairs.join(', ')}}`;
+  }
+  throw new Error(
+    'value must be a string, number, boolean, array or object; pass literal for null',
+  );
+}
+
+/** Why `literal` is not one complete single-line Godot value that reads back as written, or null when it is. Decided by reading it with `scanProjectFile` as the value of a probe statement. */
+export function checkSettingLiteral(literal: string): string | null {
+  const text = literal.trim();
+  if (text === '') return 'literal is empty';
+  if (text.includes(LINE_FEED) || text.includes(CARRIAGE_RETURN)) {
+    return 'literal must be on one line';
+  }
+  const scan = scanProjectFile(
+    `${PROBE_SECTION_HEADER}${LINE_FEED}${PROBE_KEY}=${text}${LINE_FEED}`,
+  );
+  const statement = scan.statements[0];
+  const readsAsWritten =
+    scan.statements.length === 1 &&
+    scan.unparsed.length === 0 &&
+    scan.nonCanonical.length === 0 &&
+    statement !== undefined &&
+    statement.canonical &&
+    !statement.unterminated &&
+    statement.raw === text;
+  return readsAsWritten
+    ? null
+    : `literal is not one complete value in the form Godot writes (a quoted string, number, true/false/null, array, dictionary or constructor such as Vector2(1, 2)), with no trailing comment: ${text}`;
+}
+
+export interface SettingWrite {
+  content: string;
+  /** False when an existing assignment was rewritten. */
+  created: boolean;
+  /** True when no `[section]` existed and one was appended. */
+  sectionCreated: boolean;
+  /** The value the rewritten assignment held; undefined when `created`. */
+  previous?: SettingsValue;
+}
+
+function eolOf(content: string): string {
+  return content.includes(CRLF) ? CRLF : LINE_FEED;
+}
+
+function lineEndingOf(line: string): string {
+  return LINE_ENDING_REGEX.exec(line)?.[0] ?? '';
+}
+
+function terminateLastLine(lines: string[], eol: string): void {
+  const lastIdx = lines.length - 1;
+  if (lastIdx >= 0 && lineEndingOf(lines[lastIdx]!) === '') lines[lastIdx] += eol;
+}
+
+/** Returns `content` with the setting `section`/`key` set to `literal` (already checked by `checkSettingLiteral`; the target by `settingTargetError`). The assignment the engine keeps (the last, under any spelling) is rewritten as one line where it is, keeping its line ending and dropping a trailing comment; earlier overridden assignments stay. A new setting goes after the last statement of the last `[section]`, or into a `[section]` appended after one blank line. Every other line is byte for byte as it was, and new lines use the file's own line ending. */
+export function applySetting(
+  content: string,
+  section: string,
+  key: string,
+  literal: string,
+): SettingWrite {
+  const text = literal.trim();
+  const eol = eolOf(content);
+  const scan = scanProjectFile(content);
+  const lines: string[] = content.match(LINE_WITH_ENDING_REGEX) ?? [];
+  const winner = findSetting(scan, section, key);
+
+  if (winner !== undefined) {
+    lines.splice(
+      winner.startLine,
+      winner.endLine - winner.startLine + 1,
+      `${winner.key}=${text}${lineEndingOf(lines[winner.endLine] ?? '')}`,
+    );
+    return {
+      content: lines.join(''),
+      created: false,
+      sectionCreated: false,
+      previous: winner.value,
+    };
+  }
+
+  const entry = `${key}=${text}${eol}`;
+  const target = scan.sections.filter((s) => s.name === section).at(-1);
+  if (target === undefined) {
+    terminateLastLine(lines, eol);
+    const last = lines.at(-1);
+    if (last !== undefined && last.trim() !== '') lines.push(eol);
+    lines.push(`[${section}]${eol}`, entry);
+    return { content: lines.join(''), created: true, sectionCreated: true };
+  }
+
+  const lastStatement = scan.statements
+    .filter((s) => s.startLine > target.headerLine && s.startLine < target.endLine)
+    .at(-1);
+  const insertAt = (lastStatement?.endLine ?? target.headerLine) + 1;
+  if (insertAt >= lines.length) {
+    terminateLastLine(lines, eol);
+    lines.push(entry);
+  } else {
+    lines.splice(insertAt, 0, entry);
+  }
+  return { content: lines.join(''), created: true, sectionCreated: false };
+}
+
+/** Reads `projectFilePath`, applies the setting and writes the file back atomically. */
+export function writeProjectSetting(
+  projectFilePath: string,
+  section: string,
+  key: string,
+  literal: string,
+  existingContent?: string,
+): SettingWrite {
+  const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
+  const result = applySetting(content, section, key, literal);
+  writeFileAtomicSync(projectFilePath, result.content);
+  return result;
 }
