@@ -1018,10 +1018,6 @@ func create_resource(params: Variant) -> void:
 		_fail_operation()
 		return
 
-	if not _ensure_res_dir(full_path):
-		log_error("Failed to create directory for resource: " + full_path)
-		_fail_operation()
-		return
 	_save_and_emit_resource(res, full_path, applied.keys)
 
 func set_resource_properties(params: Variant) -> void:
