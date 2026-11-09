@@ -57,7 +57,7 @@ export interface SceneConnection {
   method: string;
 }
 
-/** One reparent: the node at `from` (tool-form path) now sits at `to`, its whole subtree with it. */
+/** One requested move: the node at `from` (tool-form path) now sits at `to`, its whole subtree with it; a reorder has `to` equal to `from`. */
 export interface MovedNode {
   from: string;
   to: string;
@@ -67,7 +67,7 @@ export interface SceneChangeIntent {
   /** Tool-form node paths ("root/A", "Main/A", "A", "./A", "%A") the operation may rewrite as a whole. */
   touchedNodes: string[];
   deletedNodes: string[];
-  /** Reparents in the order they ran; each `from` is the path the tree had when that move began. The subtree is compared at its new place, so a loss inside it is reported and the move itself is not. A `%Name` path is not followed. */
+  /** Every requested move in the order it ran, the i-th matching the operation's i-th result entry; each `from` is the path the tree had when that move began. The subtree is compared at its new place, so a loss inside it is reported and the move itself is not. A `%Name` path is not followed. */
   movedNodes?: MovedNode[];
   /** Single properties the operation assigns. Everything else on those nodes is still compared. */
   touchedProperties?: TouchedProperty[];
@@ -875,28 +875,21 @@ function readResolvedPaths(
   return { resolved, succeeded };
 }
 
-/** `moved` restated from a `move_nodes` report: each move is matched, in order, to the result entry for its `from`; a success becomes the path the node was found at and the path it reached, a failure is dropped, and a move the report does not mention stays as requested. */
+/** `moved` restated from a `move_nodes` report, whose i-th result entry answers the i-th move: a success becomes the path the node was found at and the path it reached, a failure is dropped, and a move whose entry is missing or names another node stays as requested. */
 function restateMoves(moved: readonly MovedNode[], results: unknown): MovedNode[] {
   if (!Array.isArray(results)) return [...moved];
   const entries = results as unknown[];
   const restated: MovedNode[] = [];
-  let next = 0;
-  for (const move of moved) {
-    let found = -1;
-    for (let at = next; at < entries.length && found === -1; at++) {
-      if (stringField(asRecord(entries[at]) ?? {}, 'nodePath', 'node_path') === move.from)
-        found = at;
-    }
-    const entry = found === -1 ? null : asRecord(entries[found]);
-    if (entry === null) {
+  moved.forEach((move, at) => {
+    const entry = asRecord(entries[at]);
+    if (entry === null || stringField(entry, 'nodePath', 'node_path') !== move.from) {
       restated.push(move);
-      continue;
+      return;
     }
-    next = found + 1;
     const from = stringField(entry, 'resolvedNodePath', 'resolved_node_path');
     const to = stringField(entry, 'newNodePath', 'new_node_path');
     if (entry.success === true && from !== null && to !== null) restated.push({ from, to });
-  }
+  });
   return restated;
 }
 

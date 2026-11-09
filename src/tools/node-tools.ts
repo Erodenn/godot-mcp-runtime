@@ -794,13 +794,12 @@ export async function handleMoveNodes(
   if (!checkedMoves.ok) return checkedMoves;
 
   const params = { scenePath: parsed.value.scenePath, moves: checkedMoves.value };
-  // A reparent changes the file path of the whole subtree; the guard follows the subtree to its new place and still compares it there. A pure reorder moves no path, and the guard does not compare child order.
-  const reparented: MovedNode[] = checkedMoves.value
-    .filter((move) => move.newParentPath !== undefined)
-    .map((move) => ({
-      from: move.nodePath as NodePath,
-      to: `${move.newParentPath as NodePath}/${nodeNameOf(move.nodePath as NodePath)}`,
-    }));
+  // One entry per move, reorders included, so each lines up with its result entry; a reorder moves no path and the guard does not compare child order.
+  const movedNodes: MovedNode[] = checkedMoves.value.map((move) => {
+    const from = move.nodePath as NodePath;
+    const parent = move.newParentPath as NodePath | undefined;
+    return { from, to: parent === undefined ? from : `${parent}/${nodeNameOf(from)}` };
+  });
   return executeSceneOp(
     runner,
     'move_nodes',
@@ -812,7 +811,7 @@ export async function handleMoveNodes(
     {
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
-      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { movedNodes: reparented }),
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { movedNodes }),
     },
   );
 }
