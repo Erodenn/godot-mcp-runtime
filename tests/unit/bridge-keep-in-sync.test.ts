@@ -5,6 +5,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import {
   ACTION_BOUNDARY_SENTINEL,
+  COMPILE_BEGIN_SENTINEL,
+  COMPILE_END_SENTINEL,
   BRIDGE_UNAUTHORIZED_ERROR,
   DEFAULT_BRIDGE_PORT,
   FRAME_HEADER_BYTES,
@@ -29,6 +31,9 @@ import {
   MAX_TEXT_LENGTH,
   MAX_WAIT_FRAMES,
   MAX_WATCH_ENTRIES,
+  RUN_SCRIPT_DEFAULT_TIMEOUT_MS,
+  RUN_SCRIPT_TIMED_OUT_FIELD,
+  RUN_SCRIPT_TIMEOUT_FIELD,
   runtimeToolDefinitions,
   SCREENSHOT_DEFAULT_TIMEOUT_MS,
   SCREENSHOT_FRAME_RENDER_BUDGET_MS,
@@ -77,6 +82,17 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
     expect(gdConst('MAX_FRAME_BYTES')).toBe('16 * 1024 * 1024');
     expect(MAX_FRAME_BYTES).toBe(16 * 1024 * 1024);
     expect(gdConst('FRAME_HEADER_BYTES')).toBe(String(FRAME_HEADER_BYTES));
+  });
+
+  it('declares the same compile-span sentinels', () => {
+    expect(gdConst('COMPILE_BEGIN_SENTINEL')).toBe(`"${COMPILE_BEGIN_SENTINEL}"`);
+    expect(gdConst('COMPILE_END_SENTINEL')).toBe(`"${COMPILE_END_SENTINEL}"`);
+  });
+
+  it('declares the same run_script timeout contract', () => {
+    expect(gdConst('RUN_SCRIPT_TIMEOUT_FIELD')).toBe(`"${RUN_SCRIPT_TIMEOUT_FIELD}"`);
+    expect(gdConst('RUN_SCRIPT_TIMED_OUT_FIELD')).toBe(`"${RUN_SCRIPT_TIMED_OUT_FIELD}"`);
+    expect(gdConst('RUN_SCRIPT_DEFAULT_TIMEOUT_MS')).toBe(String(RUN_SCRIPT_DEFAULT_TIMEOUT_MS));
   });
 
   it('declares the same action-boundary sentinel', () => {

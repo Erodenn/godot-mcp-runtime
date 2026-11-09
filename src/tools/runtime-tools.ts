@@ -131,7 +131,11 @@ const MAX_ACTIONS_WITHIN_BUDGET = Math.floor(
 const ACTIONS_PER_CALL_SENTENCE = `The budget admits at most ${MAX_ACTIONS_WITHIN_BUDGET} actions per call, fewer when they tap, hold or wait.`;
 
 export const SCREENSHOT_DEFAULT_TIMEOUT_MS = 10000;
-const RUN_SCRIPT_DEFAULT_TIMEOUT_MS = 30000;
+// KEEP IN SYNC: `RUN_SCRIPT_DEFAULT_TIMEOUT_MS`, `RUN_SCRIPT_TIMEOUT_FIELD` and `RUN_SCRIPT_TIMED_OUT_FIELD` in src/scripts/mcp_bridge.gd.
+// The request carries the call's timeout so the bridge bounds an execute that awaits and answers before this side's socket timeout.
+export const RUN_SCRIPT_DEFAULT_TIMEOUT_MS = 30000;
+export const RUN_SCRIPT_TIMEOUT_FIELD = 'timeout_ms';
+export const RUN_SCRIPT_TIMED_OUT_FIELD = 'timed_out';
 // KEEP IN SYNC: `FRAME_RENDER_BUDGET_MS` in src/scripts/mcp_bridge.gd.
 // Must stay under SCREENSHOT_DEFAULT_TIMEOUT_MS, or the generic timeout fires before the bridge's own diagnosis.
 export const SCREENSHOT_FRAME_RENDER_BUDGET_MS = 5000;
@@ -710,7 +714,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; the return is JSON-serialized: vectors as {x,y[,z,w]}, Color as {r,g,b,a}, packed arrays as plain arrays, a Node as {class,name,path}. print() goes to get_debug_output. Returns: projectPath, result, warnings, tip. Spawned: a stderr runtime error is an error if result is null, else a warning. Attached: errors are unobservable; a null result warns.',
+      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; execute may await, cut off at the timeout (not cancelled). The return is JSON-serialized: vectors as {x,y[,z,w]}, Color as {r,g,b,a}, a Node as {class,name,path}. Compiled under project warning settings. Returns: projectPath, result, warnings, tip. Spawned: a runtime error is an error if result is null, else a warning. Attached: errors are unobservable.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -2690,12 +2694,17 @@ async function executeAdmittedScript(
       response: responseStr,
       runtimeErrors,
       stderrWindow,
-    } = await runner.sendCommandWithErrors('run_script', { source: script }, timeout);
+    } = await runner.sendCommandWithErrors(
+      'run_script',
+      { source: script, [RUN_SCRIPT_TIMEOUT_FIELD]: timeout },
+      timeout,
+    );
 
     const parsedResult = parseBridgeJson<{
       success?: boolean;
       result?: unknown;
       error?: string;
+      timed_out?: boolean;
     }>(responseStr, 'run_script', {
       ran: 'The script ran to completion and whatever it changed stays changed.',
       solutions: [
@@ -2706,6 +2715,21 @@ async function executeAdmittedScript(
     if (!parsedResult.ok) return parsedResult;
     const parsed = parsedResult.value;
     const nonFiniteWarning = readNonFiniteWarning(parsed);
+
+    if (parsed.error && parsed[RUN_SCRIPT_TIMED_OUT_FIELD] === true) {
+      // An execute that awaits and never resumes: typed, and the stderr lines since the send are the likely reason (an error inside a resumed coroutine aborts it silently).
+      const errorContext =
+        runtimeErrors.length > 0
+          ? `\nRuntime errors since the call began:\n${capRuntimeErrorLines(runtimeErrors).join('\n')}`
+          : '';
+      return err(
+        createErrorResponse(`${parsed.error}${errorContext}`, [
+          'Make sure every await in execute resumes (a signal that fires, process_frame, a timer); a runtime error after an await ends the coroutine without a reply',
+          'Raise the timeout parameter if the script legitimately waits longer',
+          'Check get_debug_output, and wait for the script to settle before the next call',
+        ]),
+      );
+    }
 
     if (parsed.error) {
       // Compile failures return a bare "error N" with no location; the parser diagnostic (message and line) is on engine stderr, so surface it here.

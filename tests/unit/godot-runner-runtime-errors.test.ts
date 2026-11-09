@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import type { GodotProcess } from '../../src/utils/godot-runner.js';
-import { ACTION_BOUNDARY_SENTINEL } from '../../src/utils/bridge-protocol.js';
+import {
+  ACTION_BOUNDARY_SENTINEL,
+  COMPILE_BEGIN_SENTINEL,
+  COMPILE_END_SENTINEL,
+} from '../../src/utils/bridge-protocol.js';
 import { MAX_PENDING_LINE_CHARS, truncatedLineMarker } from '../../src/utils/child-output.js';
 import { installSession } from '../helpers/session-install.js';
 
@@ -136,6 +140,38 @@ describe('GodotRunner.ingestStderrChunk', () => {
     expect(proc.errors).toEqual(['SCRIPT ERROR: boom', 'after']);
     expect(proc.totalErrorsWritten).toBe(2);
     expect(proc.errors.some((line) => line.includes(ACTION_BOUNDARY_SENTINEL))).toBe(false);
+  });
+
+  it('keeps a run_script compile span out of proc.errors and in the compile buffer', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    runner.ingestStderrChunk(
+      proc,
+      [
+        'before',
+        COMPILE_BEGIN_SENTINEL,
+        'SCRIPT ERROR: Parse Error: bad probe',
+        '          at: GDScript::reload (gdscript://1.gd:4)',
+        COMPILE_END_SENTINEL,
+        'SCRIPT ERROR: a real game error',
+        '',
+      ].join('\n'),
+    );
+    expect(proc.errors).toEqual(['before', 'SCRIPT ERROR: a real game error']);
+    expect(proc.totalErrorsWritten).toBe(2);
+    expect(proc.compileLines).toEqual([
+      'SCRIPT ERROR: Parse Error: bad probe',
+      '          at: GDScript::reload (gdscript://1.gd:4)',
+    ]);
+  });
+
+  it('closes a compile span that never ended so later game errors stay visible', () => {
+    const proc = makeFakeProcess({ errors: [], totalErrorsWritten: 0 });
+    const spanOverflowLines = 400;
+    const lines = [COMPILE_BEGIN_SENTINEL];
+    for (let i = 0; i < spanOverflowLines; i++) lines.push(`SCRIPT ERROR: line ${i}`);
+    runner.ingestStderrChunk(proc, lines.join('\n') + '\n');
+    expect(proc.errors.length).toBeGreaterThan(0);
+    expect(proc.errors[proc.errors.length - 1]).toBe(`SCRIPT ERROR: line ${spanOverflowLines - 1}`);
   });
 
   it('records boundary marks whose seq is the retained-line count before each sentinel', () => {

@@ -114,6 +114,19 @@ export function parseActionBoundary(line: string): number | null {
   return Number.parseInt(digits, 10);
 }
 
+// Markers the bridge prints on stderr around compiling a run_script source. The engine prints a compile failure as SCRIPT ERROR lines; the lines between the markers belong to the submitted probe, not to the game, so the Node side keeps them out of the game's error log.
+// KEEP IN SYNC: `COMPILE_BEGIN_SENTINEL` and `COMPILE_END_SENTINEL` in src/scripts/mcp_bridge.gd; a mismatch leaves a probe's compile errors in the game's log.
+export const COMPILE_BEGIN_SENTINEL = 'MCP_COMPILE_BEGIN';
+export const COMPILE_END_SENTINEL = 'MCP_COMPILE_END';
+
+/** Which compile marker a stderr line is, or null for any other line. */
+export function parseCompileBoundary(line: string): 'begin' | 'end' | null {
+  const trimmed = line.trim();
+  if (trimmed === COMPILE_BEGIN_SENTINEL) return 'begin';
+  if (trimmed === COMPILE_END_SENTINEL) return 'end';
+  return null;
+}
+
 export interface BucketBySentinelInput {
   lines: string[];
   startSeq: number;

@@ -13,6 +13,7 @@ import {
   findFreePort,
   parseFrames,
   parseActionBoundary,
+  parseCompileBoundary,
   bucketBySentinel,
   clampTimerDelay,
   FRAME_HEADER_BYTES,
@@ -181,6 +182,8 @@ export function startBridgeWaitDeadline(mode: RuntimeSessionMode, requestedAt: n
 const IMPORT_TIMEOUT_MS = 300000;
 
 const STDERR_RING_LIMIT_LINES = 500;
+/** Lines one compile span may divert before it is closed by force, so a bridge that died between the two markers cannot swallow the game's later errors. */
+const COMPILE_SPAN_MAX_LINES = 200;
 const STDOUT_RING_LIMIT_LINES = 500;
 // The bridge's TCP response can land before its stderr drains, so the last action boundary is polled for.
 const SENTINEL_DRAIN_TIMEOUT_MS = 250;
@@ -199,6 +202,11 @@ export interface GodotProcess {
   /** Stderr text not yet ended by a newline. Optional like `actionBoundaries`; `ingestStderrChunk` creates it. */
   stderrLines?: LineAssembler;
   stdoutLines?: LineAssembler;
+  /** Compile output of run_script sources, kept apart from `errors` so a probe's compile failure never reads as a game error. Optional like `actionBoundaries`. */
+  compileLines?: string[];
+  totalCompileLinesWritten?: number;
+  /** Lines diverted into `compileLines` since the open marker; null outside a span. */
+  compileSpanLines?: number | null;
   /** Settles once stdout and stderr both ended. Absent on a hand-built literal. */
   streamsEnded?: Promise<void>;
 }
@@ -475,6 +483,14 @@ function streamEnded(stream: NodeJS.ReadableStream | null | undefined): Promise<
 function recentErrorLines(proc: GodotProcess | null, count: number): string[] {
   if (!proc) return [];
   return proc.errors.slice(-count).filter((line) => line.trim() !== '');
+}
+
+function compileLinesSince(proc: GodotProcess | null, marker: number): string[] {
+  if (!proc?.compileLines) return [];
+  const delta = (proc.totalCompileLinesWritten ?? 0) - marker;
+  if (delta <= 0) return [];
+  const lines = proc.compileLines;
+  return delta >= lines.length ? lines.slice() : lines.slice(lines.length - delta);
 }
 
 function errorsSince(proc: GodotProcess | null, marker: number): string[] {
@@ -2221,7 +2237,29 @@ export class GodotRunner {
       proc.actionBoundaries.push({ index: boundaryIndex, seq: proc.totalErrorsWritten });
       return;
     }
+    const compileBoundary = parseCompileBoundary(line);
+    if (compileBoundary === 'begin') {
+      proc.compileSpanLines = 0;
+      return;
+    }
+    if (compileBoundary === 'end') {
+      proc.compileSpanLines = null;
+      return;
+    }
     if (line.trim() === '') return;
+    if (proc.compileSpanLines !== null && proc.compileSpanLines !== undefined) {
+      if (proc.compileSpanLines < COMPILE_SPAN_MAX_LINES) {
+        proc.compileSpanLines += 1;
+        proc.compileLines ??= [];
+        proc.compileLines.push(line);
+        proc.totalCompileLinesWritten = (proc.totalCompileLinesWritten ?? 0) + 1;
+        if (proc.compileLines.length > STDERR_RING_LIMIT_LINES) {
+          proc.compileLines.splice(0, proc.compileLines.length - STDERR_RING_LIMIT_LINES);
+        }
+        return;
+      }
+      proc.compileSpanLines = null;
+    }
     proc.errors.push(line);
     proc.totalErrorsWritten += 1;
     logDebug(`[Godot stderr] ${line}`);
@@ -2394,12 +2432,14 @@ export class GodotRunner {
         throw new NoLiveCurrentSessionError(this.getRuntimeSessionStatus());
       }
       const marker = session.process?.totalErrorsWritten ?? 0;
+      const compileMarker = session.process?.totalCompileLinesWritten ?? 0;
       const response = await this.sendCommandWithReconnect(session, command, params, timeoutMs);
       // Keyed on the retained process, not the mode: the auto-clear nulls the mode on exit but the stderr buffer survives. Attached sessions have no process and get [].
       const newErrors = errorsSince(session.process, marker);
       const runtimeErrors = session.process !== null ? this.extractRuntimeErrors(newErrors) : [];
-      // The unfiltered window is for callers needing the engine output around a failure (run_script compile diagnostics: the "at:" line the per-line filter drops).
-      return { response, runtimeErrors, stderrWindow: newErrors };
+      // The unfiltered window is for callers needing the engine output around a failure (run_script compile diagnostics: the "at:" line the per-line filter drops). Compile output leads it and never feeds runtimeErrors: it is the probe's, not the game's.
+      const stderrWindow = [...compileLinesSince(session.process, compileMarker), ...newErrors];
+      return { response, runtimeErrors, stderrWindow };
     });
   }
 

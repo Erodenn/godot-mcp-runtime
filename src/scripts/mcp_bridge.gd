@@ -123,6 +123,19 @@ const RUN_SCRIPT_ENTRY_METHOD := "execute"
 const RUN_SCRIPT_INIT_METHOD := "_init"
 const RUN_SCRIPT_ENTRY_ARGUMENT_COUNT := 1
 const RUN_SCRIPT_ENTRY_MISSING_ERROR := "Script must define func execute(scene_tree: SceneTree) -> Variant"
+# The request carries the call's timeout so the bridge can bound an execute that awaits and answer before the Node side gives up, which destroys the socket and leaves no typed error.
+# KEEP IN SYNC: RUN_SCRIPT_TIMEOUT_FIELD with the payload key in src/tools/runtime-tools.ts, and RUN_SCRIPT_TIMED_OUT_FIELD with the field read there.
+const RUN_SCRIPT_TIMEOUT_FIELD := "timeout_ms"
+const RUN_SCRIPT_TIMED_OUT_FIELD := "timed_out"
+# Used only when a bridge is driven by hand; the server always sends the timeout. KEEP IN SYNC: RUN_SCRIPT_DEFAULT_TIMEOUT_MS in src/tools/runtime-tools.ts.
+const RUN_SCRIPT_DEFAULT_TIMEOUT_MS := 30000
+# The bridge answers this much before the Node side's timeout (never below half of it), so the typed reply wins the race.
+const RUN_SCRIPT_REPLY_MARGIN_MS := 250
+const RUN_SCRIPT_TIMED_OUT_ERROR := "run_script timed out: execute was still awaiting after %d ms and has not returned. It is not cancelled and may still resume and change the game; the next call may race with it."
+# Markers around compiling the source, so the Node side keeps a probe's compile errors out of the game's error log.
+# KEEP IN SYNC: COMPILE_BEGIN_SENTINEL and COMPILE_END_SENTINEL in src/utils/bridge-protocol.ts.
+const COMPILE_BEGIN_SENTINEL := "MCP_COMPILE_BEGIN"
+const COMPILE_END_SENTINEL := "MCP_COMPILE_END"
 const TRUNCATED_DEPTH_MARKER := "<truncated: nested deeper than %d levels>"
 const TRUNCATED_CYCLE_MARKER := "<truncated: this container contains itself>"
 const TRUNCATED_ELEMENTS_MARKER := "<truncated: %d more elements>"
@@ -1427,11 +1440,20 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": "No script source provided"})
 		return
 
+	var timeout_field: Variant = payload.get(RUN_SCRIPT_TIMEOUT_FIELD, RUN_SCRIPT_DEFAULT_TIMEOUT_MS)
+	if typeof(timeout_field) != TYPE_INT and typeof(timeout_field) != TYPE_FLOAT:
+		_send_response(peer, {"error": "%s must be a number" % RUN_SCRIPT_TIMEOUT_FIELD})
+		return
+	var timeout_ms: int = maxi(int(timeout_field), 0)
+
 	var script := GDScript.new()
 	script.source_code = source
+	# The engine prints a compile failure on stderr and offers no switch to compile without printing; the markers tell the Node side which lines are this probe's. printerr, never print: only stderr is ordered against the engine's own output.
+	printerr(COMPILE_BEGIN_SENTINEL)
 	var err := script.reload()
+	printerr(COMPILE_END_SENTINEL)
 	if err != OK:
-		_send_response(peer, {"error": "Script compilation failed (error %d). Check syntax." % err})
+		_send_response(peer, {"error": "Script compilation failed (error %d). Check syntax. The project's GDScript warning settings apply to the script: a project that treats warnings as errors fails untyped declarations, unsafe access and casts." % err})
 		return
 
 	# Refuse here everything that would make new() or the execute call raise: a raise in this handler sends no response and the client waits out its whole timeout.
@@ -1453,11 +1475,25 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_send_response(peer, {"error": RUN_SCRIPT_ENTRY_MISSING_ERROR})
 		return
 
-	# The argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states. A coroutine returns its pending state, which the await resolves.
-	# A freed Object is never awaited: `await` raises on one ("Trying to await on a freed object."), the handler stops and no response is sent.
-	var result: Variant = instance.execute(get_tree())
-	if typeof(result) != TYPE_OBJECT or is_instance_valid(result):
-		result = await result
+	# The argument list is what RUN_SCRIPT_ENTRY_ARGUMENT_COUNT states. execute may be a coroutine: _run_execute awaits it and records the outcome, and this handler waits on that outcome, bounded by the call's timeout.
+	# Started without using its return value, as _poll_peer starts _dispatch_command: using a coroutine's return value without await is a runtime error that aborts this handler before it replies.
+	var outcome := {"done": false, "value": null}
+	if _execute_body_awaits(source):
+		_run_execute.call(instance, outcome)
+	else:
+		# Not a coroutine, so called plainly: awaiting its value would raise on a returned freed Object.
+		outcome["value"] = Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
+		outcome["done"] = true
+	if not outcome["done"]:
+		var budget_ms := maxi(timeout_ms - RUN_SCRIPT_REPLY_MARGIN_MS, int(timeout_ms * 0.5))
+		var deadline_ms := Time.get_ticks_msec() + budget_ms
+		while not outcome["done"] and Time.get_ticks_msec() < deadline_ms:
+			await get_tree().process_frame
+		if not outcome["done"]:
+			# The coroutine is not cancelled and keeps its own reference to the instance, so the instance is left alone.
+			_send_response(peer, {"error": RUN_SCRIPT_TIMED_OUT_ERROR % budget_ms, RUN_SCRIPT_TIMED_OUT_FIELD: true})
+			return
+	var result: Variant = outcome["value"]
 
 	if instance is RefCounted:
 		instance = null
@@ -1466,6 +1502,28 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 
 	var serialized: Variant = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
+
+# GDScript makes a function a coroutine exactly when its own body holds an await. The body runs from `func execute` to the next line at column 0 that is not a comment; a comment's text is dropped before the check, and a stray match in a string only sends a plain function down the awaiting path.
+func _execute_body_awaits(source: String) -> bool:
+	var await_word := RegEx.create_from_string("\\bawait\\b")
+	var in_body := false
+	for line: String in source.split("\n"):
+		var trimmed := line.strip_edges()
+		var at_column_zero := line.length() > 0 and line[0] != " " and line[0] != "\t"
+		if at_column_zero and not trimmed.begins_with("#"):
+			if in_body:
+				return false
+			in_body = trimmed.begins_with("func %s(" % RUN_SCRIPT_ENTRY_METHOD) or trimmed.begins_with("func %s (" % RUN_SCRIPT_ENTRY_METHOD)
+			if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
+				return true
+			continue
+		if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
+			return true
+	return false
+
+func _run_execute(instance: Variant, outcome: Dictionary) -> void:
+	outcome["value"] = await Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
+	outcome["done"] = true
 
 # The list runs from the script to its base scripts, so the first match is the one a call reaches.
 func _script_method_info(script: Script, method_name: String) -> Dictionary:
