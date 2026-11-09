@@ -237,7 +237,7 @@ export const sceneToolDefinitions = [
   {
     name: 'export_mesh_library',
     description:
-      "Export a scene's MeshInstance3D children as a MeshLibrary .res file for GridMap. For grid-based 3D tile palettes only, not 2D scenes. Pass meshItemNames for a subset, or omit it for all. Saves to outputPath, overwriting silently. Returns: outputPath, itemCount and itemNames, read from the saved library; warnings leads when a requested name was not exported. Errors if the scene holds no valid meshes. Errors while a runtime session is live on this project.",
+      "Export a scene's MeshInstance3D children as a MeshLibrary for GridMap. The outputPath extension sets the format: .tres is text (prefer it; the launch pre-flight scan reads it), .res is binary (reported as not scanned). Not for 2D scenes. meshItemNames picks a subset, else all. Overwrites silently. Returns: outputPath, itemCount, itemNames read from the saved library; warnings leads when a requested name was not exported. Errors if no valid meshes, or while a runtime session is live.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -246,7 +246,8 @@ export const sceneToolDefinitions = [
         scenePath: { type: 'string', description: 'Scene file path relative to the project' },
         outputPath: {
           type: 'string',
-          description: 'Output path for the MeshLibrary .res file (relative to project)',
+          description:
+            'Output path for the MeshLibrary (relative to project). Its extension sets the format: .tres writes text, .res writes binary. Prefer .tres.',
         },
         meshItemNames: {
           type: 'array',
@@ -704,7 +705,7 @@ export async function handleExportMeshLibrary(
     'Failed to export mesh library',
     ['Check if the scene contains valid 3D meshes'],
     undefined,
-    // Writes a .res and no scene file, so there are no sceneWrites to compare.
+    // Writes a .tres or .res and no scene file, so there are no sceneWrites to compare.
     { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }

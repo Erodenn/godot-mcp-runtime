@@ -470,6 +470,12 @@ describe('handleExportMeshLibrary', () => {
     expect(expectMatchesOutputSchema('export_mesh_library', result)).toEqual(exported);
   });
 
+  it.each(['lib.tres', 'sub/lib.res'])('forwards the %s output path unchanged', async (out) => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({}) });
+    await handleExportMeshLibrary(fake.asRunner, { ...validBase, outputPath: out });
+    expect(fake.calls[0]?.params.outputPath).toBe(out);
+  });
+
   it('puts warnings first when a requested item was not exported', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({
