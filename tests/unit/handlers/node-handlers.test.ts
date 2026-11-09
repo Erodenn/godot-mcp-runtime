@@ -626,6 +626,33 @@ describe('handleDuplicateNode', () => {
     expectErrorMatching(result, /boom/);
   });
 
+  // Red when copySignals is dropped before the runner call, or forwarded when the caller omitted it.
+  it('forwards copySignals false, and sends nothing when it is omitted', async () => {
+    const payload = JSON.stringify({ nodePath: 'root/Node', newNodePath: 'root/Node2' });
+    const off = createFakeRunner({ stdout: payload });
+    await handleDuplicateNode(off.asRunner, {
+      ...validBase,
+      nodePath: 'root/Node',
+      copy_signals: false,
+    });
+    expect(off.calls[0]?.params.copySignals).toBe(false);
+
+    const unset = createFakeRunner({ stdout: payload });
+    await handleDuplicateNode(unset.asRunner, { ...validBase, nodePath: 'root/Node' });
+    expect(unset.calls[0]?.params).not.toHaveProperty('copySignals');
+  });
+
+  it('rejects a copySignals that is not a boolean', async () => {
+    const fake = createFakeRunner();
+    const result = await handleDuplicateNode(fake.asRunner, {
+      ...validBase,
+      nodePath: 'root/Node',
+      copySignals: 'no',
+    });
+    expectErrorMatching(result, /copySignals/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('returns parsed result on successful runner output', async () => {
     const fake = createFakeRunner({
       stdout: JSON.stringify({

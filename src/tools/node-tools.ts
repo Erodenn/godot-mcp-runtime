@@ -308,7 +308,7 @@ export const nodeToolDefinitions = [
   {
     name: 'duplicate_node',
     description:
-      'Duplicate a node and its descendants in a scene, instead of rebuilding it node by node with add_node. newName defaults to the original name plus "2"; targetParentPath defaults to the parent of the original. Saves automatically. Returns: nodePath (the node that was copied) and newNodePath (where the duplicate is, read back after the add). Errors if nodePath does not exist or is the scene root, or if targetParentPath is not found. Errors while a runtime session is live on this project.',
+      'Duplicate a node and its descendants, instead of rebuilding it with add_node. newName defaults to the original name plus "2"; targetParentPath to the parent of the original. Keeps the saved signal connections like the editor; copySignals false drops them. Saves automatically. Returns: nodePath (copied node), newNodePath (read back). Errors if nodePath or targetParentPath is not found, nodePath is the root, or a runtime session is live.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -322,6 +322,11 @@ export const nodeToolDefinitions = [
         targetParentPath: {
           type: 'string',
           description: 'Parent node path for the duplicate (default: same parent as original)',
+        },
+        copySignals: {
+          type: 'boolean',
+          description:
+            "Keep the copy's saved signal connections (default true). False drops those from the copy or a node inside it to a node outside the copied subtree; connections within the subtree stay.",
         },
       },
       required: ['projectPath', 'scenePath', 'nodePath'],
@@ -695,12 +700,16 @@ export async function handleDuplicateNode(
   const newName = optionalString(args, 'newName');
   if (!newName.ok) return newName;
 
+  const copySignals = optionalBoolean(args, 'copySignals');
+  if (!copySignals.ok) return copySignals;
+
   const params: OperationParams = {
     scenePath: parsed.value.scenePath,
     nodePath: nodePath.value,
   };
   if (newName.value) params.newName = newName.value;
   if (targetParentPath.value) params.targetParentPath = targetParentPath.value;
+  if (copySignals.value !== undefined) params.copySignals = copySignals.value;
   return executeSceneOp(
     runner,
     'duplicate_node',

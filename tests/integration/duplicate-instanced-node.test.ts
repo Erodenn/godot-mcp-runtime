@@ -17,6 +17,7 @@ const TINTED_HOST_SCENE = 'tinted_host.tscn';
 const HOST_SCENE = 'host.tscn';
 const DERIVED_SCENE = 'derived_unit.tscn';
 const UNBIND_SCENE = 'unbind_host.tscn';
+const MIXED_SCENE = 'mixed_signal_host.tscn';
 const CASE_TIMEOUT_MS = 120000;
 
 let runner: GodotRunner;
@@ -261,6 +262,79 @@ describe('duplicate_node keeps what a connection of the copy carries', () => {
         expect(connections[0]).toContain('method="_on_toggle_changed"');
         expect(connections[0]).toContain('unbinds=1');
       }
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('duplicate_node copySignals', () => {
+  function connectionLines(source: string): string[] {
+    return sceneText(UNBIND_SCENE)
+      .split('\n')
+      .filter((line) => line.startsWith(`[connection signal="toggled" from="${source}" to="."`));
+  }
+
+  itGodot(
+    'copySignals true keeps the copy connection to the original handler',
+    async () => {
+      const result = await handleDuplicateNode(runner, {
+        projectPath,
+        scenePath: UNBIND_SCENE,
+        nodePath: 'root/Toggle',
+        newName: 'Toggle2',
+        copySignals: true,
+      });
+      expectMatchesOutputSchema('duplicate_node', result);
+
+      expect(connectionLines('Toggle')).toHaveLength(1);
+      expect(connectionLines('Toggle2')).toHaveLength(1);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'copySignals false drops the copy connection and leaves the original one',
+    async () => {
+      const result = await handleDuplicateNode(runner, {
+        projectPath,
+        scenePath: UNBIND_SCENE,
+        nodePath: 'root/Toggle',
+        newName: 'Toggle2',
+        copySignals: false,
+      });
+      expectMatchesOutputSchema('duplicate_node', result);
+
+      const text = sceneText(UNBIND_SCENE);
+      expect(text).toContain('[node name="Toggle2"');
+      expect(connectionLines('Toggle2')).toHaveLength(0);
+      expect(connectionLines('Toggle')).toHaveLength(1);
+      expect(connectionLines('Toggle')[0]).toContain('method="_on_toggle_changed"');
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+describe('duplicate_node copySignals false keeps the copy internal wiring', () => {
+  itGodot(
+    'a connection inside the copied subtree survives and one to the outside is dropped',
+    async () => {
+      const result = await handleDuplicateNode(runner, {
+        projectPath,
+        scenePath: MIXED_SCENE,
+        nodePath: 'root/Group',
+        newName: 'Group2',
+        copySignals: false,
+      });
+      expectMatchesOutputSchema('duplicate_node', result);
+
+      const connections = sceneText(MIXED_SCENE)
+        .split('\n')
+        .filter((line) => line.startsWith('[connection '));
+      const from = (source: string): string[] =>
+        connections.filter((line) => line.includes(`from="${source}"`));
+      expect(from('Group2/Toggle')).toHaveLength(1);
+      expect(from('Group2/Toggle')[0]).toContain('to="Group2"');
+      expect(from('Group/Toggle')).toHaveLength(2);
     },
     CASE_TIMEOUT_MS,
   );

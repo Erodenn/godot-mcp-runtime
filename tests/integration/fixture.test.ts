@@ -75,6 +75,7 @@ describe('tests/fixtures/godot-authored-project: fixture health', () => {
     'spawner.tscn',
     'unbind_host.gd',
     'unbind_host.tscn',
+    'mixed_signal_host.tscn',
     'notes.txt',
   ];
 

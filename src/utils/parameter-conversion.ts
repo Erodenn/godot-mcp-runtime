@@ -16,6 +16,7 @@ const parameterMappings = {
   target_parent_path: 'targetParentPath',
   new_parent_path: 'newParentPath',
   new_name: 'newName',
+  copy_signals: 'copySignals',
   output_path: 'outputPath',
   mesh_item_names: 'meshItemNames',
   new_path: 'newPath',

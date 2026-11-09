@@ -1824,6 +1824,19 @@ func _unbound_argument_count(callable: Variant) -> int:
 func _is_donor_node(value: Variant, donor_root: Node) -> bool:
 	return value is Node and (value == donor_root or donor_root.is_ancestor_of(value))
 
+# Saved connections carry CONNECT_PERSIST (what the donor load made from the scene file); a connection the engine makes at runtime does not, so only the copied ones go. Only signals the copy's nodes emit are touched, and only those whose target lies outside the copy: the copy's internal wiring stays. The source node's own connections live on other objects.
+func _drop_copied_connections(copy: Node) -> void:
+	for current: Variant in _iter_subtree(copy):
+		for signal_info: Variant in current.get_signal_list():
+			for conn: Variant in current.get_signal_connection_list(signal_info.name):
+				if (int(conn["flags"]) & CONNECT_PERSIST) == 0:
+					continue
+				var callable: Callable = conn["callable"]
+				var target: Object = callable.get_object()
+				if target is Node and (target == copy or copy.is_ancestor_of(target)):
+					continue
+				current.disconnect(signal_info.name, callable)
+
 # A copy taken from a donor tree can still point at donor nodes outside the copy (persistent signal connections, Node-valued properties); those die with the donor, so each is re-pointed at the node on the same path in the edited scene.
 func _retarget_donor_references(copy: Node, donor_root: Node, scene_root: Node) -> void:
 	for current: Variant in _iter_subtree(copy):
@@ -1914,6 +1927,9 @@ func duplicate_node(params: Variant) -> void:
 	for current: Variant in _iter_subtree(duplicate):
 		if current.owner == null:
 			current.owner = scene_root
+	# Engine-faithful default: the copy keeps its saved connections. copy_signals false drops them before they are re-pointed.
+	if params.has("copy_signals") and not params.copy_signals:
+		_drop_copied_connections(duplicate)
 	_retarget_donor_references(duplicate, donor_root, scene_root)
 	donor_root.free()
 
