@@ -620,7 +620,12 @@ function refusedSettingFor(path: string): RefusedSetting | undefined {
 }
 
 /** Constructors the engine cannot read while it loads `project.godot` (no resource loader exists yet), so a file holding one does not load. Matched case-exactly, as the engine's parser does. */
-const UNLOADABLE_CONSTRUCTORS: ReadonlySet<string> = new Set(['Resource', 'Object']);
+const UNLOADABLE_CONSTRUCTORS: ReadonlySet<string> = new Set([
+  'Resource',
+  'Object',
+  'ExtResource',
+  'SubResource',
+]);
 
 /** The first constructor in `UNLOADABLE_CONSTRUCTORS` called anywhere in `text` outside a string, nested or not, or null. */
 function unloadableConstructorIn(text: string): string | null {

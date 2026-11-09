@@ -55,16 +55,6 @@ describe('evaluateScript: Tier 1 hard_block', () => {
     expect(evalLine('var v = str_to_var(data)').decision).toBe('hard_block');
   });
 
-  it('asks about load() with a non-literal first argument', () => {
-    const d = evalLine('var r = load(path_var)');
-    expect(d.decision).toBe('elicit_required');
-    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
-  });
-
-  it('asks about ResourceLoader.load with non-literal first arg', () => {
-    expect(evalLine('var r = ResourceLoader.load(var_path)').decision).toBe('elicit_required');
-  });
-
   it('does NOT block load() with a literal string (Tier 3 warn instead)', () => {
     const d = evalLine('var r = load("res://foo.tscn")');
     expect(d.decision).toBe('warn');
@@ -98,6 +88,16 @@ describe('evaluateScript: Tier 2 elicit_required', () => {
 
   it('elicits on IP.resolve_hostname', () => {
     expect(evalLine('IP.resolve_hostname("example.com")').decision).toBe('elicit_required');
+  });
+
+  it('asks about load() with a non-literal first argument', () => {
+    const d = evalLine('var r = load(path_var)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.indirect.load.nonliteral')).toBe(true);
+  });
+
+  it('asks about ResourceLoader.load with non-literal first arg', () => {
+    expect(evalLine('var r = ResourceLoader.load(var_path)').decision).toBe('elicit_required');
   });
 });
 
@@ -1667,5 +1667,44 @@ describe('evaluateScript: load and preload with a non-literal path are Tier 2', 
     const d = evalLine(line);
     expect(d.matches.map((m) => [m.ruleId, m.tier])).toEqual([[ruleId, 2]]);
     expect(d.decision).toBe('elicit_required');
+  });
+});
+
+describe('evaluateScript: a lone number as a dispatch argument', () => {
+  // Red when the scalar classification starts accepting hex or signed numbers (docs/security.md says only a decimal number is lone).
+  it('passes a decimal number and treats a hex or signed one as non-literal', () => {
+    expect(evalLine('OS.call(5)').matches).toEqual([]);
+    for (const line of ['OS.call(0x1)', 'OS.call(-1)']) {
+      expect(evalLine(line).matches.map((m) => m.ruleId)).toEqual([
+        'tier1.indirect.OS.call.nonliteral',
+      ]);
+    }
+  });
+});
+
+describe('evaluateScript: preload of a string constant', () => {
+  const strictOf = (source: string) => evaluateScript(VALID_PREFIX + source, true).decision;
+
+  // Red when isPreloadOfStringConstant is removed: strict refuses preload(CONST) again.
+  it.each([
+    'const C = "res://a.gd"\nvar r = preload(C)\n',
+    'const C: String = "res://a.gd"\nvar r = preload(C)\n',
+    'const C := "res://a.gd"\nvar r = preload(C)\n',
+  ])('is a literal path to the scan, even in strict mode: %j', (source) => {
+    const d = evaluateScript(VALID_PREFIX + source);
+    expect(d.matches.map((m) => m.ruleId)).toEqual(['tier3.literal.preload']);
+    expect(strictOf(source)).toBe('warn');
+  });
+
+  // Red when the declaration check stops requiring a lone string on the line.
+  it.each([
+    'var r = preload(C)\n',
+    'const C = "res://" + evil\nvar r = preload(C)\n',
+    'const C = evil\nvar r = preload(C)\n',
+    'const C = "res://a.gd"\nconst C = evil\nvar r = preload(C)\n',
+    'const C = "res://a.gd"\nvar r = preload(C + x)\n',
+    'const C = "res://a.gd"\nvar r = load(C)\n',
+  ])('stays non-literal: %j', (source) => {
+    expect(strictOf(source)).toBe('hard_block');
   });
 });

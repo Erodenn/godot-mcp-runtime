@@ -321,11 +321,6 @@ export function classifyHandlerUseDetailed(source: string, method: string): Hand
   return site ? { use: 'maybe', site } : { use: 'none' };
 }
 
-/** How one script's source uses `method`; see `HandlerUse`. */
-export function classifyHandlerUse(source: string, method: string): HandlerUse {
-  return classifyHandlerUseDetailed(source, method).use;
-}
-
 export interface ScriptSource {
   path: string;
   source: string;
@@ -346,10 +341,4 @@ export function classifyHandlerUseAcrossDetailed(
     }
   }
   return best;
-}
-
-/** The strongest use of `method` across several scripts: connected, then referenced, then maybe. */
-export function classifyHandlerUseAcross(sources: readonly string[], method: string): HandlerUse {
-  const scripts = sources.map((source, index) => ({ path: String(index), source }));
-  return classifyHandlerUseAcrossDetailed(scripts, method).use;
 }

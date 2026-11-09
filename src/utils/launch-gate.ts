@@ -130,18 +130,29 @@ function scanScriptFile(
   return { findings: decision.matches, warning: null, readFailed: false };
 }
 
-/** The confirmation prompt: the fixed warning, then what the pre-flight scan found (up to `MAX_SCAN_WARNINGS_SHOWN`) so the person answering sees it. */
-function confirmationPromptMessage(scanFindings: readonly ScanFinding[]): string {
-  if (scanFindings.length === 0) return LAUNCH_PROMPT_MESSAGE;
-  const shown = scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map(formatScanFinding);
-  const lines = [
-    LAUNCH_PROMPT_MESSAGE,
-    '',
-    'The pre-flight scan found:',
-    ...shown.map((f) => `- ${f}`),
-  ];
-  if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
-    lines.push(`- +${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+/** The confirmation prompt: the fixed warning, then the findings and the not-scanned notices, each capped as in the payload, so the person answering sees what was not checked. */
+function confirmationPromptMessage(
+  scanFindings: readonly ScanFinding[],
+  scanWarnings: readonly string[],
+): string {
+  const lines = [LAUNCH_PROMPT_MESSAGE];
+  if (scanFindings.length > 0) {
+    lines.push('', 'The pre-flight scan found:');
+    lines.push(
+      ...scanFindings.slice(0, MAX_SCAN_WARNINGS_SHOWN).map((f) => `- ${formatScanFinding(f)}`),
+    );
+    if (scanFindings.length > MAX_SCAN_WARNINGS_SHOWN) {
+      lines.push(`- +${scanFindings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+    }
+  }
+  if (scanWarnings.length > 0) {
+    lines.push('', 'The pre-flight scan was incomplete:');
+    lines.push(...scanWarnings.slice(0, MAX_SCAN_INCOMPLETE_SHOWN).map((w) => `- ${w}`));
+    if (scanWarnings.length > MAX_SCAN_INCOMPLETE_SHOWN) {
+      lines.push(
+        `- +${scanWarnings.length - MAX_SCAN_INCOMPLETE_SHOWN} more files were not scanned`,
+      );
+    }
   }
   return lines.join('\n');
 }
@@ -493,7 +504,7 @@ export async function runLaunchGate(
       let elicitResult: ElicitorResult;
       try {
         elicitResult = await ctx.elicitor({
-          message: confirmationPromptMessage(scanFindings),
+          message: confirmationPromptMessage(scanFindings, scanWarnings),
           requestedSchema: {
             type: 'object',
             properties: {

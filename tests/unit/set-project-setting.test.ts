@@ -152,6 +152,10 @@ describe('checkSettingLiteral', () => {
     ['Object', 'Object(RefCounted, "script": null)'],
     ['Resource', '[1, {"k": Resource("res://r.tres")}]'],
     ['Object', 'Object (RefCounted)'],
+    ['ExtResource', 'ExtResource("1")'],
+    ['SubResource', 'SubResource("x")'],
+    ['ExtResource', '{"a": [ExtResource("1")]}'],
+    ['SubResource', '[1, {"k": SubResource("x")}]'],
   ])('refuses a %s constructor anywhere in the value: %s', (constructor, literal) => {
     expect(checkSettingLiteral(literal)).toContain(`${constructor}(...)`);
   });

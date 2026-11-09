@@ -111,6 +111,46 @@ function classifyArgument(argument: readonly Token[]): ArgumentClassification {
   return 'nonliteral';
 }
 
+const CONST_KEYWORD = 'const';
+const PRELOAD_FUNCTION = 'preload';
+
+/** Names declared by `const NAME = "..."`, `const NAME: T = "..."` or `const NAME := "..."` alone on its line, mapped to whether every declaration of that name in the source is such a lone string. */
+function stringConstants(tokens: readonly Token[]): Map<string, boolean> {
+  const constants = new Map<string, boolean>();
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const keyword = tokens[i]!;
+    const name = tokens[i + 1]!;
+    if (keyword.kind !== 'identifier' || keyword.text !== CONST_KEYWORD) continue;
+    if (name.kind !== 'identifier' || keyword.precededByDot) continue;
+    let j = i + 2;
+    while (j < tokens.length && tokens[j]!.kind === 'other' && tokens[j]!.text === ':') j++;
+    while (j < tokens.length && tokens[j]!.kind === 'identifier') j++;
+    const assign = tokens[j];
+    const value = tokens[j + 1];
+    const end = tokens[j + 2];
+    const isLoneString =
+      assign?.kind === 'punct' &&
+      assign.text === '=' &&
+      value?.kind === 'string' &&
+      (end === undefined || end.kind === 'newline');
+    constants.set(name.text, (constants.get(name.text) ?? true) && isLoneString);
+  }
+  return constants;
+}
+
+/** True when `preload`'s whole first argument is one identifier that this source declares only as a lone string constant: preload takes a compile-time constant, so that is the literal path the scan can read. */
+function isPreloadOfStringConstant(
+  tokens: readonly Token[],
+  openParenIndex: number,
+  budget: ScanBudget,
+  constants: ReadonlyMap<string, boolean>,
+): boolean {
+  const args = argumentsOf(tokens, openParenIndex, budget);
+  const argument = args?.[0];
+  if (argument?.length !== 1 || argument[0]!.kind !== 'identifier') return false;
+  return constants.get(argument[0]!.text) === true;
+}
+
 /** Classifies the whole first argument, so `load("res://" + evil_var)` is 'nonliteral' rather than matching on the leading literal. */
 function classifyFirstArgument(
   tokens: readonly Token[],
@@ -502,8 +542,10 @@ export const policyRules: readonly PolicyRule[] = [
     matchAsBareIdentifier: true,
     globalFunctionOnly: true,
     argumentKind: 'nonliteral',
-    reason: 'preload() with a non-literal path can be redirected',
-    solutions: ['Pass a literal `res://...` path string to preload()'],
+    reason: 'preload() with a path the scan cannot read loads a resource it did not check',
+    solutions: [
+      'Pass a literal `res://...` path string to preload(), or a const declared as one in this script',
+    ],
   },
   {
     id: 'tier2.indirect.ResourceLoader.load.nonliteral',
@@ -1237,6 +1279,7 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
   const tokens = tokenize(source);
   const budget = newScanBudget(tokens.length);
   const valueReferences = valueReferencePositions(tokens);
+  let stringConstantNames: Map<string, boolean> | undefined;
   const matches: PolicyMatch[] = [];
   let promotedByStrict = false;
 
@@ -1262,7 +1305,14 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
       const firstArgument =
         dispatch?.kind === 'opaque'
           ? (): ArgumentClassification => UNREADABLE_METHOD_NAME
-          : (): ArgumentClassification => classifyFirstArgument(tokens, openParen, budget);
+          : (): ArgumentClassification => {
+              const classified = classifyFirstArgument(tokens, openParen, budget);
+              if (classified !== 'nonliteral' || tok.text !== PRELOAD_FUNCTION) return classified;
+              stringConstantNames ??= stringConstants(tokens);
+              return isPreloadOfStringConstant(tokens, openParen, budget, stringConstantNames)
+                ? 'literal'
+                : classified;
+            };
       const rule = firstMatchingRule(tok, openParen, firstArgument, valueReferences[i] === true);
       if (rule !== undefined) matched = { rule, text: tok.text };
     }

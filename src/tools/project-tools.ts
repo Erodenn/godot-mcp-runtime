@@ -370,7 +370,7 @@ export const projectToolDefinitions = [
         literal: {
           type: 'string',
           description:
-            'Raw Godot literal written as is, on one line, with no trailing comment: "str", 1.5, true, null, [1, 2], {"a": 1} or a constructor such as Vector2i(1, 2) or PackedStringArray("a"). Checked by reading it back as one complete value. Resource(...) and Object(...) are refused: Godot may then fail to load project.godot.',
+            'Raw Godot literal written as is, on one line, with no trailing comment: "str", 1.5, true, null, [1, 2], {"a": 1} or a constructor such as Vector2i(1, 2) or PackedStringArray("a"). Checked by reading it back as one complete value. Resource(...), Object(...), ExtResource(...) and SubResource(...) are refused: Godot may then fail to load project.godot.',
         },
       },
       required: ['projectPath', 'section', 'key'],

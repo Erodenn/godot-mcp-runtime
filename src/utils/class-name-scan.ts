@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { isAbsolute, join, relative } from 'path';
 import { tokenize, decodeStringLiteral, type Token } from './gdscript-scanner.js';
 import { resolveProjectPath } from './path-validation.js';
+import { UID_SCAN_MAX_DIRECTORIES } from './launch-scene.js';
 
 /** Most `.gd` files one scan reads before it stops and reports itself incomplete. */
 export const MAX_CLASS_SCAN_FILES = 20_000;
@@ -18,11 +19,7 @@ const EXTENDS_KEYWORD = 'extends';
 const FIRST_COLUMN = 1;
 const SCRIPT_EXTENSION = '.gd';
 
-/**
- * The global class name a GDScript source declares with `class_name`, or null.
- * Read from tokens, so a mention in a comment or a string is not a declaration. The name is the identifier after the keyword; `class_name Foo extends Bar` and `@icon("x.svg") class_name Foo` both give `Foo`.
- * A class a script inherits is not read here: `findInheritedClassName` follows `extends` chains.
- */
+/** The global class name a source declares with `class_name`, read from tokens (a comment or string mention is not one), or null. */
 export function declaredClassName(source: string): string | null {
   const tokens = tokenize(source);
   for (const [i, token] of tokens.entries()) {
@@ -51,10 +48,7 @@ function isScriptLevelExtends(tokens: readonly Token[], i: number): boolean {
   return lead.column === FIRST_COLUMN && lead.text !== CLASS_KEYWORD;
 }
 
-/**
- * The script's own `extends` target, or null when it has none (it then extends `RefCounted`) or the clause is not one this reads.
- * Read from tokens, so a mention in a comment or a string is not a clause.
- */
+/** The script's own `extends` target, read from tokens, or null when it has none or the clause is not one this reads. */
 export function declaredExtends(source: string): ExtendsTarget | null {
   const tokens = tokenize(source);
   for (const [i, token] of tokens.entries()) {
@@ -74,19 +68,11 @@ export function declaredExtends(source: string): ExtendsTarget | null {
   return null;
 }
 
-export interface ClassNameScan {
-  /** Project-relative paths of the scripts that declare the class, in walk order. */
-  declaredIn: string[];
-  /** False when the scan stopped at the file cap, skipped an oversize script, or could not read a directory or file: a script it did not reach could still declare the class. */
-  complete: boolean;
-  filesScanned: number;
-}
-
 /** Every global class name the project's scripts declare, from one walk. */
 export interface ClassNameMap {
   /** Class name to the project-relative paths of the scripts declaring it, in walk order (an extra script is keyed by the absolute path it was given). */
   byName: Map<string, string[]>;
-  /** False under the same conditions as `ClassNameScan.complete`. */
+  /** False when the walk hit a cap, skipped an oversize script, or could not read a folder or file: a script it did not reach could still declare the class. */
   complete: boolean;
   filesScanned: number;
 }
@@ -103,17 +89,18 @@ function mentionsWord(source: string, name: string): boolean {
   return false;
 }
 
-/**
- * Walks `.gd` files under `projectDir` once and maps each `class_name` to the scripts declaring it, skipping dot-prefixed entries (`.godot`, `.mcp`) and links; `extraScripts` are absolute paths read in addition (a script reached through a link). Bounded by `MAX_CLASS_SCAN_FILES`.
- */
+/** Walks `.gd` files under `projectDir` once and maps each `class_name` to its scripts, skipping dot-prefixed entries and links; `extraScripts` (absolute) are read too. Stops incomplete at `MAX_CLASS_SCAN_FILES` files or `maxDirectories` folders. */
 export function scanClassNames(
   projectDir: string,
   extraScripts: readonly string[] = [],
+  maxDirectories: number = UID_SCAN_MAX_DIRECTORIES,
 ): ClassNameMap {
   const byName = new Map<string, string[]>();
   const seen = new Set<string>();
   let complete = true;
   let filesScanned = 0;
+  let directoriesEntered = 0;
+  let capped = false;
 
   const readScript = (absPath: string, relPath: string): void => {
     if (seen.has(relPath)) return;
@@ -137,6 +124,12 @@ export function scanClassNames(
   };
 
   const walk = (dir: string, relBase: string): void => {
+    if (capped) return;
+    if (++directoriesEntered > maxDirectories) {
+      capped = true;
+      complete = false;
+      return;
+    }
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -145,6 +138,7 @@ export function scanClassNames(
       return;
     }
     for (const entry of entries) {
+      if (capped) return;
       if (entry.name.startsWith('.')) continue;
       const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink()) continue;
@@ -152,6 +146,7 @@ export function scanClassNames(
         walk(join(dir, entry.name), relPath);
       } else if (entry.isFile() && entry.name.endsWith(SCRIPT_EXTENSION)) {
         if (filesScanned >= MAX_CLASS_SCAN_FILES) {
+          capped = true;
           complete = false;
           return;
         }
@@ -168,20 +163,6 @@ export function scanClassNames(
   return { byName, complete, filesScanned };
 }
 
-/** Finds the project scripts that declare `class_name <name>`; see `scanClassNames`. */
-export function findClassNameDeclarations(
-  projectDir: string,
-  name: string,
-  extraScripts: readonly string[] = [],
-): ClassNameScan {
-  const map = scanClassNames(projectDir, extraScripts);
-  return {
-    declaredIn: map.byName.get(name) ?? [],
-    complete: map.complete,
-    filesScanned: map.filesScanned,
-  };
-}
-
 export interface InheritedClassNameScan {
   /** Project-relative paths (as spelled for a script outside the project) of scripts on the chain that declare the class. */
   declaredIn: string[];
@@ -193,10 +174,7 @@ function toProjectRelative(projectDir: string, absPath: string): string {
   return relative(projectDir, absPath).replace(/\\/g, '/');
 }
 
-/**
- * Follows the `extends` chain of the script at `startAbsPath` from its text and reports the scripts on it that declare `class_name <name>`: `extends "res://x.gd"` (or a path relative to the script) is read directly, `extends Name` goes through `classNames`. A name the complete map does not hold is an engine class and ends the chain cleanly. Bounded by `MAX_EXTENDS_CHAIN_DEPTH` and `MAX_EXTENDS_CHAIN_FILES`, and cycle-safe.
- * Covers what the project walk cannot see: a base script reached through a link. A chain that cannot be followed is `resolved: false`, never a pass.
- */
+/** Follows the `extends` chain of `startAbsPath` (by path, or by name through `classNames`) and reports the scripts on it declaring `class_name <name>`, including a base the project walk skipped as a link. Bounded by `MAX_EXTENDS_CHAIN_DEPTH` and `MAX_EXTENDS_CHAIN_FILES`; a chain it cannot follow is `resolved: false`, never a pass. */
 export function findInheritedClassName(
   projectDir: string,
   startAbsPath: string,
@@ -212,7 +190,7 @@ export function findInheritedClassName(
 
   const enqueue = (absPath: string, relPath: string, depth: number): void => {
     if (visited.has(relPath)) {
-      // A script met again on its own chain: a cycle the engine rejects, not a clean end.
+      // Met again by a cycle or by a second route to one base: not followed twice, so the chain is reported unresolved.
       resolved = false;
       return;
     }
