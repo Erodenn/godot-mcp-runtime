@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   handleListAutoloads,
@@ -672,6 +672,119 @@ describe('autoload name equal to a class_name', () => {
       autoloadPath: 'child.gd',
     });
     expectErrorMatching(result, /base\.gd/);
+  });
+
+  describe('inherited class_name', () => {
+    /** A script chain whose base sits behind a link the project walk skips. */
+    function projectWithLinkedBase(scripts: Record<string, string>, baseSource: string): string {
+      const dir = projectWithScripts(scripts);
+      const shared = tmp.make('mcp-autoload-shared-');
+      writeFileSync(join(shared, 'base.gd'), baseSource, 'utf8');
+      symlinkSync(shared, join(dir, 'linked'), 'junction');
+      return dir;
+    }
+
+    it('add_autoload refuses a script whose base behind a link declares the name, and writes nothing', async () => {
+      const dir = projectWithLinkedBase(
+        { 'child.gd': 'extends "res://linked/base.gd"\n' },
+        'class_name Game\nextends Node\n',
+      );
+      const before = readProjectGodot(dir);
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      expectErrorMatching(result, /hides an autoload singleton/);
+      expectErrorMatching(result, /linked\/base\.gd/);
+      expect(readProjectGodot(dir)).toBe(before);
+    });
+
+    it('add_autoload follows a class name down to a base behind a link', async () => {
+      const dir = projectWithLinkedBase(
+        {
+          'mid.gd': 'class_name Mid\nextends "res://linked/base.gd"\n',
+          'child.gd': 'extends Mid\n',
+        },
+        'class_name Game\nextends Node\n',
+      );
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      expectErrorMatching(result, /linked\/base\.gd/);
+    });
+
+    it('update_autoload refuses a path change onto a script that inherits the name', async () => {
+      const dir = projectWithLinkedBase(
+        { 'old.gd': 'extends Node\n', 'child.gd': 'extends "res://linked/base.gd"\n' },
+        'class_name Game\nextends Node\n',
+      );
+      writeFileSync(
+        join(dir, 'project.godot'),
+        'config_version=5\n\n[autoload]\nGame="*res://old.gd"\n',
+      );
+      const before = readProjectGodot(dir);
+      const result = await handleUpdateAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      expectErrorMatching(result, /hides an autoload singleton/);
+      expect(readProjectGodot(dir)).toBe(before);
+    });
+
+    it('add_autoload allows singleton false on an inheriting script', async () => {
+      const dir = projectWithLinkedBase(
+        { 'child.gd': 'extends "res://linked/base.gd"\n' },
+        'class_name Game\nextends Node\n',
+      );
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+        singleton: false,
+      });
+      expect(hasError(result)).toBe(false);
+    });
+
+    it('add_autoload leads with a warning, and still registers, when the chain cannot be followed', async () => {
+      const dir = projectWithScripts({ 'child.gd': 'extends "res://missing.gd"\n' });
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      const payload = expectMatchesOutputSchema('add_autoload', result);
+      expect(Object.keys(payload)[0]).toBe('warnings');
+      expect(JSON.stringify(payload.warnings)).toContain('could not be followed');
+      expect(payload.autoload).toEqual({ name: 'Game', path: 'res://child.gd', singleton: true });
+    });
+
+    it('update_autoload leads with the same warning for an unresolvable chain', async () => {
+      const dir = projectWithScripts(
+        { 'old.gd': 'extends Node\n', 'child.gd': 'extends Base.Inner\n' },
+        'config_version=5\n\n[autoload]\nGame="*res://old.gd"\n',
+      );
+      const result = await handleUpdateAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      const payload = expectMatchesOutputSchema('update_autoload', result);
+      expect(JSON.stringify(payload.warnings)).toContain('could not be followed');
+    });
+
+    it('adds no warning for a chain that ends at an engine class', async () => {
+      const dir = projectWithScripts({ 'child.gd': 'extends Node2D\n' });
+      const result = await handleAddAutoload({
+        projectPath: dir,
+        autoloadName: 'Game',
+        autoloadPath: 'child.gd',
+      });
+      expect(expectMatchesOutputSchema('add_autoload', result).warnings).toBeUndefined();
+    });
   });
 
   it('allows singleton false: no global name is created, so nothing is hidden', async () => {

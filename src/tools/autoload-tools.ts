@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
@@ -16,7 +16,7 @@ import {
   optionalBoolean,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
-import { findClassNameDeclarations } from '../utils/class-name-scan.js';
+import { findInheritedClassName, scanClassNames } from '../utils/class-name-scan.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseAutoloads,
@@ -44,7 +44,7 @@ const WARNINGS_SCHEMA = {
   type: 'array',
   items: { type: 'string' },
   description:
-    'Present only when the scan for a class_name clash could not cover every .gd file, so a clash may remain.',
+    'Present only when the scan for a class_name clash could not cover every .gd file, or the script extends a chain that could not be followed to its end, so a clash may remain.',
 } as const;
 
 export const autoloadToolDefinitions = [
@@ -172,6 +172,9 @@ function rejectForbiddenPathCharacters(autoloadPath: string): HandlerResult | un
 const CLASS_SCAN_INCOMPLETE_WARNING =
   'The scan for a script declaring this name as a class_name did not cover every .gd file (the file cap was reached, or a file or directory could not be read), so a clash may remain. The engine reports one as "Class X hides an autoload singleton".';
 
+const EXTENDS_CHAIN_UNRESOLVED_WARNING =
+  'The script extends a chain that could not be followed to its end from the script text (a path that is not a readable .gd in the project, a dotted inner class, a script too large to read, a cycle, or a class the scan did not reach), so a class_name equal to this name on it may remain. The engine reports one as "Class X hides an autoload singleton".';
+
 /** A singleton autoload is a global named like it; a project script declaring `class_name` with that name makes the engine fail with "Class X hides an autoload singleton" and the game runs without the script. A non-singleton autoload makes no global, so it cannot clash. */
 function classNameClash(
   projectPath: string,
@@ -180,9 +183,17 @@ function classNameClash(
   singleton: boolean,
 ): { refusal?: HandlerResult; warnings: string[] } {
   if (!singleton) return { warnings: [] };
-  const scan = findClassNameDeclarations(projectPath, autoloadName, [autoloadAbsPath]);
-  if (scan.declaredIn.length > 0) {
-    const files = scan.declaredIn.join(', ');
+  const classNames = scanClassNames(projectPath, [autoloadAbsPath]);
+  // The walk skips links and dot directories; the chain is read from the script's own text, so a base reached through a link is still seen.
+  const inherited =
+    autoloadAbsPath.endsWith('.gd') && existsSync(autoloadAbsPath)
+      ? findInheritedClassName(projectPath, autoloadAbsPath, autoloadName, classNames)
+      : { declaredIn: [], resolved: true };
+  const declaredIn = [
+    ...new Set([...(classNames.byName.get(autoloadName) ?? []), ...inherited.declaredIn]),
+  ];
+  if (declaredIn.length > 0) {
+    const files = declaredIn.join(', ');
     return {
       warnings: [],
       refusal: err(
@@ -197,7 +208,10 @@ function classNameClash(
       ),
     };
   }
-  return { warnings: scan.complete ? [] : [CLASS_SCAN_INCOMPLETE_WARNING] };
+  const warnings: string[] = [];
+  if (!classNames.complete) warnings.push(CLASS_SCAN_INCOMPLETE_WARNING);
+  if (!inherited.resolved) warnings.push(EXTENDS_CHAIN_UNRESOLVED_WARNING);
+  return { warnings };
 }
 
 export function handleListAutoloads(args: OperationParams): HandlerResult {
