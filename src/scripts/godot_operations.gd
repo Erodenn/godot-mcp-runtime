@@ -1820,7 +1820,7 @@ func _unbound_argument_count(callable: Variant) -> int:
 func _is_donor_node(value: Variant, donor_root: Node) -> bool:
 	return value is Node and (value == donor_root or donor_root.is_ancestor_of(value))
 
-# Saved connections carry CONNECT_PERSIST (what the donor load made from the scene file); a connection the engine makes at runtime does not, so only the copied ones go. Only signals the copy's nodes emit are touched, and only those whose target lies outside the copy: the copy's internal wiring stays. The source node's own connections live on other objects.
+# Only CONNECT_PERSIST connections came from the scene file; of those, only ones leaving the copy go, so its internal wiring stays.
 func _drop_copied_connections(copy: Node) -> void:
 	for current: Variant in _iter_subtree(copy):
 		for signal_info: Variant in current.get_signal_list():
@@ -3592,9 +3592,8 @@ func _validate_single(target: Dictionary) -> Dictionary:
 	else:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
 
-# A target with a non-empty checks[] also gets the structural and signal checks here, reported in "checkErrors".
-# "valid" is false for any check failure but an orphaned_handler: whether one is wired in code is decided by the TS layer, which reads the script's tokens.
-# checkErrors is separate from "errors" because the TS layer overlays stderr diagnostics over "errors" for any target that produced some, which would discard merged check errors. Every failure lands on its own target and the loop continues.
+# checks[] results go in "checkErrors", apart from "errors", because the TS layer overlays stderr diagnostics onto "errors" and would discard them.
+# "valid" is false for any check failure but an orphaned_handler, which the TS layer judges from the script's tokens.
 func validate_batch(params: Dictionary) -> void:
 	var results: Array = []
 	for target: Variant in params.targets:

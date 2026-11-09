@@ -733,7 +733,7 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 		elif target is BaseButton and (target as BaseButton).disabled:
 			entry["error"] = "UI element '%s' is disabled" % identifier
 		else:
-			# Before any press: a click that would land on another control is refused here, so a failure never hides a side effect.
+			# Before any press: a click that would land on another control is refused here, so a refused click presses nothing (the preflight's pointer motions still reach the game).
 			var scrolled := await _scroll_into_view(target)
 			if not scrolled.is_empty():
 				entry["scrolled"] = scrolled
@@ -987,7 +987,7 @@ func _resolve_button_name(button_name: String) -> Array:
 		_:
 			return [MOUSE_BUTTON_NONE, "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name]
 
-# Resolves which control would receive the click before anything is pressed. A mouse motion to the target centre makes the viewport resolve hover on the next frame; the centre is re-read each pass because a layout refresh (a container re-sort after the previous action) can move the target after the last read. Returns "" when the click may go ahead, otherwise the error text. Without the hovered-control API there is nothing to ask, so it returns "" and the post-click verdict stays the only check.
+# "" when the click may go ahead, else the refusal. The centre is re-read each pass: a layout refresh can move the target after the last read. Without the hovered-control API only the clip check runs.
 func _preflight_click(target: Control) -> String:
 	if not _has_hover_api():
 		return _clip_refusal(target)
@@ -1390,7 +1390,7 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 func _rect_number(number: float) -> Variant:
 	return number if is_finite(number) else null
 
-# Where the control is drawn, in viewport pixels: its local rect under get_global_transform_with_canvas(), which adds the transform of the CanvasLayer it sits in (offset, scale, rotation, follow_viewport) or, with no layer, the viewport's canvas_transform (a Camera2D). get_global_rect() is in the layer's own space and leaves both out. The one place a control's on-screen position is read, so a rect and the click centre cannot disagree. Without rotation or skew the bounds are built directly, so an identity transform reports exactly position and size; otherwise they are the axis-aligned bounds of the transformed rect.
+# Viewport pixels, the one place a control's on-screen position is read: get_global_rect() leaves out the CanvasLayer or canvas_transform that get_global_transform_with_canvas() adds.
 func _control_viewport_rect(ctrl: Control) -> Rect2:
 	var xform := ctrl.get_global_transform_with_canvas()
 	if is_zero_approx(xform.x.y) and is_zero_approx(xform.y.x):
