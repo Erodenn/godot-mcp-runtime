@@ -11,7 +11,7 @@ import {
   handleGetProjectSettings,
   handleSetProjectSetting,
 } from '../../src/tools/project-tools.js';
-import { expectErrorMatching } from '../helpers/assertions.js';
+import { errorText, expectErrorMatching, unwrap } from '../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
@@ -75,8 +75,35 @@ describe('applySetting', () => {
 
 describe('settingTargetError', () => {
   it('refuses autoload settings under either spelling and points to the autoload tools', () => {
-    expect(settingTargetError('autoload', 'Globals')).toMatch(/autoload tools|add_autoload/);
+    expect(settingTargetError('autoload', 'Globals')?.solution).toMatch(/add_autoload/);
     expect(settingTargetError('', 'x')).not.toBeNull();
+  });
+
+  it.each([
+    ['application', 'run/main_scene'],
+    ['application/run', 'main_scene'],
+    ['application', 'run/main_scene.windows'],
+    ['application', 'run/main_scene.mobile.release'],
+    ['application', 'run/main_loop_type'],
+    ['application/run', 'main_loop_type.web'],
+    ['editor_plugins', 'enabled'],
+    ['editor_plugins', 'enabled.editor'],
+    ['autoload', 'Globals.windows'],
+  ])('refuses %s / %s, a setting that selects what runs on launch', (section, key) => {
+    const refusal = settingTargetError(section, key);
+    expect(refusal?.message).toContain(`"${section}/${key}"`);
+    expect(refusal?.message).toMatch(/selects code or the launch scene/);
+  });
+
+  it.each([
+    ['application', 'run/main_scenes'],
+    ['application', 'run/main_scene_extra'],
+    ['Application', 'run/main_scene'],
+    ['application', 'run/Main_Loop_Type'],
+    ['editor_plugin', 'enabled'],
+    ['application', 'config/name'],
+  ])('writes %s / %s: only the exact engine key and its .tag overrides are refused', (s, k) => {
+    expect(settingTargetError(s, k)).toBeNull();
   });
 
   it('refuses names that need quoting and the global pseudo-section', () => {
@@ -117,6 +144,21 @@ describe('checkSettingLiteral', () => {
       'PackedStringArray("a", "b")',
     ]) {
       expect(checkSettingLiteral(literal), literal).toBeNull();
+    }
+  });
+
+  it.each([
+    ['Resource', 'Resource("res://p.gd")'],
+    ['Object', 'Object(RefCounted, "script": null)'],
+    ['Resource', '[1, {"k": Resource("res://r.tres")}]'],
+    ['Object', 'Object (RefCounted)'],
+  ])('refuses a %s constructor anywhere in the value: %s', (constructor, literal) => {
+    expect(checkSettingLiteral(literal)).toContain(`${constructor}(...)`);
+  });
+
+  it('writes the constructor names inside a string or as part of another name', () => {
+    for (const literal of ['"Resource(x)"', '["Object(", &"Resource()"]', 'MyResource(1)']) {
+      expect(checkSettingLiteral(literal) ?? '', literal).not.toMatch(/constructor/);
     }
   });
 
@@ -200,6 +242,58 @@ describe('handleSetProjectSetting', () => {
       /add_autoload/,
     );
     expect(projectFile(dir)).toBe(LF_PROJECT);
+  });
+
+  it('refuses every key that selects what runs on launch without touching the file', async () => {
+    const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
+    const cases: Array<[string, string, RegExp]> = [
+      ['application', 'run/main_scene', /run_project/],
+      ['application', 'run/main_scene.windows', /run_project/],
+      ['application/run', 'main_loop_type', /main loop/],
+      ['editor_plugins', 'enabled', /Plugins/],
+    ];
+    for (const [section, key, solution] of cases) {
+      const result = await handleSetProjectSetting({
+        projectPath: dir,
+        section,
+        key,
+        value: 'res://evil.tscn',
+      });
+      expectErrorMatching(result, /selects/);
+      expect(errorText(result)).toContain(`"${section}/${key}"`);
+      expect(unwrap(result).content[1]?.text ?? '', `${section}/${key}`).toMatch(solution);
+    }
+    expect(projectFile(dir)).toBe(LF_PROJECT);
+  });
+
+  it('refuses a nested Resource() literal without touching the file', async () => {
+    const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
+    expectErrorMatching(
+      await handleSetProjectSetting({
+        projectPath: dir,
+        section: 'custom',
+        key: 'data',
+        literal: '{"a": [Resource("res://p.gd")]}',
+      }),
+      /Resource\(\.\.\.\) constructor/,
+    );
+    expect(projectFile(dir)).toBe(LF_PROJECT);
+  });
+
+  it('still writes an allowed key beside the refused ones, byte for byte elsewhere', async () => {
+    const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
+    await handleSetProjectSetting({
+      projectPath: dir,
+      section: 'application',
+      key: 'run/main_scene_note',
+      literal: '"Resource(x)"',
+    });
+    expect(projectFile(dir)).toBe(
+      LF_PROJECT.replace(
+        'run/main_scene="res://main.tscn"\n',
+        'run/main_scene="res://main.tscn"\nrun/main_scene_note="Resource(x)"\n',
+      ),
+    );
   });
 
   it('refuses both or neither of value and literal, and a bad literal, leaving the file alone', async () => {
