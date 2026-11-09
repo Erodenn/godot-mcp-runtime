@@ -1,4 +1,4 @@
-/** A clip_contents Control clips through CanvasItem children only: get_ui_elements and the click_element clip check must both stop it at a CanvasLayer or a plain Node and carry it through a Node2D. */
+/** A clip_contents Control clips through CanvasItem children only: get_ui_elements and the click_element clip check must both stop it at a CanvasLayer or a plain Node and carry it through a Node2D. A non-finite rect gets no visibleRect. */
 
 import { describe, beforeAll, afterEach, afterAll, expect } from 'vitest';
 import { cpSync } from 'fs';
@@ -151,6 +151,35 @@ describe('clipping across canvas boundaries (live bridge)', () => {
           'return [root.get_meta("pressed_LayerBtn", false), root.get_meta("pressed_PlainBtn", false), root.get_meta("pressed_BodyBtn", false)]',
         ]),
       ).toEqual([true, true, false]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'a control with a NAN position has null rect numbers and no visibleRect',
+    async (ctx) => {
+      await startWithClipScene(ctx);
+      expect(
+        await script([
+          'var lost := Button.new()',
+          'lost.name = "Lost"',
+          'scene_tree.root.add_child(lost)',
+          'lost.position = Vector2(NAN, 10)',
+          'return true',
+        ]),
+      ).toBe(true);
+
+      const result = await handleGetUiElements(runner, {});
+      if (!result.ok) throw new Error(`get_ui_elements error: ${JSON.stringify(result.error)}`);
+      const payload = result.value.structuredContent as unknown as {
+        warnings?: string[];
+        elements: Array<UiElement & { rect: { x: unknown }; visibleRect?: unknown }>;
+      };
+      const lost = payload.elements.find((element) => element.path === '/root/Lost');
+      expect(lost, JSON.stringify(payload.elements.map((element) => element.path))).toBeDefined();
+      expect(lost!.rect.x).toBeNull();
+      expect(lost).not.toHaveProperty('visibleRect');
+      expect(payload.warnings?.[0]).toMatch(/non-finite position or size.*\/root\/Lost/);
     },
     TEST_TIMEOUT_MS,
   );

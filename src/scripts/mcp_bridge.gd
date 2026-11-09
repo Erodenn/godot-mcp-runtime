@@ -1407,9 +1407,12 @@ func _control_viewport_rect(ctrl: Control) -> Rect2:
 func _clips_children(ctrl: Control) -> bool:
 	return ctrl.clip_contents or ctrl is ScrollContainer
 
+func _rect_is_finite(rect: Rect2) -> bool:
+	return is_finite(rect.position.x) and is_finite(rect.position.y) and is_finite(rect.size.x) and is_finite(rect.size.y)
+
 # Whether any of the control's rect is reachable on screen, and the part of it that is. A rect with no area of its own (a spacer) counts as on screen when its point is inside the region. A non-finite rect is never claimed off screen.
 func _visible_part(rect: Rect2, region: Rect2) -> Variant:
-	if not (is_finite(rect.position.x) and is_finite(rect.position.y) and is_finite(rect.size.x) and is_finite(rect.size.y)):
+	if not _rect_is_finite(rect):
 		return rect
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
 		return rect if region.has_point(rect.position) else null
@@ -1455,7 +1458,8 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 				"visible": ctrl.is_visible_in_tree(),
 				"onScreen": on_screen,
 			}
-			if on_screen and visible_part != rect:
+			# NAN != NAN, so a non-finite rect would otherwise always differ from itself.
+			if on_screen and _rect_is_finite(rect) and visible_part != rect:
 				var part: Rect2 = visible_part
 				element["visibleRect"] = {"x": part.position.x, "y": part.position.y, "width": part.size.x, "height": part.size.y}
 			if ctrl is Button:
