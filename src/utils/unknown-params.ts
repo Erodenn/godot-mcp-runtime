@@ -50,25 +50,28 @@ export interface UnknownParameterOptions {
   aliases?: Readonly<Record<string, string>>;
 }
 
-/**
- * An error response when `args` (already through `normalizeParameters`) holds a top-level key the tool does not declare, naming the declared keys and, when one is recognisable, the key that was meant; null when every key is declared.
- * Call it from a handler with `declaredParameters(definition)`; a tool that forwards free-form keys does not call it.
- */
+/** An error response naming every top-level key of `args` (already through `normalizeParameters`) that `allowed` lacks, the declared keys and any key that was meant; null when every key is declared. */
 export function unknownParameterError(
   args: OperationParams,
   allowed: readonly string[],
   options: UnknownParameterOptions = {},
 ): (ToolResponse & { isError: true }) | null {
-  const unknown = Object.keys(args).find((key) => !allowed.includes(key));
-  if (unknown === undefined) return null;
-  const meant = suggestParameter(unknown, allowed, options.aliases ?? {});
-  const hint = meant === undefined ? '' : `; did you mean "${meant}"?`;
+  const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
+  if (unknown.length === 0) return null;
+  const aliases = options.aliases ?? {};
+  const guesses = unknown.map((key) => ({ key, meant: suggestParameter(key, allowed, aliases) }));
+  const several = unknown.length > 1;
+  const hints = guesses.flatMap(({ key, meant }) =>
+    meant === undefined ? [] : [several ? `"${meant}" for "${key}"` : `"${meant}"`],
+  );
+  const hint = hints.length === 0 ? '' : `; did you mean ${hints.join(', ')}?`;
+  const named = unknown.map((key) => `"${key}"`).join(', ');
   return createErrorResponse(
-    `Unknown parameter "${unknown}" (allowed: ${allowed.join(', ')})${hint}`,
-    [
+    `Unknown parameter${several ? 's' : ''} ${named} (allowed: ${allowed.join(', ')})${hint}`,
+    guesses.map(({ key, meant }) =>
       meant === undefined
-        ? `Check the spelling of "${unknown}": an unknown parameter is refused instead of ignored`
-        : `Pass the value as "${meant}" instead of "${unknown}"`,
-    ],
+        ? `Check the spelling of "${key}": an unknown parameter is refused instead of ignored`
+        : `Pass the value as "${meant}" instead of "${key}"`,
+    ),
   );
 }
