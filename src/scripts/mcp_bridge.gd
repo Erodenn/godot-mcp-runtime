@@ -434,6 +434,8 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			_handle_track_start(peer, payload)
 		"track_stop":
 			_handle_track_stop(peer)
+		"frame_cap":
+			_handle_frame_cap(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
 		_:
@@ -1272,6 +1274,21 @@ func _handle_track_stop(peer: PeerState) -> void:
 	_non_finite_count += _track_non_finite
 	_track_non_finite = 0
 	_send_response(peer, {"samples": samples})
+
+# The longest the engine sleeps on purpose after a frame, in ms: the profiler's frame_time excludes it, so the profiler needs it to tell a capped game from a busy server. Upper bound: the larger of the max_fps and vsync intervals, plus frame_delay_msec, plus the low-processor sleep.
+func _handle_frame_cap(peer: PeerState) -> void:
+	var pacing_ms := 0.0
+	if Engine.max_fps > 0:
+		pacing_ms = 1000.0 / float(Engine.max_fps)
+	if DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED:
+		var refresh_hz: float = DisplayServer.screen_get_refresh_rate()
+		if refresh_hz > 0.0:
+			pacing_ms = maxf(pacing_ms, 1000.0 / refresh_hz)
+	var delay_ms := float(ProjectSettings.get_setting("application/run/frame_delay_msec", 0))
+	var low_processor_ms := 0.0
+	if OS.low_processor_usage_mode:
+		low_processor_ms = float(OS.low_processor_usage_mode_sleep_usec) / 1000.0
+	_send_response(peer, {"frame_cap_ms": pacing_ms + maxf(delay_ms, 0.0) + low_processor_ms})
 
 # Past max_ms or a full buffer nothing new is taken, so a track nobody stops cannot grow without bound.
 func _poll_track() -> void:

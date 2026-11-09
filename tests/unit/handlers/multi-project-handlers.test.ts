@@ -560,7 +560,7 @@ describe('profiler track collection follows the session that ran the capture', (
   }
 
   function sentCommands(send: { mock: { calls: unknown[][] } }): unknown[] {
-    return send.mock.calls.map((call) => call[0]);
+    return send.mock.calls.map((call) => call[0]).filter((command) => command !== 'frame_cap');
   }
 
   it('profile_project does not ask another session for the track after switch_project', async () => {

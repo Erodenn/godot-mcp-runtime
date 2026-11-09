@@ -10,6 +10,8 @@ import {
 } from '../../src/tools/profiler-tools.js';
 import {
   DebuggerProfiler,
+  FRAME_CAP_MS_MAX,
+  sanitizeFrameCapMs,
   PROFILE_MAX_SECONDS,
   PROFILE_WINDOW_MAX_SECONDS,
   PROFILE_WINDOW_WORST_CASE_MS,
@@ -1600,6 +1602,63 @@ describe('DebuggerProfiler timeline', () => {
     expect(buckets[2]).toMatchObject({ frames: 0, fps: 0, frameMs: null, top: [] });
     // The capture ended 100 ms into its last interval: too short to divide by.
     expect(buckets[3]!.fps).toBeNull();
+  });
+
+  describe('a frame cap the engine sleeps for is not a stall of this server', () => {
+    const CAP_INTERVAL_MS = 200;
+    const CAPPED_FRAME_COUNT = 12;
+
+    // Frames of 2 ms of work, one packet per cap interval: the engine sleeps after reporting its frame time.
+    async function cappedTimeline(
+      frameCapMs: number | undefined,
+      stallBeforeFrame: number | null,
+    ): Promise<Awaited<ReturnType<DebuggerProfiler['stop']>>> {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(1_000_000);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const running = p.start(5, 512, {
+        timelineMs: 250,
+        ...(frameCapMs === undefined ? {} : { frameCapMs }),
+      });
+      await feedStart(fake, running, [frame(1, 0.002, []), frame(2, 0.002, [])]);
+      let at = 1_000_000;
+      for (let n = 3; n <= CAPPED_FRAME_COUNT; n++) {
+        at += CAP_INTERVAL_MS + (n === stallBeforeFrame ? 1500 : 0);
+        await sendAt(fake, at, ['servers:profile_frame', THREAD, frame(n, 0.002, [])]);
+      }
+      return stopCapture(p, fake);
+    }
+
+    it('reports no stall at a capped rate when the engine reported the cap', async () => {
+      const result = await cappedTimeline(CAP_INTERVAL_MS, null);
+
+      expect(result.warnings).toBeUndefined();
+      const rated = result.timeline!.buckets.filter((b) => b.frames > 0);
+      expect(rated.length).toBeGreaterThan(0);
+      // The capped rate (5 fps) is measured, not nulled as a stall; only the short trailing interval has no rate.
+      expect(rated[0]!.fps).not.toBeNull();
+    });
+
+    it('still reports a real stall at a capped rate', async () => {
+      const result = await cappedTimeline(CAP_INTERVAL_MS, 8);
+
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings![0]).toMatch(/event loop/);
+    });
+
+    it('keeps the old reading when no cap is known: an uncapped game is judged as before', async () => {
+      const result = await cappedTimeline(undefined, null);
+
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings![0]).toMatch(/event loop/);
+    });
+
+    it('ignores a cap that is not a finite figure inside the bound', () => {
+      expect(sanitizeFrameCapMs(33.3)).toBe(33.3);
+      for (const bad of [NaN, Infinity, -5, 0, FRAME_CAP_MS_MAX + 1, '33', null, undefined]) {
+        expect(sanitizeFrameCapMs(bad)).toBe(0);
+      }
+    });
   });
 
   describe('a stall of the server event loop is not read as game behaviour', () => {

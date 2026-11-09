@@ -29,6 +29,7 @@ import {
   PROFILE_WINDOW_MAX_SECONDS,
   PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
+  sanitizeFrameCapMs,
   TARGET_FPS_MAX,
   TIMELINE_MS_MAX,
   TIMELINE_BUCKETS_DEFAULT,
@@ -61,10 +62,12 @@ export const TRACK_MIN_INTERVAL_MS = 50;
 const TRACK_INTERVAL_MS = 250;
 const TRACK_GRACE_MS = 10000;
 // Shorter than the usual command timeout: profile_project sends one track command on each side of its window.
-const TRACK_COMMAND_TIMEOUT_MS = 4000;
+const TRACK_COMMAND_TIMEOUT_MS = 3500;
+// The frame-cap read is a plain property read in the game; a game that cannot answer in this time is read as uncapped.
+const FRAME_CAP_COMMAND_TIMEOUT_MS = 1000;
 // Held under the 60 s after which a client with no progress token abandons the request; a later result or error is never read.
 export const PROFILE_PROJECT_WORST_CASE_MS =
-  PROFILE_WINDOW_WORST_CASE_MS + 2 * TRACK_COMMAND_TIMEOUT_MS;
+  PROFILE_WINDOW_WORST_CASE_MS + 2 * TRACK_COMMAND_TIMEOUT_MS + FRAME_CAP_COMMAND_TIMEOUT_MS;
 const TRACK_REPLY_PREVIEW_CHARS = 200;
 const TRACK_OWNER_NOT_CURRENT =
   'The session that ran this capture is no longer the current one, so its track was not collected';
@@ -699,6 +702,18 @@ function checkCanStart(
   }
 }
 
+/** The capture options plus the engine's on-purpose sleep per frame, asked of the game once per capture. Best effort: a game that does not answer, or answers oddly, is read as uncapped, which is the rule as it was. */
+async function withFrameCap<T extends CaptureOptions>(runner: GodotRunner, capture: T): Promise<T> {
+  try {
+    const raw = await runner.sendCommand('frame_cap', {}, FRAME_CAP_COMMAND_TIMEOUT_MS);
+    const reply = JSON.parse(raw) as { frame_cap_ms?: unknown };
+    const frameCapMs = sanitizeFrameCapMs(reply.frame_cap_ms);
+    return frameCapMs > 0 ? { ...capture, frameCapMs } : capture;
+  } catch {
+    return capture;
+  }
+}
+
 /** The bridge samples on its own clock, so it keeps sampling while another command holds the bridge, and stops by itself if nobody collects. */
 async function startTrack(
   runner: GodotRunner,
@@ -996,12 +1011,12 @@ export async function handleProfileProject(
 
     const windowSeconds = seconds.value ?? DEFAULT_WINDOW_SECONDS;
     const limit = captureLimit.value ?? CAPTURE_LIMIT_MAX;
-    const { options: capture, requestedTimelineMs } = options.value;
+    const { options: parsedCapture, requestedTimelineMs } = options.value;
     const startable = checkCanStart(
       receiver,
       windowSeconds,
       limit,
-      capture,
+      parsedCapture,
       PROFILE_WINDOW_MAX_SECONDS,
     );
     if (!startable.ok) return startable;
@@ -1014,6 +1029,7 @@ export async function handleProfileProject(
     if (!charged.ok) return charged;
     tracksHeldForReRead.delete(receiver);
     trackNonFiniteWarnings.delete(receiver);
+    const capture = await withFrameCap(runner, parsedCapture);
     const tracking = await startTrack(
       runner,
       capture.track,
@@ -1077,11 +1093,18 @@ export async function handleStartProfiler(
 
     const maxSeconds = seconds.value ?? DEFAULT_MAX_SECONDS;
     const limit = captureLimit.value ?? CAPTURE_LIMIT_MAX;
-    const { options: capture, requestedTimelineMs } = options.value;
-    const startable = checkCanStart(receiver, maxSeconds, limit, capture, PROFILE_MAX_SECONDS);
+    const { options: parsedCapture, requestedTimelineMs } = options.value;
+    const startable = checkCanStart(
+      receiver,
+      maxSeconds,
+      limit,
+      parsedCapture,
+      PROFILE_MAX_SECONDS,
+    );
     if (!startable.ok) return startable;
     tracksHeldForReRead.delete(receiver);
     trackNonFiniteWarnings.delete(receiver);
+    const capture = await withFrameCap(runner, parsedCapture);
     const tracking = await startTrack(
       runner,
       capture.track,

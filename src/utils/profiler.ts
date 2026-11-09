@@ -88,6 +88,8 @@ const MAX_DROPPED_MONITOR_NAMES = 256;
 const DROPPED_MONITOR_NAMES_SHOWN = 3;
 /** Arrival lag beyond the engine's own frame times after which this process is blamed; network batching stays under it, a synchronous stretch here does not. */
 const UNACCOUNTED_ARRIVAL_GAP_MS = 100;
+/** Ceiling on the engine's reported on-purpose sleep per frame; a larger figure is read as a bad reply and ignored. */
+export const FRAME_CAP_MS_MAX = 10_000;
 /** Things kept per kind in a timeline bucket, so many script functions cannot crowd out render stages and server calls. */
 const MAX_BUCKET_ITEMS = 512;
 /** Heaviest things a timeline interval lists by default; `timelineTop` overrides it per capture. */
@@ -202,6 +204,8 @@ export interface CaptureOptions {
   /** Most intervals the timeline reply holds, TIMELINE_BUCKETS_MIN..MAX_TIMELINE_BUCKETS (default TIMELINE_BUCKETS_DEFAULT); a longer recording merges adjacent intervals. */
   timelineBuckets?: number;
   targetFps?: number;
+  /** Longest the engine sleeps on purpose after a frame (`Engine.max_fps`, vsync, `frame_delay_msec`, low-processor mode), read from the game; its frame times exclude it. Absent or 0 means uncapped or unknown. */
+  frameCapMs?: number;
   /** NodePath:property specs the bridge samples; they reach the capture through the `TrackCollector` given to stop, never through this receiver. */
   track?: string[];
 }
@@ -409,6 +413,8 @@ interface Capture {
   visual: VisualCapture | null;
   targetFps: number;
   slowFrames: number;
+  /** The engine's on-purpose sleep per frame in ms (0 when uncapped or unknown); added to each frame's own time when judging an arrival gap. */
+  frameCapMs: number;
   timeline: TimelineCapture | null;
   /** Frames that arrived later than the engine's frame times account for; see `UNACCOUNTED_ARRIVAL_GAP_MS`. */
   arrivalStalls: number;
@@ -957,6 +963,16 @@ function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): 
     });
   }
   return timeline.buckets[index] ?? null;
+}
+
+/** The game's answer is data: anything but a finite figure in [0, FRAME_CAP_MS_MAX] means no cap is known. */
+export function sanitizeFrameCapMs(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value <= FRAME_CAP_MS_MAX
+    ? value
+    : 0;
 }
 
 function markStalled(timeline: TimelineCapture, fromMs: number, toMs: number): void {
@@ -1566,6 +1582,7 @@ export class DebuggerProfiler {
       visual: visual ? newVisualCapture() : null,
       targetFps: options.targetFps ?? DEFAULT_TARGET_FPS,
       slowFrames: 0,
+      frameCapMs: sanitizeFrameCapMs(options.frameCapMs),
       arrivalStalls: 0,
       receiverFault: null,
       timeline:
@@ -1957,8 +1974,9 @@ export class DebuggerProfiler {
     const bucket = this.timelineBucket(capture, true);
     if (bucket !== null) foldTimelineFrame(bucket, sample, slow);
     if (capture.timeline !== null && previousArrivalAt !== null && previousFrame !== null) {
-      // Wall time beyond the engine's reported frame times is time this process did not read its socket.
-      const engineMs = sample.timings.frameMs * Math.max(1, frame - previousFrame);
+      // Wall time beyond the engine's frame times and its own on-purpose sleep (the frame cap) is time this process did not read its socket.
+      const engineMs =
+        (sample.timings.frameMs + capture.frameCapMs) * Math.max(1, frame - previousFrame);
       if (arrivedAt - previousArrivalAt - engineMs > UNACCOUNTED_ARRIVAL_GAP_MS) {
         capture.arrivalStalls += 1;
         markStalled(

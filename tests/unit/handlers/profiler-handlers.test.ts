@@ -32,6 +32,8 @@ interface ProfilerFake {
   asRunner: GodotRunner;
   calls: ProfilerCall[];
   bridge: Array<{ command: string; params: Record<string, unknown> }>;
+  /** The frame_cap reads, kept apart from `bridge` so the track tests keep pinning the track commands. */
+  frameCapReads: Array<Record<string, unknown>>;
 }
 
 /** How long the fake's session queue lets a call wait: short, so a busy queue fails a test fast. */
@@ -114,6 +116,7 @@ function createProfilerFake(
 ): ProfilerFake {
   const calls: ProfilerCall[] = [];
   const bridge: ProfilerFake['bridge'] = [];
+  const frameCapReads: Array<Record<string, unknown>> = [];
   let trackPending = options.trackPending === true;
   const record = (method: ProfilerCall['method'], args: unknown[], result: unknown): unknown => {
     calls.push({ method, args });
@@ -193,6 +196,12 @@ function createProfilerFake(
     },
     sendCommand(command: string, params: Record<string, unknown> = {}) {
       return queue.run(`bridge command '${command}'`, async () => {
+        if (command === 'frame_cap') {
+          frameCapReads.push(params);
+          const capReply = options.replies?.[command] ?? '{"frame_cap_ms":0}';
+          if (capReply instanceof Error) throw capReply;
+          return capReply;
+        }
         bridge.push({ command, params });
         const reply =
           options.replies?.[command] ??
@@ -213,7 +222,7 @@ function createProfilerFake(
       },
     })),
   );
-  return { asRunner: runner as unknown as GodotRunner, calls, bridge };
+  return { asRunner: runner as unknown as GodotRunner, calls, bridge, frameCapReads };
 }
 
 describe('profiler handlers: session requirements', () => {
@@ -507,11 +516,40 @@ describe('handleProfileProject', () => {
     await handleProfileProject(fake.asRunner, { track: ['/root/Main:position'] });
 
     expect(fake.bridge.map((b) => b.command)).toEqual(['track_start', 'track_stop']);
-    expect(timeouts).toHaveLength(2);
-    const [start, stop] = timeouts as [number, number];
+    expect(timeouts).toHaveLength(3);
+    const [cap, start, stop] = timeouts as [number, number, number];
     expect(start).toBe(stop);
-    expect(PROFILE_WINDOW_WORST_CASE_MS + start + stop).toBe(PROFILE_PROJECT_WORST_CASE_MS);
+    expect(PROFILE_WINDOW_WORST_CASE_MS + cap + start + stop).toBe(PROFILE_PROJECT_WORST_CASE_MS);
     expect(PROFILE_PROJECT_WORST_CASE_MS).toBeLessThan(CLIENT_REQUEST_TIMEOUT_MS);
+  });
+
+  describe('the game frame cap', () => {
+    const CAP_MS = 33.3;
+
+    it('is read once and handed to profile_project and start_profiler captures', async () => {
+      const reply = JSON.stringify({ frame_cap_ms: CAP_MS });
+      const windowed = createProfilerFake({ replies: { frame_cap: reply } });
+      await handleProfileProject(windowed.asRunner, {});
+      expect(windowed.frameCapReads).toHaveLength(1);
+      expect((windowed.calls[0]!.args[4] as { frameCapMs?: number }).frameCapMs).toBe(CAP_MS);
+
+      const started = createProfilerFake({ replies: { frame_cap: reply } });
+      await handleStartProfiler(started.asRunner, {});
+      expect(started.frameCapReads).toHaveLength(1);
+      expect((started.calls[0]!.args[2] as { frameCapMs?: number }).frameCapMs).toBe(CAP_MS);
+    });
+
+    it.each([
+      ['an unanswered read', new Error('timed out')],
+      ['a reply that is not JSON', 'pong'],
+      ['a figure outside the bound', JSON.stringify({ frame_cap_ms: -1 })],
+    ])('leaves the capture uncapped on %s', async (_label, reply) => {
+      const fake = createProfilerFake({ replies: { frame_cap: reply } });
+      const result = await handleProfileProject(fake.asRunner, {});
+
+      expect(hasError(result)).toBe(false);
+      expect(fake.calls[0]!.args[4]).toEqual(PLAIN);
+    });
   });
 
   it('says so when a long window widens the requested timeline interval', async () => {
