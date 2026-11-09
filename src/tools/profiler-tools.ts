@@ -68,6 +68,9 @@ const TRACK_INTERVAL_MS = 250;
 const TRACK_GRACE_MS = 10000;
 // Shorter than the usual command timeout: profile_project sends one track command on each side of its window.
 const TRACK_COMMAND_TIMEOUT_MS = 3500;
+// KEEP IN SYNC: FRAME_CAP_COMMAND and FRAME_CAP_FIELD in src/scripts/mcp_bridge.gd.
+export const FRAME_CAP_COMMAND = 'frame_cap';
+export const FRAME_CAP_FIELD = 'frame_cap_ms';
 // The frame-cap read is a plain property read in the game; a game that cannot answer in this time is read as uncapped.
 const FRAME_CAP_COMMAND_TIMEOUT_MS = 1000;
 // Held under the 60 s after which a client with no progress token abandons the request; a later result or error is never read.
@@ -727,9 +730,9 @@ function checkCanStart(
 /** The capture options plus the engine's on-purpose sleep per frame, asked of the game once per capture. Best effort: a game that does not answer, or answers oddly, is read as uncapped, which is the rule as it was. */
 async function withFrameCap<T extends CaptureOptions>(runner: GodotRunner, capture: T): Promise<T> {
   try {
-    const raw = await runner.sendCommand('frame_cap', {}, FRAME_CAP_COMMAND_TIMEOUT_MS);
-    const reply = JSON.parse(raw) as { frame_cap_ms?: unknown };
-    const frameCapMs = sanitizeFrameCapMs(reply.frame_cap_ms);
+    const raw = await runner.sendCommand(FRAME_CAP_COMMAND, {}, FRAME_CAP_COMMAND_TIMEOUT_MS);
+    const reply = JSON.parse(raw) as Record<string, unknown>;
+    const frameCapMs = sanitizeFrameCapMs(reply[FRAME_CAP_FIELD]);
     return frameCapMs > 0 ? { ...capture, frameCapMs } : capture;
   } catch {
     return capture;

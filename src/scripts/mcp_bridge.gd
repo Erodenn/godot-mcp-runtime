@@ -98,6 +98,9 @@ const PARENT_WATCH_PORT_ENV := "MCP_PARENT_WATCH_PORT"
 # A server killed outright is noticed within two checks: the first write after its death is answered with a reset, the second fails.
 const PARENT_WATCH_INTERVAL_MS := 2000
 
+# KEEP IN SYNC: FRAME_CAP_COMMAND and FRAME_CAP_FIELD in src/tools/profiler-tools.ts.
+const FRAME_CAP_COMMAND := "frame_cap"
+const FRAME_CAP_FIELD := "frame_cap_ms"
 # Profiler track caps. KEEP IN SYNC: MAX_TRACK_ENTRIES and MIN_TRACK_INTERVAL_MS with TRACK_MAX_ENTRIES and TRACK_MIN_INTERVAL_MS in src/tools/profiler-tools.ts.
 # A track samples from _process on its own clock so a profiler timeline can place samples by frame while other commands (a long input batch) hold this peer.
 const MAX_TRACK_ENTRIES := 4
@@ -436,7 +439,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			_handle_track_start(peer, payload)
 		"track_stop":
 			_handle_track_stop(peer)
-		"frame_cap":
+		FRAME_CAP_COMMAND:
 			_handle_frame_cap(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
@@ -1291,7 +1294,7 @@ func _handle_frame_cap(peer: PeerState) -> void:
 	var low_processor_ms := 0.0
 	if OS.low_processor_usage_mode:
 		low_processor_ms = float(OS.low_processor_usage_mode_sleep_usec) / 1000.0
-	_send_response(peer, {"frame_cap_ms": pacing_ms + maxf(delay_ms, 0.0) + low_processor_ms})
+	_send_response(peer, {FRAME_CAP_FIELD: pacing_ms + maxf(delay_ms, 0.0) + low_processor_ms})
 
 # Past max_ms or a full buffer nothing new is taken, so a track nobody stops cannot grow without bound.
 func _poll_track() -> void:

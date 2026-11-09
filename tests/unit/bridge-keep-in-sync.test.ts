@@ -17,7 +17,13 @@ import {
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
 import { stderrRequestsImport } from '../../src/utils/headless-op.js';
-import { TRACK_MAX_ENTRIES, TRACK_MIN_INTERVAL_MS } from '../../src/tools/profiler-tools.js';
+import {
+  FRAME_CAP_COMMAND,
+  FRAME_CAP_FIELD,
+  TRACK_MAX_ENTRIES,
+  TRACK_MIN_INTERVAL_MS,
+} from '../../src/tools/profiler-tools.js';
+import { ORPHANED_HANDLER_PROBLEM } from '../../src/utils/orphan-findings.js';
 import {
   extractTokenFramedPayload,
   normalizeForCompare,
@@ -130,6 +136,16 @@ describe('mcp_bridge.gd agrees with the TypeScript wire contract', () => {
   it('declares the same profiler track caps', () => {
     expect(gdConst('MAX_TRACK_ENTRIES')).toBe(String(TRACK_MAX_ENTRIES));
     expect(gdConst('MIN_TRACK_INTERVAL_MS')).toBe(String(TRACK_MIN_INTERVAL_MS));
+  });
+
+  it('names the frame-cap command and its reply field as the profiler reads them', () => {
+    // Red when either side renames one: the profiler would read every game as uncapped without a word.
+    expect(gdConst('FRAME_CAP_COMMAND')).toBe(`"${FRAME_CAP_COMMAND}"`);
+    expect(gdConst('FRAME_CAP_FIELD')).toBe(`"${FRAME_CAP_FIELD}"`);
+    expect(gdFunctionBody('_dispatch_command')).toMatch(
+      /\n\t\tFRAME_CAP_COMMAND:\n\t\t\t_handle_frame_cap\(peer\)\n/,
+    );
+    expect(gdFunctionBody('_handle_frame_cap')).toContain('{FRAME_CAP_FIELD: ');
   });
 
   it('writes screenshots where the containment check looks for them', () => {
@@ -428,6 +444,15 @@ describe('godot_operations.gd agrees with unexported TypeScript constants', () =
   function quotedItems(list: string): string[] {
     return [...list.matchAll(/["']([^"']*)["']/g)].map((item) => item[1]!);
   }
+
+  it('tags an orphaned handler with the problem the TypeScript re-judge looks for', () => {
+    // Red when either side renames the tag: the re-judge would pass every orphaned_handler finding through unrefined.
+    const match = operationsSource.match(
+      new RegExp(`^const ORPHANED_HANDLER_PROBLEM${GD_ASSIGN}\\s*(.+?)\\s*(?:#.*)?$`, 'm'),
+    );
+    expect(match, 'godot_operations.gd must declare const ORPHANED_HANDLER_PROBLEM').not.toBeNull();
+    expect(match![1]).toBe(`"${ORPHANED_HANDLER_PROBLEM}"`);
+  });
 
   it('prints the operation-started line the runner looks for', () => {
     // Red when the marker constant or the script's log line changes: the runner would report every operation as an engine that died before dispatch,
