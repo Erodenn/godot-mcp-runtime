@@ -31,7 +31,11 @@ import {
   ProfilerError,
   TARGET_FPS_MAX,
   TIMELINE_MS_MAX,
+  TIMELINE_BUCKETS_DEFAULT,
+  TIMELINE_BUCKETS_MIN,
   TIMELINE_MS_MIN,
+  TIMELINE_TOP_DEFAULT,
+  TIMELINE_TOP_MAX,
   TIMESTAMP_OVERFLOW_FIX,
   timelineBucketMs,
   type CaptureOptions,
@@ -93,12 +97,22 @@ const visualProperty = {
 const timelineProperty = {
   type: 'boolean',
   description:
-    'Also record the capture over time in `timeline.buckets`: per interval the fps, frameMs avg/max, process/physics/script ms, slowFrames, draw calls, render CPU/GPU ms (with visual) and the 3 heaviest functions, server calls or render stages - where and when frames got slow (default: false). timelineMs and track turn it on by themselves; false beside either is rejected.',
+    'Also record the capture over time in `timeline.buckets`: per interval the fps, frameMs avg/max, process/physics/script ms, slowFrames, draw calls, render CPU/GPU ms (with visual) and the heaviest functions, server calls or render stages (`top`, named once in `timeline.items`) - where and when frames got slow (default: false). timelineMs, timelineTop, timelineBuckets and track turn it on by themselves; false beside any is rejected.',
 } as const;
 
 const timelineMsProperty = {
   type: 'number',
-  description: `Timeline interval in milliseconds, ${TIMELINE_MS_MIN}..${TIMELINE_MS_MAX} (default: ${DEFAULT_TIMELINE_MS}). A timeline has about ${MAX_TIMELINE_BUCKETS} intervals, so a longer capture uses wider ones (${PROFILE_MAX_SECONDS} s: ${timelineBucketMs(TIMELINE_MS_MIN, PROFILE_MAX_SECONDS)} ms). Implies timeline.`,
+  description: `Timeline interval in milliseconds, ${TIMELINE_MS_MIN}..${TIMELINE_MS_MAX} (default: ${DEFAULT_TIMELINE_MS}). Records at most about ${MAX_TIMELINE_BUCKETS} intervals (${PROFILE_MAX_SECONDS} s: ${timelineBucketMs(TIMELINE_MS_MIN, PROFILE_MAX_SECONDS)} ms) and the reply merges them down to timelineBuckets. Implies timeline.`,
+} as const;
+
+const timelineTopProperty = {
+  type: 'number',
+  description: `Heaviest functions, server calls or render stages listed per timeline interval, 0..${TIMELINE_TOP_MAX} (default: ${TIMELINE_TOP_DEFAULT}). 0 leaves \`top\` empty. Implies timeline.`,
+} as const;
+
+const timelineBucketsProperty = {
+  type: 'number',
+  description: `Most intervals the timeline reply holds, ${TIMELINE_BUCKETS_MIN}..${MAX_TIMELINE_BUCKETS} (default: ${TIMELINE_BUCKETS_DEFAULT}). A capture recorded in more is merged: adjacent intervals combine (counts and times add up, maxima stay) and \`timeline.bucketMs\` reports the width. Implies timeline.`,
 } as const;
 
 const targetFpsProperty = {
@@ -251,6 +265,16 @@ const timelineSchema = {
     bucketMs: { type: 'number' },
     track: { type: 'array', items: { type: 'string' } },
     trackError: { type: ['string', 'null'] },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['script', 'server', 'render'] },
+          name: { type: 'string' },
+        },
+      },
+    },
     buckets: {
       type: 'array',
       items: {
@@ -274,14 +298,17 @@ const timelineSchema = {
             items: {
               type: 'object',
               properties: {
-                kind: { type: 'string', enum: ['script', 'server', 'render'] },
-                name: { type: 'string' },
+                item: { type: 'number' },
                 ms: { type: 'number' },
                 maxMs: { type: 'number' },
               },
             },
           },
-          track: { type: ['object', 'null'] },
+          track: {
+            type: ['object', 'null'],
+            description:
+              'Tracked values that changed since the last interval with a sample, by spec: absent means unchanged, null means the value became null. The first sample lists every spec. null here means no sample landed in the interval.',
+          },
         },
       },
     },
@@ -380,6 +407,8 @@ export const profilerToolDefinitions = [
         visual: visualProperty,
         timeline: timelineProperty,
         timelineMs: timelineMsProperty,
+        timelineTop: timelineTopProperty,
+        timelineBuckets: timelineBucketsProperty,
         targetFps: targetFpsProperty,
         track: trackProperty,
       },
@@ -402,6 +431,8 @@ export const profilerToolDefinitions = [
         visual: visualProperty,
         timeline: timelineProperty,
         timelineMs: timelineMsProperty,
+        timelineTop: timelineTopProperty,
+        timelineBuckets: timelineBucketsProperty,
         targetFps: targetFpsProperty,
         track: trackProperty,
       },
@@ -522,7 +553,7 @@ interface ParsedCaptureOptions {
   requestedTimelineMs: number | undefined;
 }
 
-/** Checked here for the same reason as `top`. `timelineMs` or a `track` imply a timeline. */
+/** Checked here for the same reason as `top`. `timelineMs`, `timelineTop`, `timelineBuckets` or a `track` imply a timeline. */
 function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions, ToolResponse> {
   const visual = optionalBoolean(args, 'visual');
   if (!visual.ok) return visual;
@@ -530,6 +561,10 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
   if (!timeline.ok) return timeline;
   const timelineMs = optionalNumber(args, 'timelineMs');
   if (!timelineMs.ok) return timelineMs;
+  const timelineTop = optionalNumber(args, 'timelineTop');
+  if (!timelineTop.ok) return timelineTop;
+  const timelineBuckets = optionalNumber(args, 'timelineBuckets');
+  if (!timelineBuckets.ok) return timelineBuckets;
   const targetFps = optionalNumber(args, 'targetFps');
   if (!targetFps.ok) return targetFps;
   const track = optionalStringArray(args, 'track');
@@ -545,6 +580,32 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
       createErrorResponse(
         `Invalid timelineMs: must be an integer in [${TIMELINE_MS_MIN}, ${TIMELINE_MS_MAX}] (got: ${timelineMs.value})`,
         [`Omit timelineMs for ${DEFAULT_TIMELINE_MS} ms intervals`],
+      ),
+    );
+  }
+  if (
+    timelineTop.value !== undefined &&
+    (!Number.isInteger(timelineTop.value) ||
+      timelineTop.value < 0 ||
+      timelineTop.value > TIMELINE_TOP_MAX)
+  ) {
+    return err(
+      createErrorResponse(
+        `Invalid timelineTop: must be an integer in [0, ${TIMELINE_TOP_MAX}] (got: ${timelineTop.value})`,
+        [`Omit timelineTop for the ${TIMELINE_TOP_DEFAULT} heaviest per interval`],
+      ),
+    );
+  }
+  if (
+    timelineBuckets.value !== undefined &&
+    (!Number.isInteger(timelineBuckets.value) ||
+      timelineBuckets.value < TIMELINE_BUCKETS_MIN ||
+      timelineBuckets.value > MAX_TIMELINE_BUCKETS)
+  ) {
+    return err(
+      createErrorResponse(
+        `Invalid timelineBuckets: must be an integer in [${TIMELINE_BUCKETS_MIN}, ${MAX_TIMELINE_BUCKETS}] (got: ${timelineBuckets.value})`,
+        [`Omit timelineBuckets for at most ${TIMELINE_BUCKETS_DEFAULT} intervals`],
       ),
     );
   }
@@ -580,6 +641,8 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
   // An explicit timeline: false beside timelineMs or track contradicts it; picking a side would ignore half the request.
   const implied = [
     ...(timelineMs.value !== undefined ? ['timelineMs'] : []),
+    ...(timelineTop.value !== undefined ? ['timelineTop'] : []),
+    ...(timelineBuckets.value !== undefined ? ['timelineBuckets'] : []),
     ...(specs.length > 0 ? ['track'] : []),
   ];
   if (timeline.value === false && implied.length > 0) {
@@ -592,11 +655,17 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
   }
 
   const wantsTimeline =
-    timeline.value === true || timelineMs.value !== undefined || specs.length > 0;
+    timeline.value === true ||
+    timelineMs.value !== undefined ||
+    timelineTop.value !== undefined ||
+    timelineBuckets.value !== undefined ||
+    specs.length > 0;
   return ok({
     options: {
       visual: visual.value === true,
       timelineMs: wantsTimeline ? (timelineMs.value ?? DEFAULT_TIMELINE_MS) : null,
+      ...(timelineTop.value !== undefined ? { timelineTop: timelineTop.value } : {}),
+      ...(timelineBuckets.value !== undefined ? { timelineBuckets: timelineBuckets.value } : {}),
       targetFps: targetFps.value ?? DEFAULT_TARGET_FPS,
       track: specs,
     },

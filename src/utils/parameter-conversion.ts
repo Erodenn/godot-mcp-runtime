@@ -38,6 +38,8 @@ const parameterMappings = {
   autoload_path: 'autoloadPath',
   visible_only: 'visibleOnly',
   timeline_ms: 'timelineMs',
+  timeline_top: 'timelineTop',
+  timeline_buckets: 'timelineBuckets',
   target_fps: 'targetFps',
   has_property: 'hasProperty', // nested in validate checks[].schema; flows through strict converter
 } as const satisfies Record<string, string>;

@@ -15,6 +15,11 @@ import {
   PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
   timelineBucketMs,
+  timelineMergeFactor,
+  mergeTimelineBuckets,
+  trackChanges,
+  expandTrack,
+  type Bucket,
   type TrackCollector,
   type TrackSample,
 } from '../../src/utils/profiler.js';
@@ -958,6 +963,14 @@ async function visualCapture(
   return stopCapture(p, fake, top);
 }
 
+/** A bucket's top list with each entry's name and kind looked up in the timeline's item table. */
+function topOf(
+  timeline: NonNullable<Awaited<ReturnType<DebuggerProfiler['stop']>>['timeline']>,
+  bucket: { top: Array<{ item: number; ms: number; maxMs: number }> },
+): Array<{ kind: string; name: string; ms: number; maxMs: number }> {
+  return bucket.top.map(({ item, ms, maxMs }) => ({ ...timeline.items[item]!, ms, maxMs }));
+}
+
 /** Stop a running capture and answer it with the engine's closing totals. */
 async function stopCapture(
   p: DebuggerProfiler,
@@ -1574,11 +1587,11 @@ describe('DebuggerProfiler timeline', () => {
     expect(buckets.map((b) => b.t)).toEqual([0, 0.5, 1, 1.5]);
     expect(buckets.map((b) => b.frames)).toEqual([2, 1, 0, 1]);
     expect(buckets[0]!.fps).toBe(4);
-    expect(buckets[0]!.top).toContainEqual(
+    expect(topOf(timeline, buckets[0]!)).toContainEqual(
       expect.objectContaining({ kind: 'server', name: 'physics_3d/Finalize Islands' }),
     );
     expect(buckets[1]).toMatchObject({ slowFrames: 1, frameMs: { avg: 20, max: 20 } });
-    expect(buckets[1]!.top[0]).toEqual({
+    expect(topOf(timeline, buckets[1]!)[0]).toEqual({
       kind: 'script',
       name: '_burn (res://hot.gd:8)',
       ms: 15,
@@ -1676,7 +1689,7 @@ describe('DebuggerProfiler timeline', () => {
     expect(bucket.render!.gpuMs).toBeCloseTo(3.6, 6);
     expect(bucket.drawCalls).toBe(12);
     // Render stages rank by the heavier of their CPU and GPU time.
-    const opaque = bucket.top.find((item) => item.kind === 'render');
+    const opaque = topOf(result.timeline!, bucket).find((item) => item.kind === 'render');
     expect(opaque).toMatchObject({
       name: path('Render Viewports', 'Render Viewport 0', 'Render 3D Scene', 'Render Opaque Pass'),
       ms: 2,
@@ -1805,9 +1818,249 @@ describe('DebuggerProfiler timeline', () => {
 
     // 0.3 ms in each of ten frames sums past the opaque pass's 2 ms in its one
     // rendered frame, but per frame the pass is far the heavier.
-    const top = result.timeline!.buckets[0]!.top;
+    const top = topOf(result.timeline!, result.timeline!.buckets[0]!);
     expect(top[0]).toMatchObject({ kind: 'render', ms: 2 });
     expect(top.map((item) => item.kind)).toEqual(['render', 'render', 'render']);
+  });
+
+  describe('the reply is sized for an agent context', () => {
+    /** `bucketCount` half-second intervals, each with one frame that ran `_burn` and `_other` for the same time. */
+    async function steadyCapture(
+      bucketCount: number,
+      options: { timelineTop?: number; timelineBuckets?: number },
+    ): Promise<NonNullable<Awaited<ReturnType<DebuggerProfiler['stop']>>['timeline']>> {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(1_000_000);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const rows: Row[] = [
+        [0, 1, 0.004, 0.004],
+        [1, 1, 0.002, 0.002],
+      ];
+      const running = p.start((bucketCount * 500) / MS_PER_SECOND, 512, {
+        timelineMs: 500,
+        ...options,
+      });
+      await feedStart(fake, running, [frame(1, 0.016, rows), frame(2, 0.016, rows)]);
+      for (let n = 1; n < bucketCount; n++) {
+        await sendAt(fake, 1_000_000 + n * 500 + 10, [
+          'servers:profile_frame',
+          THREAD,
+          frame(2 + n, 0.016, rows),
+        ]);
+      }
+      return (await stopCapture(p, fake)).timeline!;
+    }
+
+    // Red when summarizeTimeline copies kind and name into each bucket's top again.
+    it('names a thing once however many intervals it tops', async () => {
+      const timeline = await steadyCapture(8, {});
+
+      expect(timeline.buckets).toHaveLength(8);
+      expect(timeline.items).toEqual([
+        { kind: 'script', name: '_burn (res://hot.gd:8)' },
+        { kind: 'script', name: '_other (res://hot.gd:14)' },
+      ]);
+      for (const bucket of timeline.buckets) {
+        expect(bucket.top.map((entry) => entry.item)).toEqual([0, 1]);
+      }
+    });
+
+    // Red when the item table is dropped or the entries carry their names again: the interned form
+    // is then no smaller than the inline one.
+    it('is smaller than listing each name in every interval', async () => {
+      const timeline = await steadyCapture(40, {});
+
+      const inline = {
+        ...timeline,
+        items: undefined,
+        buckets: timeline.buckets.map((bucket) => ({
+          ...bucket,
+          top: topOf(timeline, bucket),
+        })),
+      };
+      expect(JSON.stringify(timeline).length).toBeLessThan(JSON.stringify(inline).length * 0.8);
+    });
+
+    // Red when the reply keeps every recorded interval: 41 frames over 20 s would come back as 40 buckets of 500 ms.
+    it('merges a long recording down to the default interval cap and reports the width', async () => {
+      const timeline = await steadyCapture(40, {});
+      const unmerged = await steadyCapture(40, { timelineBuckets: 60 });
+
+      expect(unmerged.buckets).toHaveLength(40);
+      expect(unmerged.bucketMs).toBe(500);
+      expect(timeline.buckets).toHaveLength(20);
+      expect(timeline.bucketMs).toBe(1000);
+      expect(timeline.buckets.map((b) => b.t)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+      const frames = (t: typeof timeline): number => t.buckets.reduce((n, b) => n + b.frames, 0);
+      expect(frames(timeline)).toBe(frames(unmerged));
+      expect(timeline.buckets.reduce((n, b) => n + b.slowFrames, 0)).toBe(
+        unmerged.buckets.reduce((n, b) => n + b.slowFrames, 0),
+      );
+    });
+
+    it.each([3, 61, 10.5])('rejects a timelineBuckets of %s', async (timelineBuckets) => {
+      const { profiler: p } = await connectedProfiler();
+      await expect(p.start(5, 512, { timelineMs: 500, timelineBuckets })).rejects.toMatchObject({
+        code: 'bad_args',
+      });
+    });
+
+    // Red when timelineTop is ignored or ranking keeps the fixed three.
+    it.each([
+      [1, 1],
+      [0, 0],
+    ])('lists at most timelineTop=%i things per interval', async (timelineTop, expectedLength) => {
+      const timeline = await steadyCapture(3, { timelineTop });
+
+      expect(timeline.buckets.map((bucket) => bucket.top.length)).toEqual([
+        expectedLength,
+        expectedLength,
+        expectedLength,
+      ]);
+      expect(timeline.items).toHaveLength(expectedLength);
+    });
+
+    it.each([-1, 1.5, 11])('rejects a timelineTop of %s', async (timelineTop) => {
+      const { profiler: p } = await connectedProfiler();
+      await expect(p.start(5, 512, { timelineMs: 500, timelineTop })).rejects.toMatchObject({
+        code: 'bad_args',
+      });
+    });
+  });
+
+  describe('merging intervals and unchanged track values', () => {
+    const emptyBucket = (over: Partial<Bucket>): Bucket => ({
+      frames: 0,
+      frameSum: 0,
+      frameMax: 0,
+      processSum: 0,
+      physicsSum: 0,
+      scriptSum: 0,
+      slowFrames: 0,
+      firstFrame: null,
+      lastFrame: null,
+      items: null,
+      top: [],
+      renderFrames: 0,
+      renderCpuSum: 0,
+      renderGpuSum: 0,
+      drawCalls: null,
+      stalled: false,
+      ...over,
+    });
+
+    it.each([
+      [0, 20, 1],
+      [20, 20, 1],
+      [21, 20, 2],
+      [40, 20, 2],
+      [41, 20, 3],
+      [60, 20, 3],
+    ])('merges %i intervals under a cap of %i by %i', (count, cap, factor) => {
+      expect(timelineMergeFactor(count, cap)).toBe(factor);
+    });
+
+    // Red when sums are averaged instead of added, a maximum is summed, or the weights are dropped.
+    it('adds counts and times, keeps maxima and weighs the top lists by frames', () => {
+      const a = emptyBucket({
+        frames: 10,
+        frameSum: 100,
+        frameMax: 15,
+        processSum: 20,
+        slowFrames: 1,
+        firstFrame: 1,
+        lastFrame: 10,
+        drawCalls: 5,
+        top: [{ kind: 'script', name: 'f', ms: 4, maxMs: 6 }],
+      });
+      const b = emptyBucket({
+        frames: 30,
+        frameSum: 600,
+        frameMax: 40,
+        processSum: 30,
+        slowFrames: 2,
+        firstFrame: 11,
+        lastFrame: 40,
+        stalled: true,
+        top: [
+          { kind: 'script', name: 'f', ms: 8, maxMs: 9 },
+          { kind: 'script', name: 'g', ms: 1, maxMs: 1 },
+        ],
+      });
+
+      const merged = mergeTimelineBuckets([a, b], 2, 3);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0]).toMatchObject({
+        frames: 40,
+        frameSum: 700,
+        frameMax: 40,
+        processSum: 50,
+        slowFrames: 3,
+        firstFrame: 1,
+        lastFrame: 40,
+        drawCalls: 5,
+        stalled: true,
+      });
+      // f: (4*10 + 8*30) / 40 = 7, g: (1*30) / 40 = 0.75
+      expect(merged[0]!.top).toEqual([
+        { kind: 'script', name: 'f', ms: 7, maxMs: 9 },
+        { kind: 'script', name: 'g', ms: 0.75, maxMs: 1 },
+      ]);
+      expect(a.frames).toBe(10);
+    });
+
+    it('merges a trailing short run on its own', () => {
+      const three = [1, 2, 3].map((n) => emptyBucket({ frames: n }));
+      expect(mergeTimelineBuckets(three, 2, 3).map((b) => b.frames)).toEqual([3, 3]);
+    });
+
+    // Red when an unchanged value is repeated, or when a value that became null is dropped as unchanged.
+    it('lists only the values that changed, a value that became null included', () => {
+      const first = { a: 1, b: { x: 1 }, c: null };
+      expect(trackChanges(null, first)).toEqual(first);
+      expect(trackChanges(first, { a: 1, b: { x: 1 }, c: null })).toEqual({});
+      expect(trackChanges(first, { a: 2, b: { x: 1 }, c: null })).toEqual({ a: 2 });
+      expect(trackChanges(first, { a: 1, b: null, c: null })).toEqual({ b: null });
+      expect(trackChanges(first, { a: 1, b: { x: 2 }, c: 5 })).toEqual({ b: { x: 2 }, c: 5 });
+    });
+
+    it('expands the changes back into full values, skipping intervals without a sample', () => {
+      expect(
+        expandTrack([
+          { track: { a: 1, b: 2 } },
+          { track: null },
+          { track: { b: null } },
+          { track: {} },
+        ]),
+      ).toEqual([{ a: 1, b: 2 }, null, { a: 1, b: null }, { a: 1, b: null }]);
+    });
+
+    it('sends an unchanged tracked value once across the capture', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(3_000_000);
+      const { profiler: p, peer: fake } = await connectedProfiler();
+      const running = p.start(5, 512, { timelineMs: 500, track: ['/a:hp', '/a:pos'] });
+      await feedStart(fake, running, [frame(1, 0.016, []), frame(2, 0.016, [])]);
+      await sendAt(fake, 3_000_600, ['servers:profile_frame', THREAD, frame(3, 0.016, [])]);
+      await sendAt(fake, 3_001_100, ['servers:profile_frame', THREAD, frame(4, 0.016, [])]);
+      const collect = vi.fn(async () => ({
+        samples: [
+          { frame: 2, values: { '/a:hp': 5, '/a:pos': 1 } },
+          { frame: 3, values: { '/a:hp': 5, '/a:pos': 2 } },
+          { frame: 4, values: { '/a:hp': null, '/a:pos': 2 } },
+        ],
+        error: null,
+      }));
+
+      const result = await stopCapture(p, fake, 10, collect);
+
+      expect(result.timeline!.buckets.map((b) => b.track)).toEqual([
+        { '/a:hp': 5, '/a:pos': 1 },
+        { '/a:pos': 2 },
+        { '/a:hp': null },
+      ]);
+    });
   });
 
   it('keeps render stages in the ranking when scripts fill a bucket', async () => {
@@ -1821,7 +2074,7 @@ describe('DebuggerProfiler timeline', () => {
     fake.send(['visual:profile_frame', THREAD, visualFrame(41, RENDER_FRAME)]);
     const result = await stopCapture(p, fake);
 
-    expect(result.timeline!.buckets[0]!.top[0]).toMatchObject({
+    expect(topOf(result.timeline!, result.timeline!.buckets[0]!)[0]).toMatchObject({
       kind: 'render',
       name: path('Render Viewports', 'Render Viewport 0', 'Render 3D Scene', 'Render Opaque Pass'),
       ms: 2,

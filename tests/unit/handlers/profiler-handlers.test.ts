@@ -335,6 +335,16 @@ describe('handleProfileProject', () => {
     ['timeline alone', { timeline: true }, { timelineMs: 500 }],
     ['an interval, which implies a timeline', { timeline_ms: 1000 }, { timelineMs: 1000 }],
     ['a target frame rate', { targetFps: 90 }, { targetFps: 90 }],
+    [
+      'an interval cap, which implies a timeline',
+      { timeline_buckets: 10 },
+      { timelineMs: 500, timelineBuckets: 10 },
+    ],
+    [
+      'a cap on the top list, which implies a timeline',
+      { timeline_top: 1 },
+      { timelineMs: 500, timelineTop: 1 },
+    ],
   ])('passes %s to the capture', async (_label, args, expected) => {
     const fake = createProfilerFake();
     await handleProfileProject(fake.asRunner, args);
@@ -519,6 +529,21 @@ describe('handleProfileProject', () => {
     ['an interval below the minimum', { timelineMs: 100 }, /Invalid timelineMs/],
     ['a fractional interval', { timelineMs: 250.5 }, /Invalid timelineMs/],
     ['a target frame rate of 0', { targetFps: 0 }, /Invalid targetFps/],
+    ['a top cap above the maximum', { timelineTop: 11 }, /Invalid timelineTop/],
+    ['an interval cap below the minimum', { timelineBuckets: 2 }, /Invalid timelineBuckets/],
+    ['an interval cap above the maximum', { timelineBuckets: 61 }, /Invalid timelineBuckets/],
+    [
+      'timeline: false together with an interval cap',
+      { timeline: false, timelineBuckets: 10 },
+      /Invalid timeline: false .* timelineBuckets/,
+    ],
+    ['a negative top cap', { timelineTop: -1 }, /Invalid timelineTop/],
+    ['a fractional top cap', { timelineTop: 2.5 }, /Invalid timelineTop/],
+    [
+      'timeline: false together with a top cap',
+      { timeline: false, timelineTop: 2 },
+      /Invalid timeline: false .* timelineTop/,
+    ],
     ['a track entry without a property', { track: ['/root/Main'] }, /Invalid track entry/],
     [
       'timeline: false together with a track',

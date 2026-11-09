@@ -90,7 +90,12 @@ const DROPPED_MONITOR_NAMES_SHOWN = 3;
 const UNACCOUNTED_ARRIVAL_GAP_MS = 100;
 /** Things kept per kind in a timeline bucket, so many script functions cannot crowd out render stages and server calls. */
 const MAX_BUCKET_ITEMS = 512;
-const BUCKET_TOP = 3;
+/** Heaviest things a timeline interval lists by default; `timelineTop` overrides it per capture. */
+export const TIMELINE_TOP_DEFAULT = 3;
+export const TIMELINE_TOP_MAX = 10;
+/** Intervals a timeline reply holds by default; a capture recorded in more of them is merged down to this many. */
+export const TIMELINE_BUCKETS_DEFAULT = 20;
+export const TIMELINE_BUCKETS_MIN = 4;
 /** Every engine row is `[signature id, calls, self, total, internal]`. */
 const ROW_STRIDE = 5;
 /** Milliseconds are reported to this many decimals; below it is float noise. */
@@ -192,6 +197,10 @@ export interface CaptureOptions {
   visual?: boolean;
   /** Timeline bucket length in ms; absent or null records no timeline. */
   timelineMs?: number | null;
+  /** Heaviest things listed per timeline interval, 0..TIMELINE_TOP_MAX (default TIMELINE_TOP_DEFAULT). */
+  timelineTop?: number;
+  /** Most intervals the timeline reply holds, TIMELINE_BUCKETS_MIN..MAX_TIMELINE_BUCKETS (default TIMELINE_BUCKETS_DEFAULT); a longer recording merges adjacent intervals. */
+  timelineBuckets?: number;
   targetFps?: number;
   /** NodePath:property specs the bridge samples; they reach the capture through the `TrackCollector` given to stop, never through this receiver. */
   track?: string[];
@@ -213,6 +222,19 @@ export interface TimelineItem {
   maxMs: number;
 }
 
+/** A thing that made some interval's top list; named once per timeline, not once per interval. */
+export interface TimelineItemName {
+  kind: TimelineItem['kind'];
+  name: string;
+}
+
+/** One entry of an interval's top list: `item` indexes `TimelineResult.items`. */
+export interface TimelineTopEntry {
+  item: number;
+  ms: number;
+  maxMs: number;
+}
+
 export interface TimelineBucket {
   t: number;
   frames: number;
@@ -226,7 +248,7 @@ export interface TimelineBucket {
   /** Render timeline per profiled frame; `gpuMs` is null when no GPU work was timed in the whole capture. */
   render: { cpuMs: number; gpuMs: number | null } | null;
   drawCalls: number | null;
-  top: TimelineItem[];
+  top: TimelineTopEntry[];
   track: Record<string, unknown> | null;
 }
 
@@ -234,6 +256,8 @@ export interface TimelineResult {
   bucketMs: number;
   track: string[];
   trackError: string | null;
+  /** Every thing named by an interval's `top`, in order of first appearance. */
+  items: TimelineItemName[];
   buckets: TimelineBucket[];
 }
 
@@ -407,7 +431,7 @@ interface BucketItems {
   render: Map<string, BucketItem>;
 }
 
-interface Bucket {
+export interface Bucket {
   frames: number;
   frameSum: number;
   frameMax: number;
@@ -430,6 +454,10 @@ interface Bucket {
 
 interface TimelineCapture {
   bucketMs: number;
+  /** Things ranked into each bucket's `top`. */
+  topLimit: number;
+  /** Most buckets the reply holds. */
+  replyBuckets: number;
   /** Buckets past this belong to frames that arrived after the window closed. */
   maxBuckets: number;
   buckets: Bucket[];
@@ -878,9 +906,17 @@ function summarizeVisual(
   };
 }
 
-function newTimeline(bucketMs: number, maxSeconds: number, track: string[]): TimelineCapture {
+function newTimeline(
+  bucketMs: number,
+  maxSeconds: number,
+  track: string[],
+  topLimit: number,
+  replyBuckets: number,
+): TimelineCapture {
   return {
     bucketMs,
+    topLimit,
+    replyBuckets,
     maxBuckets: Math.ceil((maxSeconds * MS_PER_SECOND) / bucketMs) + TIMELINE_OVERRUN_BUCKETS,
     buckets: [],
     track,
@@ -900,7 +936,7 @@ function bucketAt(timeline: TimelineCapture, elapsedMs: number, grow: boolean): 
   while (timeline.buckets.length <= index) {
     // A later bucket existing means nothing more lands before it: rank this one now.
     const previous = timeline.buckets[timeline.buckets.length - 1];
-    if (previous !== undefined) closeBucket(previous);
+    if (previous !== undefined) closeBucket(previous, timeline.topLimit);
     timeline.buckets.push({
       frames: 0,
       frameSum: 0,
@@ -934,7 +970,7 @@ function bump(item: BucketItem, ms: number): void {
   if (ms > item.max) item.max = ms;
 }
 
-function rankBucket(bucket: Bucket): TimelineItem[] {
+function rankBucket(bucket: Bucket, limit: number): TimelineItem[] {
   const items = bucket.items;
   if (items === null) return bucket.top;
   const ranked: TimelineItem[] = [];
@@ -952,12 +988,12 @@ function rankBucket(bucket: Bucket): TimelineItem[] {
   }
   // Render stages come from fewer frames than the servers profiler sends.
   for (const item of items.render.values()) add(item, bucket.renderFrames);
-  return ranked.sort((a, b) => b.ms - a.ms).slice(0, BUCKET_TOP);
+  return ranked.sort((a, b) => b.ms - a.ms).slice(0, limit);
 }
 
-function closeBucket(bucket: Bucket): void {
+function closeBucket(bucket: Bucket, limit: number): void {
   if (bucket.items === null) return;
-  bucket.top = rankBucket(bucket);
+  bucket.top = rankBucket(bucket, limit);
   bucket.items = null;
 }
 
@@ -1025,19 +1061,137 @@ function foldTimelineRender(bucket: Bucket, render: FoldedRender): void {
   }
 }
 
+/** Merge factor that brings `count` recorded intervals to at most `cap`. */
+export function timelineMergeFactor(count: number, cap: number): number {
+  return Math.max(1, Math.ceil(count / cap));
+}
+
+/** What changed since the last sample: only keys whose value differs, a value that became null kept as null. The first sample has no earlier one and lists every key. */
+export function trackChanges(
+  previous: Record<string, unknown> | null,
+  current: Record<string, unknown>,
+): Record<string, unknown> {
+  if (previous === null) return current;
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(current)) {
+    if (!(key in previous) || JSON.stringify(previous[key]) !== JSON.stringify(value)) {
+      changed[key] = value;
+    }
+  }
+  return changed;
+}
+
+/** Folds `trackChanges` output back into the full values of each interval; null where no sample landed. */
+export function expandTrack(
+  buckets: ReadonlyArray<{ track: Record<string, unknown> | null }>,
+): Array<Record<string, unknown> | null> {
+  let state: Record<string, unknown> = {};
+  return buckets.map((bucket) => {
+    if (bucket.track === null) return null;
+    state = { ...state, ...bucket.track };
+    return state;
+  });
+}
+
+/** Merges each run of `factor` adjacent intervals into one: counts and sums add, maxima take the largest, and a merged `top` weighs each entry's per-frame time by the frames of the interval it came from (an entry absent from some interval's top is understated there, so the merged ms is a lower bound). A merged draw-call count is the newest sample in the run. Pure: the input is not changed. */
+export function mergeTimelineBuckets(
+  buckets: Bucket[],
+  factor: number,
+  topLimit: number,
+): Bucket[] {
+  const merged: Bucket[] = [];
+  for (let from = 0; from < buckets.length; from += factor) {
+    const run = buckets.slice(from, from + factor);
+    const out: Bucket = {
+      frames: 0,
+      frameSum: 0,
+      frameMax: 0,
+      processSum: 0,
+      physicsSum: 0,
+      scriptSum: 0,
+      slowFrames: 0,
+      firstFrame: null,
+      lastFrame: null,
+      items: null,
+      top: [],
+      renderFrames: 0,
+      renderCpuSum: 0,
+      renderGpuSum: 0,
+      drawCalls: null,
+      stalled: false,
+    };
+    const weighted = new Map<string, { item: TimelineItem; sum: number }>();
+    for (const bucket of run) {
+      out.frames += bucket.frames;
+      out.frameSum += bucket.frameSum;
+      out.frameMax = Math.max(out.frameMax, bucket.frameMax);
+      out.processSum += bucket.processSum;
+      out.physicsSum += bucket.physicsSum;
+      out.scriptSum += bucket.scriptSum;
+      out.slowFrames += bucket.slowFrames;
+      out.firstFrame ??= bucket.firstFrame;
+      out.lastFrame = bucket.lastFrame ?? out.lastFrame;
+      out.renderFrames += bucket.renderFrames;
+      out.renderCpuSum += bucket.renderCpuSum;
+      out.renderGpuSum += bucket.renderGpuSum;
+      out.drawCalls = bucket.drawCalls ?? out.drawCalls;
+      out.stalled = out.stalled || bucket.stalled;
+      for (const item of rankBucket(bucket, topLimit)) {
+        const key = item.kind + ':' + item.name;
+        const weight = item.kind === 'render' ? bucket.renderFrames : bucket.frames;
+        const known = weighted.get(key);
+        if (known === undefined) {
+          weighted.set(key, { item: { ...item }, sum: item.ms * weight });
+        } else {
+          known.sum += item.ms * weight;
+          known.item.maxMs = Math.max(known.item.maxMs, item.maxMs);
+        }
+      }
+    }
+    out.top = [...weighted.values()]
+      .map(({ item, sum }) => ({
+        ...item,
+        ms: sum / Math.max(item.kind === 'render' ? out.renderFrames : out.frames, 1),
+      }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, topLimit);
+    merged.push(out);
+  }
+  return merged;
+}
+
 function summarizeTimeline(
   timeline: TimelineCapture,
   spanMs: number,
   gpuTimed: boolean,
 ): TimelineResult {
   const samples = [...(timeline.samples ?? [])].sort((a, b) => a.frame - b.frame);
-  const last = timeline.buckets.length - 1;
-  const buckets = timeline.buckets.map((bucket, index): TimelineBucket => {
-    const startMs = index * timeline.bucketMs;
+  const factor = timelineMergeFactor(timeline.buckets.length, timeline.replyBuckets);
+  const bucketMs = timeline.bucketMs * factor;
+  const source =
+    factor === 1
+      ? timeline.buckets
+      : mergeTimelineBuckets(timeline.buckets, factor, timeline.topLimit);
+  const last = source.length - 1;
+  const names = new Map<string, number>();
+  const items: TimelineItemName[] = [];
+  const intern = (item: TimelineItem): TimelineTopEntry => {
+    const key = `${item.kind} ${item.name}`;
+    let id = names.get(key);
+    if (id === undefined) {
+      id = items.length;
+      names.set(key, id);
+      items.push({ kind: item.kind, name: item.name });
+    }
+    return { item: id, ms: item.ms, maxMs: item.maxMs };
+  };
+  let previousTrack: Record<string, unknown> | null = null;
+  const buckets = source.map((bucket, index): TimelineBucket => {
+    const startMs = index * bucketMs;
     // Only the trailing bucket is partial: from its start to the last frame it is too short to divide by if the capture ended just inside it.
-    const durationMs = index === last ? spanMs - startMs : timeline.bucketMs;
+    const durationMs = index === last ? spanMs - startMs : bucketMs;
     const fps =
-      !bucket.stalled && durationMs >= timeline.bucketMs * TRAILING_BUCKET_MIN_SHARE
+      !bucket.stalled && durationMs >= bucketMs * TRAILING_BUCKET_MIN_SHARE
         ? bucket.frames / (durationMs / MS_PER_SECOND)
         : null;
     const perFrame = (sum: number): number | null =>
@@ -1048,6 +1202,11 @@ function summarizeTimeline(
         if (sample.frame > bucket.lastFrame) break;
         if (sample.frame >= bucket.firstFrame) track = sample.values;
       }
+    }
+    if (track !== null) {
+      const sampled: Record<string, unknown> = track;
+      track = trackChanges(previousTrack, sampled);
+      previousTrack = sampled;
     }
     return {
       t: startMs / MS_PER_SECOND,
@@ -1068,14 +1227,15 @@ function summarizeTimeline(
           : null,
       drawCalls: bucket.drawCalls,
       // The newest bucket is still open; ranking it here leaves it that way.
-      top: rankBucket(bucket),
+      top: rankBucket(bucket, timeline.topLimit).map(intern),
       track,
     };
   });
   return {
-    bucketMs: timeline.bucketMs,
+    bucketMs,
     track: timeline.track,
     trackError: timeline.trackError,
+    items,
     buckets,
   };
 }
@@ -1327,6 +1487,24 @@ export class DebuggerProfiler {
     if (!Number.isFinite(targetFps) || targetFps <= 0 || targetFps > TARGET_FPS_MAX) {
       throw new ProfilerError('bad_args', `targetFps must be in (0, ${TARGET_FPS_MAX}]`);
     }
+    const timelineBuckets = options.timelineBuckets ?? TIMELINE_BUCKETS_DEFAULT;
+    if (
+      !Number.isInteger(timelineBuckets) ||
+      timelineBuckets < TIMELINE_BUCKETS_MIN ||
+      timelineBuckets > MAX_TIMELINE_BUCKETS
+    ) {
+      throw new ProfilerError(
+        'bad_args',
+        `timelineBuckets must be an integer in [${TIMELINE_BUCKETS_MIN}, ${MAX_TIMELINE_BUCKETS}]`,
+      );
+    }
+    const timelineTop = options.timelineTop ?? TIMELINE_TOP_DEFAULT;
+    if (!Number.isInteger(timelineTop) || timelineTop < 0 || timelineTop > TIMELINE_TOP_MAX) {
+      throw new ProfilerError(
+        'bad_args',
+        `timelineTop must be an integer in [0, ${TIMELINE_TOP_MAX}]`,
+      );
+    }
     if (
       !Number.isInteger(captureLimit) ||
       captureLimit < CAPTURE_LIMIT_MIN ||
@@ -1393,7 +1571,13 @@ export class DebuggerProfiler {
       timeline:
         timelineMs === null
           ? null
-          : newTimeline(timelineBucketMs(timelineMs, seconds), seconds, options.track ?? []),
+          : newTimeline(
+              timelineBucketMs(timelineMs, seconds),
+              seconds,
+              options.track ?? [],
+              options.timelineTop ?? TIMELINE_TOP_DEFAULT,
+              options.timelineBuckets ?? TIMELINE_BUCKETS_DEFAULT,
+            ),
     };
     const capture = this.capture;
     this.state = 'starting';

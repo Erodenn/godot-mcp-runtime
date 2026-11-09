@@ -36,11 +36,12 @@ interface CaptureShape {
   timeline: {
     bucketMs: number;
     trackError: string | null;
+    items: Array<{ kind: string; name: string }>;
     buckets: Array<{
       t: number;
       frames: number;
       fps: number | null;
-      top: Array<{ kind: string; name: string }>;
+      top: Array<{ item: number; ms: number; maxMs: number }>;
       track: Record<string, unknown> | null;
     }>;
   } | null;
@@ -197,7 +198,9 @@ describe('profiler smoke', () => {
       const firstTimed = buckets.find((bucket) => bucket.fps !== null);
       expect(firstTimed).toBeDefined();
       expect(firstTimed!.fps).toBeGreaterThan(0);
-      expect(buckets[0]!.top.map((item) => item.name).join(', ')).toContain('burn');
+      expect(
+        buckets[0]!.top.map((entry) => timeline!.items[entry.item]!.name).join(', '),
+      ).toContain('burn');
       const tracked = buckets.filter((bucket) => bucket.track !== null);
       expect(tracked.length).toBeGreaterThan(0);
       expect(tracked[0]!.track!['/root/Main:position']).toEqual({ x: 0, y: 0 });
