@@ -19,17 +19,21 @@ import {
 } from '../utils/session-report.js';
 import {
   CAPTURE_LIMIT_MAX,
+  CAPTURE_LIMIT_MIN,
   DEFAULT_TARGET_FPS,
   MAX_TIMELINE_BUCKETS,
   MONITOR_NAMES,
   MS_PER_SECOND,
   PROFILE_MAX_SECONDS,
+  PROFILE_SECONDS_FLOOR,
   PROFILE_SORTS,
   PROFILE_TOP_MAX,
+  PROFILE_TOP_MIN,
   PROFILE_WINDOW_MAX_SECONDS,
   PROFILE_WINDOW_WORST_CASE_MS,
   ProfilerError,
   sanitizeFrameCapMs,
+  TARGET_FPS_FLOOR,
   TARGET_FPS_MAX,
   TIMELINE_MS_MAX,
   TIMELINE_BUCKETS_DEFAULT,
@@ -37,6 +41,7 @@ import {
   TIMELINE_MS_MIN,
   TIMELINE_TOP_DEFAULT,
   TIMELINE_TOP_MAX,
+  TIMELINE_TOP_MIN,
   TIMESTAMP_OVERFLOW_FIX,
   timelineBucketMs,
   type CaptureOptions,
@@ -80,15 +85,17 @@ const sortProperty = {
 } as const;
 
 const captureLimitProperty = {
-  type: 'number',
-  description:
-    'Rows the engine puts in each frame packet, 16..512 (default: 512). Godot selects them by inclusive time, so a lower limit hides cheap functions and sets limitReached.',
+  type: 'integer',
+  minimum: CAPTURE_LIMIT_MIN,
+  maximum: CAPTURE_LIMIT_MAX,
+  description: `Rows the engine puts in each frame packet, ${CAPTURE_LIMIT_MIN}..${CAPTURE_LIMIT_MAX} (default: ${CAPTURE_LIMIT_MAX}). Godot selects them by inclusive time, so a lower limit hides cheap functions and sets limitReached.`,
 } as const;
 
 const topProperty = {
-  type: 'number',
-  description:
-    'How many functions to return, 1..100 (default: 20). Also caps visual.areas when the capture recorded render stages.',
+  type: 'integer',
+  minimum: PROFILE_TOP_MIN,
+  maximum: PROFILE_TOP_MAX,
+  description: `How many functions to return, ${PROFILE_TOP_MIN}..${PROFILE_TOP_MAX} (default: ${DEFAULT_TOP}). Also caps visual.areas when the capture recorded render stages.`,
 } as const;
 
 const visualProperty = {
@@ -104,22 +111,30 @@ const timelineProperty = {
 } as const;
 
 const timelineMsProperty = {
-  type: 'number',
+  type: 'integer',
+  minimum: TIMELINE_MS_MIN,
+  maximum: TIMELINE_MS_MAX,
   description: `Timeline interval in milliseconds, ${TIMELINE_MS_MIN}..${TIMELINE_MS_MAX} (default: ${DEFAULT_TIMELINE_MS}). Records at most about ${MAX_TIMELINE_BUCKETS} intervals (${PROFILE_MAX_SECONDS} s: ${timelineBucketMs(TIMELINE_MS_MIN, PROFILE_MAX_SECONDS)} ms) and the reply merges them down to timelineBuckets. Implies timeline.`,
 } as const;
 
 const timelineTopProperty = {
-  type: 'number',
-  description: `Heaviest functions, server calls or render stages listed per timeline interval, 0..${TIMELINE_TOP_MAX} (default: ${TIMELINE_TOP_DEFAULT}). 0 leaves \`top\` empty. Implies timeline.`,
+  type: 'integer',
+  minimum: TIMELINE_TOP_MIN,
+  maximum: TIMELINE_TOP_MAX,
+  description: `Heaviest functions, server calls or render stages listed per timeline interval, ${TIMELINE_TOP_MIN}..${TIMELINE_TOP_MAX} (default: ${TIMELINE_TOP_DEFAULT}). 0 leaves \`top\` empty. Implies timeline.`,
 } as const;
 
 const timelineBucketsProperty = {
-  type: 'number',
+  type: 'integer',
+  minimum: TIMELINE_BUCKETS_MIN,
+  maximum: MAX_TIMELINE_BUCKETS,
   description: `Most intervals the timeline reply holds, ${TIMELINE_BUCKETS_MIN}..${MAX_TIMELINE_BUCKETS} (default: ${TIMELINE_BUCKETS_DEFAULT}). A capture recorded in more is merged: adjacent intervals combine (counts and times add up, maxima stay) and \`timeline.bucketMs\` reports the width. Implies timeline.`,
 } as const;
 
 const targetFpsProperty = {
   type: 'number',
+  exclusiveMinimum: TARGET_FPS_FLOOR,
+  maximum: TARGET_FPS_MAX,
   description: `Frame rate to hold the game to (default: ${DEFAULT_TARGET_FPS}). slowFrames counts frames whose frameMs exceeds 1000/targetFps, over the capture and per timeline interval. Under vsync every frame lasts the refresh interval: disable vsync, or set targetFps a few percent below the refresh rate.`,
 } as const;
 
@@ -402,6 +417,8 @@ export const profilerToolDefinitions = [
       properties: {
         seconds: {
           type: 'number',
+          exclusiveMinimum: PROFILE_SECONDS_FLOOR,
+          maximum: PROFILE_WINDOW_MAX_SECONDS,
           description: `Capture duration in seconds, greater than 0 and at most ${PROFILE_WINDOW_MAX_SECONDS} (default: ${DEFAULT_WINDOW_SECONDS}). The call answers only when the window has closed, and with its waits can take up to ${PROFILE_PROJECT_WORST_CASE_MS / MS_PER_SECOND} s, which the limit keeps under a client's 60 s request timeout. Time spent waiting for the session queue counts against that: a call whose wait plus its worst case would pass 60 s is refused with nothing sent. For a longer capture use start_profiler (up to ${PROFILE_MAX_SECONDS} s) and stop_profiler.`,
         },
         top: topProperty,
@@ -428,6 +445,8 @@ export const profilerToolDefinitions = [
       properties: {
         seconds: {
           type: 'number',
+          exclusiveMinimum: PROFILE_SECONDS_FLOOR,
+          maximum: PROFILE_MAX_SECONDS,
           description: `Maximum capture duration before the automatic stop, greater than 0 and at most ${PROFILE_MAX_SECONDS} (default: ${DEFAULT_MAX_SECONDS}).`,
         },
         captureLimit: captureLimitProperty,
@@ -525,10 +544,10 @@ function parseTop(args: OperationParams): Result<number, ToolResponse> {
   const raw = optionalNumber(args, 'top');
   if (!raw.ok) return raw;
   if (raw.value === undefined) return ok(DEFAULT_TOP);
-  if (!Number.isInteger(raw.value) || raw.value < 1 || raw.value > PROFILE_TOP_MAX) {
+  if (!Number.isInteger(raw.value) || raw.value < PROFILE_TOP_MIN || raw.value > PROFILE_TOP_MAX) {
     return err(
       createErrorResponse(
-        `Invalid top: must be an integer in [1, ${PROFILE_TOP_MAX}] (got: ${raw.value})`,
+        `Invalid top: must be an integer in [${PROFILE_TOP_MIN}, ${PROFILE_TOP_MAX}] (got: ${raw.value})`,
         [`Omit top to return the default of ${DEFAULT_TOP} rows`],
       ),
     );
@@ -589,12 +608,12 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
   if (
     timelineTop.value !== undefined &&
     (!Number.isInteger(timelineTop.value) ||
-      timelineTop.value < 0 ||
+      timelineTop.value < TIMELINE_TOP_MIN ||
       timelineTop.value > TIMELINE_TOP_MAX)
   ) {
     return err(
       createErrorResponse(
-        `Invalid timelineTop: must be an integer in [0, ${TIMELINE_TOP_MAX}] (got: ${timelineTop.value})`,
+        `Invalid timelineTop: must be an integer in [${TIMELINE_TOP_MIN}, ${TIMELINE_TOP_MAX}] (got: ${timelineTop.value})`,
         [`Omit timelineTop for the ${TIMELINE_TOP_DEFAULT} heaviest per interval`],
       ),
     );
@@ -612,10 +631,13 @@ function parseCaptureOptions(args: OperationParams): Result<ParsedCaptureOptions
       ),
     );
   }
-  if (targetFps.value !== undefined && (targetFps.value <= 0 || targetFps.value > TARGET_FPS_MAX)) {
+  if (
+    targetFps.value !== undefined &&
+    (targetFps.value <= TARGET_FPS_FLOOR || targetFps.value > TARGET_FPS_MAX)
+  ) {
     return err(
       createErrorResponse(
-        `Invalid targetFps: must be greater than 0 and at most ${TARGET_FPS_MAX} (got: ${targetFps.value})`,
+        `Invalid targetFps: must be greater than ${TARGET_FPS_FLOOR} and at most ${TARGET_FPS_MAX} (got: ${targetFps.value})`,
         [`Omit targetFps to count frames slower than ${DEFAULT_TARGET_FPS} fps`],
       ),
     );

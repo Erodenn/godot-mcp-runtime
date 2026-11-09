@@ -35,7 +35,11 @@ export const PROFILE_SORTS: readonly ProfileSort[] = ['selfMs', 'totalMs', 'call
 export const PROFILE_MAX_SECONDS = 60;
 export const CAPTURE_LIMIT_MIN = 16;
 export const CAPTURE_LIMIT_MAX = 512;
+export const PROFILE_TOP_MIN = 1;
 export const PROFILE_TOP_MAX = 100;
+/** Exclusive: a capture lasts longer than this many seconds, and a target frame rate exceeds this many fps. */
+export const PROFILE_SECONDS_FLOOR = 0;
+export const TARGET_FPS_FLOOR = 0;
 /** Engine text when a frame runs out of render timestamp slots (RenderingDevice says so; Compatibility only fails the condition). */
 export const TIMESTAMP_OVERFLOW_ERRORS = [
   'Tried capturing more timestamps than the configured maximum',
@@ -94,6 +98,7 @@ export const FRAME_CAP_MS_MAX = 10_000;
 const MAX_BUCKET_ITEMS = 512;
 /** Heaviest things a timeline interval lists by default; `timelineTop` overrides it per capture. */
 export const TIMELINE_TOP_DEFAULT = 3;
+export const TIMELINE_TOP_MIN = 0;
 export const TIMELINE_TOP_MAX = 10;
 /** Intervals a timeline reply holds by default; a capture recorded in more of them is merged down to this many. */
 export const TIMELINE_BUCKETS_DEFAULT = 20;
@@ -1486,8 +1491,11 @@ export class DebuggerProfiler {
   ): void {
     const timelineMs = options.timelineMs ?? null;
     const targetFps = options.targetFps ?? DEFAULT_TARGET_FPS;
-    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > maxSeconds) {
-      throw new ProfilerError('bad_args', `seconds must be in (0, ${maxSeconds}]`);
+    if (!Number.isFinite(seconds) || seconds <= PROFILE_SECONDS_FLOOR || seconds > maxSeconds) {
+      throw new ProfilerError(
+        'bad_args',
+        `seconds must be in (${PROFILE_SECONDS_FLOOR}, ${maxSeconds}]`,
+      );
     }
     if (
       timelineMs !== null &&
@@ -1500,8 +1508,15 @@ export class DebuggerProfiler {
         `timelineMs must be an integer in [${TIMELINE_MS_MIN}, ${TIMELINE_MS_MAX}]`,
       );
     }
-    if (!Number.isFinite(targetFps) || targetFps <= 0 || targetFps > TARGET_FPS_MAX) {
-      throw new ProfilerError('bad_args', `targetFps must be in (0, ${TARGET_FPS_MAX}]`);
+    if (
+      !Number.isFinite(targetFps) ||
+      targetFps <= TARGET_FPS_FLOOR ||
+      targetFps > TARGET_FPS_MAX
+    ) {
+      throw new ProfilerError(
+        'bad_args',
+        `targetFps must be in (${TARGET_FPS_FLOOR}, ${TARGET_FPS_MAX}]`,
+      );
     }
     const timelineBuckets = options.timelineBuckets ?? TIMELINE_BUCKETS_DEFAULT;
     if (
@@ -1515,10 +1530,14 @@ export class DebuggerProfiler {
       );
     }
     const timelineTop = options.timelineTop ?? TIMELINE_TOP_DEFAULT;
-    if (!Number.isInteger(timelineTop) || timelineTop < 0 || timelineTop > TIMELINE_TOP_MAX) {
+    if (
+      !Number.isInteger(timelineTop) ||
+      timelineTop < TIMELINE_TOP_MIN ||
+      timelineTop > TIMELINE_TOP_MAX
+    ) {
       throw new ProfilerError(
         'bad_args',
-        `timelineTop must be an integer in [0, ${TIMELINE_TOP_MAX}]`,
+        `timelineTop must be an integer in [${TIMELINE_TOP_MIN}, ${TIMELINE_TOP_MAX}]`,
       );
     }
     if (
@@ -1655,8 +1674,11 @@ export class DebuggerProfiler {
 
   /** Stop an active capture (or re-read a finished one); waits for the engine's `profile_total` rather than summing the last frame. */
   async stop(top: number, sort: ProfileSort, collect?: TrackCollector): Promise<ProfileResult> {
-    if (!Number.isInteger(top) || top < 1 || top > PROFILE_TOP_MAX) {
-      throw new ProfilerError('bad_args', `top must be an integer in [1, ${PROFILE_TOP_MAX}]`);
+    if (!Number.isInteger(top) || top < PROFILE_TOP_MIN || top > PROFILE_TOP_MAX) {
+      throw new ProfilerError(
+        'bad_args',
+        `top must be an integer in [${PROFILE_TOP_MIN}, ${PROFILE_TOP_MAX}]`,
+      );
     }
     if (!PROFILE_SORTS.includes(sort)) {
       throw new ProfilerError('bad_args', `sort must be one of ${PROFILE_SORTS.join(', ')}`);

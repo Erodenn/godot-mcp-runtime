@@ -43,6 +43,9 @@ function fileExtension(name: string): string {
   return dotIdx >= 0 ? name.slice(dotIdx + 1).toLowerCase() : '';
 }
 
+const DEFAULT_SEARCH_MAX_RESULTS = 100;
+export const MIN_SEARCH_MAX_RESULTS = 1;
+
 const FILE_TREE_NODE_SCHEMA = {
   type: 'object',
   properties: {
@@ -235,7 +238,8 @@ export const projectToolDefinitions = [
         },
         caseSensitive: { type: 'boolean', description: 'Case-sensitive search (default: false)' },
         maxResults: {
-          type: 'number',
+          type: 'integer',
+          minimum: MIN_SEARCH_MAX_RESULTS,
           description: 'Maximum matches to return, an integer of 1 or more (default: 100)',
         },
       },
@@ -420,9 +424,6 @@ const EXT_RESOURCE_HEADER_PATTERN = /^\[\s*ext_resource\b/;
 
 const APPLICATION_SECTION = 'application';
 const CONFIG_NAME_KEY = 'config/name';
-
-const DEFAULT_SEARCH_MAX_RESULTS = 100;
-const MIN_SEARCH_MAX_RESULTS = 1;
 
 const UNLIMITED_DEPTH = -1;
 

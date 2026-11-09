@@ -387,7 +387,7 @@ function wrongModeError(param: string, ownMode: string, mode: string): ToolRespo
   );
 }
 
-function parseRenderOptions(
+export function parseRenderOptions(
   args: OperationParams,
   projectRoot: string,
 ): Result<RenderOptions, ToolResponse> {

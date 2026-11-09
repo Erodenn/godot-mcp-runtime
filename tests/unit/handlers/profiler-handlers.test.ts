@@ -14,9 +14,10 @@ import {
   ProfilerError,
   timelineBucketMs,
   type CaptureOptions,
-  type DebuggerProfiler,
+  DebuggerProfiler,
   type TrackCollector,
 } from '../../../src/utils/profiler.js';
+import { collectBoundedInputs, probesFor } from '../../helpers/schema-bounds.js';
 import type { GodotProcess, GodotRunner } from '../../../src/utils/godot-runner.js';
 import { SessionQueue } from '../../../src/utils/session-queue.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
@@ -1365,4 +1366,78 @@ describe('profile_project: the queue wait is charged against the 60 s request ti
     const result = await handleProfileProject(fake.asRunner, { seconds: SHORT_WINDOW_SECONDS });
     expect(hasError(result)).toBe(false);
   });
+});
+
+describe('profiler input schema bounds against the handlers', () => {
+  type Handler = typeof handleProfileProject;
+  const HANDLERS: Record<string, Handler> = {
+    profile_project: handleProfileProject,
+    start_profiler: handleStartProfiler,
+    stop_profiler: handleStopProfiler,
+  };
+
+  /** A profiler that runs the real argument checks, so a bound the handler leaves to `assertCanStart` is exercised. */
+  function realChecksFake(): ProfilerFake {
+    const fake = createProfilerFake();
+    const profiler = fake.asRunner.activeProfiler as unknown as {
+      assertCanStart: (...args: unknown[]) => void;
+    };
+    const standIn = { error: null, closed: false, assertIdle() {} };
+    profiler.assertCanStart = (...args: unknown[]) => {
+      (DebuggerProfiler.prototype.assertCanStart as (...a: unknown[]) => void).apply(standIn, args);
+    };
+    return fake;
+  }
+
+  async function accepts(tool: string, param: string, value: number): Promise<boolean> {
+    const result = await HANDLERS[tool]!(realChecksFake().asRunner, { [param]: value });
+    return !hasError(result);
+  }
+
+  const bounded = collectBoundedInputs(profilerToolDefinitions);
+
+  // Red when a profiler input gains a bound with no handler behind it in this file, or loses its schema bound.
+  it('finds every bounded profiler input', () => {
+    expect(bounded.map((b) => b.id).sort()).toEqual(
+      [
+        ...['profile_project', 'start_profiler'].flatMap((tool) =>
+          [
+            'seconds',
+            'captureLimit',
+            'timelineMs',
+            'timelineTop',
+            'timelineBuckets',
+            'targetFps',
+          ].map((param) => `${tool}.${param}`),
+        ),
+        'profile_project.top',
+        'stop_profiler.top',
+      ].sort(),
+    );
+  });
+
+  // Red when a schema bound drifts from what its handler accepts: a value just inside must pass and one just outside must be refused.
+  it.each(bounded.map((b) => [b.id, b] as const))(
+    '%s: handler range equals schema range',
+    async (id, b) => {
+      const [tool, param] = id.split('.') as [string, string];
+      const { inside, outside } = probesFor(b.schema);
+      for (const value of inside) {
+        expect(await accepts(tool, param, value), `${id} = ${value} accepted`).toBe(true);
+      }
+      for (const value of outside) {
+        expect(await accepts(tool, param, value), `${id} = ${value} refused`).toBe(false);
+      }
+    },
+  );
+
+  // Red when an input declared `integer` accepts a fraction in its handler.
+  it.each(bounded.filter((b) => b.schema.type === 'integer').map((b) => [b.id, b] as const))(
+    '%s: an integer input refuses a fraction',
+    async (id, b) => {
+      const [tool, param] = id.split('.') as [string, string];
+      const { fraction } = probesFor(b.schema);
+      expect(await accepts(tool, param, fraction!), `${id} = ${fraction} refused`).toBe(false);
+    },
+  );
 });

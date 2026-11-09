@@ -104,6 +104,9 @@ const STATS_NOT_MEASURED_WARNING_SUFFIX =
 // which the bridge enforces independently.
 export const MAX_WAIT_FRAMES = 600;
 export const MAX_HOLD_MS = 10000;
+// The bridge refuses a negative hold_ms, wait ms or wait frames with the literal 0.
+export const MIN_ACTION_MS = 0;
+export const MIN_WAIT_FRAMES = 0;
 export const MAX_TEXT_LENGTH = 1000;
 export const MAX_WATCH_ENTRIES = 16;
 
@@ -287,7 +290,7 @@ export const runtimeToolDefinitions = [
       type: 'object',
       properties: {
         limit: {
-          type: 'number',
+          type: 'integer',
           minimum: MIN_DEBUG_OUTPUT_LIMIT,
           description: `Max lines to return, a whole number of ${MIN_DEBUG_OUTPUT_LIMIT} or more (default: ${DEFAULT_DEBUG_OUTPUT_LIMIT}, from end of output)`,
         },
@@ -375,7 +378,7 @@ export const runtimeToolDefinitions = [
       type: 'object',
       properties: {
         timeout: {
-          type: 'number',
+          type: 'integer',
           minimum: MIN_RUNTIME_TIMEOUT_MS,
           maximum: MAX_RUNTIME_TIMEOUT_MS,
           description: `Timeout in milliseconds to wait for the screenshot, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${SCREENSHOT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Time spent waiting for the session queue comes off it, and a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent. The game gives up on a frame that never renders after ${SCREENSHOT_FRAME_RENDER_BUDGET_MS} ms and reports that; a lower timeout expires first.`,
@@ -474,6 +477,8 @@ export const runtimeToolDefinitions = [
               },
               hold_ms: {
                 type: 'number',
+                minimum: MIN_ACTION_MS,
+                maximum: MAX_HOLD_MS,
                 description: `[key, mouse_button, action] Tap hold duration in milliseconds, overriding the default (one process frame plus one physics frame for key/action, zero gap for mouse_button). Use it for code polling is_action_pressed over real time. Rejected when pressed is also set. Max ${MAX_HOLD_MS}.`,
               },
               shift: { type: 'boolean', description: '[key] Shift modifier' },
@@ -531,10 +536,13 @@ export const runtimeToolDefinitions = [
               },
               ms: {
                 type: 'number',
+                minimum: MIN_ACTION_MS,
                 description: `[wait] Real-time pause in milliseconds, for time-driven things such as cooldowns and animations (~16ms = one frame at 60fps). Exactly one of ms or frames is required. Counts toward the batch's ${MAX_INPUT_BATCH_BUDGET_MS / MS_PER_SECOND}s time budget, and a batch whose total wait approaches 60s may be cut off by your client before the server answers: split it across calls.`,
               },
               frames: {
                 type: 'number',
+                minimum: MIN_WAIT_FRAMES,
+                maximum: MAX_WAIT_FRAMES,
                 description: `[wait] Deterministic pause of N engine process frames, for stepping game logic rather than waiting on the clock. Exactly one of ms or frames is required. Max ${MAX_WAIT_FRAMES}, budgeted at a 10fps floor, so a wait of several hundred frames may be cut off by your client before the server answers.`,
               },
             },
@@ -733,7 +741,7 @@ export const runtimeToolDefinitions = [
             'GDScript source code. Must contain "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".',
         },
         timeout: {
-          type: 'number',
+          type: 'integer',
           minimum: MIN_RUNTIME_TIMEOUT_MS,
           maximum: MAX_RUNTIME_TIMEOUT_MS,
           description: `Timeout in ms, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
@@ -966,7 +974,9 @@ function describeReplacedAttached(replaced: ReplacedAttachedSession | null): {
   };
 }
 
-function parseBridgePortArg(args: OperationParams): Result<number | undefined, ToolResponse> {
+export function parseBridgePortArg(
+  args: OperationParams,
+): Result<number | undefined, ToolResponse> {
   const bridgePort = optionalNumber(args, 'bridgePort');
   if (!bridgePort.ok) return bridgePort;
   if (
@@ -2143,7 +2153,7 @@ export function computeInputTimeoutMs(actions: unknown[]): number {
 }
 
 /** Null when the batch may go to the bridge. The bridge validates independently; this bounds the computed timeout and saves a round trip. */
-function findInputCapViolation(actions: unknown[], watch: string[]): string | null {
+export function findInputCapViolation(actions: unknown[], watch: string[]): string | null {
   if (watch.length > MAX_WATCH_ENTRIES) {
     return `watch accepts at most ${MAX_WATCH_ENTRIES} entries (got ${watch.length})`;
   }
@@ -2160,8 +2170,16 @@ function findInputCapViolation(actions: unknown[], watch: string[]): string | nu
       if (hasMs === hasFrames) {
         return `action ${i} (wait): set exactly one of ms or frames`;
       }
-      if (hasFrames && (typeof rec.frames !== 'number' || rec.frames > MAX_WAIT_FRAMES)) {
-        return `action ${i} (wait): frames must be a number no greater than ${MAX_WAIT_FRAMES}`;
+      if (
+        hasFrames &&
+        (typeof rec.frames !== 'number' ||
+          rec.frames < MIN_WAIT_FRAMES ||
+          rec.frames > MAX_WAIT_FRAMES)
+      ) {
+        return `action ${i} (wait): frames must be a number no greater than ${MAX_WAIT_FRAMES} and not below ${MIN_WAIT_FRAMES}`;
+      }
+      if (hasMs && (typeof rec.ms !== 'number' || rec.ms < MIN_ACTION_MS)) {
+        return `action ${i} (wait): ms must be a number of ${MIN_ACTION_MS} or more`;
       }
       continue;
     }
@@ -2169,8 +2187,12 @@ function findInputCapViolation(actions: unknown[], watch: string[]): string | nu
       if (rec.pressed !== undefined) {
         return `action ${i} (${String(type)}): hold_ms cannot be combined with pressed`;
       }
-      if (typeof rec.hold_ms !== 'number' || rec.hold_ms > MAX_HOLD_MS) {
-        return `action ${i} (${String(type)}): hold_ms must be a number no greater than ${MAX_HOLD_MS}`;
+      if (
+        typeof rec.hold_ms !== 'number' ||
+        rec.hold_ms < MIN_ACTION_MS ||
+        rec.hold_ms > MAX_HOLD_MS
+      ) {
+        return `action ${i} (${String(type)}): hold_ms must be a number no greater than ${MAX_HOLD_MS} and not below ${MIN_ACTION_MS}`;
       }
     }
     if (typeof rec.text === 'string' && rec.text.length > MAX_TEXT_LENGTH) {
