@@ -316,7 +316,7 @@ const timelineSchema = {
             items: {
               type: 'object',
               properties: {
-                item: { type: 'number' },
+                item: { type: 'integer' },
                 ms: { type: 'number' },
                 maxMs: { type: 'number' },
               },
