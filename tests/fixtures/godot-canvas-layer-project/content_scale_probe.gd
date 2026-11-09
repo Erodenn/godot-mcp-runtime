@@ -1,5 +1,6 @@
 extends Control
 
+# KEEP IN SYNC: CONTENT_SCALE_FACTOR in tests/integration/ui-canvas-layer-and-scale.test.ts
 const CONTENT_SCALE_FACTOR: float = 0.7
 
 # Read back through run_script after a click; a press on a neighbour shows up as a count on the wrong button.

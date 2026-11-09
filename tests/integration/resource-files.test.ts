@@ -143,7 +143,7 @@ describe('create_resource', () => {
         type: 'item_stats.gd',
         properties: { power: 'lots' },
       });
-      expectErrorMatching(result, /power/);
+      expectErrorMatching(result, /Cannot set property 'power' .*expected int, got String/);
       expect(existsSync(join(project, 'items/bad.tres'))).toBe(false);
     },
     CASE_TIMEOUT_MS,
@@ -256,7 +256,7 @@ describe('set_resource_properties', () => {
         resourcePath: SWORD,
         properties: { script: 'res://item_stats.gd' },
       });
-      expectErrorMatching(result, /script/);
+      expectErrorMatching(result, /Property 'script' cannot be set by the resource tools/);
       expect(readText(project, SWORD)).toBe(before);
     },
     CASE_TIMEOUT_MS,

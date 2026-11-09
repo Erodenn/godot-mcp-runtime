@@ -4,7 +4,7 @@ import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
 import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { handleSetNodeProperties } from '../../src/tools/node-tools.js';
@@ -1316,8 +1316,6 @@ describe('typed Array[T] element coercion', () => {
 });
 
 const INVENTORY_SCENE = 'inventory.tscn';
-/** Dictionary[K, V] exists from Godot 4.4. */
-const TYPED_DICTIONARY_MIN_MINOR = 4;
 const AUTHORED_CASE_TIMEOUT_MS = 120000;
 
 function makeAuthoredProject(): string {
@@ -1349,8 +1347,7 @@ function inventoryText(project: string): string {
 describe('typed Dictionary[K, V] properties', () => {
   itGodot(
     'stores a JSON object on a Dictionary[String, int] as a typed dictionary',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'stock', { hp: 3, mp: 4 });
@@ -1364,8 +1361,7 @@ describe('typed Dictionary[K, V] properties', () => {
 
   itGodot(
     'converts the string keys of a Dictionary[int, float] to ints',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'by_id', { '1': 1.5 });
@@ -1379,8 +1375,7 @@ describe('typed Dictionary[K, V] properties', () => {
 
   itGodot(
     'rejects a value that is not an int and names its key',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
       const before = inventoryText(project);
 
@@ -1395,8 +1390,7 @@ describe('typed Dictionary[K, V] properties', () => {
 
   itGodot(
     'rejects a fractional value for an int dictionary',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
       const before = inventoryText(project);
 
@@ -1411,8 +1405,7 @@ describe('typed Dictionary[K, V] properties', () => {
 
   itGodot(
     'rejects a key that is not a number on an int-keyed dictionary',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
       const before = inventoryText(project);
 
@@ -1430,8 +1423,7 @@ describe('typed Dictionary[K, V] properties', () => {
 describe('integer vectors and packed integer arrays', () => {
   itGodot(
     'rejects a fractional component on a Vector2i',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
       const before = inventoryText(project);
 
@@ -1446,8 +1438,7 @@ describe('integer vectors and packed integer arrays', () => {
 
   itGodot(
     'stores whole-number components on a Vector2i',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'cell', { x: 1, y: 2 });
@@ -1461,8 +1452,7 @@ describe('integer vectors and packed integer arrays', () => {
 
   itGodot(
     'rejects a PackedByteArray element above 255 and names its index',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
       const before = inventoryText(project);
 
@@ -1477,8 +1467,7 @@ describe('integer vectors and packed integer arrays', () => {
 
   itGodot(
     'rejects a negative PackedByteArray element',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'bytes', [-1]);
@@ -1491,8 +1480,7 @@ describe('integer vectors and packed integer arrays', () => {
 
   itGodot(
     'rejects a PackedInt32Array element past the 32-bit maximum',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'ids32', [2147483648]);
@@ -1505,8 +1493,7 @@ describe('integer vectors and packed integer arrays', () => {
 
   itGodot(
     'accepts the bounds of a PackedByteArray',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = makeAuthoredProject();
 
       const entry = await setInventoryProperty(project, 'bytes', [0, 255]);

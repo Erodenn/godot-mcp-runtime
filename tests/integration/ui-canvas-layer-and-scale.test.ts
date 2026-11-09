@@ -1,6 +1,5 @@
 // Controls under a transformed CanvasLayer, a viewport canvas_transform and a runtime content_scale_factor (issue #76).
-// get_ui_elements and click_element must agree with where a control is drawn, in viewport pixels.
-// Every transform is read back from the running game before an assertion leans on it, and presses are counted in the game, so a platform that ignores a transform fails instead of passing vacuously.
+// Each transform is read back from the running game before an assertion uses it, so a platform that ignores one fails instead of passing vacuously.
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
 import { cpSync } from 'fs';
@@ -35,7 +34,7 @@ const SCALE_TOLERANCE = 0.001;
 const LAYER_SCALE = 2;
 const CANVAS_SHIFT_X = 40;
 const CANVAS_SHIFT_Y = 30;
-/** Must match CONTENT_SCALE_FACTOR in content_scale_probe.gd. */
+// KEEP IN SYNC: CONTENT_SCALE_FACTOR in tests/fixtures/godot-canvas-layer-project/content_scale_probe.gd
 const CONTENT_SCALE_FACTOR = 0.7;
 const FACTOR_IN_EFFECT_MIN_DELTA = 0.05;
 

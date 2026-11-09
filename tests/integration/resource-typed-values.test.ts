@@ -3,7 +3,7 @@
 import { describe, beforeAll, expect } from 'vitest';
 import { cpSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
 import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
 import { authoredFixtureProjectPath } from '../helpers/fixture-paths.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
@@ -13,7 +13,6 @@ import { handleCreateResource, handleSetResourceProperties } from '../../src/too
 import { handleSetNodeProperties } from '../../src/tools/node-tools.js';
 
 const CASE_TIMEOUT_MS = 120_000;
-const TYPED_DICTIONARY_MIN_MINOR = 4;
 const TABLE_SCRIPT = 'title_table.gd';
 const BARE_TITLES = 'bare_titles.tres';
 const HOST_SCENE = 'title_host.tscn';
@@ -41,8 +40,7 @@ function readText(project: string, relPath: string): string {
 describe('a Dictionary[StringName, PackedStringArray] property', () => {
   itGodot(
     'create_resource builds it from string keys and arrays of strings',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = authoredCopy();
       const result = await handleCreateResource(runner, {
         projectPath: project,
@@ -62,8 +60,7 @@ describe('a Dictionary[StringName, PackedStringArray] property', () => {
 
   itGodot(
     'a key written in the file spelling &"b" is stored as b',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = authoredCopy();
       const result = await handleCreateResource(runner, {
         projectPath: project,
@@ -80,8 +77,7 @@ describe('a Dictionary[StringName, PackedStringArray] property', () => {
 
   itGodot(
     'an element that is not a string is an error naming the entry, and nothing is written',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = authoredCopy();
       const result = await handleCreateResource(runner, {
         projectPath: project,
@@ -97,8 +93,7 @@ describe('a Dictionary[StringName, PackedStringArray] property', () => {
 
   itGodot(
     'a value that is not an array is an error, and nothing is written',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = authoredCopy();
       const result = await handleCreateResource(runner, {
         projectPath: project,
@@ -114,8 +109,7 @@ describe('a Dictionary[StringName, PackedStringArray] property', () => {
 
   itGodot(
     'set_node_properties builds it too',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const project = authoredCopy();
       const result = await handleSetNodeProperties(runner, {
         projectPath: project,

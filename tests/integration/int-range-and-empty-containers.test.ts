@@ -7,7 +7,7 @@ import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { engineMajorMinor, itGodot } from '../helpers/godot-skip.js';
+import { itGodot } from '../helpers/godot-skip.js';
 import { authoredFixtureProjectPath } from '../helpers/fixture-paths.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
@@ -18,7 +18,6 @@ const TYPED_SCENE = 'typed_values.tscn';
 const INVENTORY_SCENE = 'inventory.tscn';
 const PLAYER_SCENE = 'player.tscn';
 const CASE_TIMEOUT_MS = 120000;
-const TYPED_DICTIONARY_MIN_MINOR = 4;
 // 3e9: above int32, inside uint32. 5000: above the z_index limit of 4096. 16777217 = 2^24 + 1, the first integer float32 cannot hold.
 const ABOVE_INT32_MAX = 3000000000;
 const ABOVE_Z_INDEX_LIMIT = 5000;
@@ -104,8 +103,7 @@ describe('an empty JSON array or object empties a typed container', () => {
 
   itGodot(
     '{} on a Dictionary[String, int] removes its entries',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const filled = await setProperty(INVENTORY_SCENE, 'root', 'stock', { hp: 3 });
       expect(filled.success).toBe(true);
       expect(sceneText(INVENTORY_SCENE)).toContain('"hp": 3');
@@ -236,8 +234,7 @@ describe('an integer that does not fit its target is an error', () => {
 
   itGodot(
     'a typed-dictionary int value beyond that range names its key',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const before = sceneText(INVENTORY_SCENE);
 
       const entry = await setProperty(INVENTORY_SCENE, 'root', 'stock', { hp: HUGE_NUMBER });
@@ -253,8 +250,7 @@ describe('an integer that does not fit its target is an error', () => {
 describe('integer vector components are checked and stored as integers', () => {
   itGodot(
     'a component past 32 bits is an error that names the component and the range',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
+    async () => {
       const before = sceneText(INVENTORY_SCENE);
 
       const entry = await setProperty(INVENTORY_SCENE, 'root', 'cell', {
@@ -274,9 +270,7 @@ describe('integer vector components are checked and stored as integers', () => {
 
   itGodot(
     'a component a 32-bit float cannot hold exactly is stored exactly',
-    async (ctx) => {
-      if ((await engineMajorMinor()).minor < TYPED_DICTIONARY_MIN_MINOR) ctx.skip();
-
+    async () => {
       const entry = await setProperty(INVENTORY_SCENE, 'root', 'cell', {
         x: ABOVE_FLOAT32_EXACT,
         y: 2,

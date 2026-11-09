@@ -76,6 +76,16 @@ describe('tests/fixtures/godot-authored-project: fixture health', () => {
     'unbind_host.gd',
     'unbind_host.tscn',
     'mixed_signal_host.tscn',
+    'item_stats.gd',
+    'item_stats.gd.uid',
+    'sword.tres',
+    'title_table.gd',
+    'title_table.gd.uid',
+    'bare_titles.tres',
+    'title_host.gd',
+    'title_host.tscn',
+    'number_bag.gd',
+    'number_bag.tres',
     'notes.txt',
   ];
 
@@ -91,5 +101,30 @@ describe('tests/fixtures/godot-authored-project: fixture health', () => {
   it('project.godot registers the GameState autoload', () => {
     const content = readFileSync(join(authoredPath, 'project.godot'), 'utf8');
     expect(content).toContain('GameState="*res://game_state.gd"');
+  });
+});
+
+describe.each([
+  {
+    fixture: 'godot-stretch-project',
+    mainScene: 'stretch_probe.tscn',
+    files: ['stretch_probe.gd'],
+  },
+  {
+    fixture: 'godot-canvas-layer-project',
+    mainScene: 'canvas_layer_probe.tscn',
+    files: ['canvas_layer_probe.gd', 'content_scale_probe.tscn', 'content_scale_probe.gd'],
+  },
+])('tests/fixtures/$fixture: fixture health', ({ fixture, mainScene, files }) => {
+  const projectPath = join(here, '..', 'fixtures', fixture);
+
+  it(`project.godot wires run/main_scene to ${mainScene}, which exists`, () => {
+    const content = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    expect(content).toContain(`run/main_scene="res://${mainScene}"`);
+    expect(existsSync(join(projectPath, mainScene))).toBe(true);
+  });
+
+  it.each(files)('%s exists', (file) => {
+    expect(existsSync(join(projectPath, file))).toBe(true);
   });
 });
