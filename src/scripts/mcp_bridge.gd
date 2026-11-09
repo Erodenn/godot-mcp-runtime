@@ -1347,9 +1347,20 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 		if not names_a_control:
 			_send_response(peer, {"error": "filter '%s' is not a Control class" % type_filter})
 			return
+	var scope_field: Variant = payload.get("root", "")
+	if typeof(scope_field) != TYPE_STRING:
+		_send_response(peer, {"error": "root must be a string"})
+		return
+	var scope_identifier: String = scope_field
+	var scope: Control = null
+	if scope_identifier != "":
+		scope = _find_control_by_identifier(scope_identifier)
+		if scope == null:
+			_send_response(peer, {"error": "could not find UI element: %s. root takes a Control's absolute path, relative path or node name." % scope_identifier})
+			return
 	var root := get_tree().root
 	var elements: Array[Dictionary] = []
-	_collect_control_nodes(root, elements, visible_only, type_filter)
+	_collect_control_nodes(root, elements, visible_only, type_filter, Rect2(), false, scope)
 	_send_response(peer, {"elements": elements})
 
 # Not _finite_or_null: this walk also runs for every input action's UI snapshot, where a count would land on a reply with no rect.
@@ -1370,7 +1381,11 @@ func _visible_part(rect: Rect2, region: Rect2) -> Variant:
 		return null
 	return region.intersection(rect)
 
-func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "", clip: Rect2 = Rect2(), has_clip: bool = false) -> void:
+# `scope` limits what is listed to that node and its descendants. The walk still passes through the ancestors above it, unlisted, so their visibility and clipping apply to the scoped controls exactly as in the unscoped walk; branches that cannot reach the scope are skipped. The default (null) lists everything, which is what the UI snapshot uses.
+func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "", clip: Rect2 = Rect2(), has_clip: bool = false, scope: Node = null) -> void:
+	var in_scope := scope == null or node == scope or scope.is_ancestor_of(node)
+	if not in_scope and not node.is_ancestor_of(scope):
+		return
 	var child_clip := clip
 	var child_has_clip := has_clip
 	if node is Control:
@@ -1389,7 +1404,7 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 			child_clip = rect if not child_has_clip else child_clip.intersection(rect)
 			child_has_clip = true
 		var listed := type_filter == "" or ctrl.is_class(type_filter)
-		if visible_only and not on_screen:
+		if (visible_only and not on_screen) or not in_scope:
 			listed = false
 		if listed:
 			var element := {
@@ -1425,7 +1440,7 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 				element["tooltip"] = ctrl.tooltip_text
 			elements.append(element)
 	for child: Node in node.get_children():
-		_collect_control_nodes(child, elements, visible_only, type_filter, child_clip, child_has_clip)
+		_collect_control_nodes(child, elements, visible_only, type_filter, child_clip, child_has_clip, scope)
 
 func _find_control_by_identifier(identifier: String) -> Control:
 	var root := get_tree().root

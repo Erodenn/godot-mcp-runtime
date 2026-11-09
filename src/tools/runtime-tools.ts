@@ -645,7 +645,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'get_ui_elements',
     description:
-      'List the running scene Controls with rect, type and text. Call before simulate_input click_element to find names and paths. Needs a runtime session (run_project). visibleOnly (default true) drops hidden Controls and ones clipped out of view; false lists them. filter narrows by class. Returns: projectPath, elements[] with path/type/rect/visible/onScreen (visibleRect if clipped), optional text/disabled/tooltip. Errors on a non-Control filter.',
+      'List the running scene Controls with rect, type and text. Call before simulate_input click_element to find names and paths. Needs a runtime session. visibleOnly (default true) drops hidden Controls and ones clipped out of view. filter narrows by class; root limits the list to one Control and its descendants. Returns: projectPath, elements[] with path/type/rect/visible/onScreen (visibleRect if clipped), optional text/disabled/tooltip. Errors on a non-Control filter or an unknown root.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -659,6 +659,11 @@ export const runtimeToolDefinitions = [
           type: 'string',
           description:
             'Filter by native Control class name (e.g. "Button", "Label", "LineEdit"); subclasses match. A class Control inherits from (CanvasItem, Node) lists every Control. Any other name, including a script class_name, is an error.',
+        },
+        root: {
+          type: 'string',
+          description:
+            'List only this Control and its descendants. Same lookup as simulate_input click_element: absolute path, relative path or node name (BFS matched). Visibility and clipping by ancestors above it still apply. An unknown name, or a node that is not a Control, is an error.',
         },
       },
       required: [],
@@ -2379,9 +2384,13 @@ async function queryUiElements(runner: GodotRunner, args: OperationParams): Prom
   const filterResult = optionalString(args, 'filter');
   if (!filterResult.ok) return filterResult;
 
+  const rootResult = optionalString(args, 'root');
+  if (!rootResult.ok) return rootResult;
+
   try {
     const cmdParams: Record<string, unknown> = { visible_only: visibleOnly };
     if (filterResult.value) cmdParams.type_filter = filterResult.value;
+    if (rootResult.value) cmdParams.root = rootResult.value;
     const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
       'get_ui_elements',
       cmdParams,
@@ -2405,6 +2414,7 @@ async function queryUiElements(runner: GodotRunner, args: OperationParams): Prom
       return err(
         createErrorResponse(`UI element query error: ${parsed.error}`, [
           'Pass a native Control class name (Button, Label, LineEdit), or omit filter',
+          'Pass root as the path or name of a Control from an unscoped get_ui_elements, or omit it',
         ]),
       );
     }

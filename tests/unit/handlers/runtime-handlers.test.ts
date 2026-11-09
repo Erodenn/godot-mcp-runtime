@@ -2003,6 +2003,24 @@ describe('handleGetUiElements', () => {
     expect(fake.bridgeCalls[0].params).not.toHaveProperty('type_filter');
   });
 
+  it('forwards root to the bridge unchanged and omits it when not provided', async () => {
+    const fake = setupActive();
+    await handleGetUiElements(fake.asRunner, { root: '/root/InputProbe/FreeMe' });
+    expect(fake.bridgeCalls[0].params).toEqual({
+      visible_only: true,
+      root: '/root/InputProbe/FreeMe',
+    });
+    await handleGetUiElements(fake.asRunner, {});
+    expect(fake.bridgeCalls[1].params).not.toHaveProperty('root');
+  });
+
+  it('rejects a root that is not a string before anything is sent', async () => {
+    const fake = setupActive();
+    const result = await handleGetUiElements(fake.asRunner, { root: 7 });
+    expect(hasError(result)).toBe(true);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
   it('puts warnings first when the query raised runtime errors', async () => {
     const fake = setupActive();
     fake.setBridgeResponse(JSON.stringify({ elements: [] }), ['SCRIPT ERROR: boom']);
