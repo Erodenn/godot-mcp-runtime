@@ -44,6 +44,7 @@ export const MAX_SCAN_INCOMPLETE_SHOWN = 10;
 const GDSCRIPT_EXTENSION = '.gd';
 const SCENE_EXTENSION = '.tscn';
 const TEXT_RESOURCE_EXTENSION = '.tres';
+const IMPORT_FILE_EXTENSION = '.import';
 /** Why a reference the engine would still try to load was not scanned. */
 const UNRESOLVED_PATH_CAUSE = 'the path could not be resolved to a file inside the project';
 /** What a `project.godot` with lines Godot did not write means for the scan. */
@@ -203,12 +204,13 @@ export async function runLaunchGate(
     for (const item of collected.unscanned) {
       const notice = `Not scanned: ${displayPath(absProjectPath, item.scenePath)}: ${item.reason}`;
       scanWarnings.push(notice);
-      // A text scene or resource is one the scan reads; another extension that could not be read is at best a binary scene, which it does not.
+      // A text scene, resource or `.import` is one the scan reads; another extension that could not be read is at best a binary scene, which it does not.
       const loweredItemPath = item.scenePath.toLowerCase();
       const sceneReadFailed =
         item.readFailed === true &&
         (loweredItemPath.endsWith(SCENE_EXTENSION) ||
-          loweredItemPath.endsWith(TEXT_RESOURCE_EXTENSION));
+          loweredItemPath.endsWith(TEXT_RESOURCE_EXTENSION) ||
+          loweredItemPath.endsWith(IMPORT_FILE_EXTENSION));
       // An unresolved reference is one the engine would still try to load, so the scan set out to read it and did not; a malformed statement was read in part, so the engine may load something unseen.
       if (sceneReadFailed || item.unresolved === true || item.malformed === true) {
         scanReadFailures.push(notice);

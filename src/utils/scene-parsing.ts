@@ -1,9 +1,9 @@
 /** .tscn parsing for the run-script security pipeline: one scanner following Godot's own statement grammar, and a transitive collection of the scripts a scene brings with it, reporting what it cannot read rather than skipping it.
- * Not read (see `docs/security.md`): resource files other than scripts, scenes and `SCRIPT_INERT_EXTENSIONS` (so a `.res` or `.material` is reported), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
+ * Not read (see `docs/security.md`): resource files other than scripts, scenes and `SCRIPT_INERT_EXTENSIONS` (so a `.res` or `.material` is reported, and so is an imported asset's binary remap target other than a texture), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
 
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { resolveProjectPath } from './path-validation.js';
+import { fileIdentityKey, resolveProjectPath } from './path-validation.js';
 
 /** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
 const TSCN_RAW_SNIPPET_MAX = 200;
@@ -11,7 +11,7 @@ const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
 /** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says: `.tres` and `.escn` share the statement grammar; a binary `.scn` is walked and reported as not text. */
 const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
-/** Image, audio, font and shader extensions, trusted by extension and never reported: an imported one's `.import` remap is not read (`docs/security.md`, "What this does NOT do"). Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
+/** Image, audio, font and shader extensions, never reported themselves; when one has a sibling `<file>.import`, the engine loads its remap target instead, and the walk follows that (`readImportRemap`). Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
 const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
   '.png',
   '.jpg',
@@ -36,6 +36,23 @@ const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
   '.gdshaderinc',
   '.shader',
 ];
+const IMPORT_FILE_SUFFIX = '.import';
+/** Import remap targets the engine hands to a texture loader by extension (`CompressedTexture2D`, its layered, cubemap and 3D forms), which builds a texture and attaches no script; checked for `.ctex` against Godot 4.6.2. Audio and font imports (`.oggvorbisstr`, `.mp3str`, `.sample`, `.fontdata`) are saved as binary resources, which the binary resource loader reads and which can carry a script, so they are not here. */
+const IMPORT_ONLY_INERT_EXTENSIONS: readonly string[] = [
+  '.ctex',
+  '.ctexarray',
+  '.ccube',
+  '.ccubearray',
+  '.ctex3d',
+];
+const IMPORT_REMAP_TAG = 'remap';
+const IMPORT_DEPS_TAG = 'deps';
+const IMPORT_PATH_KEY = 'path';
+/** A feature-tagged remap path (`path.s3tc`, `path.etc2`), which the engine loads on a platform with that feature. */
+const IMPORT_FEATURE_PATH_PREFIX = 'path.';
+const IMPORT_DEST_FILES_KEY = 'dest_files';
+/** What may surround the strings of a `dest_files` value: an array literal or a `PackedStringArray(...)`. */
+const DEST_FILES_FRAME_PATTERN = /^(?:PackedStringArray)?[\s[\](),]*$/;
 /** `type` values that mark an `ext_resource` as a script: Godot's loaders take the base or concrete class, so a hand-edited `type="GDScript"` loads as `Script` does. */
 const SCRIPT_TYPE_HINTS: ReadonlySet<string> = new Set(['Script', 'GDScript', 'CSharpScript']);
 const UNICODE_SHORT_ESCAPE_DIGITS = 4;
@@ -118,6 +135,8 @@ export interface TscnHeader {
   stringProps: Map<string, string>;
   /** Every other property by key: the whole trimmed value, comments removed. A value whose brackets never close is reported in `malformed` and cut at its first line. A key is in at most one map, and in neither when its last assignment could not be read. */
   rawProps: Map<string, string>;
+  /** Keys assigned more than once under this header: the maps keep the last, which is not what every engine reader keeps (the import remap reader keeps the first `path`). */
+  repeatedKeys: Set<string>;
 }
 
 export interface TscnScan {
@@ -476,6 +495,7 @@ export function scanTscn(content: string): TscnScan {
   };
   let i = content.startsWith(BYTE_ORDER_MARK) ? BYTE_ORDER_MARK.length : 0;
   let current: TscnHeader | null = null;
+  let assignedKeys = new Set<string>();
   // The key of the statement being read: its text so far, where it started,
   // and whether a line break inside it has been reported.
   let key = '';
@@ -526,7 +546,9 @@ export function scanTscn(content: string): TscnScan {
         raw,
         stringProps: new Map(),
         rawProps: new Map(),
+        repeatedKeys: new Set(),
       };
+      assignedKeys = new Set();
       headers.push(current);
       if (!restOfLineIsEmpty(content, parsed.end)) report(i, TEXT_AFTER_HEADER_REASON, raw);
       i = parsed.end;
@@ -566,6 +588,8 @@ export function scanTscn(content: string): TscnScan {
       readable = false;
     }
     if (current === null || statementKey === '') continue;
+    if (assignedKeys.has(statementKey)) current.repeatedKeys.add(statementKey);
+    assignedKeys.add(statementKey);
     current.stringProps.delete(statementKey);
     current.rawProps.delete(statementKey);
     if (readable && value.quoted !== null && value.plainString) {
@@ -623,6 +647,73 @@ function resPathOf(attrs: Map<string, string>): string | null {
   return path !== undefined && path.startsWith(TSCN_RES_PREFIX) ? path : null;
 }
 
+export interface ImportRemap {
+  /** Every `[remap]` `path` and `path.<feature>` value, then every `[deps]` `dest_files` entry, once each, as written. */
+  targets: string[];
+  /** What could not be taken as written; the engine may load a target from it that is not in `targets`. */
+  problems: string[];
+}
+
+/** The strings of a `dest_files` value, or null when it is not an array of plain strings. */
+function destFileStrings(raw: string): string[] | null {
+  const strings: string[] = [];
+  let frame = '';
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== '"') {
+      frame += raw[i];
+      i++;
+      continue;
+    }
+    const quoted = readQuoted(raw, i, raw.length);
+    if (quoted === null) return null;
+    strings.push(quoted.value);
+    i = quoted.end;
+  }
+  return DEST_FILES_FRAME_PATTERN.test(frame) ? strings : null;
+}
+
+/** Reads a `<file>.import` with the text-resource statement grammar, which is the parser the engine's import loader uses. Over-reads where the engine is narrower (every `[remap]` section, every feature path, and `dest_files`, which the engine does not load from), and reports what it cannot take as written: a statement outside any section, a path value that is not one plain string, a key assigned twice (the engine keeps the first `path`, the scanner the last). */
+export function readImportRemap(content: string): ImportRemap {
+  const scan = scanTscn(content);
+  const targets = new Set<string>();
+  const problems: string[] = scan.malformed.map(
+    (problem) => `${problem.reason} at line ${problem.line}: ${problem.raw}`,
+  );
+  const firstHeaderLine = scan.headers[0]?.line ?? Number.POSITIVE_INFINITY;
+  const lines = content.replace(BYTE_ORDER_MARK, '').split('\n');
+  for (let index = 0; index < lines.length && index + 1 < firstHeaderLine; index++) {
+    const text = lines[index]!.trim();
+    if (text !== '' && !text.startsWith(';')) {
+      problems.push(`statement before any section at line ${index + 1}: ${snippet(text)}`);
+    }
+  }
+  const isPathKey = (key: string): boolean =>
+    key === IMPORT_PATH_KEY || key.startsWith(IMPORT_FEATURE_PATH_PREFIX);
+  for (const header of scan.headers) {
+    if (header.tag === IMPORT_REMAP_TAG) {
+      for (const [key, value] of header.stringProps) {
+        if (isPathKey(key)) targets.add(value);
+      }
+      for (const key of header.rawProps.keys()) {
+        if (isPathKey(key)) problems.push(`[remap] ${key} is not one plain string`);
+      }
+      for (const key of header.repeatedKeys) {
+        if (isPathKey(key)) problems.push(`[remap] ${key} is assigned more than once`);
+      }
+    } else if (header.tag === IMPORT_DEPS_TAG) {
+      const single = header.stringProps.get(IMPORT_DEST_FILES_KEY);
+      if (single !== undefined) targets.add(single);
+      const raw = header.rawProps.get(IMPORT_DEST_FILES_KEY);
+      if (raw === undefined) continue;
+      const strings = destFileStrings(raw);
+      if (strings === null) problems.push(`[deps] dest_files is not a list of plain strings`);
+      else for (const value of strings) targets.add(value);
+    }
+  }
+  return { targets: Array.from(targets), problems };
+}
+
 /** Transitively walks the scenes `scenePath` references, collecting the `.gd` files their ext_resources name and the source of inline GDScript: a hostile script in an instanced PackedScene is invisible to a single-scene scan.
  * References are classified by path, not `type`, which a hand-edited scene can set to anything; what the walk cannot follow but could bring a script in is listed in `unscanned`, never dropped. Cycle-safe by resolved path; nothing throws on a stale or unreadable reference. */
 export function collectSceneScripts(scenePath: string, projectDir: string): SceneScriptCollection {
@@ -632,6 +723,70 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
   const unscanned: UnscannedSceneItem[] = [];
   // One notice per resource file, however many scenes reference it.
   const reportedResources = new Set<string>();
+  // Each `.import` is read once, however many scenes reference its asset.
+  const followedImports = new Set<string>();
+
+  // An imported asset loads as its remap target, chosen by the target's extension, so each target is classified the way a direct reference would be.
+  function followImportRemap(assetPath: string, fromScenePath: string): void {
+    const importFile = resolveProjectPath(projectDir, assetPath + IMPORT_FILE_SUFFIX, 'read');
+    if (importFile === null) {
+      unscanned.push({
+        scenePath: fromScenePath,
+        reason: `import file of ${assetPath} could not be resolved to a file inside the project and was not read`,
+        unresolved: true,
+      });
+      return;
+    }
+    const importKey = fileIdentityKey(importFile.absPath);
+    if (followedImports.has(importKey)) return;
+    followedImports.add(importKey);
+    let content: string;
+    try {
+      content = readFileSync(importFile.absPath, 'utf8');
+    } catch (err) {
+      if (isFileNotFound(err)) return;
+      const detail = err instanceof Error ? err.message : String(err);
+      unscanned.push({
+        scenePath: importFile.absPath,
+        reason: `import file could not be read (${detail}), so what ${assetPath} loads was not scanned`,
+        readFailed: true,
+      });
+      return;
+    }
+    const remap = readImportRemap(content);
+    for (const problem of remap.problems.slice(0, MAX_MALFORMED_REPORTED_PER_SCENE)) {
+      unscanned.push({ scenePath: importFile.absPath, reason: problem, malformed: true });
+    }
+    if (remap.problems.length > MAX_MALFORMED_REPORTED_PER_SCENE) {
+      unscanned.push({
+        scenePath: importFile.absPath,
+        reason: `${remap.problems.length - MAX_MALFORMED_REPORTED_PER_SCENE} more malformed statements`,
+        malformed: true,
+      });
+    }
+    for (const target of remap.targets) {
+      const lowered = target.toLowerCase();
+      if (IMPORT_ONLY_INERT_EXTENSIONS.some((ext) => lowered.endsWith(ext))) continue;
+      const resolved = resolveProjectPath(projectDir, target, 'read');
+      if (resolved === null) {
+        unscanned.push({
+          scenePath: importFile.absPath,
+          reason: `remap target ${target} could not be resolved to a file inside the project and was not followed`,
+          unresolved: true,
+        });
+      } else if (lowered.endsWith(GDSCRIPT_EXTENSION)) {
+        scripts.add(resolved.absPath);
+      } else if (SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
+        walk(resolved.absPath);
+      } else if (!reportedResources.has(lowered)) {
+        reportedResources.add(lowered);
+        unscanned.push({
+          scenePath: importFile.absPath,
+          reason: `resource ${target}, which ${assetPath} is imported as, is not scanned (a resource file can carry a script)`,
+        });
+      }
+    }
+  }
 
   function walk(currentScenePath: string): void {
     const absScenePath = resolve(currentScenePath);
@@ -717,6 +872,8 @@ export function collectSceneScripts(scenePath: string, projectDir: string): Scen
             reportedResources.add(lowered);
             skip(`resource ${path} is not scanned (a resource file can carry a script)`);
           }
+        } else {
+          followImportRemap(path, absScenePath);
         }
       } else if (
         header.tag === 'sub_resource' &&

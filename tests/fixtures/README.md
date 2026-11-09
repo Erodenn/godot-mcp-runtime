@@ -54,6 +54,18 @@ Contents:
 - `canvas_layer_probe.tscn`, `canvas_layer_probe.gd`: a `CanvasLayer` with offset (150, 80) and scale 2 holding `LayeredBtn`, a `DecoyBtn` under the root at the position `LayeredBtn` would have without the layer (the click lands there if the layer transform is left out), and a `PlainBtn` in the default canvas for the viewport `canvas_transform` test. Each `pressed` handler increments a counter on the root
 - `content_scale_probe.tscn`, `content_scale_probe.gd`: three adjacent Buttons (`LeftBtn`, `MiddleBtn`, `RightBtn`) and a `_ready` that sets `Window.content_scale_factor` to 0.7; a click at 1/0.7 of the middle button lands on the right one
 
+## `godot-import-remap-project/`
+
+Imported assets for the launch scan's `.import` remap tests (`importRemapFixtureProjectPath`, used by `tests/unit/launch-scan-import-remap.test.ts`). It is scanned, never launched or imported: an import pass would rewrite every `.import` file, and the two payload variants would run `payload.gd`. Every `.png` and the files under `.godot/imported/` other than the `.tres` are empty placeholders, because the scan never reads them.
+
+Contents, one scene per asset, each a `Sprite2D` whose texture is that asset:
+- `payload.gd`, `payload.tres`: a resource script with a Tier 1 call in `_init` (`OS.execute("echo", ...)`), and a resource that carries it
+- `variant_a.*`: `variant_a.png.import` remaps to `res://payload.tres` (F15 variant A)
+- `variant_b.*`: the remap and `dest_files` name `res://.godot/imported/variant_b.png-f16.tres`, a text copy of `payload.tres` (F15 variant B)
+- `clean.*`: the control, a `.import` as the editor writes it for a texture, remapping to a `.ctex` under `.godot/imported/`
+- `res_target.*`: a remap to a binary `.res` under `.godot/imported/`
+- `malformed.*`: a remap `path` written as a StringName (`&"..."`), which the engine reads and the scan cannot take as written
+
 ## `godot-profiling-project/`
 
 The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).
