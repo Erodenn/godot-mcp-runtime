@@ -218,6 +218,37 @@ describe('add_node sets properties on a node that is already in the scene', () =
   );
 
   itGodot(
+    'a Control added with only anchors_preset is stored as full rect in anchors layout mode',
+    async () => {
+      const created = await handleCreateScene(runner, {
+        projectPath,
+        scenePath: UI_SCENE,
+        rootNodeType: 'Control',
+      });
+      expectMatchesOutputSchema('create_scene', created);
+
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: UI_SCENE,
+        nodeType: 'Control',
+        nodeName: 'Panel',
+        properties: { anchors_preset: 15 },
+      });
+      expectMatchesOutputSchema('add_node', result);
+
+      const properties = sectionProperties(
+        sceneText(UI_SCENE),
+        '[node name="Panel" type="Control"',
+      );
+      expect(properties).toContain('layout_mode = 1');
+      expect(properties).toContain('anchors_preset = 15');
+      expect(properties).toContain('anchor_right = 1.0');
+      expect(properties).toContain('anchor_bottom = 1.0');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
     'a property that fails leaves the scene file as it was',
     async () => {
       const before = sceneText(PLAYER_SCENE);

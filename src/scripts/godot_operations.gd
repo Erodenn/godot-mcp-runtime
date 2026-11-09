@@ -1168,6 +1168,20 @@ func _name_not_kept_warning(requested_name: String, final_name: String) -> Strin
 		return ""
 	return "Requested node name '%s' was not kept: Godot assigned '%s' (the name was taken by a sibling, or held a character a node name cannot hold)" % [requested_name, final_name]
 
+const _LAYOUT_MODE_PROPERTY := "layout_mode"
+const _LAYOUT_MODE_ANCHORS := 1
+const _ANCHOR_LAYOUT_PROPERTIES: Array = ["anchors_preset", "anchor_left", "anchor_top", "anchor_right", "anchor_bottom"]
+
+# The engine stores anchors only on a Control whose layout_mode is anchors; the editor sets that mode when it adds a Control under a Control, a bare add does not (it stays position, 0) and the anchors setter then does nothing.
+# So a request for anchors on a Control under a non-container Control carries the mode the editor would have chosen, unless the caller named one. A Container parent owns the mode, so nothing is added there.
+func _default_anchors_layout_mode(new_node: Node, parent: Node, props: Dictionary) -> void:
+	if not (new_node is Control and parent is Control) or parent is Container or props.has(_LAYOUT_MODE_PROPERTY):
+		return
+	for anchor_property: String in _ANCHOR_LAYOUT_PROPERTIES:
+		if props.has(anchor_property):
+			props[_LAYOUT_MODE_PROPERTY] = _LAYOUT_MODE_ANCHORS
+			return
+
 func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	# Each is handed to a typed parameter below, where a wrong type raises.
 	for string_param: String in ["parent_node_path", "node_type", "node_name"]:
@@ -1208,8 +1222,12 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	var warnings: Array = []
-	# "script" goes first whatever its JSON order: the variables it declares exist only once it is attached.
+	_default_anchors_layout_mode(new_node, parent, props)
+	# "script" goes first whatever its JSON order: the variables it declares exist only once it is attached. layout_mode follows it, before the anchors it enables.
 	var ordered_properties: Array = props.keys()
+	if props.has(_LAYOUT_MODE_PROPERTY):
+		ordered_properties.erase(_LAYOUT_MODE_PROPERTY)
+		ordered_properties.push_front(_LAYOUT_MODE_PROPERTY)
 	if props.has("script"):
 		ordered_properties.erase("script")
 		ordered_properties.push_front("script")
