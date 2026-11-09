@@ -8,6 +8,8 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
+import { handleValidate } from '../../src/tools/validate-tools.js';
+import { unwrap } from '../helpers/assertions.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -239,6 +241,43 @@ describe('validate: signals checks', () => {
       expect(
         result.issues.find((i: { problem: string }) => i.problem === 'naming_convention'),
       ).toBeUndefined();
+    },
+    60000,
+  );
+
+  itGodot(
+    'does not report a handler the script connects in code, and still reports its unconnected sibling',
+    async () => {
+      mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(tmpProject, 'scripts', 'code_wired.gd'),
+        'extends Label\n' +
+          'func _ready():\n' +
+          '\tvisibility_changed.connect(_on_code_connected)\n' +
+          'func _on_code_connected():\n' +
+          '\ttext = "one"\n' +
+          'func _on_really_orphaned():\n' +
+          '\ttext = "two"\n',
+      );
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/Label', scriptPath: 'scripts/code_wired.gd' },
+        tmpProject,
+        30000,
+      );
+
+      // Through the handler: the raw validate_checks operation cannot see code connections, the token pass in the handler does.
+      const response = await handleValidate(runner, {
+        projectPath: tmpProject,
+        scenePath: 'main.tscn',
+        checks: [{ type: 'signals' }],
+      });
+      const payload = JSON.parse(unwrap(response).content[0]!.text) as {
+        errors: Array<{ problem?: string; method?: string }>;
+      };
+      const orphans = payload.errors.filter((e) => e.problem === 'orphaned_handler');
+      expect(orphans.map((e) => e.method)).toEqual(['_on_really_orphaned']);
+      expect(orphans[0]).not.toHaveProperty('script');
     },
     60000,
   );

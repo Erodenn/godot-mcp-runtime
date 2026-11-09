@@ -2207,6 +2207,9 @@ func _collect_connection_issues(scope: Node, scene_root: Node, issues: Array) ->
 						"problem": "naming_convention"
 					})
 
+# KEEP IN SYNC: the orphaned_handler problem tag src/utils/orphan-findings.ts re-judges.
+const ORPHANED_HANDLER_PROBLEM := "orphaned_handler"
+
 func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) -> void:
 	# Index targets across the whole scene so a handler connected from outside the scope is not reported; keyed by (node_path, method) because Object identity does not match across iterations.
 	var wired_pairs := {}
@@ -2240,8 +2243,16 @@ func _collect_orphaned_handlers(scope: Node, scene_root: Node, issues: Array) ->
 					"signal": "",
 					"target": node_rel,
 					"method": method_name,
-					"problem": "orphaned_handler"
+					"problem": ORPHANED_HANDLER_PROBLEM,
+					"script": _script_res_path(node)
 				})
+
+# The res:// path of the node's script, "" when it has none or an embedded one. The TS layer reads that file to see whether code connects the handler.
+func _script_res_path(node: Node) -> String:
+	var script: Variant = node.get_script()
+	if script == null:
+		return ""
+	return String(script.resource_path)
 
 func _iter_subtree(root: Node) -> Array:
 	var out := [root]
@@ -2536,6 +2547,8 @@ func _collect_check_errors(scene_root: Node, checks: Variant) -> Array:
 					"problem": str(si.get("problem", "")),
 					"message": str(si.get("problem", "")),
 				}
+				if si.has("script"):
+					entry["script"] = str(si["script"])
 				errors.append(entry)
 		else:
 			errors.append({
@@ -3568,6 +3581,7 @@ func _validate_single(target: Dictionary) -> Dictionary:
 		return {"valid": false, "errors": [{"message": "No valid target: provide script_path or scene_path"}], "target": ""}
 
 # A target with a non-empty checks[] also gets the structural and signal checks here, reported in "checkErrors".
+# "valid" is false for any check failure but an orphaned_handler: whether one is wired in code is decided by the TS layer, which reads the script's tokens.
 # checkErrors is separate from "errors" because the TS layer overlays stderr diagnostics over "errors" for any target that produced some, which would discard merged check errors. Every failure lands on its own target and the loop continues.
 func validate_batch(params: Dictionary) -> void:
 	var results: Array = []
@@ -3582,7 +3596,9 @@ func validate_batch(params: Dictionary) -> void:
 				result["valid"] = false
 			elif not outcome.errors.is_empty():
 				result["checkErrors"] = outcome.errors
-				result["valid"] = false
+				for check_error: Variant in outcome.errors:
+					if not (check_error is Dictionary and check_error.get("problem", "") == ORPHANED_HANDLER_PROBLEM):
+						result["valid"] = false
 			else:
 				result["checkErrors"] = []
 		results.append(result)

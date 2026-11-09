@@ -675,12 +675,18 @@ Structural failures are returned in the `validate` output's `errors` array with 
 
 Walks every connection reachable from the scope (whole scene, or the subtree under `nodePath`) and reports one issue per problem found. Read-only. Issues appear in `errors` with `"check": "signals"` and `{ node, signal, target, method, problem }`; `node`, `target` are scene-root-relative paths. The problem codes:
 
-| Code                       | Meaning                                                                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                         |
-| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. See the residual classes below. |
-| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                             |
-| `orphaned_handler`         | A script-defined `_on_*` method on a node with no incoming connection pointing at it - dead code, or leftover after a disconnect.        |
+| Code                       | Meaning                                                                                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_not_in_scene`      | Connection target resolves outside the scene (freed object, or a connection made to a non-Node).                                              |
+| `method_missing_on_target` | The handler method does not exist on the target node - the signal would silently no-op or error on emit. See the residual classes below.      |
+| `naming_convention`        | Handler does not begin with `_on_` - debuggability warning only, the connection still fires.                                                  |
+| `orphaned_handler`         | A script-defined `_on_*` method on a node with no scene-saved connection and no sign in the scene's scripts that code connects it. See below. |
+
+What `orphaned_handler` counts. The engine sees only connections saved in the scene file; a handler wired in code (`button.pressed.connect(_on_x)`) exists only at run time. So the tool re-reads the tokens of the node's script and of every script the scene attaches (from its `[ext_resource type="Script"]` headers; a binary `.scn` contributes none) and applies these rules to each finding:
+
+- **Dropped (not an orphan):** the method name appears inside a `connect(...)` call, as `_on_x`, `self._on_x`, `_on_x.bind(...)`, a string `"_on_x"` or `&"_on_x"`; or it appears anywhere as a Callable value (`var cb = _on_x`, `Callable(self, "_on_x")`). A direct call `_on_x()` is not a reference.
+- **Kept with `severity: "warning"`:** no such sign, but a script builds a Callable the tokens cannot resolve (`Callable(self, name)`, or a `"_on_" + name` stem). The message says "may be connected in code". A warning does not make the target `valid: false`.
+- **Kept as an error:** neither. The check matches by method name and does not resolve which node the connect call targets, so a same-named handler on another node can hide an orphan (a false negative). Comments and string contents elsewhere never count.
 
 What `method_missing_on_target` covers, stated precisely so a clean result is not read as proof:
 

@@ -35,6 +35,7 @@ import {
   stderrRequestsImport,
 } from '../utils/headless-op.js';
 import { BridgeManager, BridgeRegistryUnreadableError } from '../utils/bridge-manager.js';
+import { isWarningFinding, refineOrphanFindings } from '../utils/orphan-findings.js';
 
 const CHECK_ITEM_SCHEMA = {
   type: 'object',
@@ -89,6 +90,11 @@ const VALIDATE_ERROR_SCHEMA = {
     target: { type: 'string' },
     method: { type: 'string' },
     problem: { type: 'string', description: 'Signals findings: the problem code.' },
+    severity: {
+      type: 'string',
+      description:
+        '"warning" on a finding that does not make the target invalid (an orphaned_handler that may be connected in code).',
+    },
   },
   required: ['message'],
 } as const;
@@ -290,7 +296,10 @@ export function attributeDiagnostics(
     if (r.valid === false && errors.length === 0) unexplainedFailures.push(errors);
     return {
       target: r.target,
-      valid: r.valid && stderrErrors.length === 0 && checkErrors.length === 0,
+      valid:
+        r.valid &&
+        stderrErrors.length === 0 &&
+        checkErrors.every((finding) => isWarningFinding(finding)),
       errors,
     };
   });
@@ -680,6 +689,13 @@ export async function handleValidate(
         );
       }
 
+      // Godot sees only scene-saved connections; handlers wired in code are re-judged from the scripts' tokens.
+      batchParsed.results.forEach((r, k) => {
+        const sceneRel = (snakeTargets[k] as { scene_path?: string } | undefined)?.scene_path;
+        if (sceneRel && Array.isArray(r.checkErrors)) {
+          r.checkErrors = refineOrphanFindings(r.checkErrors, projectPath, sceneRel);
+        }
+      });
       const attributed = attributeDiagnostics(stderr || '', batchParsed.results);
       const godotResults = attributed.results.map((r, resultIndex) => ({
         ...r,
@@ -879,6 +895,13 @@ export async function handleValidate(
       }
       engineWarnings = runWarnings(batchParsed);
       const target = batchParsed.results?.[0];
+      if (target && resolvedScenePath !== undefined && Array.isArray(target.checkErrors)) {
+        target.checkErrors = refineOrphanFindings(
+          target.checkErrors,
+          projectPath,
+          resolvedScenePath,
+        );
+      }
       if (!target) {
         return err(
           createErrorResponse(
