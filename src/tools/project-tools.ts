@@ -4,7 +4,12 @@ import type { GodotRunner, RuntimeSessionInfo } from '../utils/godot-runner.js';
 import { BRIDGE_PING_TIMEOUT_MS } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validatePath, projectGodotPath } from '../utils/path-validation.js';
+import {
+  validatePath,
+  projectGodotPath,
+  resolveProjectPath,
+  projectSubPathError,
+} from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
@@ -63,7 +68,7 @@ export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use when the user has not named a project; to inspect a known one use check_project. recursive: true descends into subdirectories (skipping .git, .godot, .mcp, node_modules and the like); the default checks the directory and its immediate children. Returns: projects[], each { projectPath, name }; empty when none. warnings leads when a path could not be read or a link was not followed. Errors if directory is not a directory.',
+      'Find Godot projects under a directory by locating project.godot files. Use when no project is named; to inspect a known one use check_project. recursive: true descends into subdirectories (skipping .git, .godot, node_modules); the default checks the directory and its immediate children. Returns: projects[], each { projectPath, name }, name being config/name else the folder name. warnings leads when a path could not be read or a link was not followed. Errors if directory is not a directory.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
@@ -89,7 +94,10 @@ export const projectToolDefinitions = [
             type: 'object',
             properties: {
               projectPath: { type: 'string' },
-              name: { type: 'string' },
+              name: {
+                type: 'string',
+                description: 'config/name from project.godot; the folder name when unset.',
+              },
             },
             required: ['projectPath', 'name'],
           },
@@ -178,21 +186,27 @@ export const projectToolDefinitions = [
   {
     name: 'get_project_files',
     description:
-      'Return the file tree of a Godot project. Use to discover project structure when paths are unknown. extensions filters files (e.g. ["gd","tscn"]); maxDepth caps recursion (-1 is unlimited, else 0 or more). Skips dot-prefixed entries, .mcp included. Returns: the root node { name, type, path, children[] }; a child is a file, a directory, or a link (type "link", not followed). A directory not opened or not readable has children null; warnings leads then.',
+      'Return the file tree of a Godot project. Use to discover project structure when paths are unknown. subfolder lists one folder as the root (maxDepth counts from it). extensions filters files (e.g. ["gd","tscn"]) and drops directories with no match; maxDepth -1 is unlimited. Skips dot-prefixed entries. Returns: the root node { name, type, path, children[] }; a child is a file, a directory, or a link (not followed). A directory not opened or unreadable has children null; warnings leads then.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        subfolder: {
+          type: 'string',
+          description:
+            'Folder inside the project to list instead of the whole project (e.g. "ui/themes" or "res://ui"). Must exist and be a directory. Omit for the project root.',
+        },
         maxDepth: {
           type: 'number',
-          description: 'Maximum recursion depth. -1 means unlimited (default: -1)',
+          description:
+            'Maximum recursion depth, counted from the listed root. -1 means unlimited (default: -1)',
         },
         extensions: {
           type: 'array',
           items: { type: 'string' },
           description:
-            'Filter to only these file extensions (e.g. ["gd", "tscn"]). Omit to include all.',
+            'Filter to only these file extensions (e.g. ["gd", "tscn"]); directories with no match are left out. Omit to include all.',
         },
       },
       required: ['projectPath'],
@@ -448,6 +462,23 @@ function summarizeWalkProblems(problems: WalkProblems): string[] {
   return warnings;
 }
 
+/** The project's `application/config/name`, else `fallback` (absent, empty, not a string, or the file unreadable). */
+function readProjectName(projectFile: string, fallback: string): string {
+  try {
+    const nameSetting = findSetting(
+      scanProjectFile(readFileSync(projectFile, 'utf8')),
+      APPLICATION_SECTION,
+      CONFIG_NAME_KEY,
+    );
+    if (typeof nameSetting?.value === 'string' && nameSetting.value !== '') {
+      return nameSetting.value;
+    }
+  } catch (error) {
+    logDebug(`Error reading project file: ${error}`);
+  }
+  return fallback;
+}
+
 function findGodotProjects(
   directory: string,
   recursive: boolean,
@@ -456,7 +487,10 @@ function findGodotProjects(
   const projects: Array<{ path: string; name: string }> = [];
 
   if (existsSync(projectGodotPath(directory))) {
-    projects.push({ path: directory, name: basename(directory) });
+    projects.push({
+      path: directory,
+      name: readProjectName(projectGodotPath(directory), basename(directory)),
+    });
   }
 
   let entries;
@@ -475,7 +509,10 @@ function findGodotProjects(
     }
     if (!entry.isDirectory()) continue;
     if (existsSync(projectGodotPath(subdir))) {
-      projects.push({ path: subdir, name: entry.name });
+      projects.push({
+        path: subdir,
+        name: readProjectName(projectGodotPath(subdir), entry.name),
+      });
     } else if (recursive) {
       projects.push(...findGodotProjects(subdir, true, problems));
     }
@@ -588,16 +625,17 @@ function buildFilesystemTree(
       walk.problems.links.push(childRelPath);
       children.push({ name: entry.name, type: 'link', path: childRelPath });
     } else if (entry.isDirectory()) {
-      children.push(
-        buildFilesystemTree(
-          join(currentPath, entry.name),
-          childRelPath,
-          maxDepth,
-          currentDepth + 1,
-          extensions,
-          walk,
-        ),
+      const child = buildFilesystemTree(
+        join(currentPath, entry.name),
+        childRelPath,
+        maxDepth,
+        currentDepth + 1,
+        extensions,
+        walk,
       );
+      // Under a filter a directory that was opened and holds no match is noise; one not opened (children null) stays, its content is unknown.
+      if (extensions && child.children?.length === 0) continue;
+      children.push(child);
     } else if (entry.isFile()) {
       const ext = fileExtension(entry.name);
       if (extensions && !extensions.includes(ext)) continue;
@@ -870,21 +908,7 @@ export async function handleCheckProject(
     const structureProblems = newWalkProblems();
     const projectStructure = getProjectStructure(parsed.value.projectPath, structureProblems);
 
-    let projectName = basename(parsed.value.projectPath);
-    try {
-      const projectFileContent = readFileSync(projectFile, 'utf8');
-      const nameSetting = findSetting(
-        scanProjectFile(projectFileContent),
-        APPLICATION_SECTION,
-        CONFIG_NAME_KEY,
-      );
-      if (typeof nameSetting?.value === 'string' && nameSetting.value !== '') {
-        projectName = nameSetting.value;
-        logDebug(`Found project name in config: ${projectName}`);
-      }
-    } catch (error) {
-      logDebug(`Error reading project file: ${error}`);
-    }
+    const projectName = readProjectName(projectFile, basename(parsed.value.projectPath));
 
     const newer = engineNewerThanProject(version, parsed.value.projectPath);
     const engineWarnings =
@@ -937,8 +961,36 @@ export async function handleGetProjectFiles(args: OperationParams): Promise<Hand
       ? extensionsResult.value.map((e) => e.toLowerCase().replace(/^\./, ''))
       : null;
 
+    const subfolderResult = optionalString(args, 'subfolder');
+    if (!subfolderResult.ok) return subfolderResult;
+    let scopePath: string = parsed.value.projectPath;
+    let scopeRelPath = '';
+    if (subfolderResult.value !== undefined) {
+      const resolved = resolveProjectPath(parsed.value.projectPath, subfolderResult.value, 'read');
+      if (
+        resolved === null ||
+        resolved.relPath.split('/').some((segment) => segment.startsWith('.'))
+      ) {
+        return err(
+          createErrorResponse(projectSubPathError('subfolder', subfolderResult.value), [
+            'Pass a folder inside the project, such as "ui" or "res://ui/themes", with no dot-prefixed segment',
+            'Omit subfolder to list the whole project',
+          ]),
+        );
+      }
+      if (!existsSync(resolved.absPath) || !statSync(resolved.absPath).isDirectory()) {
+        return err(
+          createErrorResponse(`subfolder is not a directory in the project: ${resolved.resPath}`, [
+            'Check the folder name; get_project_files without subfolder lists the top level',
+          ]),
+        );
+      }
+      scopePath = resolved.absPath;
+      scopeRelPath = resolved.relPath;
+    }
+
     const walk: TreeWalk = { problems: newWalkProblems(), depthCut: false };
-    const tree = buildFilesystemTree(parsed.value.projectPath, '', maxDepth, 0, extensions, walk);
+    const tree = buildFilesystemTree(scopePath, scopeRelPath, maxDepth, 0, extensions, walk);
     const warnings = [
       ...(walk.depthCut
         ? [`maxDepth ${maxDepth} cut the listing: directories at that depth have children null`]
