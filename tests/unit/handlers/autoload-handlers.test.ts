@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   handleListAutoloads,
@@ -594,5 +594,151 @@ describe('handleListAutoloads lines Godot did not write', () => {
     });
     expectErrorMatching(result, /not found/i);
     expect(readProjectGodot(dir)).toBe(content);
+  });
+});
+
+describe('autoload name equal to a class_name', () => {
+  function projectWithScripts(scripts: Record<string, string>, projectContent?: string): string {
+    const dir = makeTmpProject();
+    if (projectContent !== undefined) writeFileSync(join(dir, 'project.godot'), projectContent);
+    for (const [rel, text] of Object.entries(scripts)) {
+      const abs = join(dir, rel);
+      mkdirSync(join(abs, '..'), { recursive: true });
+      writeFileSync(abs, text, 'utf8');
+    }
+    return dir;
+  }
+
+  it('add_autoload refuses a singleton whose own script declares the same class_name, and writes nothing', async () => {
+    const dir = projectWithScripts({ 'game.gd': 'class_name Game\nextends Node\n' });
+    const before = readProjectGodot(dir);
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.gd',
+    });
+    expectErrorMatching(result, /hides an autoload singleton/);
+    expectErrorMatching(result, /game\.gd/);
+    expect(readProjectGodot(dir)).toBe(before);
+  });
+
+  it('names the fix in the solutions', async () => {
+    const dir = projectWithScripts({ 'game.gd': 'class_name Game\nextends Node\n' });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.gd',
+    });
+    const text = JSON.stringify(result);
+    expect(text).toContain('singleton');
+    expect(text).toContain('class_name');
+  });
+
+  it('refuses when a different project script declares the class_name', async () => {
+    const dir = projectWithScripts({
+      'manager.gd': 'extends Node\n',
+      'lib/game_class.gd': 'class_name Game\nextends RefCounted\n',
+    });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'manager.gd',
+    });
+    expectErrorMatching(result, /lib\/game_class\.gd/);
+  });
+
+  it('refuses a scene autoload whose root script declares the class_name', async () => {
+    const dir = projectWithScripts({
+      'game.gd': 'class_name Game\nextends Node\n',
+      'game.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://game.gd" id="1"]\n\n[node name="Game" type="Node"]\nscript = ExtResource("1")\n',
+    });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.tscn',
+    });
+    expectErrorMatching(result, /hides an autoload singleton/);
+  });
+
+  it('refuses a script that inherits the class, since the declaring script is still a project script', async () => {
+    const dir = projectWithScripts({
+      'base.gd': 'class_name Game\nextends Node\n',
+      'child.gd': 'extends "res://base.gd"\n',
+    });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'child.gd',
+    });
+    expectErrorMatching(result, /base\.gd/);
+  });
+
+  it('allows singleton false: no global name is created, so nothing is hidden', async () => {
+    const dir = projectWithScripts({ 'game.gd': 'class_name Game\nextends Node\n' });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.gd',
+      singleton: false,
+    });
+    expect(hasError(result)).toBe(false);
+  });
+
+  it('allows a name no script declares, and ignores a mention in a comment or an extends clause', async () => {
+    const dir = projectWithScripts({
+      'game.gd': '# class_name Game\nextends Game2\nclass_name Game2\n',
+    });
+    const result = await handleAddAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.gd',
+    });
+    expect(expectMatchesOutputSchema('add_autoload', result).autoload).toEqual({
+      name: 'Game',
+      path: 'res://game.gd',
+      singleton: true,
+    });
+  });
+
+  it('update_autoload refuses a path change onto a script that declares the name', async () => {
+    const dir = projectWithScripts(
+      { 'old.gd': 'extends Node\n', 'game.gd': 'class_name Game\nextends Node\n' },
+      'config_version=5\n\n[autoload]\nGame="*res://old.gd"\n',
+    );
+    const before = readProjectGodot(dir);
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      autoloadPath: 'game.gd',
+    });
+    expectErrorMatching(result, /hides an autoload singleton/);
+    expect(readProjectGodot(dir)).toBe(before);
+  });
+
+  it('update_autoload refuses turning the singleton flag on when the current script clashes', async () => {
+    const dir = projectWithScripts(
+      { 'game.gd': 'class_name Game\nextends Node\n' },
+      'config_version=5\n\n[autoload]\nGame="res://game.gd"\n',
+    );
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      singleton: true,
+    });
+    expectErrorMatching(result, /hides an autoload singleton/);
+  });
+
+  it('update_autoload turning the singleton flag off is allowed on a clashing script', async () => {
+    const dir = projectWithScripts(
+      { 'game.gd': 'class_name Game\nextends Node\n' },
+      'config_version=5\n\n[autoload]\nGame="*res://game.gd"\n',
+    );
+    const result = await handleUpdateAutoload({
+      projectPath: dir,
+      autoloadName: 'Game',
+      singleton: false,
+    });
+    expect(hasError(result)).toBe(false);
   });
 });

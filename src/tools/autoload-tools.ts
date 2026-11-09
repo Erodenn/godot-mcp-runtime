@@ -1,4 +1,5 @@
 import { readFileSync } from 'fs';
+import { join } from 'path';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import {
@@ -15,6 +16,7 @@ import {
   optionalBoolean,
 } from '../utils/arg-parsing.js';
 import { err } from '../utils/result.js';
+import { findClassNameDeclarations } from '../utils/class-name-scan.js';
 import { createStructuredResponse, leadWithWarnings } from '../utils/structured-response.js';
 import {
   parseAutoloads,
@@ -36,6 +38,13 @@ const AUTOLOAD_ENTRY_SCHEMA = {
     singleton: { type: 'boolean' },
   },
   required: ['name', 'path', 'singleton'],
+} as const;
+
+const WARNINGS_SCHEMA = {
+  type: 'array',
+  items: { type: 'string' },
+  description:
+    'Present only when the scan for a class_name clash could not cover every .gd file, so a clash may remain.',
 } as const;
 
 export const autoloadToolDefinitions = [
@@ -68,7 +77,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'add_autoload',
     description:
-      'Register a new autoload in a project. autoloadPath takes res://... or a path inside the project. singleton defaults to true. No Godot process is used. An autoload that stops the engine before a headless operation is dispatched fails all of them (one that only errors in _ready does not): run validate on it first. Returns: autoload { name, path, singleton } read back from project.godot, and a tip. Errors if the name is already registered; use update_autoload to change it.',
+      'Register a new autoload. autoloadPath takes res://... or a project path. singleton defaults to true. No Godot process is used. An autoload that stops the engine before a headless operation is dispatched fails all of them: run validate on it first. Returns: autoload { name, path, singleton } read back from project.godot, and a tip. Errors if the name exists (use update_autoload), or a singleton shares its name with a class_name a project script declares (the engine then drops the script).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -92,6 +101,7 @@ export const autoloadToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: WARNINGS_SCHEMA,
         autoload: AUTOLOAD_ENTRY_SCHEMA,
         tip: { type: 'string' },
       },
@@ -127,7 +137,7 @@ export const autoloadToolDefinitions = [
   {
     name: 'update_autoload',
     description:
-      "Change an existing autoload's path or singleton flag. Pass autoloadPath, singleton or both; errors if neither is given. An omitted field keeps its current value. Use instead of remove_autoload plus add_autoload: one edit, no window where the autoload is missing. No Godot process is used. Returns: autoload { name, path, singleton } read back from project.godot. Errors if autoloadName is not registered.",
+      "Change an existing autoload's path or singleton flag. Pass autoloadPath, singleton or both; errors if neither is given. An omitted field keeps its current value. Use instead of remove_autoload plus add_autoload: one edit, no window where the autoload is missing. No Godot process is used. Returns: autoload { name, path, singleton } read back from project.godot. Errors if autoloadName is not registered, or if the result is a singleton named like a class_name a project script declares.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -142,6 +152,7 @@ export const autoloadToolDefinitions = [
     outputSchema: {
       type: 'object',
       properties: {
+        warnings: WARNINGS_SCHEMA,
         autoload: AUTOLOAD_ENTRY_SCHEMA,
       },
       required: ['autoload'],
@@ -156,6 +167,37 @@ function rejectForbiddenPathCharacters(autoloadPath: string): HandlerResult | un
       'Remove the double quote or line break from autoloadPath',
     ]),
   );
+}
+
+const CLASS_SCAN_INCOMPLETE_WARNING =
+  'The scan for a script declaring this name as a class_name did not cover every .gd file (the file cap was reached, or a file or directory could not be read), so a clash may remain. The engine reports one as "Class X hides an autoload singleton".';
+
+/** A singleton autoload is a global named like it; a project script declaring `class_name` with that name makes the engine fail with "Class X hides an autoload singleton" and the game runs without the script. A non-singleton autoload makes no global, so it cannot clash. */
+function classNameClash(
+  projectPath: string,
+  autoloadName: string,
+  autoloadAbsPath: string,
+  singleton: boolean,
+): { refusal?: HandlerResult; warnings: string[] } {
+  if (!singleton) return { warnings: [] };
+  const scan = findClassNameDeclarations(projectPath, autoloadName, [autoloadAbsPath]);
+  if (scan.declaredIn.length > 0) {
+    const files = scan.declaredIn.join(', ');
+    return {
+      warnings: [],
+      refusal: err(
+        createErrorResponse(
+          `Autoload '${autoloadName}' is a singleton and ${files} declares class_name ${autoloadName}: the engine reports "Class ${autoloadName} hides an autoload singleton" and the game runs without the script`,
+          [
+            `Rename the autoload so it differs from the class_name (the script then reaches the autoload by its new name)`,
+            `Or remove class_name ${autoloadName} from ${files}`,
+            'Or pass singleton: false, which makes no global name (the node is still added to the tree under its name)',
+          ],
+        ),
+      ),
+    };
+  }
+  return { warnings: scan.complete ? [] : [CLASS_SCAN_INCOMPLETE_WARNING] };
 }
 
 export function handleListAutoloads(args: OperationParams): HandlerResult {
@@ -229,6 +271,13 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
       );
     }
     const isSingleton = singleton.value !== false;
+    const clash = classNameClash(
+      parsed.value.projectPath,
+      autoloadName.value,
+      resolvedAutoload.absPath,
+      isSingleton,
+    );
+    if (clash.refusal) return clash.refusal;
     addAutoloadEntry(
       projectFile,
       autoloadName.value,
@@ -248,7 +297,9 @@ export function handleAddAutoload(args: OperationParams): HandlerResult {
         ),
       );
     }
-    return createStructuredResponse({ autoload: registered, tip: ADD_AUTOLOAD_TIP });
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: clash.warnings, autoload: registered, tip: ADD_AUTOLOAD_TIP }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to add autoload: ${getErrorMessage(error)}`, [
@@ -337,6 +388,21 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
 
   try {
     const projectFile = projectGodotPath(parsed.value.projectPath);
+    // Judged on the entry as it will stand: an omitted field keeps its current value. A name that is not registered falls through to the not-found error below.
+    const existing = parseAutoloads(projectFile).find((a) => a.name === autoloadName.value);
+    let clash: { refusal?: HandlerResult; warnings: string[] } = { warnings: [] };
+    if (existing !== undefined) {
+      const finalAbsPath =
+        resolvedAutoload?.absPath ??
+        join(parsed.value.projectPath, existing.path.replace(/^res:\/\//, ''));
+      clash = classNameClash(
+        parsed.value.projectPath,
+        autoloadName.value,
+        finalAbsPath,
+        singleton.value ?? existing.singleton,
+      );
+      if (clash.refusal) return clash.refusal;
+    }
     const updated = updateAutoloadEntry(
       projectFile,
       autoloadName.value,
@@ -360,7 +426,9 @@ export function handleUpdateAutoload(args: OperationParams): HandlerResult {
         ),
       );
     }
-    return createStructuredResponse({ autoload: current });
+    return createStructuredResponse(
+      leadWithWarnings({ warnings: clash.warnings, autoload: current }),
+    );
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to update autoload: ${getErrorMessage(error)}`, [
