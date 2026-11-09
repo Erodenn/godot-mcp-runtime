@@ -245,7 +245,7 @@ export function parseAutoloadAssignments(projectFilePath: string, name: string):
 }
 
 /** Removes every assignment of this autoload under every spelling and `[autoload]` section, so no earlier line takes over. With `shouldRemove`, only entry-reading assignments whose path satisfies it go; the last one left is what the engine then loads.
- * An `[autoload]` section left empty is dropped with its header unless the header carries a comment or `options.keepEmptySection` is set; at end of file the blank lines before it go too. Returns true when the file was mutated. */
+ * An `[autoload]` section this removal emptied is dropped with its header unless the header carries a comment; with `options.keepEmptySection` the last `[autoload]` section keeps its bare header and every emptied duplicate before it is still dropped. At end of file the blank lines before a dropped section go too. Returns true when the file was mutated. */
 export function removeAutoloadEntry(
   projectFilePath: string,
   name: string,
@@ -267,15 +267,23 @@ export function removeAutoloadEntry(
     for (let i = target.startLine; i <= target.endLine; i++) dropped.add(i);
   }
 
+  // The section `addAutoloadEntry` writes into and `hasEmptyAutoloadSection` judges: the only one a kept header can stand for.
+  const keptSection =
+    options.keepEmptySection === true
+      ? scan.sections.filter((s) => s.name === AUTOLOAD_SECTION).at(-1)
+      : undefined;
   for (const section of scan.sections) {
-    if (options.keepEmptySection === true) break;
+    if (section === keptSection) continue;
     if (section.name !== AUTOLOAD_SECTION || section.headerHasComment) continue;
     const bodyEnd = Math.min(section.endLine, lines.length);
     let empty = true;
+    let touched = false;
     for (let i = section.headerLine + 1; i < bodyEnd && empty; i++) {
+      if (dropped.has(i)) touched = true;
       empty = dropped.has(i) || isBlankLine(lines[i]!);
     }
-    if (!empty) continue;
+    // Only a section this removal emptied goes: a bare header that was already there is not ours to drop.
+    if (!empty || !touched) continue;
     for (let i = section.headerLine; i < bodyEnd; i++) dropped.add(i);
     if (bodyEnd === lines.length) {
       for (let i = section.headerLine - 1; i >= 0 && isBlankLine(lines[i]!); i--) dropped.add(i);

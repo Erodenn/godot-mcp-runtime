@@ -188,7 +188,7 @@ describe('BridgeManager.inject', () => {
     const bridgeSourcePath = join(sourceDir, 'mcp_bridge.gd');
     writeFileSync(bridgeSourcePath, '# no marker\nextends Node\n', 'utf8');
     const manager = new BridgeManager(bridgeSourcePath);
-    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/const PORT := <int>/);
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/const PORT = <int>/);
   });
 
   it('throws if the template lacks the SESSION_TOKEN_BAKED marker', () => {
@@ -1914,6 +1914,68 @@ describe('BridgeManager keeps a bare [autoload] header it found at injection', (
     expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(original);
   });
 
+  it('the server that leaves last keeps the header a sibling server found bare', () => {
+    const { projectPath, bridgeSourcePath } = setupProject({ projectGodot: EMPTY_HEADER_PROJECT });
+    const managerA = new BridgeManager(bridgeSourcePath);
+    const managerB = new BridgeManager(bridgeSourcePath);
+    managerA.inject(projectPath, TEST_PORT);
+    managerB.inject(projectPath, ALT_PORT);
+
+    managerA.cleanup(projectPath);
+    managerB.cleanup(projectPath);
+
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(EMPTY_HEADER_PROJECT);
+  });
+
+  it('a header that is gone by the next injection is not put back by a server that saw it bare earlier', () => {
+    const noHeader = 'config_version=5\n\n[rendering]\nx="y"\n';
+    const { projectPath, bridgeSourcePath } = setupProject({ projectGodot: EMPTY_HEADER_PROJECT });
+    const projectFile = join(projectPath, 'project.godot');
+    const managerA = new BridgeManager(bridgeSourcePath);
+    const managerB = new BridgeManager(bridgeSourcePath);
+    managerA.inject(projectPath, TEST_PORT);
+    managerA.cleanup(projectPath);
+    writeFileSync(projectFile, noHeader, 'utf8');
+
+    managerB.inject(projectPath, ALT_PORT);
+    managerA.inject(projectPath, TEST_PORT);
+    managerB.cleanup(projectPath);
+    managerA.cleanup(projectPath);
+
+    expect(readFileSync(projectFile, 'utf8')).toBe(noHeader);
+  });
+
+  it('keeps the bare header it found and drops an emptied duplicate section before it', () => {
+    const original = 'config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n\n[autoload]\n';
+    const { projectPath, manager } = setupProject({ projectGodot: original });
+    const projectFile = join(projectPath, 'project.godot');
+    manager.inject(projectPath, TEST_PORT);
+    const injected = readFileSync(projectFile, 'utf8');
+    expect(injected.indexOf('McpBridge=')).toBeGreaterThan(injected.lastIndexOf('[autoload]'));
+    // A sibling server's older run left its own entry in the first section too.
+    writeFileSync(
+      projectFile,
+      injected.replace(
+        '[autoload]\n\n[rendering]',
+        `[autoload]\nMcpBridge="*${BRIDGE_SCRIPT_RES_PATH}"\n\n[rendering]`,
+      ),
+      'utf8',
+    );
+
+    manager.cleanup(projectPath);
+
+    expect(readFileSync(projectFile, 'utf8')).toBe(
+      'config_version=5\n\n[rendering]\nx="y"\n\n[autoload]\n',
+    );
+  });
+
+  it('removes the marker with the bridge directory', () => {
+    const { projectPath, manager } = setupProject({ projectGodot: EMPTY_HEADER_PROJECT });
+    manager.inject(projectPath, TEST_PORT);
+    manager.cleanup(projectPath);
+    expect(existsSync(bridgeDir(projectPath))).toBe(false);
+  });
+
   it('a repair by the instance that injected keeps the header too', () => {
     const { projectPath, manager } = setupProject({
       projectGodot: EMPTY_HEADER_PROJECT,
@@ -2037,5 +2099,70 @@ describe('BridgeManager start-identity caching follows its platform option', () 
   it('reuses the answer within its window where asking runs a helper program (win32) and asks every read where it does not (linux), whatever the host', () => {
     expect(identityReads('win32')).toBe(1);
     expect(identityReads('linux')).toBe(2);
+  });
+});
+
+describe('BridgeManager bakes the port and token into every spelling GDScript allows', () => {
+  const SPELLINGS: Array<{ label: string; port: string; token: string }> = [
+    { label: 'inferred', port: 'const PORT := 9900', token: 'const SESSION_TOKEN_BAKED := ""' },
+    {
+      label: 'typed',
+      port: 'const PORT: int = 9900',
+      token: 'const SESSION_TOKEN_BAKED: String = ""',
+    },
+    { label: 'untyped', port: 'const PORT = 9900', token: 'const SESSION_TOKEN_BAKED = ""' },
+    {
+      label: 'loose spacing',
+      port: 'const   PORT  :  int  =  9900',
+      token: 'const\tSESSION_TOKEN_BAKED:String="";',
+    },
+  ];
+
+  function injectWithTemplate(template: string, token?: string): string {
+    const { projectPath, manager, bridgeSourcePath } = setupProject();
+    writeFileSync(bridgeSourcePath, template, 'utf8');
+    manager.inject(projectPath, ALT_PORT, token);
+    return readFileSync(bridgeScriptAbsPath(projectPath), 'utf8');
+  }
+
+  it.each(SPELLINGS)(
+    'attach inject rewrites the $label spelling and keeps the rest of the line',
+    ({ port, token }) => {
+      const template = `extends Node\n${port}  # trailing comment\nconst PORT_MIN := 1\n${token}\n`;
+      const rendered = injectWithTemplate(template, 'tok-123');
+      expect(rendered).toBe(
+        template
+          .replace(/9900/, String(ALT_PORT))
+          .replace(/(SESSION_TOKEN_BAKED[^"]*)""/, '$1"tok-123"'),
+      );
+    },
+  );
+
+  it.each(SPELLINGS)('a spawned inject leaves the $label template unchanged', ({ port, token }) => {
+    const template = `extends Node\n${port}\n${token}\n`;
+    expect(injectWithTemplate(template)).toBe(template);
+  });
+
+  it('does not bake a commented-out declaration or a longer constant name', () => {
+    const template =
+      'extends Node\n# const PORT := 1111\nconst PORT_MIN := 1\nconst PORT: int = 9900\nconst SESSION_TOKEN_BAKED := ""\n';
+    const rendered = injectWithTemplate(template, 'tok');
+    expect(rendered).toContain('# const PORT := 1111\n');
+    expect(rendered).toContain('const PORT_MIN := 1\n');
+    expect(rendered).toContain(`const PORT: int = ${ALT_PORT}\n`);
+  });
+
+  it('refuses a template that declares neither constant in any spelling', () => {
+    const { projectPath, manager, bridgeSourcePath } = setupProject();
+    writeFileSync(bridgeSourcePath, 'extends Node\nvar PORT = 9900\n', 'utf8');
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/const PORT/);
+  });
+
+  it('accepts the shipped bridge script and bakes it back to a script that still reads as unbaked', () => {
+    const shipped = readFileSync(join(process.cwd(), 'src', 'scripts', 'mcp_bridge.gd'), 'utf8');
+    const rendered = injectWithTemplate(shipped, 'tok-xyz');
+    expect(rendered).toContain(`const PORT := ${ALT_PORT}  # MCP_BRIDGE_PORT_BAKED`);
+    expect(rendered).toContain('const SESSION_TOKEN_BAKED := "tok-xyz"  # MCP_BRIDGE_TOKEN_BAKED');
+    expect(rendered.split('\n').length).toBe(shipped.split('\n').length);
   });
 });

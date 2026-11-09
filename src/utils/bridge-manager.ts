@@ -31,6 +31,7 @@ import {
 import {
   BRIDGE_SCRIPT_RES_PATH,
   LEGACY_BRIDGE_SCRIPT_FILENAME,
+  bridgeBareHeaderMarkerPath,
   bridgeDir,
   bridgeOwnersDir,
   bridgeScriptAbsPath,
@@ -81,11 +82,18 @@ const BRIDGE_ENTRY_REMEDY =
 // A stranded bridge script is removed by the same retry.
 const REMOVAL_RETRY_NOTE = 'the next headless tool call on this project retries the removal';
 
-// Marker line in mcp_bridge.gd that inject() rewrites per project.
-const BAKED_PORT_REGEX = /const PORT := \d+/;
+// The declarations inject() rewrites in mcp_bridge.gd. Both regexes read every spelling GDScript allows for a constant (`:=`, `: int =`, `=`, any blanks) and capture everything up to the value, so a bake replaces the value alone and the template's own spelling, comment and layout come back out unchanged. Anchored to a line start, so a commented-out copy or a longer name (`PORT_MIN`) is never the marker.
+const CONST_ASSIGNMENT_PREFIX = String.raw`[ \t]*(?::[ \t]*(?:[A-Za-z_]\w*[ \t]*)?)?=[ \t]*`;
+const BAKED_PORT_REGEX = new RegExp(
+  String.raw`^([ \t]*const[ \t]+PORT${CONST_ASSIGNMENT_PREFIX})\d+`,
+  'm',
+);
 
-// Marker line in mcp_bridge.gd rewritten for attach-mode sessions; spawned sessions leave the shipped "" default.
-const BAKED_TOKEN_REGEX = /const SESSION_TOKEN_BAKED := "[^"]*"/;
+// Rewritten for attach-mode sessions; spawned sessions leave the shipped "" default.
+const BAKED_TOKEN_REGEX = new RegExp(
+  String.raw`^([ \t]*const[ \t]+SESSION_TOKEN_BAKED${CONST_ASSIGNMENT_PREFIX})"[^"]*"`,
+  'm',
+);
 
 /** How long an "is this pid still the owner" answer is reused where asking runs a helper program (one per registry read would be felt). Unknown is cached too (a blocked helper fails the same way next read) but not for longer: a pid can be reissued to a newcomer. */
 const OWNER_IDENTITY_CACHE_TTL_MS = 30000;
@@ -220,8 +228,6 @@ function isValidOwnerInfo(value: unknown): value is BridgeOwnerInfo {
 export class BridgeManager {
   /** Projects `repairOrphaned` found clean, with the `project.godot` signature that verdict was read at. */
   private repairedProjects: Map<string, string> = new Map();
-  /** Projects whose `project.godot` held an `[autoload]` header with no statement when this instance added the bridge entry: removal puts that header back. In memory, so another server process removing the entry last drops the bare header. */
-  private emptyAutoloadHeaders: Set<string> = new Set();
   private readonly instanceId: string;
   private readonly pid: number;
   private readonly hostnameFn: () => string;
@@ -264,12 +270,12 @@ export class BridgeManager {
     const template = readFileSync(this.bridgeScriptPath, 'utf8');
     if (!BAKED_PORT_REGEX.test(template)) {
       throw new Error(
-        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const PORT := <int>' marker`,
+        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const PORT = <int>' declaration (any spelling GDScript allows)`,
       );
     }
     if (!BAKED_TOKEN_REGEX.test(template)) {
       throw new Error(
-        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const SESSION_TOKEN_BAKED := "..."' marker`,
+        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const SESSION_TOKEN_BAKED = "..."' declaration (any spelling GDScript allows)`,
       );
     }
 
@@ -376,13 +382,11 @@ export class BridgeManager {
       );
     }
     if (currentEntry === undefined) {
-      // Recorded before the add, while the header is still bare, so removal can put it back.
-      const headerKey = projectPathKey(projectPath);
-      if (hasEmptyAutoloadSection(readFileSync(projectFile, 'utf8'))) {
-        this.emptyAutoloadHeaders.add(headerKey);
-      } else {
-        this.emptyAutoloadHeaders.delete(headerKey);
-      }
+      // Recorded on disk before the add, while the header is still bare, so whichever server removes the entry last can put it back.
+      this.recordBareHeader(
+        projectPath,
+        hasEmptyAutoloadSection(readFileSync(projectFile, 'utf8')),
+      );
       addAutoloadEntry(projectFile, BRIDGE_AUTOLOAD_NAME, BRIDGE_SCRIPT_RES_PATH, true);
       logDebug('Injected bridge autoload into project.godot');
     } else if (currentEntry !== normalizeAutoloadPath(BRIDGE_SCRIPT_RES_PATH)) {
@@ -391,6 +395,21 @@ export class BridgeManager {
       logDebug(`Migrated bridge autoload from ${currentEntry} to ${BRIDGE_SCRIPT_RES_PATH}`);
     } else {
       logDebug('Bridge autoload already present, skipping injection');
+    }
+  }
+
+  /** Write or clear the on-disk marker saying the `[autoload]` header was bare before the bridge entry was added. Called only by the inject that adds the entry, so a server that finds the entry present leaves what the adder recorded. A failed write is logged: removal then drops the header, as it does for a section the server created. */
+  private recordBareHeader(projectPath: string, wasBare: boolean): void {
+    const marker = bridgeBareHeaderMarkerPath(projectPath);
+    try {
+      if (wasBare) {
+        mkdirSync(bridgeDir(projectPath), { recursive: true });
+        writeFileAtomicSync(marker, '');
+      } else if (existsSync(marker)) {
+        this.unlinkFn(marker);
+      }
+    } catch (err) {
+      logDebug(`Non-fatal: Failed to record the bare [autoload] header marker: ${err}`);
     }
   }
 
@@ -507,11 +526,16 @@ export class BridgeManager {
   /** Render the template with the attach owner's port and token baked in, or unchanged when there is none. Spawned sessions never bake, so the script is identical across them, which makes the "write only when different" check meaningful across sibling processes. */
   private renderScript(template: string, attachOwner: BridgeOwnerInfo | undefined): string {
     if (!attachOwner) return template;
-    let rendered = template.replace(BAKED_PORT_REGEX, `const PORT := ${attachOwner.port}`);
+    // Function replacers: a `$` in a token must not be read as a replacement pattern.
+    let rendered = template.replace(
+      BAKED_PORT_REGEX,
+      (_match, declaration: string) => `${declaration}${attachOwner.port}`,
+    );
     if (attachOwner.token !== undefined) {
+      const token = attachOwner.token;
       rendered = rendered.replace(
         BAKED_TOKEN_REGEX,
-        `const SESSION_TOKEN_BAKED := "${attachOwner.token}"`,
+        (_match, declaration: string) => `${declaration}"${token}"`,
       );
     }
     return rendered;
@@ -706,6 +730,8 @@ export class BridgeManager {
         `project.godot could not be read (${describeFailure(err)}), so it is not known whether its ${BRIDGE_AUTOLOAD_NAME} autoload entry is still registered: ${BRIDGE_ENTRY_REMEDY}`,
       );
     }
+    // Kept while the entry is not confirmed gone, so the retry still knows the header was bare.
+    if (problems.length === 0) this.unlinkQuietly(bridgeBareHeaderMarkerPath(projectPath));
 
     const scriptFailure = this.unlinkQuietly(bridgeScriptAbsPath(projectPath));
     if (scriptFailure !== null) {
@@ -754,7 +780,7 @@ export class BridgeManager {
     const projectFile = join(projectPath, 'project.godot');
     try {
       this.removeAutoloadEntryFn(projectFile, BRIDGE_AUTOLOAD_NAME, isServerOwnedBridgePath, {
-        keepEmptySection: this.emptyAutoloadHeaders.has(projectPathKey(projectPath)),
+        keepEmptySection: existsSync(bridgeBareHeaderMarkerPath(projectPath)),
       });
     } catch (err) {
       logDebug(`Non-fatal: Failed to clean ${BRIDGE_AUTOLOAD_NAME} from project.godot: ${err}`);

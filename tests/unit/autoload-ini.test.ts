@@ -198,6 +198,37 @@ describe('removeAutoloadEntry', () => {
     expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n');
   });
 
+  it('with keepEmptySection keeps only the last emptied [autoload] section and drops the duplicates before it', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\nMcpBridge="*res://a.gd"\n\n[rendering]\nx="y"\n\n[autoload]\nMcpBridge="*res://b.gd"\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'McpBridge', undefined, { keepEmptySection: true })).toBe(
+      true,
+    );
+    expect(readProject(dir)).toBe('config_version=5\n\n[rendering]\nx="y"\n\n[autoload]\n');
+  });
+
+  it('with keepEmptySection keeps CRLF and drops an emptied duplicate that is not the last', () => {
+    const dir = makeProject(
+      'config_version=5\r\n\r\n[autoload]\r\nMcpBridge="*res://a.gd"\r\n\r\n[autoload]\r\nOther="*res://o.gd"\r\nMcpBridge="*res://b.gd"\r\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'McpBridge', undefined, { keepEmptySection: true })).toBe(
+      true,
+    );
+    expect(readProject(dir)).toBe('config_version=5\r\n\r\n[autoload]\r\nOther="*res://o.gd"\r\n');
+  });
+
+  it('leaves an [autoload] section the removal did not touch, even when it is a bare header', () => {
+    const dir = makeProject(
+      'config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n\n[autoload]\nMcpBridge="*res://a.gd"\n',
+    );
+    const file = join(dir, 'project.godot');
+    expect(removeAutoloadEntry(file, 'McpBridge')).toBe(true);
+    expect(readProject(dir)).toBe('config_version=5\n\n[autoload]\n\n[rendering]\nx="y"\n');
+  });
+
   it('with a predicate removes only the assignments whose path satisfies it', () => {
     const dir = makeProject(
       'config_version=5\n\n[autoload]\nA="*res://keep.gd"\nA="*res://drop.gd"\nA="res://drop.gd"\n',

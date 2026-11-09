@@ -11,6 +11,7 @@ const ARTIFACT_NAMESPACE_DIR_NAME = 'godot-runtime' as const;
 
 const BRIDGE_DIR_NAME = 'bridge' as const;
 const BRIDGE_OWNERS_DIR_NAME = 'owners' as const;
+const BRIDGE_BARE_HEADER_MARKER_NAME = 'bare-autoload-header' as const;
 const SCREENSHOTS_DIR_NAME = 'screenshots' as const;
 const AUDIT_SCRIPTS_DIR_NAME = 'scripts' as const;
 const VALIDATE_DIR_NAME = 'validate' as const;
@@ -59,6 +60,11 @@ export function bridgeScriptAbsPath(projectPath: string): string {
 /** `.../bridge/owners`: one JSON file per live session, read by every session to decide whether it is the last leaver before removing the shared script and autoload entry. */
 export function bridgeOwnersDir(projectPath: string): string {
   return join(bridgeDir(projectPath), BRIDGE_OWNERS_DIR_NAME);
+}
+
+/** `.../bridge/bare-autoload-header`: present while the `[autoload]` header the bridge entry sits under was a bare header before this server added the entry. On disk so whichever server removes the entry last reads the same fact, and removed with `bridge/`. */
+export function bridgeBareHeaderMarkerPath(projectPath: string): string {
+  return join(bridgeDir(projectPath), BRIDGE_BARE_HEADER_MARKER_NAME);
 }
 
 /** `<project>/.mcp/godot-runtime/screenshots`: where the bridge saves PNGs and the only directory `take_screenshot` reads one back from.
