@@ -544,11 +544,20 @@ describe('handleProfileProject', () => {
       ['an unanswered read', new Error('timed out')],
       ['a reply that is not JSON', 'pong'],
       ['a figure outside the bound', JSON.stringify({ frame_cap_ms: -1 })],
-    ])('leaves the capture uncapped on %s', async (_label, reply) => {
+    ])('marks the cap unknown on %s', async (_label, reply) => {
       const fake = createProfilerFake({ replies: { frame_cap: reply } });
       const result = await handleProfileProject(fake.asRunner, {});
 
       expect(hasError(result)).toBe(false);
+      expect(fake.calls[0]!.args[4]).toEqual({ ...PLAIN, frameCapMs: null });
+    });
+
+    it('leaves the capture uncapped when the game reports no cap', async () => {
+      const fake = createProfilerFake({
+        replies: { frame_cap: JSON.stringify({ frame_cap_ms: 0 }) },
+      });
+      await handleProfileProject(fake.asRunner, {});
+
       expect(fake.calls[0]!.args[4]).toEqual(PLAIN);
     });
   });

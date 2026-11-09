@@ -248,10 +248,14 @@ describe('handleMoveNodes: the loss guard', () => {
     ],
   });
 
-  async function moveAUnderB(savedText: string): Promise<string[]> {
+  async function moveAUnderB(
+    savedText: string,
+    moves: Record<string, unknown>[] = [{ nodePath: 'root/A', newParentPath: 'root/B' }],
+    stdout: string = MOVE_PAYLOAD,
+  ): Promise<string[]> {
     const projectPath = tmp.makeProject('move-guard-');
     writeFileSync(join(projectPath, SCENE), BEFORE, 'utf8');
-    const fake = createFakeRunner({ stdout: MOVE_PAYLOAD });
+    const fake = createFakeRunner({ stdout });
     const runner = fake.asRunner;
     const answer = runner.executeOperation.bind(runner);
     runner.executeOperation = async (...args: Parameters<typeof runner.executeOperation>) => {
@@ -261,7 +265,7 @@ describe('handleMoveNodes: the loss guard', () => {
     const result = await handleMoveNodes(runner, {
       projectPath,
       scenePath: SCENE,
-      moves: [{ nodePath: 'root/A', newParentPath: 'root/B' }],
+      moves,
     });
     const payload = unwrap(result).structuredContent as Record<string, unknown>;
     expect(readFileSync(join(projectPath, SCENE), 'utf8')).toBe(savedText);
@@ -270,6 +274,32 @@ describe('handleMoveNodes: the loss guard', () => {
 
   it('says nothing when a reparent keeps the whole subtree', async () => {
     expect(await moveAUnderB(afterMovingA())).toEqual([]);
+  });
+
+  it('says nothing when the same node is reordered and then reparented', async () => {
+    const reorderThenReparent = JSON.stringify({
+      results: [
+        {
+          nodePath: 'root/A',
+          resolvedNodePath: 'root/A',
+          success: true,
+          newNodePath: 'root/A',
+          index: 0,
+        },
+        {
+          nodePath: 'root/A',
+          resolvedNodePath: 'root/A',
+          success: true,
+          newNodePath: 'root/B/A',
+          index: 0,
+        },
+      ],
+    });
+    const moves = [
+      { nodePath: 'root/A', index: 0 },
+      { nodePath: 'root/A', newParentPath: 'root/B' },
+    ];
+    expect(await moveAUnderB(afterMovingA(), moves, reorderThenReparent)).toEqual([]);
   });
 
   it('reports a node lost from inside the reparented subtree', async () => {

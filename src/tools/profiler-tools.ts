@@ -316,7 +316,7 @@ const timelineSchema = {
             items: {
               type: 'object',
               properties: {
-                item: { type: 'number' },
+                item: { type: 'integer' },
                 ms: { type: 'number' },
                 maxMs: { type: 'number' },
               },
@@ -724,15 +724,16 @@ function checkCanStart(
   }
 }
 
-/** The capture options plus the engine's on-purpose sleep per frame, asked of the game once per capture. Best effort: a game that does not answer, or answers oddly, is read as uncapped, which is the rule as it was. */
+/** The capture options plus the engine's on-purpose sleep per frame, asked of the game once per capture; a missing or unusable answer is `null`, judged as uncapped and named in the stall warning. */
 async function withFrameCap<T extends CaptureOptions>(runner: GodotRunner, capture: T): Promise<T> {
   try {
     const raw = await runner.sendCommand('frame_cap', {}, FRAME_CAP_COMMAND_TIMEOUT_MS);
-    const reply = JSON.parse(raw) as { frame_cap_ms?: unknown };
-    const frameCapMs = sanitizeFrameCapMs(reply.frame_cap_ms);
-    return frameCapMs > 0 ? { ...capture, frameCapMs } : capture;
+    const reported = (JSON.parse(raw) as { frame_cap_ms?: unknown }).frame_cap_ms;
+    if (reported === 0) return capture;
+    const frameCapMs = sanitizeFrameCapMs(reported);
+    return { ...capture, frameCapMs: frameCapMs > 0 ? frameCapMs : null };
   } catch {
-    return capture;
+    return { ...capture, frameCapMs: null };
   }
 }
 

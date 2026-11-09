@@ -1071,6 +1071,16 @@ describe('handleMoveNodes', () => {
       [{ nodePath: 'root/A' }],
       /needs newParentPath/,
     ],
+    [
+      'an empty newParentPath beside an index',
+      [{ nodePath: 'root/A/B', newParentPath: '', index: 0 }],
+      /moves\[0\]\.newParentPath is empty/,
+    ],
+    [
+      'a misspelled key beside an index',
+      [{ nodePath: 'root/A', newParent: 'root/B', index: 0 }],
+      /moves\[0\]: Unknown parameter "newParent" \(allowed: nodePath, newParentPath, index\)/,
+    ],
   ])('rejects %s before starting Godot', async (_label, moves, pattern) => {
     const fake = createFakeRunner();
     const result = await handleMoveNodes(fake.asRunner, { ...validBase, moves });

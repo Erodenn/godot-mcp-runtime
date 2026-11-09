@@ -72,7 +72,7 @@ export const projectToolDefinitions = [
   {
     name: 'list_projects',
     description:
-      'Find Godot projects under a directory by locating project.godot files. Use when no project is named; to inspect a known one use check_project. recursive: true descends into subdirectories (skipping .git, .godot, node_modules); the default checks the directory and its immediate children. Returns: projects[], each { projectPath, name }, name being config/name else the folder name. warnings leads when a path could not be read or a link was not followed. Errors if directory is not a directory.',
+      'Find Godot projects under a directory by locating project.godot files. Use when no project is named; to inspect a known one use check_project. recursive: true descends into subdirectories (skipping .git, .godot, node_modules, etc.); the default checks the directory and its immediate children. Returns: projects[], each { projectPath, name }, name being config/name else the folder name. warnings leads when a path could not be read or a link was not followed. Errors if directory is not a directory.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',

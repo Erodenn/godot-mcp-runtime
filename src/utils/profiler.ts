@@ -209,10 +209,18 @@ export interface CaptureOptions {
   /** Most intervals the timeline reply holds, TIMELINE_BUCKETS_MIN..MAX_TIMELINE_BUCKETS (default TIMELINE_BUCKETS_DEFAULT); a longer recording merges adjacent intervals. */
   timelineBuckets?: number;
   targetFps?: number;
-  /** Longest the engine sleeps on purpose after a frame (`Engine.max_fps`, vsync, `frame_delay_msec`, low-processor mode), read from the game; its frame times exclude it. Absent or 0 means uncapped or unknown. */
-  frameCapMs?: number;
+  /** Longest the engine sleeps on purpose after a frame (`Engine.max_fps`, vsync, `frame_delay_msec`, low-processor mode), read from the game; its frame times exclude it. Absent or 0 means uncapped; null means the read failed, judged as uncapped and named in the stall warning. */
+  frameCapMs?: number | null;
   /** NodePath:property specs the bridge samples; they reach the capture through the `TrackCollector` given to stop, never through this receiver. */
   track?: string[];
+}
+
+/** `CaptureOptions` as `assertCanStart` resolved and checked them. */
+interface CaptureSettings {
+  timelineMs: number | null;
+  targetFps: number;
+  timelineBuckets: number;
+  timelineTop: number;
 }
 
 export interface TrackSample {
@@ -420,6 +428,8 @@ interface Capture {
   slowFrames: number;
   /** The engine's on-purpose sleep per frame in ms (0 when uncapped or unknown); added to each frame's own time when judging an arrival gap. */
   frameCapMs: number;
+  /** The game's frame cap could not be read, so arrival gaps were judged as if it were uncapped. */
+  frameCapUnknown: boolean;
   timeline: TimelineCapture | null;
   /** Frames that arrived later than the engine's frame times account for; see `UNACCOUNTED_ARRIVAL_GAP_MS`. */
   arrivalStalls: number;
@@ -1114,6 +1124,11 @@ export function expandTrack(
   });
 }
 
+/** One spelling of an item's identity for every map keyed by it; `kind` never holds a colon, so the key is unambiguous. */
+function timelineItemKey(item: TimelineItem): string {
+  return `${item.kind}:${item.name}`;
+}
+
 /** Merges each run of `factor` adjacent intervals into one: counts and sums add, maxima take the largest, and a merged `top` weighs each entry's per-frame time by the frames of the interval it came from (an entry absent from some interval's top is understated there, so the merged ms is a lower bound). A merged draw-call count is the newest sample in the run. Pure: the input is not changed. */
 export function mergeTimelineBuckets(
   buckets: Bucket[],
@@ -1158,7 +1173,7 @@ export function mergeTimelineBuckets(
       out.drawCalls = bucket.drawCalls ?? out.drawCalls;
       out.stalled = out.stalled || bucket.stalled;
       for (const item of rankBucket(bucket, topLimit)) {
-        const key = item.kind + ':' + item.name;
+        const key = timelineItemKey(item);
         const weight = item.kind === 'render' ? bucket.renderFrames : bucket.frames;
         const known = weighted.get(key);
         if (known === undefined) {
@@ -1197,7 +1212,7 @@ function summarizeTimeline(
   const names = new Map<string, number>();
   const items: TimelineItemName[] = [];
   const intern = (item: TimelineItem): TimelineTopEntry => {
-    const key = `${item.kind} ${item.name}`;
+    const key = timelineItemKey(item);
     let id = names.get(key);
     if (id === undefined) {
       id = items.length;
@@ -1482,13 +1497,13 @@ export class DebuggerProfiler {
     return (await this.open(seconds, captureLimit, options)).started;
   }
 
-  /** Throws what `start` would refuse; the tools check first because a track_start replaces a running track, and a refused call must not take it down. */
+  /** Throws what `start` would refuse, else returns the settings with defaults applied; the tools check first because a track_start replaces a running track, and a refused call must not take it down. */
   assertCanStart(
     seconds: number,
     captureLimit: number,
     options: CaptureOptions = {},
     maxSeconds: number = PROFILE_MAX_SECONDS,
-  ): void {
+  ): CaptureSettings {
     const timelineMs = options.timelineMs ?? null;
     const targetFps = options.targetFps ?? DEFAULT_TARGET_FPS;
     if (!Number.isFinite(seconds) || seconds <= PROFILE_SECONDS_FLOOR || seconds > maxSeconds) {
@@ -1555,6 +1570,7 @@ export class DebuggerProfiler {
       throw new ProfilerError('profile_disconnected', this.error ?? 'Profiler closed');
     }
     this.assertIdle();
+    return { timelineMs, targetFps, timelineBuckets, timelineTop };
   }
 
   private async open(
@@ -1563,9 +1579,13 @@ export class DebuggerProfiler {
     options: CaptureOptions,
     maxSeconds: number = PROFILE_MAX_SECONDS,
   ): Promise<{ started: ProfileStartResult; capture: Capture }> {
-    this.assertCanStart(seconds, captureLimit, options, maxSeconds);
+    const { timelineMs, targetFps, timelineBuckets, timelineTop } = this.assertCanStart(
+      seconds,
+      captureLimit,
+      options,
+      maxSeconds,
+    );
     const visual = options.visual === true;
-    const timelineMs = options.timelineMs ?? null;
 
     await this.wait(
       () => this.threadId !== null,
@@ -1599,9 +1619,10 @@ export class DebuggerProfiler {
       closedBy: null,
       monitors: newMonitorCapture(this.lastCompilations),
       visual: visual ? newVisualCapture() : null,
-      targetFps: options.targetFps ?? DEFAULT_TARGET_FPS,
+      targetFps,
       slowFrames: 0,
       frameCapMs: sanitizeFrameCapMs(options.frameCapMs),
+      frameCapUnknown: options.frameCapMs === null,
       arrivalStalls: 0,
       receiverFault: null,
       timeline:
@@ -1611,8 +1632,8 @@ export class DebuggerProfiler {
               timelineBucketMs(timelineMs, seconds),
               seconds,
               options.track ?? [],
-              options.timelineTop ?? TIMELINE_TOP_DEFAULT,
-              options.timelineBuckets ?? TIMELINE_BUCKETS_DEFAULT,
+              timelineTop,
+              timelineBuckets,
             ),
     };
     const capture = this.capture;
@@ -2085,8 +2106,11 @@ export class DebuggerProfiler {
 
     const warnings: string[] = [];
     if (capture.arrivalStalls > 0) {
+      const capCaveat = capture.frameCapUnknown
+        ? " The game's frame cap could not be read, so these gaps were judged as if it were uncapped: on a capped game (vsync, Engine.max_fps) some of them may be the engine's own sleep."
+        : '';
       warnings.push(
-        `This server's event loop was busy while ${capture.arrivalStalls} frame packet(s) waited, so the timeline intervals covering that time report fps: null and may hold no frames; the game was not measured as slow there.`,
+        `This server's event loop was busy while ${capture.arrivalStalls} frame packet(s) waited, so the timeline intervals covering that time report fps: null and may hold no frames; the game was not measured as slow there.${capCaveat}`,
       );
     }
     if (capture.closedBy === 'timeout') {

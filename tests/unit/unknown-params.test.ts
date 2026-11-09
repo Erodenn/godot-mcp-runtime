@@ -29,6 +29,13 @@ describe('unknownParameterError', () => {
     );
   });
 
+  it('names every unknown key in one refusal, with the key each one meant', () => {
+    const error = unknownParameterError({ patern: 'x', zzz: 1, projectPath: 'p' }, ALLOWED);
+    expect(errorText(error)).toContain('Unknown parameters "patern", "zzz" (allowed:');
+    expect(errorText(error)).toContain('did you mean "pattern" for "patern"?');
+    expect(error?.content[1]?.text).toContain('Check the spelling of "zzz"');
+  });
+
   it('prefers a tool alias over edit distance', () => {
     const error = unknownParameterError({ query: 'x' }, ALLOWED, { aliases: { query: 'pattern' } });
     expect(errorText(error)).toContain('did you mean "pattern"');
