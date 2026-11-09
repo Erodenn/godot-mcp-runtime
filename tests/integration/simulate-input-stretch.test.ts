@@ -1,5 +1,4 @@
 // Positioned injection under `canvas_items` stretch with a window size different from the viewport (issue #76).
-// Every assertion about where an event landed reads the running game, never the request echoed back.
 // `hit`-dependent assertions branch on the engine hovered-control probe, as simulate-input-observed does.
 
 import { describe, beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
