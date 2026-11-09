@@ -95,7 +95,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      "Set node properties in a scene in one Godot process. Always-array: pass one update for a one-off edit. Each value is checked against the property's declared type and errors instead of storing a zero value (rules: Property Values in docs/tools.md). Saves once at the end. Returns: results[], one entry per update in input order, each with success, error or skipped (abortOnError); warnings leads when a value was set but is not saved. Errors while a runtime session is live on this project.",
+      "Set node properties in a scene in one Godot process. Always-array: one update for a one-off edit. Each value is checked against the property's declared type, never stored as a zero (Property Values in docs/tools.md). A Dictionary or Array value replaces the stored one whole; send every key. Saves once. Returns: results[], one per update in input order, each with success, error or skipped; warnings leads when a value is set but not saved. Errors while a runtime session is live.",
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',

@@ -3182,6 +3182,31 @@ func _engine_minor_at_least(minor: int) -> bool:
 	var version := Engine.get_version_info()
 	return int(version.major) > _ENGINE_MAJOR or (int(version.major) == _ENGINE_MAJOR and int(version.minor) >= minor)
 
+# The parsed JSON carries every number as a float. Where no declared type decides (an untyped Dictionary or Array, a Variant or metadata value, a Variant element of a typed container) a whole number becomes an int, unless the value already stored at that key or index is a float, which stays a float. A fractional number is left as it is.
+func _json_numbers_to_ints(value: Variant, existing: Variant) -> Variant:
+	match typeof(value):
+		TYPE_FLOAT:
+			if typeof(existing) == TYPE_FLOAT or _json_int_problem(value) != "":
+				return value
+			return int(value)
+		TYPE_DICTIONARY:
+			var out_dict: Dictionary = {}
+			for key: Variant in value:
+				var held: Variant = null
+				if typeof(existing) == TYPE_DICTIONARY and existing.has(key):
+					held = existing[key]
+				out_dict[key] = _json_numbers_to_ints(value[key], held)
+			return out_dict
+		TYPE_ARRAY:
+			var out_array: Array = []
+			for i: int in range(value.size()):
+				var held_element: Variant = null
+				if typeof(existing) == TYPE_ARRAY and i < existing.size():
+					held_element = existing[i]
+				out_array.append(_json_numbers_to_ints(value[i], held_element))
+			return out_array
+	return value
+
 func _typed_dictionary_error(message: String) -> Dictionary:
 	return {"ok": false, "value": null, "error": message, "typed": false}
 
@@ -3231,7 +3256,9 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 			if not packed_prep.ok:
 				return _typed_dictionary_error(packed_prep.error)
 			element = type_convert(packed_prep.value, value_type)
-		elif value_type != TYPE_NIL:
+		elif value_type == TYPE_NIL:
+			element = _json_numbers_to_ints(element, current[key] if current.has(key) else null)
+		else:
 			element = _unwrap_text_literal(_coerce_property_value(element), value_type)
 			if value_type in _INT_VECTOR_TYPES and typeof(raw[raw_key]) == TYPE_DICTIONARY:
 				var int_vector: Dictionary = _int_vector_from_json(value_type, raw[raw_key])
@@ -3286,6 +3313,7 @@ func _prepare_property_value(node: Object, property: String, raw_value: Variant)
 		}
 
 	coerced = _unwrap_text_literal(coerced, declared)
+	var built_container := false
 
 	# Built from the JSON numbers themselves, not the float vector coerced above (_int_vector_from_json).
 	if declared in _INT_VECTOR_TYPES and typeof(raw_value) == TYPE_DICTIONARY:
@@ -3305,6 +3333,7 @@ func _prepare_property_value(node: Object, property: String, raw_value: Variant)
 		if not element_prep.ok:
 			return {"ok": false, "value": null, "error": element_prep.error}
 		coerced = element_prep.value
+		built_container = true
 
 	# A script-declared Array[T] has plain TYPE_ARRAY as its declared type, so the element type is recovered from the value or descriptor. set() refuses an untyped Array (an empty one too) and reports nothing, so a typed one is built; an element type with no _ELEMENT_TYPE_COMPAT row (Object types such as Array[Texture2D] included) is rejected, never passed through.
 	# With no elements to convert, [] can still be emptied from the typed array the property holds.
@@ -3317,8 +3346,10 @@ func _prepare_property_value(node: Object, property: String, raw_value: Variant)
 				if not typed_prep.ok:
 					return {"ok": false, "value": null, "error": typed_prep.error}
 				coerced = typed_prep.value
+				built_container = true
 			elif emptied != null:
 				coerced = emptied
+				built_container = true
 			else:
 				return {
 					"ok": false,
@@ -3334,6 +3365,12 @@ func _prepare_property_value(node: Object, property: String, raw_value: Variant)
 			return {"ok": false, "value": null, "error": dict_prep.error}
 		if dict_prep.typed:
 			coerced = dict_prep.value
+			built_container = true
+
+	# No declared type decides these numbers (untyped container, Variant, metadata): the value already stored settles int against float.
+	if not built_container and (declared == TYPE_NIL or declared == TYPE_DICTIONARY or declared == TYPE_ARRAY) and typeof(coerced) in [TYPE_FLOAT, TYPE_DICTIONARY, TYPE_ARRAY]:
+		var stored: Variant = node.get_meta(property.substr(_METADATA_PREFIX.length()), null) if is_metadata else node.get(property)
+		coerced = _json_numbers_to_ints(coerced, stored)
 
 	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
 		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
