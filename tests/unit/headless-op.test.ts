@@ -1759,6 +1759,59 @@ describe('executeSceneOp scene loss guard: what it is told and what it says', ()
     expect(again.warnings).toHaveLength(1);
   });
 
+  describe('every backup of a damaged .tscn is named', () => {
+    const DAMAGED = Buffer.from([0xff, 0xfe, 0x00, 0x5b, 0x6e, 0x6f, 0x64, 0x65, 0x80, 0x0d, 0x0a]);
+    const BACKUP_PATH_PATTERN = /scene-backups\/[^/]+\/(\S+\.tscn)\./;
+
+    async function warningsOf(
+      fake: ReturnType<typeof writingRunner>,
+      projectPath: string,
+      scene: string,
+    ): Promise<string[]> {
+      const payload = unwrap(await guarded(fake, projectPath, inPlaceSceneWrite(scene)))
+        .structuredContent as { warnings?: string[] };
+      return payload.warnings ?? [];
+    }
+
+    it('names the new backup path on a later save of a file already noted this session', async () => {
+      const projectPath = tmp.makeProject('loss-guard-');
+      writeFileSync(join(projectPath, 'level.tscn'), DAMAGED);
+      const runner = writingRunner(projectPath, [
+        { 'level.tscn': SCRIPTED },
+        { 'level.tscn': SCRIPTED },
+      ]);
+      const firstWarnings = await warningsOf(runner, projectPath, 'level.tscn');
+      expect(firstWarnings).toHaveLength(1);
+
+      // The same file is damaged again; the same runner has already given the once-per-file notice.
+      writeFileSync(join(projectPath, 'level.tscn'), DAMAGED);
+      const secondWarnings = await warningsOf(runner, projectPath, 'level.tscn');
+
+      // Red when a noted file's later backup is dropped with its notice: no warning, so this length is 0.
+      expect(secondWarnings).toHaveLength(1);
+      const path = (text: string): string | undefined => BACKUP_PATH_PATTERN.exec(text)?.[0];
+      expect(path(secondWarnings[0]!)).toBeDefined();
+      expect(path(secondWarnings[0]!)).not.toBe(path(firstWarnings[0]!));
+      const runDirs = readdirSync(sceneBackupsDir(projectPath));
+      expect(runDirs).toHaveLength(2);
+    });
+
+    it('names every backup of a save that backs up two damaged scenes', async () => {
+      const projectPath = tmp.makeProject('loss-guard-');
+      for (const name of ['a.tscn', 'b.tscn']) writeFileSync(join(projectPath, name), DAMAGED);
+      const fake = writingRunner(projectPath, [{ 'a.tscn': SCRIPTED, 'b.tscn': SCRIPTED }]);
+      const payload = unwrap(
+        await guarded(fake, projectPath, [
+          ...inPlaceSceneWrite('a.tscn'),
+          ...inPlaceSceneWrite('b.tscn'),
+        ]),
+      ).structuredContent as { warnings?: string[] };
+      const warnings = payload.warnings ?? [];
+      expect(warnings.some((w) => w.includes('/a.tscn.'))).toBe(true);
+      expect(warnings.some((w) => w.includes('/b.tscn.'))).toBe(true);
+    });
+  });
+
   it('takes a deleted %Name from the path the operation reports, not from every node of that name', async () => {
     // Two nodes are called Enemy and neither stores the unique flag (it lives in the instanced scene); the save also lost Reserve/Enemy.
     const before = [

@@ -1041,7 +1041,11 @@ export interface SceneGuard {
 
 export interface UncheckedSave {
   fileKey: string;
+  relPath: string;
+  /** The once-per-file sentence: the file was saved without a comparison, and why. */
   warning: string;
+  /** Where this save's copy of the pre-save file went; null when none was made. Differs on every save, so the caller reports it every time. */
+  backup: string | null;
 }
 
 export interface SceneGuardOutcome {
@@ -1172,19 +1176,20 @@ export function finishSceneGuard(guard: SceneGuard, stderr: string): SceneGuardO
           !isSaveAs &&
           isTextScenePath(target.relPath) &&
           target.before !== null;
-        let backupNote = '';
+        let backup: string | null = null;
         if (keepsBefore) {
-          let location = backups.get(write.targetKey);
-          if (location === undefined) {
-            location = writeBackup(guard, target.relPath, target.before!);
-            backups.set(write.targetKey, location);
+          backup = backups.get(write.targetKey) ?? null;
+          if (backup === null) {
+            backup = writeBackup(guard, target.relPath, target.before!);
+            backups.set(write.targetKey, backup);
           }
-          backupNote = ` The file as it was before the save: ${location}.`;
         }
         if (!outcome.unchecked.some((entry) => entry.fileKey === target.key)) {
           outcome.unchecked.push({
             fileKey: target.key,
-            warning: `Saved ${target.relPath}, but the save was not checked for lost content: ${comparison.notChecked}.${backupNote}`,
+            relPath: target.relPath,
+            warning: `Saved ${target.relPath}, but the save was not checked for lost content: ${comparison.notChecked}.`,
+            backup,
           });
         }
         continue;

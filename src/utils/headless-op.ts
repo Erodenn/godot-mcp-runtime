@@ -236,16 +236,22 @@ const engineNewerNoted = new WeakMap<GodotRunner, Set<string>>();
 /** Scene files each runner has said were saved unchecked, once per file per session: a binary `.scn` cannot be compared on any save and would otherwise lead every payload. */
 const uncheckedSaveNoted = new WeakMap<GodotRunner, Set<string>>();
 
-/** The unchecked-save notices this session has not given yet, each marked as said once. */
+/** The unchecked-save notices to give: the explanation once per file per session, but every backup path every time, since each save writes a copy under a new run id and the path is the only way to it. */
 function newUncheckedSaveWarnings(runner: GodotRunner, unchecked: UncheckedSave[]): string[] {
   if (unchecked.length === 0) return [];
   const noted = uncheckedSaveNoted.get(runner) ?? new Set<string>();
   uncheckedSaveNoted.set(runner, noted);
   const warnings: string[] = [];
-  for (const { fileKey, warning } of unchecked) {
-    if (noted.has(fileKey)) continue;
+  for (const { fileKey, relPath, warning, backup } of unchecked) {
+    const backupNote = backup === null ? '' : ` The file as it was before the save: ${backup}.`;
+    if (noted.has(fileKey)) {
+      if (backup !== null) {
+        warnings.push(`Saved ${relPath} again without a check for lost content.${backupNote}`);
+      }
+      continue;
+    }
     noted.add(fileKey);
-    warnings.push(`${warning} Said once per file in this server session.`);
+    warnings.push(`${warning}${backupNote} Said once per file in this server session.`);
   }
   return warnings;
 }
