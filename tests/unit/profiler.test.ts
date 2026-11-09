@@ -1610,7 +1610,7 @@ describe('DebuggerProfiler timeline', () => {
 
     // Frames of 2 ms of work, one packet per cap interval: the engine sleeps after reporting its frame time.
     async function cappedTimeline(
-      frameCapMs: number | undefined,
+      frameCapMs: number | null | undefined,
       stallBeforeFrame: number | null,
     ): Promise<Awaited<ReturnType<DebuggerProfiler['stop']>>> {
       vi.useFakeTimers({ toFake: ['Date'] });
@@ -1646,11 +1646,19 @@ describe('DebuggerProfiler timeline', () => {
       expect(result.warnings![0]).toMatch(/event loop/);
     });
 
-    it('keeps the old reading when no cap is known: an uncapped game is judged as before', async () => {
+    it('judges a game without a cap as uncapped, with no cap caveat', async () => {
       const result = await cappedTimeline(undefined, null);
 
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings![0]).toMatch(/event loop/);
+      expect(result.warnings![0]).not.toMatch(/frame cap/);
+    });
+
+    it('says the cap could not be read when a capped game is judged as uncapped', async () => {
+      const result = await cappedTimeline(null, null);
+
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings![0]).toMatch(/event loop.*frame cap could not be read/);
     });
 
     it('ignores a cap that is not a finite figure inside the bound', () => {

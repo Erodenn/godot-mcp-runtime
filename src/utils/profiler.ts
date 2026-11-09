@@ -209,8 +209,8 @@ export interface CaptureOptions {
   /** Most intervals the timeline reply holds, TIMELINE_BUCKETS_MIN..MAX_TIMELINE_BUCKETS (default TIMELINE_BUCKETS_DEFAULT); a longer recording merges adjacent intervals. */
   timelineBuckets?: number;
   targetFps?: number;
-  /** Longest the engine sleeps on purpose after a frame (`Engine.max_fps`, vsync, `frame_delay_msec`, low-processor mode), read from the game; its frame times exclude it. Absent or 0 means uncapped or unknown. */
-  frameCapMs?: number;
+  /** Longest the engine sleeps on purpose after a frame (`Engine.max_fps`, vsync, `frame_delay_msec`, low-processor mode), read from the game; its frame times exclude it. Absent or 0 means uncapped; null means the read failed, judged as uncapped and named in the stall warning. */
+  frameCapMs?: number | null;
   /** NodePath:property specs the bridge samples; they reach the capture through the `TrackCollector` given to stop, never through this receiver. */
   track?: string[];
 }
@@ -420,6 +420,8 @@ interface Capture {
   slowFrames: number;
   /** The engine's on-purpose sleep per frame in ms (0 when uncapped or unknown); added to each frame's own time when judging an arrival gap. */
   frameCapMs: number;
+  /** The game's frame cap could not be read, so arrival gaps were judged as if it were uncapped. */
+  frameCapUnknown: boolean;
   timeline: TimelineCapture | null;
   /** Frames that arrived later than the engine's frame times account for; see `UNACCOUNTED_ARRIVAL_GAP_MS`. */
   arrivalStalls: number;
@@ -1607,6 +1609,7 @@ export class DebuggerProfiler {
       targetFps: options.targetFps ?? DEFAULT_TARGET_FPS,
       slowFrames: 0,
       frameCapMs: sanitizeFrameCapMs(options.frameCapMs),
+      frameCapUnknown: options.frameCapMs === null,
       arrivalStalls: 0,
       receiverFault: null,
       timeline:
@@ -2090,8 +2093,11 @@ export class DebuggerProfiler {
 
     const warnings: string[] = [];
     if (capture.arrivalStalls > 0) {
+      const capCaveat = capture.frameCapUnknown
+        ? " The game's frame cap could not be read, so these gaps were judged as if it were uncapped: on a capped game (vsync, Engine.max_fps) some of them may be the engine's own sleep."
+        : '';
       warnings.push(
-        `This server's event loop was busy while ${capture.arrivalStalls} frame packet(s) waited, so the timeline intervals covering that time report fps: null and may hold no frames; the game was not measured as slow there.`,
+        `This server's event loop was busy while ${capture.arrivalStalls} frame packet(s) waited, so the timeline intervals covering that time report fps: null and may hold no frames; the game was not measured as slow there.${capCaveat}`,
       );
     }
     if (capture.closedBy === 'timeout') {
