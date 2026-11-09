@@ -21,6 +21,8 @@ export const inputProbeScenePath = 'input_probe.tscn';
 
 export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePath);
 
+export const inputOcclusionScenePath = 'input_probe_occlusion.tscn';
+
 export const blankScenePath = 'blank.tscn';
 
 export const blankSceneAbsPath = join(fixtureProjectPath, blankScenePath);

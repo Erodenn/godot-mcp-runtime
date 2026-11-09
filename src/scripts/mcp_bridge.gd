@@ -150,6 +150,8 @@ const HELD_KIND_ACTION := "action"
 const HELD_FIELD_KIND := "kind"
 const HELD_FIELD_CODE := "code"
 
+# Bound on re-reading a click target whose rect moves between passes (a layout refresh still settling).
+const CLICK_PREFLIGHT_MAX_PASSES := 4
 const INPUT_ACTION_TYPES := ["key", "mouse_button", "mouse_motion", "click_element", "action", "text", "wait"]
 
 # A Callable connected to a signal must accept at least as many arguments as it emits, so each gets a lambda of matching arity. text_changed is absent on purpose: it fires per character and says nothing about activation.
@@ -705,6 +707,15 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 			entry["error"] = "UI element '%s' is not visible" % identifier
 		elif target is BaseButton and (target as BaseButton).disabled:
 			entry["error"] = "UI element '%s' is disabled" % identifier
+		else:
+			# Before any press: a click that would land on another control is refused here, so a failure never hides a side effect.
+			var refusal := await _preflight_click(target)
+			if refusal != "":
+				entry["error"] = refusal
+				if is_instance_valid(target):
+					var occluder: Variant = _hit_control()
+					if occluder != null and not (target == occluder or target.is_ancestor_of(occluder)):
+						entry["hit"] = str((occluder as Control).get_path())
 	elif type == "text":
 		if _focus_owner() == null:
 			entry["error"] = "no Control holds focus; focus a LineEdit or TextEdit first"
@@ -938,6 +949,38 @@ func _resolve_button_name(button_name: String) -> Array:
 			return [MOUSE_BUTTON_MIDDLE, ""]
 		_:
 			return [MOUSE_BUTTON_NONE, "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name]
+
+# Resolves which control would receive the click before anything is pressed. A mouse motion to the target centre makes the viewport resolve hover on the next frame; the centre is re-read each pass because a layout refresh (a container re-sort after the previous action) can move the target after the last read. Returns "" when the click may go ahead, otherwise the error text. Without the hovered-control API there is nothing to ask, so it returns "" and the post-click verdict stays the only check.
+func _preflight_click(target: Control) -> String:
+	if not _has_hover_api():
+		return ""
+	var settled := false
+	for _pass: int in CLICK_PREFLIGHT_MAX_PASSES:
+		if not is_instance_valid(target) or not target.is_visible_in_tree():
+			return "UI element is no longer visible"
+		var center := target.get_global_rect().get_center()
+		_inject_motion_at(center)
+		await get_tree().process_frame
+		if not is_instance_valid(target) or not target.is_visible_in_tree():
+			return "UI element is no longer visible"
+		if target.get_global_rect().get_center().is_equal_approx(center):
+			settled = true
+			break
+	if not settled:
+		return "UI element '%s' kept moving (layout did not settle), so no click was sent" % str(target.get_path())
+	var hit: Variant = _hit_control()
+	if hit == null:
+		return "no UI element would receive the click at the center of '%s' (a mouse_filter of ignore, or a point outside the window); nothing was pressed" % str(target.get_path())
+	var hit_control: Control = hit
+	if target == hit_control or target.is_ancestor_of(hit_control):
+		return ""
+	return "occluded by %s; nothing was pressed" % str(hit_control.get_path())
+
+func _inject_motion_at(viewport_pos: Vector2) -> void:
+	var event := InputEventMouseMotion.new()
+	event.position = _viewport_to_window(viewport_pos)
+	event.global_position = event.position
+	Input.parse_input_event(event)
 
 # Input.parse_input_event takes window pixels, and a content-scale stretch makes those differ from viewport pixels. The documented contract is viewport pixels, so every positioned injection converts here, once; the transform is identity without a stretch.
 func _viewport_to_window(pos: Vector2) -> Vector2:
