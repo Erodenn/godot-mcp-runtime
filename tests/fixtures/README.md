@@ -32,6 +32,7 @@ Contents and what each file is for:
 - `unbind_host.tscn`, `unbind_host.gd`: a `Toggle` `CheckButton` whose `toggled` signal is connected to a root method that takes no argument, with `unbinds=1`. For the `duplicate_node` test that the copy's connection keeps its unbound argument count
 - `notes.txt`: a plain text file under `res://`, not an importable resource
 - `item_stats.gd`, `item_stats.gd.uid`, `sword.tres`: a `class_name ItemStats` resource script with typed exports (`String`, `int`, `float`, `Color`, `Shape2D`), and a resource of it with a header uid, a script uid on the ext_resource, several values and a `RectangleShape2D` sub-resource. For the `create_resource` and `set_resource_properties` tests: an edit of one value has to leave the rest in the saved text
+- `title_table.gd`, `title_table.gd.uid`, `bare_titles.tres`, `title_host.gd`, `title_host.tscn`: a `class_name TitleTable` resource with a `StringName` and a `Dictionary[StringName, PackedStringArray]` export (needs Godot 4.4+), a hand-written resource of it whose script `ext_resource` and header carry no uid although `title_table.gd.uid` records one, and a node scene with the same dictionary export. For the typed-dictionary, `&"x"` spelling and uid-layout tests of the resource tools
 
 ## `godot-stretch-project/`
 

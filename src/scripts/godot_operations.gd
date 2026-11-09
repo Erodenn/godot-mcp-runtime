@@ -586,7 +586,7 @@ func _header_attr(line: String, attr: String) -> String:
 
 # Reads the header text, not ResourceLoader.get_resource_uid, which answers -1 on 4.6 in a project with no uid cache.
 func _read_scene_uids(full_path: String) -> Dictionary:
-	var found := {"scene": "", "ext": {}}
+	var found := {"scene": "", "ext": {}, "bare": []}
 	if not _has_text_uid_header(full_path) or not FileAccess.file_exists(full_path):
 		return found
 	for raw_line: String in FileAccess.get_file_as_string(full_path).split("\n"):
@@ -598,6 +598,8 @@ func _read_scene_uids(full_path: String) -> Dictionary:
 			var path := _header_attr(line, _PATH_ATTR)
 			if uid != "" and path != "" and not path.contains("\\"):
 				found.ext[path] = uid
+			elif uid == "" and path != "" and not path.contains("\\"):
+				found.bare.append(path)
 		elif _starts_scene_body(line):
 			break
 	return found
@@ -656,8 +658,8 @@ func _replace_file_text(full_path: String, text: String) -> bool:
 	return false
 
 # ResourceSaver.save outside the editor writes neither the scene's own uid nor any ext_resource uid (the id lookup is an editor callback); both are put back here.
-# A reference takes the uid the old text gave its path, else the one the project records; a file with no recorded uid stays path-only.
-func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Dictionary) -> bool:
+# A reference takes the uid the old text gave its path, else the one the project records; a file with no recorded uid stays path-only. A path the old text listed WITHOUT a uid (bare_paths) stays without one: the file did not have it, so adding it is churn.
+func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Dictionary, bare_paths: Array = []) -> bool:
 	if not _has_text_uid_header(full_path):
 		return true
 	if scene_uid != "":
@@ -682,7 +684,7 @@ func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Diction
 		if path == "" or at == -1 or path.contains("\\"):
 			continue
 		var uid_text: String = str(ext_uids.get(path, ""))
-		if uid_text == "":
+		if uid_text == "" and not (path in bare_paths):
 			uid_text = _recorded_uid_text(path)
 		if uid_text == "":
 			continue
@@ -924,7 +926,7 @@ func _save_resource_to_path(res: Resource, full_path: String) -> bool:
 		return false
 	if is_new_file:
 		_forget_scene_file_keys()
-	var uids_restored := _restore_scene_uids(full_path, str(uids.scene), uids.ext)
+	var uids_restored := _restore_scene_uids(full_path, str(uids.scene), uids.ext, uids.bare)
 	if not FileAccess.file_exists(full_path):
 		log_error("Resource was written, but the file is gone after its uid rewrite failed: " + full_path)
 		return false
@@ -2614,6 +2616,26 @@ func _coerce_property_value(value: Variant) -> Variant:
 			return Color(value.r, value.g, value.b, value.a)
 	return value
 
+# A .tres file spells a StringName &"x" and a NodePath ^"x"; the value the property holds is x. Only a whole-string match on the declared type's own spelling with no quote inside is stripped, so any other string is stored as written.
+const _STRING_NAME_LITERAL_PREFIX := "&\""
+const _NODE_PATH_LITERAL_PREFIX := "^\""
+const _TEXT_LITERAL_CLOSE := "\""
+func _unwrap_text_literal(value: Variant, target_type: int) -> Variant:
+	if typeof(value) != TYPE_STRING:
+		return value
+	var prefix := ""
+	if target_type == TYPE_STRING_NAME:
+		prefix = _STRING_NAME_LITERAL_PREFIX
+	elif target_type == TYPE_NODE_PATH:
+		prefix = _NODE_PATH_LITERAL_PREFIX
+	var text: String = value
+	if prefix == "" or text.length() <= prefix.length() or not text.begins_with(prefix) or not text.ends_with(_TEXT_LITERAL_CLOSE):
+		return value
+	var inner := text.substr(prefix.length(), text.length() - prefix.length() - 1)
+	if inner.contains(_TEXT_LITERAL_CLOSE):
+		return value
+	return inner
+
 # Any element that is not, and cannot be coerced into, the packed element type fails the whole assignment: node.set() would store the zero value for every element and report success.
 # The accepted set comes from _PACKED_ARRAY_ELEMENT_TYPE plus _ELEMENT_TYPE_COMPAT and fails CLOSED on a missing row; accepting it would reinstate the silent zero-write.
 func _prepare_packed_array_elements(property: String, node_class: String, declared: int, arr: Array) -> Dictionary:
@@ -3074,7 +3096,7 @@ func _prepare_typed_array_elements(property: String, node_class: String, elem_ty
 	var accepted: Array = _ELEMENT_TYPE_COMPAT[elem_type]
 	var out: Array = []
 	for i: int in range(arr.size()):
-		var element: Variant = _coerce_property_value(arr[i])
+		var element: Variant = _unwrap_text_literal(_coerce_property_value(arr[i]), elem_type)
 		if elem_type in _INT_VECTOR_TYPES and typeof(arr[i]) == TYPE_DICTIONARY:
 			var int_vector: Dictionary = _int_vector_from_json(elem_type, arr[i])
 			if int_vector.problem != "":
@@ -3159,7 +3181,8 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 	if not (key_type in _JSON_KEY_TYPES):
 		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': it is a Dictionary keyed by %s, and keys of that type cannot be built from JSON object keys. Assign it with run_script instead." % [
 			property, node_class, type_string(key_type)])
-	if value_type != TYPE_NIL and not _ELEMENT_TYPE_COMPAT.has(value_type):
+	var packed_value: bool = _PACKED_ARRAY_ELEMENT_TYPE.has(value_type)
+	if value_type != TYPE_NIL and not packed_value and not _ELEMENT_TYPE_COMPAT.has(value_type):
 		return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': it is a Dictionary with values of %s, and values of that type cannot be built from JSON. Assign it with run_script instead." % [
 			property, node_class, type_string(value_type)])
 
@@ -3181,10 +3204,19 @@ func _prepare_typed_dictionary(node: Object, property: String, raw: Dictionary) 
 					property, node_class, str(raw_key)])
 			key = float(str(raw_key))
 		elif key_type != TYPE_NIL:
-			key = type_convert(raw_key, key_type)
+			key = type_convert(_unwrap_text_literal(raw_key, key_type), key_type)
 		var element: Variant = raw[raw_key]
-		if value_type != TYPE_NIL:
-			element = _coerce_property_value(element)
+		if packed_value:
+			# JSON sends a plain Array; the packed array's elements go through the same per-element rules as a packed property, labelled with the entry they belong to.
+			if typeof(element) != TYPE_ARRAY:
+				return _typed_dictionary_error("Cannot set property '%s' on node of type '%s': value at key \"%s\" (%s) is not an array, and the value type is %s" % [
+					property, node_class, str(raw_key), str(element), type_string(value_type)])
+			var packed_prep: Dictionary = _prepare_packed_array_elements("%s[\"%s\"]" % [property, str(raw_key)], node_class, value_type, element)
+			if not packed_prep.ok:
+				return _typed_dictionary_error(packed_prep.error)
+			element = type_convert(packed_prep.value, value_type)
+		elif value_type != TYPE_NIL:
+			element = _unwrap_text_literal(_coerce_property_value(element), value_type)
 			if value_type in _INT_VECTOR_TYPES and typeof(raw[raw_key]) == TYPE_DICTIONARY:
 				var int_vector: Dictionary = _int_vector_from_json(value_type, raw[raw_key])
 				if int_vector.problem != "":
@@ -3236,6 +3268,8 @@ func _prepare_property_value(node: Object, property: String, raw_value: Variant)
 			"value": null,
 			"error": "Cannot set property '%s' on node of type '%s': expected %s, got Nil" % [property, node.get_class(), type_string(declared)],
 		}
+
+	coerced = _unwrap_text_literal(coerced, declared)
 
 	# Built from the JSON numbers themselves, not the float vector coerced above (_int_vector_from_json).
 	if declared in _INT_VECTOR_TYPES and typeof(raw_value) == TYPE_DICTIONARY:

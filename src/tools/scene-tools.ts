@@ -448,7 +448,7 @@ export const sceneToolDefinitions = [
   {
     name: 'set_resource_properties',
     description:
-      'Set property values in an existing .tres resource file and save it. Properties not named, sub-resources and uids stay as the file has them. Values are checked against declared types as in set_node_properties (Property Values in docs/tools.md); one invalid name or value errors and writes nothing. Returns: resourcePath, resourceType, scriptPath and the named properties read back from the saved file. Errors while a runtime session is live on this project.',
+      'Set property values in an existing .tres resource file and save it. Properties not named, sub-resources and uids stay as the file has them. Values are checked against declared types as in set_node_properties (Property Values in docs/tools.md); one invalid name or value errors and writes nothing. Returns: resourcePath, resourceType, scriptPath and the named properties read back from the saved file. The engine rewrites the file in its own layout. Errors while a runtime session is live.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
