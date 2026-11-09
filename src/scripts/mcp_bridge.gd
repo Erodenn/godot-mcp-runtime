@@ -116,6 +116,8 @@ const MAX_RESULT_STRING_CHARS := 1048576
 const MAX_SAMPLE_DEPTH := 4
 const MAX_SAMPLE_ELEMENTS := 32
 const MAX_SAMPLE_STRING_CHARS := 128
+# Script variables an Object serializes with, so a RefCounted with a long member list stays one small entry.
+const MAX_OBJECT_PROPERTIES := 8
 # run_script's contract: the source is created with no argument, then execute is called with the SceneTree.
 const RUN_SCRIPT_ENTRY_METHOD := "execute"
 const RUN_SCRIPT_INIT_METHOD := "_init"
@@ -1469,6 +1471,39 @@ func _serialize_packed(packed: Variant, depth: int) -> Variant:
 		result.append(_serialize_bounded(packed[i], depth + 1))
 	return result
 
+# An Object that is neither a Node nor a Resource (a RefCounted holding game state, an inner-class instance) prints only an id through str(), so it goes out as its class, its script and the values of its script variables. The values are bounded like any container's; an Object held by one of them is named by class only, so the walk stays shallow.
+func _serialize_plain_object(object: Object, depth: int) -> Variant:
+	var result := {"class": object.get_class()}
+	var script: Variant = object.get_script()
+	if script == null or not (script is Script):
+		return result
+	var script_resource: Script = script
+	result["script"] = script_resource.resource_path
+	if depth >= _serialize_depth_limit:
+		return result
+	if _on_serialize_path(object):
+		return TRUNCATED_CYCLE_MARKER
+	var props := {}
+	var omitted := 0
+	for property: Dictionary in object.get_property_list():
+		if (int(property["usage"]) & PROPERTY_USAGE_SCRIPT_VARIABLE) == 0:
+			continue
+		if props.size() >= MAX_OBJECT_PROPERTIES:
+			omitted += 1
+			continue
+		var held: Variant = object.get(String(property["name"]))
+		if typeof(held) == TYPE_OBJECT and is_instance_valid(held) and not (held is Node) and not (held is Resource):
+			var held_object: Object = held
+			props[String(property["name"])] = {"class": held_object.get_class()}
+		else:
+			props[String(property["name"])] = held
+	if omitted > 0:
+		props[TRUNCATED_ENTRIES_KEY] = TRUNCATED_ENTRIES_MARKER % omitted
+	_serialize_path.append(object)
+	result["props"] = _serialize_bounded(props, depth)
+	_serialize_path.pop_back()
+	return result
+
 # `depth` is how many containers enclose `value`; call through _serialize_value or _serialize_sample, which set the bounds.
 # Value shapes match _variant_to_json in src/scripts/godot_operations.gd (vectors as {x,y,..}, colors as {r,g,b,a}, packed arrays as arrays); only the bounds, the markers and the Object shapes differ.
 func _serialize_bounded(value: Variant, depth: int) -> Variant:
@@ -1549,7 +1584,7 @@ func _serialize_bounded(value: Variant, depth: int) -> Variant:
 				var res: Resource = value
 				return {"class": res.get_class(), "path": res.resource_path}
 			else:
-				return _bound_text(str(value))
+				return _serialize_plain_object(value, depth)
 		_:
 			if typeof(value) in _PACKED_READ_TYPES:
 				return _serialize_packed(value, depth)

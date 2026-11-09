@@ -101,6 +101,28 @@ const FREED_NODE_SCRIPT = [
   '',
 ].join('\n');
 
+/** More script variables than the bridge keeps (MAX_OBJECT_PROPERTIES), one of them an Object that must stay shallow, one that holds the Object itself. */
+const PLAIN_OBJECT_SCRIPT = [
+  'extends RefCounted',
+  'class Inner:',
+  '\textends RefCounted',
+  '\tvar hp := 7',
+  '\tvar label := "scout"',
+  '\tvar friend: RefCounted = null',
+  '\tvar a := 1',
+  '\tvar b := 2',
+  '\tvar c := 3',
+  '\tvar d := 4',
+  '\tvar e := 5',
+  '\tvar f := 6',
+  '\tvar g := 7',
+  'func execute(scene_tree: SceneTree) -> Variant:',
+  '\tvar inner := Inner.new()',
+  '\tinner.friend = RefCounted.new()',
+  '\treturn {"scripted": inner, "bare": RefCounted.new()}',
+  '',
+].join('\n');
+
 describe('bridge serialization bounds and the parent watch', () => {
   let runner: GodotRunner;
   let tmpProject: string | null = null;
@@ -296,6 +318,36 @@ describe('bridge serialization bounds and the parent watch', () => {
       const payload = payloadOf(result);
       expect(payload.result).toBe('<Freed Object>');
       expect(JSON.stringify(payload.warnings ?? [])).not.toContain('SCRIPT ERROR');
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  // Red when the TYPE_OBJECT branch of _serialize_bounded goes back to str(value): the result is then the
+  // text "<RefCounted#-...>" (an object id), with no class or props.
+  itGodot(
+    'serializes a plain Object as its class and script variables, bounded and shallow',
+    async (ctx) => {
+      await runProjectOrSkip(runner, ctx, copyFixture('plainobject'), { waitMs: BRIDGE_WAIT_MS });
+
+      const result = await handleRunScript(runner, {
+        script: PLAIN_OBJECT_SCRIPT,
+        timeout: SCRIPT_TIMEOUT_MS,
+      });
+
+      expect(hasError(result)).toBe(false);
+      const value = payloadOf(result).result as {
+        scripted: { class: string; props: Record<string, unknown> };
+        bare: Record<string, unknown>;
+      };
+      expect(value.bare).toEqual({ class: 'RefCounted' });
+      expect(value.scripted.class).toBe('RefCounted');
+      const props = value.scripted.props;
+      expect(props.hp).toBe(7);
+      expect(props.label).toBe('scout');
+      expect(props.friend).toEqual({ class: 'RefCounted' });
+      // Eight variables are kept; the other two are counted, not listed.
+      expect(Object.keys(props).filter((key) => key !== '<truncated>')).toHaveLength(8);
+      expect(props['<truncated>']).toBe('2 more entries');
     },
     CASE_TIMEOUT_MS,
   );
