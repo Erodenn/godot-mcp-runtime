@@ -1,5 +1,5 @@
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { cpSync } from 'fs';
+import { cpSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -63,8 +63,20 @@ const OVERSIZE_RESULT_SCRIPT = [
   '',
 ].join('\n');
 
-/** The bridge's MAX_RESULT_ELEMENTS: a run_script result serializes this many container elements before it is cut. */
-const RESULT_ELEMENT_BUDGET = 50000;
+const bridgeSource = readFileSync(
+  new URL('../../src/scripts/mcp_bridge.gd', import.meta.url),
+  'utf8',
+);
+
+function bridgeIntConst(name: string): number {
+  const match = new RegExp(`^const ${name} := (\\d+)$`, 'm').exec(bridgeSource);
+  if (!match) throw new Error(`mcp_bridge.gd declares no integer const ${name}`);
+  return Number(match[1]);
+}
+
+/** A run_script result serializes this many container elements before it is cut. */
+const RESULT_ELEMENT_BUDGET = bridgeIntConst('MAX_RESULT_ELEMENTS');
+const OBJECT_PROPERTY_CAP = bridgeIntConst('MAX_OBJECT_PROPERTIES');
 /** A bridge command that answers at all answers well inside this. */
 const WRONG_TYPE_REPLY_TIMEOUT_MS = 5000;
 
@@ -101,6 +113,8 @@ const FREED_NODE_SCRIPT = [
   '',
 ].join('\n');
 
+/** The variables Inner declares in PLAIN_OBJECT_SCRIPT. */
+const INNER_VARIABLE_COUNT = 10;
 /** More script variables than the bridge keeps (MAX_OBJECT_PROPERTIES), one of them an Object that must stay shallow, one that holds the Object itself. */
 const PLAIN_OBJECT_SCRIPT = [
   'extends RefCounted',
@@ -345,9 +359,12 @@ describe('bridge serialization bounds and the parent watch', () => {
       expect(props.hp).toBe(7);
       expect(props.label).toBe('scout');
       expect(props.friend).toEqual({ class: 'RefCounted' });
-      // Eight variables are kept; the other two are counted, not listed.
-      expect(Object.keys(props).filter((key) => key !== '<truncated>')).toHaveLength(8);
-      expect(props['<truncated>']).toBe('2 more entries');
+      expect(Object.keys(props).filter((key) => key !== '<truncated>')).toHaveLength(
+        OBJECT_PROPERTY_CAP,
+      );
+      expect(props['<truncated>']).toBe(
+        `${INNER_VARIABLE_COUNT - OBJECT_PROPERTY_CAP} more entries`,
+      );
     },
     CASE_TIMEOUT_MS,
   );
