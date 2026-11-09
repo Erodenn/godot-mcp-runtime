@@ -156,6 +156,66 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
   );
 
   itGodot(
+    'finds the await past a multi-line literal at column 0 and after an annotation on the func line',
+    async (ctx) => {
+      // Red when the await scan ends the body at a literal's column-0 line: the plain call then raises and no value comes back.
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await runProjectOrSkip(runner, ctx, tmpProject);
+
+      const multiLine =
+        'extends RefCounted\n' +
+        'func execute(scene_tree: SceneTree) -> Variant:\n' +
+        '\tvar text := """\nfirst\n"""\n' +
+        '\tvar list := [\n1,\n]\n' +
+        '\tawait scene_tree.process_frame\n' +
+        '\treturn text.length() + list.size()\n';
+      const fromMultiLine = await handleRunScript(runner, {
+        script: multiLine,
+        timeout: STEP_TIMEOUT_MS,
+      });
+      expect(fromMultiLine.ok, textOf(fromMultiLine)).toBe(true);
+      if (!fromMultiLine.ok) return;
+      expect(fromMultiLine.value.structuredContent?.result).toBe('\nfirst\n'.length + 1);
+
+      const annotated =
+        'extends RefCounted\n' +
+        '@warning_ignore("unused_parameter") func execute(scene_tree: SceneTree) -> Variant:\n' +
+        '\tawait scene_tree.process_frame\n' +
+        '\treturn 5\n';
+      const fromAnnotated = await handleRunScript(runner, {
+        script: annotated,
+        timeout: STEP_TIMEOUT_MS,
+      });
+      expect(fromAnnotated.ok, textOf(fromAnnotated)).toBe(true);
+      if (!fromAnnotated.ok) return;
+      expect(fromAnnotated.value.structuredContent?.result).toBe(5);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'an await only in a string or a comment leaves execute a plain call',
+    async (ctx) => {
+      // Red when a stray match sends a plain execute down the awaiting path, where awaiting a freed Object raises and the call times out.
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      await runProjectOrSkip(runner, ctx, tmpProject);
+
+      const script =
+        'extends RefCounted\n' +
+        'func execute(scene_tree: SceneTree) -> Variant:\n' +
+        '\tvar note := "await" # await\n' +
+        '\tvar node := Node.new()\n' +
+        '\tnode.free()\n' +
+        '\treturn node\n';
+      const started = Date.now();
+      const result = await handleRunScript(runner, { script, timeout: SHORT_TIMEOUT_MS });
+      expect(result.ok, textOf(result)).toBe(true);
+      expect(Date.now() - started).toBeLessThan(SHORT_TIMEOUT_MS);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
     'an execute that never resumes returns a typed timeout and the next call still runs',
     async (ctx) => {
       // Red when the bridge awaits with no bound (a silent hang to the socket timeout) or does not answer before the Node side's timeout.

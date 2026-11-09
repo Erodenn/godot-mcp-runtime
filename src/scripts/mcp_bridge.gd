@@ -132,6 +132,8 @@ const RUN_SCRIPT_TIMED_OUT_FIELD := "timed_out"
 const RUN_SCRIPT_DEFAULT_TIMEOUT_MS := 30000
 # The bridge answers this much before the Node side's timeout (never below half of it), so the typed reply wins the race.
 const RUN_SCRIPT_REPLY_MARGIN_MS := 250
+const RUN_SCRIPT_MIN_BUDGET_FRACTION := 0.5
+const RUN_SCRIPT_UNSEEN_AWAIT_ERROR := "run_script: execute awaits, but the bridge did not find the await in its source, so its result was lost. It is not cancelled and may still resume and change the game. Put the await on a line of its own inside execute."
 const RUN_SCRIPT_TIMED_OUT_ERROR := "run_script timed out: execute was still awaiting after %d ms and has not returned. It is not cancelled and may still resume and change the game; the next call may race with it."
 # Markers around compiling the source, so the Node side keeps a probe's compile errors out of the game's error log.
 # KEEP IN SYNC: COMPILE_BEGIN_SENTINEL and COMPILE_END_SENTINEL in src/utils/bridge-protocol.ts.
@@ -1545,10 +1547,12 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_run_execute.call(instance, outcome)
 	else:
 		# Not a coroutine, so called plainly: awaiting its value would raise on a returned freed Object.
-		outcome["value"] = Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
-		outcome["done"] = true
+		_run_execute_plainly.call(instance, outcome)
+		if not outcome["done"]:
+			_send_response(peer, {"error": RUN_SCRIPT_UNSEEN_AWAIT_ERROR})
+			return
 	if not outcome["done"]:
-		var budget_ms := maxi(timeout_ms - RUN_SCRIPT_REPLY_MARGIN_MS, int(timeout_ms * 0.5))
+		var budget_ms := maxi(timeout_ms - RUN_SCRIPT_REPLY_MARGIN_MS, int(timeout_ms * RUN_SCRIPT_MIN_BUDGET_FRACTION))
 		var deadline_ms := Time.get_ticks_msec() + budget_ms
 		while not outcome["done"] and Time.get_ticks_msec() < deadline_ms:
 			await get_tree().process_frame
@@ -1566,27 +1570,73 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	var serialized: Variant = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
 
-# GDScript makes a function a coroutine exactly when its own body holds an await. The body runs from `func execute` to the next line at column 0 that is not a comment; a comment's text is dropped before the check, and a stray match in a string only sends a plain function down the awaiting path.
+# GDScript makes a function a coroutine exactly when its own body holds an await. The body runs from `func execute` to the next line at column 0, read with strings and comments blanked so a multi-line literal cannot end it early.
 func _execute_body_awaits(source: String) -> bool:
 	var await_word := RegEx.create_from_string("\\bawait\\b")
+	var entry_line := RegEx.create_from_string("^(?:@\\w+(?:\\([^)]*\\))?\\s*)*func\\s+%s\\s*\\(" % RUN_SCRIPT_ENTRY_METHOD)
 	var in_body := false
-	for line: String in source.split("\n"):
-		var trimmed := line.strip_edges()
-		var at_column_zero := line.length() > 0 and line[0] != " " and line[0] != "\t"
-		if at_column_zero and not trimmed.begins_with("#"):
+	for line: String in _blank_literals(source).split("\n"):
+		if line.length() > 0 and line[0] != " " and line[0] != "\t":
 			if in_body:
 				return false
-			in_body = trimmed.begins_with("func %s(" % RUN_SCRIPT_ENTRY_METHOD) or trimmed.begins_with("func %s (" % RUN_SCRIPT_ENTRY_METHOD)
-			if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
-				return true
-			continue
-		if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
+			in_body = entry_line.search(line) != null
+		if in_body and await_word.search(line) != null:
 			return true
 	return false
 
 func _run_execute(instance: Variant, outcome: Dictionary) -> void:
 	outcome["value"] = await Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
 	outcome["done"] = true
+
+# A coroutine called here raises in this frame, not the caller's, so the handler still replies; `done` stays false.
+func _run_execute_plainly(instance: Variant, outcome: Dictionary) -> void:
+	outcome["value"] = Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
+	outcome["done"] = true
+
+# The source with string contents and comments turned into spaces, and every line break inside a string, a bracket or after a backslash joined, so each remaining line is one logical line.
+func _blank_literals(source: String) -> String:
+	var text := source.replace("\r", "")
+	var out := ""
+	var quote := ""
+	var depth := 0
+	var i := 0
+	while i < text.length():
+		var c := text[i]
+		if quote != "":
+			if c == "\\":
+				out += "  "
+				i += 2
+			elif text.substr(i, quote.length()) == quote:
+				out += " ".repeat(quote.length())
+				i += quote.length()
+				quote = ""
+			else:
+				out += " "
+				i += 1
+			continue
+		if c == "#":
+			var line_end := text.find("\n", i)
+			if line_end == -1:
+				line_end = text.length()
+			out += " ".repeat(line_end - i)
+			i = line_end
+			continue
+		if c == "\"" or c == "'":
+			quote = c.repeat(3) if text.substr(i, 3) == c.repeat(3) else c
+			out += " ".repeat(quote.length())
+			i += quote.length()
+			continue
+		if c == "\\" and text.substr(i + 1, 1) == "\n":
+			out += "  "
+			i += 2
+			continue
+		if c == "(" or c == "[" or c == "{":
+			depth += 1
+		elif (c == ")" or c == "]" or c == "}") and depth > 0:
+			depth -= 1
+		out += " " if c == "\n" and depth > 0 else c
+		i += 1
+	return out
 
 # The list runs from the script to its base scripts, so the first match is the one a call reaches.
 func _script_method_info(script: Script, method_name: String) -> Dictionary:
