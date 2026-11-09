@@ -2069,10 +2069,8 @@ func _apply_move(scene_root: Node, base_root: Node, move: Variant, move_index: i
 		_claim_for_serialization(scene_root, new_parent)
 	if has_index:
 		var target_index: int = children_after - 1 if requested_index == _MOVE_LAST_INDEX else requested_index
-		# move_child counts internal children too; the engine's own front-internal nodes sit before the first child a scene file holds.
-		var scene_children: Array = new_parent.get_children()
-		var front_internal: int = new_parent.get_children(true).find(scene_children[0])
-		new_parent.move_child(node, front_internal + target_index)
+		# move_child on a non-internal child already offsets past front-internal children (a TabContainer's TabBar).
+		new_parent.move_child(node, target_index)
 
 	var new_index: int = new_parent.get_children().find(node)
 	entry["success"] = true

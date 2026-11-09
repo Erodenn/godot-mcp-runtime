@@ -14,6 +14,7 @@ const CASE_TIMEOUT_MS = 120_000;
 const PROJECT_DIR = 'project';
 const TREE_SCENE = 'move_tree.tscn';
 const PATHS_SCENE = 'move_paths.tscn';
+const TABS_SCENE = 'move_tabs.tscn';
 const LAST_INDEX = -1;
 const ROOT_FILE_PATH = '.';
 
@@ -59,6 +60,21 @@ focus_neighbor_right = NodePath("../Peer")
 [node name="Dest" type="Control" parent="."]
 `;
 
+const TABS_SCENE_TEXT = `[gd_scene format=3]
+
+[node name="TabsHost" type="Control"]
+
+[node name="Tabs" type="TabContainer" parent="."]
+
+[node name="T0" type="Control" parent="Tabs"]
+
+[node name="T1" type="Control" parent="Tabs"]
+
+[node name="T2" type="Control" parent="Tabs"]
+
+[node name="Loose" type="Control" parent="."]
+`;
+
 const tmp = useTmpDirs();
 
 let runner: GodotRunner;
@@ -74,6 +90,7 @@ function projectWithScenes(): string {
   dropProjectFeatureVersion(project);
   writeFileSync(join(project, TREE_SCENE), TREE_SCENE_TEXT);
   writeFileSync(join(project, PATHS_SCENE), PATHS_SCENE_TEXT);
+  writeFileSync(join(project, TABS_SCENE), TABS_SCENE_TEXT);
   return project;
 }
 
@@ -246,6 +263,35 @@ describe('move_nodes reorders children', () => {
       const payload = expectMatchesOutputSchema('move_nodes', result);
       expect(resultsOf(payload)[0]).toMatchObject({ success: true, index: 0 });
       expect(readScene(project, TREE_SCENE)).toBe(before);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  itGodot(
+    'counts the index among scene children under a parent with a front-internal child (a TabContainer)',
+    async () => {
+      const project = projectWithScenes();
+      const result = await handleMoveNodes(runner, {
+        projectPath: project,
+        scenePath: TABS_SCENE,
+        moves: [
+          { nodePath: 'root/Tabs/T2', index: 0 },
+          { nodePath: 'root/Loose', newParentPath: 'root/Tabs', index: 1 },
+        ],
+      });
+      const payload = expectMatchesOutputSchema('move_nodes', result);
+      expect(resultsOf(payload).map((entry) => [entry.success, entry.index])).toEqual([
+        [true, 0],
+        [true, 1],
+      ]);
+      expect(nodePaths(readScene(project, TABS_SCENE))).toEqual([
+        ROOT_FILE_PATH,
+        'Tabs',
+        'Tabs/T2',
+        'Tabs/Loose',
+        'Tabs/T0',
+        'Tabs/T1',
+      ]);
     },
     CASE_TIMEOUT_MS,
   );
