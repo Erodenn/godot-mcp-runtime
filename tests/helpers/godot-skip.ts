@@ -8,7 +8,7 @@ export const hasGodot = Boolean(process.env.GODOT_PATH);
 
 export const itGodot = it.skipIf(!hasGodot);
 
-/** Call only where `hasGodot` is true; tests needing a newer engine than CI's oldest (typed dictionaries need 4.4) branch on it. */
+/** Call only where `hasGodot` is true; for a test whose expectation depends on the running engine version. */
 export async function engineMajorMinor(): Promise<MajorMinor> {
   const runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
   const parsed = parseMajorMinor(await runner.getVersion());
