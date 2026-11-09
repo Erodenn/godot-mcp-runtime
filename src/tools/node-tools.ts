@@ -337,6 +337,72 @@ export const nodeToolDefinitions = [
     },
   },
   {
+    name: 'move_nodes',
+    description:
+      'Move nodes to another parent and/or child position in a scene, each subtree kept whole (owners, groups, connections). Always-array moves, applied in order. Saves once at the end. Returns: results[] per move with success, newNodePath and index read back, or error; warnings leads when a NodePath value no longer leads where it did. Refused per entry: the root, a node inside an instance or inherited, a target inside the node, a name taken at the target. Errors while a runtime session is live.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        scenePath: { type: 'string', description: 'Scene file path relative to the project' },
+        moves: {
+          type: 'array',
+          description:
+            'Moves to apply in order. Each names a node and gives newParentPath, index or both.',
+          items: {
+            type: 'object',
+            properties: {
+              nodePath: { type: 'string', description: 'Node path from scene root to move' },
+              newParentPath: {
+                type: 'string',
+                description:
+                  'Node path of the new parent. Omit to keep the current parent and only reorder. The node keeps its name; a child of that name already there is an error.',
+              },
+              index: {
+                type: 'integer',
+                description:
+                  'Position among the parent children after the move, 0 = first, -1 = last. Omit to append when the parent changes, or to leave the order when it does not.',
+              },
+            },
+            required: ['nodePath'],
+          },
+        },
+      },
+      required: ['projectPath', 'scenePath', 'moves'],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        warnings: { type: 'array', items: { type: 'string' } },
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              nodePath: { type: 'string' },
+              resolvedNodePath: {
+                type: 'string',
+                description:
+                  'Where nodePath led before the move, in root/... form. Present when the node was found.',
+              },
+              success: { type: 'boolean' },
+              newNodePath: {
+                type: 'string',
+                description: 'Where the node is after the move, in root/... form. Only on success.',
+              },
+              index: {
+                type: 'integer',
+                description: 'Position among its parent children after the move. Only on success.',
+              },
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+      required: ['results'],
+    },
+  },
+  {
     name: 'get_node_signals',
     description:
       'List all signals defined on a node and their current connections. Use before connect_signal/disconnect_signal to verify signal/method names. The connections[].target field is already scene-root-relative in the "root/..." form connect_signal/disconnect_signal accept as targetNodePath (a self-connection reports as "root") - pass it straight through with no conversion. Returns: nodeType and signals[], each with name and current connections (signal/target/method). Errors if node not found.',
@@ -647,6 +713,88 @@ export async function handleDuplicateNode(
       parseStdoutAsJson: true,
       mutatesSceneFile: true,
       sceneWrites: inPlaceSceneWrite(parsed.value.scenePath),
+    },
+  );
+}
+
+/** Checks the items of move_nodes `moves`: { nodePath, newParentPath?, index? } with at least one of the last two. Returns the items to forward, keys normalized once. */
+function checkMoveItems(items: unknown[]): Result<OperationParams[], ToolResponse> {
+  const checked: OperationParams[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const where = `moves[${i}]`;
+    const raw = items[i];
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return err(
+        createErrorResponse(`${where} must be an object with nodePath and newParentPath or index`, [
+          'Each move is { nodePath, newParentPath?, index? }',
+        ]),
+      );
+    }
+    const item = normalizeParameters(raw as OperationParams);
+    if (typeof item.nodePath !== 'string' || item.nodePath === '') {
+      return err(
+        createErrorResponse(`${where}.nodePath is required and must be a non-empty string`, [
+          'Provide a scene-tree path such as "root/Player"',
+        ]),
+      );
+    }
+    const nodePath = parseNodePath(item.nodePath, `${where}.nodePath`);
+    if (!nodePath.ok) return nodePath;
+    const newParentPath = parseOptionalNodePath(item, 'newParentPath');
+    if (!newParentPath.ok) return newParentPath;
+    const index = item.index;
+    if (index !== undefined && (typeof index !== 'number' || !Number.isInteger(index))) {
+      return err(
+        createErrorResponse(`${where}.index must be a whole number when provided`, [
+          'Use 0 for first, -1 for last, or omit index',
+        ]),
+      );
+    }
+    if (newParentPath.value === undefined && index === undefined) {
+      return err(
+        createErrorResponse(`${where} needs newParentPath, index or both`, [
+          'Give newParentPath to reparent, index to reorder',
+        ]),
+      );
+    }
+    const move: OperationParams = { nodePath: nodePath.value };
+    if (newParentPath.value !== undefined) move.newParentPath = newParentPath.value;
+    if (index !== undefined) move.index = index;
+    checked.push(move);
+  }
+  return ok(checked);
+}
+
+export async function handleMoveNodes(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const parsed = parseSceneArgs(args, 'write');
+  if (!parsed.ok) return parsed;
+
+  const moves = requireArray(args, 'moves');
+  if (!moves.ok) return moves;
+  const checkedMoves = checkMoveItems(moves.value);
+  if (!checkedMoves.ok) return checkedMoves;
+
+  const params = { scenePath: parsed.value.scenePath, moves: checkedMoves.value };
+  // A reparent changes the file path of the whole subtree, so the old place is exempt like a deletion; the node is read back at its new place by the tests, not by the guard.
+  const reparented = checkedMoves.value
+    .filter((move) => move.newParentPath !== undefined)
+    .map((move) => move.nodePath as NodePath);
+  return executeSceneOp(
+    runner,
+    'move_nodes',
+    params,
+    parsed.value.projectPath,
+    'Failed to move nodes',
+    ['Check that the node paths and the new parent paths are correct'],
+    undefined,
+    {
+      parseStdoutAsJson: true,
+      mutatesSceneFile: true,
+      sceneWrites: inPlaceSceneWrite(parsed.value.scenePath, { deletedNodes: reparented }),
     },
   );
 }

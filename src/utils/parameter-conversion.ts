@@ -14,6 +14,7 @@ const parameterMappings = {
   node_paths: 'nodePaths',
   target_node_path: 'targetNodePath',
   target_parent_path: 'targetParentPath',
+  new_parent_path: 'newParentPath',
   new_name: 'newName',
   output_path: 'outputPath',
   mesh_item_names: 'meshItemNames',

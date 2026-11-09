@@ -175,4 +175,31 @@ describe('MCP outputSchema contract (issue #18)', () => {
     },
     RESOURCE_CASE_TIMEOUT_MS,
   );
+
+  itGodot(
+    'move_nodes: returns structuredContent matching outputSchema',
+    async () => {
+      const project = join(tmp.make('godot-mcp-schema-move-'), 'project');
+      cpSync(authoredFixtureProjectPath, project, { recursive: true });
+      dropProjectFeatureVersion(project);
+      const { client, server } = await makeLinkedPair();
+
+      try {
+        const moved = (await client.callTool({
+          name: 'move_nodes',
+          arguments: {
+            projectPath: project,
+            scenePath: 'host.tscn',
+            moves: [{ nodePath: 'root/Unit', index: 0 }],
+          },
+        })) as { structuredContent?: unknown; isError?: boolean };
+        expect(moved.isError).not.toBe(true);
+        expect(moved.structuredContent).toBeDefined();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+    RESOURCE_CASE_TIMEOUT_MS,
+  );
 });

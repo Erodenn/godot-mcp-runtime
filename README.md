@@ -43,7 +43,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 
 > This server is the perfect tool kit for AI assisted game development with Godot. It provides a comprehensive suite of tools that allows agents to create scenes, nodes, scripts, and more. The runtime tool set provides the capabilities to check work by running the game and interacting with it in real time, all without becoming a cumbersome dependency on your project.
 
-**Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along. All 41 tools return one JSON object with a declared output schema, and a value the server could not measure comes back as `null` with a warning rather than a made-up number.
+**Built for agents.** Every tool is purpose-built and self-documenting. When something fails, the response tells the agent how to fix it; when something succeeds, it points toward the next step. The result is an AI that stays unstuck and self-corrects without needing you to nudge it along. All 42 tools return one JSON object with a declared output schema, and a value the server could not measure comes back as `null` with a warning rather than a made-up number.
 
 **Headless editing.** Create scenes, add nodes, set properties, attach scripts, connect signals, validate GDScript. All the standard operations, no editor window required.
 

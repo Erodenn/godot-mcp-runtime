@@ -87,6 +87,7 @@ describe('outputSchema: fields a tool always returns are declared required', () 
     ['attach_script', ['nodePath', 'scriptPath']],
     ['duplicate_node', ['nodePath', 'newNodePath']],
     ['delete_nodes', ['results']],
+    ['move_nodes', ['results']],
     ['set_node_properties', ['results']],
     ['get_node_signals', ['nodePath', 'nodeType', 'signals']],
   ];

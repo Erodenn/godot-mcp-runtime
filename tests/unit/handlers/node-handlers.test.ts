@@ -7,6 +7,7 @@ import {
   handleAttachScript,
   handleGetSceneTree,
   handleDuplicateNode,
+  handleMoveNodes,
   handleConnectSignal,
   handleDisconnectSignal,
   handleGetNodeSignals,
@@ -998,5 +999,106 @@ describe('attach_script accepts every project path spelling', () => {
     });
     expect(fake.calls[0]?.params.scenePath).toBe(fixtureScenePath);
     expect(fake.calls[0]?.params.scriptPath).toBe('placeholder.gd');
+  });
+});
+
+describe('handleMoveNodes', () => {
+  const validMoves = [{ nodePath: 'root/A', newParentPath: 'root/B', index: 1 }];
+
+  it('rejects missing projectPath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleMoveNodes(fake.asRunner, {
+      scenePath: fixtureScenePath,
+      moves: validMoves,
+    });
+    expectErrorMatching(result, /projectPath/i);
+  });
+
+  it('rejects a missing or empty moves array', async () => {
+    const fake = createFakeRunner();
+    expectErrorMatching(await handleMoveNodes(fake.asRunner, { ...validBase }), /moves/i);
+    expectErrorMatching(
+      await handleMoveNodes(fake.asRunner, { ...validBase, moves: [] }),
+      /moves/i,
+    );
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['an item that is not an object', ['root/A'], /moves\[0\] must be an object/],
+    ['an item without a nodePath', [{ index: 0 }], /nodePath is required/],
+    [
+      'a nodePath containing ..',
+      [{ nodePath: 'root/../A', index: 0 }],
+      /invalid moves\[0\]\.nodePath|invalid nodePath/i,
+    ],
+    [
+      'a newParentPath containing ..',
+      [{ nodePath: 'root/A', newParentPath: 'root/../B' }],
+      /invalid newParentPath/i,
+    ],
+    ['a fractional index', [{ nodePath: 'root/A', index: 1.5 }], /index must be a whole number/],
+    ['a string index', [{ nodePath: 'root/A', index: '1' }], /index must be a whole number/],
+    [
+      'an item with neither newParentPath nor index',
+      [{ nodePath: 'root/A' }],
+      /needs newParentPath/,
+    ],
+  ])('rejects %s before starting Godot', async (_label, moves, pattern) => {
+    const fake = createFakeRunner();
+    const result = await handleMoveNodes(fake.asRunner, { ...validBase, moves });
+    expectErrorMatching(result, pattern);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('names the index of the first bad item', async () => {
+    const fake = createFakeRunner();
+    const result = await handleMoveNodes(fake.asRunner, {
+      ...validBase,
+      moves: [{ nodePath: 'root/A', index: 0 }, { index: 2 }],
+    });
+    expectErrorMatching(result, /moves\[1\]/);
+  });
+
+  it('forwards each move with its keys normalized, whichever spelling the caller used', async () => {
+    const fake = createFakeRunner({ stdout: JSON.stringify({ results: [] }) });
+    await handleMoveNodes(fake.asRunner, {
+      ...validBase,
+      moves: [
+        { node_path: 'root/A', new_parent_path: 'root/B', index: -1 },
+        { nodePath: 'root/C', index: 0 },
+      ],
+    });
+    expect(fake.calls[0]?.operation).toBe('move_nodes');
+    expect(fake.calls[0]?.params.moves).toEqual([
+      { nodePath: 'root/A', newParentPath: 'root/B', index: -1 },
+      { nodePath: 'root/C', index: 0 },
+    ]);
+  });
+
+  it('returns the operation payload, valid against the outputSchema', async () => {
+    const payload = {
+      warnings: ['moves[0]: the NodePath root/Pad.focus_neighbor_right ("../Peer") led to nothing'],
+      results: [
+        {
+          nodePath: 'root/A',
+          resolvedNodePath: 'root/A',
+          success: true,
+          newNodePath: 'root/B/A',
+          index: 1,
+        },
+        { nodePath: 'root', resolvedNodePath: 'root', error: 'Cannot move the root node' },
+      ],
+    };
+    const fake = createFakeRunner({ stdout: JSON.stringify(payload) });
+    const result = await handleMoveNodes(fake.asRunner, { ...validBase, moves: validMoves });
+    expect(unwrap(result).structuredContent).toEqual(payload);
+    expectMatchesOutputSchema('move_nodes', result);
+  });
+
+  it('reports a runner failure as an error response', async () => {
+    const fake = createFakeRunner({ throws: new Error('boom') });
+    const result = await handleMoveNodes(fake.asRunner, { ...validBase, moves: validMoves });
+    expectErrorMatching(result, /boom/);
   });
 });

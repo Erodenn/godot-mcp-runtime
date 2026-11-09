@@ -241,6 +241,8 @@ func _run_from_cmdline() -> void:
 			attach_script(params)
 		"duplicate_node":
 			duplicate_node(params)
+		"move_nodes":
+			move_nodes(params)
 		"get_node_signals":
 			get_node_signals(params)
 		"connect_signal":
@@ -1902,6 +1904,174 @@ func duplicate_node(params: Variant) -> void:
 		log_error("Failed to save scene after duplicating node")
 		_fail_operation()
 		return
+
+const _MOVE_LAST_INDEX := -1
+
+# Every node of a subtree with its owner. remove_child may clear an owner, and pack() drops a node whose owner it does not reach, so the owners are put back after the add.
+func _owners_in_subtree(node: Node) -> Dictionary:
+	var owners: Dictionary = {}
+	for current: Variant in _iter_subtree(node):
+		owners[current] = current.owner
+	return owners
+
+func _restore_owners(owners: Dictionary) -> void:
+	for current: Variant in owners.keys():
+		var recorded: Variant = owners[current]
+		if recorded != null and is_instance_valid(recorded) and current.owner != recorded:
+			current.owner = recorded
+
+# NodePath values stored on the scene's nodes that touch the moved subtree (held by a node in it, or leading into it), with the node each leads to now.
+# A relative path is stored as written, so a move can make it lead somewhere else; absolute ones cannot be resolved outside the tree and are skipped.
+func _node_path_refs(scene_root: Node, moved: Node) -> Array:
+	var refs: Array = []
+	for current: Variant in _iter_subtree(scene_root):
+		for descriptor: Dictionary in current.get_property_list():
+			if descriptor.type != TYPE_NODE_PATH or (int(descriptor.usage) & PROPERTY_USAGE_STORAGE) == 0:
+				continue
+			var value: Variant = current.get(descriptor.name)
+			if typeof(value) != TYPE_NODE_PATH or value.is_empty() or value.is_absolute():
+				continue
+			var target: Node = current.get_node_or_null(value)
+			var holder_moves: bool = current == moved or moved.is_ancestor_of(current)
+			var target_moves: bool = target != null and (target == moved or moved.is_ancestor_of(target))
+			if holder_moves or target_moves:
+				# The label is taken now: after the move the target sits at its new place.
+				var was_label := "no node" if target == null else "'%s'" % _relative_path(scene_root, target)
+				refs.append({"holder": current, "property": descriptor.name, "path": value, "target": target, "was_label": was_label})
+	return refs
+
+func _node_path_ref_warnings(scene_root: Node, refs: Array, move_index: int) -> Array:
+	var warnings: Array = []
+	for ref: Dictionary in refs:
+		var holder: Node = ref.holder
+		var now: Node = holder.get_node_or_null(ref.path)
+		if now == ref.target:
+			continue
+		var now_label := "no node" if now == null else "'%s'" % _relative_path(scene_root, now)
+		warnings.append("moves[%d]: the NodePath %s.%s (\"%s\") led to %s and now leads to %s; a move does not rewrite NodePath values, so set it again with set_node_properties" % [move_index, _relative_path(scene_root, holder), ref.property, ref.path, ref.was_label, now_label])
+	return warnings
+
+# One move, applied to the loaded tree. "changed" is false for a refusal and for a move that left the node where it was.
+func _apply_move(scene_root: Node, base_root: Node, move: Variant, move_index: int) -> Dictionary:
+	var entry: Dictionary = {"nodePath": ""}
+	var outcome: Dictionary = {"entry": entry, "warnings": [], "changed": false}
+	if typeof(move) != TYPE_DICTIONARY or typeof(move.get("node_path")) != TYPE_STRING:
+		entry["error"] = "moves[%d] must be an object with a nodePath string" % move_index
+		return outcome
+	entry["nodePath"] = move.node_path
+	var node: Node = find_node_by_path(scene_root, move.node_path)
+	if node == null:
+		entry["error"] = "Node not found: " + move.node_path
+		return outcome
+	entry["resolvedNodePath"] = _relative_path(scene_root, node)
+
+	var has_parent: bool = move.has("new_parent_path")
+	var has_index: bool = move.has("index")
+	if has_parent and typeof(move.new_parent_path) != TYPE_STRING:
+		entry["error"] = "moves[%d].newParentPath must be a string" % move_index
+		return outcome
+	var requested_index := 0
+	if has_index:
+		if not _is_json_number(move.index):
+			entry["error"] = "moves[%d].index must be a whole number" % move_index
+			return outcome
+		var index_problem := _json_int_problem(move.index)
+		if index_problem != "":
+			entry["error"] = "moves[%d].index %s" % [move_index, index_problem]
+			return outcome
+		requested_index = int(move.index)
+	if not has_parent and not has_index:
+		entry["error"] = "moves[%d] needs newParentPath, index or both" % move_index
+		return outcome
+
+	if node == scene_root:
+		entry["error"] = "Cannot move the root node"
+		return outcome
+	if node.owner != scene_root:
+		# An instance re-creates its inner nodes in their places on every load, so a move would be reported saved and come back.
+		entry["error"] = "Node '%s' belongs to an instanced scene (or is not owned by this scene) and cannot be moved from here; edit the scene it comes from" % move.node_path
+		return outcome
+	if base_root != null and base_root.has_node(scene_root.get_path_to(node)):
+		entry["error"] = "Node '%s' is inherited from the scene this one extends and cannot be moved from here: it is re-created in its place on every load. Move it in the base scene." % move.node_path
+		return outcome
+
+	var old_parent: Node = node.get_parent()
+	var new_parent: Node = old_parent
+	if has_parent:
+		new_parent = find_node_by_path(scene_root, move.new_parent_path)
+		if new_parent == null:
+			entry["error"] = "New parent not found: " + move.new_parent_path
+			return outcome
+	if new_parent == node or node.is_ancestor_of(new_parent):
+		entry["error"] = "Cannot move '%s' under itself or one of its own descendants ('%s')" % [move.node_path, _relative_path(scene_root, new_parent)]
+		return outcome
+	var changes_parent: bool = new_parent != old_parent
+	if changes_parent and new_parent.has_node(NodePath(String(node.name))):
+		entry["error"] = "'%s' already has a child named '%s'; a move never renames, so rename one of them first" % [_relative_path(scene_root, new_parent), node.name]
+		return outcome
+
+	var children_after: int = new_parent.get_child_count() + (1 if changes_parent else 0)
+	if has_index and requested_index != _MOVE_LAST_INDEX and (requested_index < 0 or requested_index >= children_after):
+		entry["error"] = "index %d is outside 0..%d (-1 means last) for '%s'" % [requested_index, children_after - 1, _relative_path(scene_root, new_parent)]
+		return outcome
+
+	var old_index: int = old_parent.get_children().find(node)
+	var refs: Array = _node_path_refs(scene_root, node) if changes_parent else []
+	if changes_parent:
+		var owners: Dictionary = _owners_in_subtree(node)
+		old_parent.remove_child(node)
+		new_parent.add_child(node)
+		_restore_owners(owners)
+		# Adding under a node an instance holds needs that instance editable; a node added straight under an instance root marks nothing.
+		_claim_for_serialization(scene_root, new_parent)
+	if has_index:
+		var target_index: int = children_after - 1 if requested_index == _MOVE_LAST_INDEX else requested_index
+		# move_child counts internal children too; the engine's own front-internal nodes sit before the first child a scene file holds.
+		var scene_children: Array = new_parent.get_children()
+		var front_internal: int = new_parent.get_children(true).find(scene_children[0])
+		new_parent.move_child(node, front_internal + target_index)
+
+	var new_index: int = new_parent.get_children().find(node)
+	entry["success"] = true
+	entry["newNodePath"] = _relative_path(scene_root, node)
+	entry["index"] = new_index
+	outcome["changed"] = changes_parent or new_index != old_index
+	if changes_parent:
+		outcome["warnings"] = _node_path_ref_warnings(scene_root, refs, move_index)
+	return outcome
+
+func move_nodes(params: Variant) -> void:
+	var scene_root: Node = load_scene_instance(params.scene_path)
+	if not scene_root:
+		_fail_operation()
+		return
+
+	# A node the base scene defines is rebuilt in its place on every load, so a move would be reported saved and come back.
+	var base_root: Node = _instantiate_base_scene(params.scene_path)
+	var results: Array = []
+	var warnings: Array = []
+	var any_changed := false
+	var moves: Array = params.moves
+	for move_index: int in range(moves.size()):
+		var outcome: Dictionary = _apply_move(scene_root, base_root, moves[move_index], move_index)
+		results.append(outcome.entry)
+		warnings.append_array(outcome.warnings)
+		if outcome.changed:
+			any_changed = true
+	if base_root != null:
+		base_root.free()
+
+	# A scene nothing moved is not rewritten: a save can only canonicalize or lose content.
+	if any_changed:
+		if not save_scene_to_path(scene_root, params.scene_path):
+			log_error("Failed to save scene after moving nodes")
+			_fail_operation()
+			return
+
+	var payload: Dictionary = {"results": results}
+	if not warnings.is_empty():
+		payload["warnings"] = warnings
+	emit_result(payload)
 
 func get_node_signals(params: Variant) -> void:
 	var scene_root: Node = load_scene_instance(params.scene_path)
