@@ -1114,6 +1114,11 @@ export function expandTrack(
   });
 }
 
+/** One spelling of an item's identity for every map keyed by it; `kind` never holds a colon, so the key is unambiguous. */
+function timelineItemKey(item: TimelineItem): string {
+  return `${item.kind}:${item.name}`;
+}
+
 /** Merges each run of `factor` adjacent intervals into one: counts and sums add, maxima take the largest, and a merged `top` weighs each entry's per-frame time by the frames of the interval it came from (an entry absent from some interval's top is understated there, so the merged ms is a lower bound). A merged draw-call count is the newest sample in the run. Pure: the input is not changed. */
 export function mergeTimelineBuckets(
   buckets: Bucket[],
@@ -1158,7 +1163,7 @@ export function mergeTimelineBuckets(
       out.drawCalls = bucket.drawCalls ?? out.drawCalls;
       out.stalled = out.stalled || bucket.stalled;
       for (const item of rankBucket(bucket, topLimit)) {
-        const key = item.kind + ':' + item.name;
+        const key = timelineItemKey(item);
         const weight = item.kind === 'render' ? bucket.renderFrames : bucket.frames;
         const known = weighted.get(key);
         if (known === undefined) {
@@ -1197,7 +1202,7 @@ function summarizeTimeline(
   const names = new Map<string, number>();
   const items: TimelineItemName[] = [];
   const intern = (item: TimelineItem): TimelineTopEntry => {
-    const key = `${item.kind} ${item.name}`;
+    const key = timelineItemKey(item);
     let id = names.get(key);
     if (id === undefined) {
       id = items.length;
