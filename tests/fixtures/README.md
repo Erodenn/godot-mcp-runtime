@@ -31,6 +31,7 @@ Contents and what each file is for:
 - `spawner.tscn`, `spawner.gd`: a scene that holds `base_unit.tscn` as a property value, once in a `PackedScene` export and once in an `Array[PackedScene]` export, both written as `ExtResource`. For the batch test that saves `base_unit.tscn` while this scene's tree is loaded: the reference has to stay an `ExtResource`
 - `unbind_host.tscn`, `unbind_host.gd`: a `Toggle` `CheckButton` whose `toggled` signal is connected to a root method that takes no argument, with `unbinds=1`. For the `duplicate_node` test that the copy's connection keeps its unbound argument count
 - `notes.txt`: a plain text file under `res://`, not an importable resource
+- `item_stats.gd`, `item_stats.gd.uid`, `sword.tres`: a `class_name ItemStats` resource script with typed exports (`String`, `int`, `float`, `Color`, `Shape2D`), and a resource of it with a header uid, a script uid on the ext_resource, several values and a `RectangleShape2D` sub-resource. For the `create_resource` and `set_resource_properties` tests: an edit of one value has to leave the rest in the saved text
 
 ## `godot-stretch-project/`
 

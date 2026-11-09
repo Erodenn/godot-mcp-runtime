@@ -43,6 +43,7 @@ Tool categories:
 - Project management: launch_editor, run_project, switch_project, stop_project, get_debug_output, list_projects, check_project
 - Scene editing (headless): create_scene, add_node, load_sprite, save_scene, export_mesh_library, batch_scene_operations
 - Node editing (headless): delete_nodes, set_node_properties, get_node_properties, attach_script, get_scene_tree, duplicate_node, get_node_signals, connect_signal, disconnect_signal
+- Resource files (headless): create_resource, set_resource_properties
 - Runtime (requires run_project): take_screenshot, simulate_input, get_ui_elements, run_script
 - Render check (no runtime session): render_movie
 - Profiling (requires run_project with profiling: true): profile_project, start_profiler, stop_profiler

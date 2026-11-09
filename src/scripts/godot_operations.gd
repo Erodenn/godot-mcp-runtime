@@ -255,6 +255,10 @@ func _run_from_cmdline() -> void:
 			validate_batch(params)
 		"batch_scene_operations":
 			batch_scene_operations(params)
+		"create_resource":
+			create_resource(params)
+		"set_resource_properties":
+			set_resource_properties(params)
 		_:
 			log_error("Unknown operation: " + operation)
 			_fail_operation()
@@ -550,10 +554,19 @@ func find_node_by_path(scene_root: Node, node_path: String) -> Node:
 	return scene_root.get_node_or_null(path)
 
 const _SCENE_HEADER_PREFIX := "[gd_scene"
+const _RESOURCE_HEADER_PREFIX := "[gd_resource"
+const _TEXT_SCENE_SUFFIX := ".tscn"
+const _TEXT_RESOURCE_SUFFIX := ".tres"
 const _EXT_RESOURCE_PREFIX := "[ext_resource "
 const _UID_ATTR := "uid=\""
 const _PATH_ATTR := "path=\""
-const _SCENE_BODY_PREFIXES: Array = ["[node ", "[sub_resource "]
+# "[resource]" opens a .tres body; a .tscn never has that line.
+const _SCENE_BODY_PREFIXES: Array = ["[node ", "[sub_resource ", "[resource]"]
+
+# A text scene or text resource: both carry their own uid in the header and their references' uids on ext_resource lines.
+func _has_text_uid_header(path: String) -> bool:
+	var lowered := path.to_lower()
+	return lowered.ends_with(_TEXT_SCENE_SUFFIX) or lowered.ends_with(_TEXT_RESOURCE_SUFFIX)
 
 func _starts_scene_body(line: String) -> bool:
 	for prefix: Variant in _SCENE_BODY_PREFIXES:
@@ -572,11 +585,11 @@ func _header_attr(line: String, attr: String) -> String:
 # Reads the header text, not ResourceLoader.get_resource_uid, which answers -1 on 4.6 in a project with no uid cache.
 func _read_scene_uids(full_path: String) -> Dictionary:
 	var found := {"scene": "", "ext": {}}
-	if not full_path.to_lower().ends_with(".tscn") or not FileAccess.file_exists(full_path):
+	if not _has_text_uid_header(full_path) or not FileAccess.file_exists(full_path):
 		return found
 	for raw_line: String in FileAccess.get_file_as_string(full_path).split("\n"):
 		var line: String = raw_line.strip_edges()
-		if line.begins_with(_SCENE_HEADER_PREFIX):
+		if line.begins_with(_SCENE_HEADER_PREFIX) or line.begins_with(_RESOURCE_HEADER_PREFIX):
 			found.scene = _header_attr(line, _UID_ATTR)
 		elif line.begins_with(_EXT_RESOURCE_PREFIX):
 			var uid := _header_attr(line, _UID_ATTR)
@@ -598,7 +611,7 @@ func _recorded_uid_text(res_path: String) -> String:
 		var id: int = ResourceLoader.call("get_resource_uid", res_path)
 		if id != ResourceUID.INVALID_ID:
 			return ResourceUID.id_to_text(id)
-	if res_path.to_lower().ends_with(".tscn"):
+	if _has_text_uid_header(res_path):
 		return str(_read_scene_uids(res_path).scene)
 	var sidecar_path := res_path + _UID_SIDECAR_SUFFIX
 	if FileAccess.file_exists(sidecar_path):
@@ -643,7 +656,7 @@ func _replace_file_text(full_path: String, text: String) -> bool:
 # ResourceSaver.save outside the editor writes neither the scene's own uid nor any ext_resource uid (the id lookup is an editor callback); both are put back here.
 # A reference takes the uid the old text gave its path, else the one the project records; a file with no recorded uid stays path-only.
 func _restore_scene_uids(full_path: String, scene_uid: String, ext_uids: Dictionary) -> bool:
-	if not full_path.to_lower().ends_with(".tscn"):
+	if not _has_text_uid_header(full_path):
 		return true
 	if scene_uid != "":
 		var id := ResourceUID.text_to_id(scene_uid)
@@ -773,6 +786,279 @@ func create_scene(params: Variant) -> void:
 		log_error("Failed to create scene: " + params.scene_path)
 		_fail_operation()
 		return
+
+# These Resource classes are written by their own tools or as their own files, not as a .tres of property values.
+const _RESOURCE_TYPES_WITH_OWN_FORMAT: Array = ["PackedScene", "Script"]
+# The type and the file of a resource come from the call's type and resourcePath, never from a property.
+const _RESOURCE_KEYS_REFUSED: Array = ["script", "resource_path"]
+const _RESOURCE_BODY_LINE := "[resource]"
+const _SCRIPT_ASSIGNMENT_PREFIX := "script = "
+const _MISSING_RESOURCE_REFERENCES_REFUSAL := "Resource references files that do not exist on disk, refusing to load so the references are not stripped on save: "
+
+# get_global_name is called by name: it is missing from the oldest 4.x releases.
+func _resource_type_label(res: Resource) -> String:
+	var script: Variant = res.get_script()
+	if script is Script:
+		if script.has_method("get_global_name"):
+			var global_name := str(script.call("get_global_name"))
+			if global_name != "":
+				return global_name
+		if script.resource_path != "":
+			return script.resource_path
+	return res.get_class()
+
+func _own_format_base(class_label: String) -> String:
+	for own_format: String in _RESOURCE_TYPES_WITH_OWN_FORMAT:
+		if class_label == own_format or ClassDB.is_parent_class(class_label, own_format):
+			return own_format
+	return ""
+
+func _resource_type_error(message: String) -> Dictionary:
+	return {"ok": false, "resource": null, "error": message}
+
+# Every refusal is decided before new(): a script that cannot be built raises and stops the operation with no reason.
+func _instantiate_resource_type(type_name: String) -> Dictionary:
+	if ClassDB.class_exists(type_name):
+		if not ClassDB.is_parent_class(type_name, "Resource"):
+			return _resource_type_error("'%s' is not a Resource type, so it cannot be saved as a .tres resource file" % type_name)
+		var own_format := _own_format_base(type_name)
+		if own_format != "":
+			return _resource_type_error("'%s' is a %s, which has its own file format and is not created as a .tres of property values" % [type_name, own_format])
+		if not ClassDB.can_instantiate(type_name):
+			return _resource_type_error("'%s' cannot be instantiated (abstract or native-only)" % type_name)
+		var engine_instance: Variant = ClassDB.instantiate(type_name)
+		if not (engine_instance is Resource):
+			return _resource_type_error("Failed to instantiate resource of type: " + type_name)
+		return {"ok": true, "resource": engine_instance, "error": ""}
+
+	var script: Script = get_script_by_name(type_name)
+	if script == null:
+		return _resource_type_error("Unknown type '%s': not an engine class, a registered class_name or a script path in the project" % type_name)
+	var script_label: String = script.resource_path if script.resource_path != "" else type_name
+	if not (script is GDScript):
+		return _resource_type_error("Script '%s' is not a GDScript: only a GDScript can be used as a resource type" % script_label)
+	var base_type: String = str(script.get_instance_base_type())
+	if base_type != "":
+		if not ClassDB.is_parent_class(base_type, "Resource"):
+			return _resource_type_error("Script '%s' extends %s, not Resource, so it cannot be saved as a .tres resource file" % [script_label, base_type])
+		var script_own_format := _own_format_base(base_type)
+		if script_own_format != "":
+			return _resource_type_error("Script '%s' extends %s, which has its own file format and is not created as a .tres of property values" % [script_label, script_own_format])
+	var attachable := _check_script_attachable(script, script_label)
+	if not attachable.ok:
+		return _resource_type_error(attachable.error)
+	var required_args := _script_init_required_args(script)
+	if required_args > 0:
+		return _resource_type_error("Script '%s' cannot be used as a resource type: its _init takes %d required argument(s), and a resource loaded from a file is built with none. Give them default values." % [script_label, required_args])
+	var instance: Variant = script.new()
+	if instance == null:
+		return _resource_type_error("Failed to instantiate resource of type: " + script_label)
+	if not (instance is Resource):
+		var produced: String = instance.get_class()
+		if not (instance is RefCounted):
+			instance.free()
+		return _resource_type_error("Script '%s' instantiates as %s, not a Resource, so it cannot be saved as a .tres resource file" % [script_label, produced])
+	return {"ok": true, "resource": instance, "error": ""}
+
+# set() accepts an unknown name silently, so a name is checked against the property list before it is set.
+func _check_resource_property_settable(res: Resource, property: String) -> Dictionary:
+	if property in _RESOURCE_KEYS_REFUSED:
+		return {"ok": false, "error": "Property '%s' cannot be set by the resource tools: a resource's script is chosen by create_resource's type, and its file by resourcePath" % property}
+	if property.begins_with(_METADATA_PREFIX):
+		if not _is_ascii_identifier(property.substr(_METADATA_PREFIX.length())):
+			return {"ok": false, "error": "Metadata key '%s' is not a valid name: use letters, digits and underscore, not starting with a digit" % property}
+		return {"ok": true, "error": ""}
+	var label := _resource_type_label(res)
+	var descriptor: Variant = _find_property_descriptor(res, property)
+	if descriptor == null:
+		return {"ok": false, "error": "Property '%s' does not exist on resource of type '%s'" % [property, label]}
+	if not _is_settable_property_descriptor(descriptor):
+		return {"ok": false, "error": "Property '%s' on resource of type '%s' is not stored in a resource file (a script variable without @export, or an editor group)" % [property, label]}
+	return {"ok": true, "error": ""}
+
+# Stops at the first invalid name or value, before anything is saved, so a call writes all of its values or none.
+func _apply_resource_properties(res: Resource, props: Variant) -> Dictionary:
+	if typeof(props) != TYPE_DICTIONARY:
+		return {"ok": false, "error": "properties must be an object", "keys": []}
+	# Slash keys last: virtual keys such as shader_parameter/<uniform> exist only once the plain property they depend on is set.
+	var ordered_keys: Array = []
+	var slash_keys: Array = []
+	for key: Variant in props.keys():
+		if "/" in str(key):
+			slash_keys.append(str(key))
+		else:
+			ordered_keys.append(str(key))
+	ordered_keys.append_array(slash_keys)
+	for key: String in ordered_keys:
+		var settable := _check_resource_property_settable(res, key)
+		if not settable.ok:
+			return {"ok": false, "error": settable.error, "keys": []}
+		var prepared: Dictionary = _prepare_property_value(res, key, props[key])
+		if _was_stopped(prepared):
+			return {"ok": false, "error": "Property '%s' %s" % [key, _STOPPED_BY_SCRIPT_ERROR], "keys": []}
+		if not prepared.ok:
+			return {"ok": false, "error": prepared.error, "keys": []}
+		var assigned := _assign_property(res, key, prepared.value, false)
+		if assigned.error != "":
+			return {"ok": false, "error": assigned.error, "keys": []}
+		if assigned.warning != "":
+			result_warnings.append("Property '%s': %s" % [key, assigned.warning])
+	return {"ok": true, "error": "", "keys": ordered_keys}
+
+# save_scene_to_path without pack(): the uids the headless saver drops are read from the file being replaced and put back.
+func _save_resource_to_path(res: Resource, full_path: String) -> bool:
+	var uids := _read_scene_uids(full_path)
+	var is_new_file := not FileAccess.file_exists(full_path)
+	var save_error: int = ResourceSaver.save(res, full_path)
+	if save_error != OK:
+		log_error("Failed to save resource %s (error %d)" % [full_path, save_error])
+		return false
+	if is_new_file:
+		_forget_scene_file_keys()
+	var uids_restored := _restore_scene_uids(full_path, str(uids.scene), uids.ext)
+	if not FileAccess.file_exists(full_path):
+		log_error("Resource was written, but the file is gone after its uid rewrite failed: " + full_path)
+		return false
+	if not uids_restored:
+		result_warnings.append("Resource %s was written, but its uids could not be put back (the file may be locked by another program). The values are saved, do not apply them again. The resource's own uid or the uid of a file it references may be missing from it until the next save." % _project_relative(full_path))
+	return true
+
+# Read back from the saved file with the cache bypassed, so the values reported are the ones the file holds. Empty on failure.
+func _resource_result_payload(full_path: String, keys: Array) -> Dictionary:
+	var reloaded: Resource = ResourceLoader.load(full_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if reloaded == null:
+		log_error("Resource was saved but could not be loaded back from %s" % full_path)
+		return {}
+	var script: Variant = reloaded.get_script()
+	var script_path: Variant = null
+	if script is Script and script.resource_path != "":
+		script_path = _project_relative(script.resource_path)
+	var properties: Dictionary = {}
+	for key: Variant in keys:
+		properties[key] = _variant_to_json(reloaded.get(key), [])
+	return {
+		"resourcePath": _project_relative(full_path),
+		"resourceType": reloaded.get_class(),
+		"scriptPath": script_path,
+		"properties": properties,
+	}
+
+# A [resource] section that assigns a script whose resource loaded without one: the script did not attach, and a save would drop the values it declares.
+func _resource_text_declares_script(full_path: String) -> bool:
+	var in_body := false
+	for raw_line: String in FileAccess.get_file_as_string(full_path).split("\n"):
+		var line: String = raw_line.strip_edges()
+		if not in_body:
+			in_body = line == _RESOURCE_BODY_LINE
+			continue
+		if line.begins_with(_SCRIPT_ASSIGNMENT_PREFIX):
+			return true
+	return false
+
+func _text_resource_key(raw_path: String) -> String:
+	var full_path := _scene_file_key(raw_path)
+	if full_path.is_empty():
+		log_error("Path escapes the project root: " + raw_path)
+		return ""
+	if not full_path.to_lower().ends_with(_TEXT_RESOURCE_SUFFIX):
+		log_error("resourcePath must name a .tres file: " + raw_path)
+		return ""
+	return full_path
+
+func _save_and_emit_resource(res: Resource, full_path: String, keys: Array) -> void:
+	if not _save_resource_to_path(res, full_path):
+		_fail_operation()
+		return
+	var payload := _resource_result_payload(full_path, keys)
+	if payload.is_empty():
+		_fail_operation()
+		return
+	emit_result(payload)
+
+func create_resource(params: Variant) -> void:
+	var raw_path := str(params.get("resource_path", ""))
+	var full_path := _text_resource_key(raw_path)
+	if full_path.is_empty():
+		_fail_operation()
+		return
+	if FileAccess.file_exists(full_path) and params.get("overwrite", false) != true:
+		log_error("Resource file already exists: %s. Pass overwrite: true to replace it, or use set_resource_properties to change its values" % _project_relative(full_path))
+		_fail_operation()
+		return
+
+	var instantiated: Dictionary = _instantiate_resource_type(str(params.get("type", "")))
+	if _was_stopped(instantiated):
+		log_error("Creating the resource " + _STOPPED_BY_SCRIPT_ERROR)
+		_fail_operation()
+		return
+	if not instantiated.ok:
+		log_error(instantiated.error)
+		_fail_operation()
+		return
+	var res: Resource = instantiated.resource
+
+	var applied: Dictionary = _apply_resource_properties(res, params.get("properties", {}))
+	if _was_stopped(applied):
+		log_error("Setting the resource's properties " + _STOPPED_BY_SCRIPT_ERROR)
+		_fail_operation()
+		return
+	if not applied.ok:
+		log_error(applied.error)
+		_fail_operation()
+		return
+
+	if not _ensure_res_dir(full_path):
+		log_error("Failed to create directory for resource: " + full_path)
+		_fail_operation()
+		return
+	_save_and_emit_resource(res, full_path, applied.keys)
+
+func set_resource_properties(params: Variant) -> void:
+	var raw_path := str(params.get("resource_path", ""))
+	var full_path := _text_resource_key(raw_path)
+	if full_path.is_empty():
+		_fail_operation()
+		return
+	if not FileAccess.file_exists(full_path):
+		log_error("Resource file does not exist: %s. Use create_resource to create it" % _project_relative(full_path))
+		_fail_operation()
+		return
+
+	# A reference the load cannot resolve is held as null and the save would strip it.
+	var probe: Dictionary = _probe_scene_deps(full_path)
+	if probe.missing.size() > 0:
+		log_error(_MISSING_RESOURCE_REFERENCES_REFUSAL + ", ".join(probe.missing))
+		_fail_operation()
+		return
+	if probe.needs_import.size() > 0:
+		_report_import_needed(raw_path, ", ".join(probe.needs_import))
+		_fail_operation()
+		return
+
+	var res: Resource = ResourceLoader.load(full_path)
+	if res == null:
+		log_error("Failed to load resource: " + full_path)
+		_fail_operation()
+		return
+	if res is PackedScene or res is Script:
+		log_error("%s holds a %s, which the resource tools do not edit: use the scene tools for a scene, and edit a script as a file" % [_project_relative(full_path), res.get_class()])
+		_fail_operation()
+		return
+	if res.get_script() == null and _resource_text_declares_script(full_path):
+		log_error("The resource's script could not be attached (parse errors, or a script for another base type), so saving would drop the values it declares. Check the script with validate")
+		_fail_operation()
+		return
+
+	var applied: Dictionary = _apply_resource_properties(res, params.get("properties", {}))
+	if _was_stopped(applied):
+		log_error("Setting the resource's properties " + _STOPPED_BY_SCRIPT_ERROR)
+		_fail_operation()
+		return
+	if not applied.ok:
+		log_error(applied.error)
+		_fail_operation()
+		return
+	_save_and_emit_resource(res, full_path, applied.keys)
 
 # Spatial params add_node accepts at top level. KEEP IN SYNC with PROMOTED_SPATIAL_PARAMS in src/tools/scene-tools.ts.
 const _PROMOTED_SPATIAL_PARAMS: Array = ["position", "rotation", "scale", "visible", "modulate"]

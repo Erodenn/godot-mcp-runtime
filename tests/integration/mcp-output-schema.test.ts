@@ -1,6 +1,8 @@
 // The MCP spec requires tools declaring `outputSchema` to return matching `structuredContent`; strict clients reject responses that omit it.
 // Wires the real `Server` to a real `Client` over an in-memory transport and calls filesystem-only tools through the dispatch table.
 import { describe, it, expect } from 'vitest';
+import { cpSync } from 'fs';
+import { join } from 'path';
 
 import { Server, type CallToolResult, type ListToolsResult } from '@modelcontextprotocol/server';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
@@ -14,7 +16,13 @@ import { nodeToolDefinitions } from '../../src/tools/node-tools.js';
 import { validateToolDefinitions } from '../../src/tools/validate-tools.js';
 
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { authoredFixtureProjectPath, fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { itGodot } from '../helpers/godot-skip.js';
+import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
+
+const RESOURCE_CASE_TIMEOUT_MS = 120_000;
+
+const tmp = useTmpDirs();
 
 const allToolDefinitions = [
   ...runtimeToolDefinitions,
@@ -133,4 +141,38 @@ describe('MCP outputSchema contract (issue #18)', () => {
       await server.close();
     }
   });
+
+  itGodot(
+    'create_resource and set_resource_properties: return structuredContent matching outputSchema',
+    async () => {
+      const project = join(tmp.make('godot-mcp-schema-resource-'), 'project');
+      cpSync(authoredFixtureProjectPath, project, { recursive: true });
+      dropProjectFeatureVersion(project);
+      const { client, server } = await makeLinkedPair();
+
+      try {
+        const created = (await client.callTool({
+          name: 'create_resource',
+          arguments: { projectPath: project, resourcePath: 'blank.tres', type: 'Resource' },
+        })) as { structuredContent?: unknown; isError?: boolean };
+        expect(created.isError).not.toBe(true);
+        expect(created.structuredContent).toBeDefined();
+
+        const edited = (await client.callTool({
+          name: 'set_resource_properties',
+          arguments: {
+            projectPath: project,
+            resourcePath: 'blank.tres',
+            properties: { resource_name: 'n' },
+          },
+        })) as { structuredContent?: unknown; isError?: boolean };
+        expect(edited.isError).not.toBe(true);
+        expect(edited.structuredContent).toBeDefined();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+    RESOURCE_CASE_TIMEOUT_MS,
+  );
 });

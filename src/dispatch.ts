@@ -42,6 +42,8 @@ import {
   handleSaveScene,
   handleExportMeshLibrary,
   handleBatchSceneOperations,
+  handleCreateResource,
+  handleSetResourceProperties,
 } from './tools/scene-tools.js';
 
 import {
@@ -95,6 +97,8 @@ export const toolDispatch = {
   save_scene: handleSaveScene,
   export_mesh_library: handleExportMeshLibrary,
   batch_scene_operations: handleBatchSceneOperations,
+  create_resource: handleCreateResource,
+  set_resource_properties: handleSetResourceProperties,
 
   delete_nodes: handleDeleteNodes,
   set_node_properties: handleSetNodeProperties,

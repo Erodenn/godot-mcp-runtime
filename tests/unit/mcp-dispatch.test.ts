@@ -55,6 +55,7 @@ describe('serverInstructions category coverage', () => {
     ['Project management', 'launch_editor'],
     ['Scene editing', 'create_scene'],
     ['Node editing', 'delete_nodes'],
+    ['Resource files', 'create_resource'],
     ['Runtime', 'take_screenshot'],
     ['Render check', 'render_movie'],
     ['Profiling', 'profile_project'],

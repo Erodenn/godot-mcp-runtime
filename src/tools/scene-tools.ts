@@ -1,6 +1,6 @@
 import { existsSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
-import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
+import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import {
   isSceneFileNodeType,
@@ -20,11 +20,37 @@ import {
   optionalBoolean,
   requireArray,
   optionalObject,
+  requireObject,
   checkBatchOperationItems,
 } from '../utils/arg-parsing.js';
-import { err } from '../utils/result.js';
+import { err, ok, type Result } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
 import { batchSceneWrites, inPlaceSceneWrite, loadSpriteTouch } from '../utils/scene-loss-guard.js';
+
+const resourceFileOutputSchema = {
+  type: 'object',
+  properties: {
+    warnings: { type: 'array', items: { type: 'string' } },
+    resourcePath: {
+      type: 'string',
+      description: 'Project-relative path of the .tres file written.',
+    },
+    resourceType: {
+      type: 'string',
+      description: 'Engine class of the saved resource (Resource for a script class).',
+    },
+    scriptPath: {
+      type: ['string', 'null'],
+      description: 'Project-relative path of its script, or null.',
+    },
+    properties: {
+      type: 'object',
+      description:
+        'Each property the call set, read back from the saved file, in the shapes set_node_properties accepts.',
+    },
+  },
+  required: ['resourcePath', 'resourceType', 'scriptPath', 'properties'],
+} as const;
 
 export const sceneToolDefinitions = [
   {
@@ -385,6 +411,62 @@ export const sceneToolDefinitions = [
       required: ['results'],
     },
   },
+  {
+    name: 'create_resource',
+    description:
+      'Create a .tres resource file from an engine Resource class or a GDScript resource script (class_name or path), with property values set. Values are checked against declared types as in set_node_properties (Property Values in docs/tools.md). Refuses an existing file unless overwrite is true. Returns: resourcePath, resourceType, scriptPath and properties read back from the saved file. Errors on an unknown type or property, and while a runtime session is live on this project.',
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        resourcePath: {
+          type: 'string',
+          description:
+            'Path of the .tres file inside the project, e.g. "items/sword.tres". Created with its folders.',
+        },
+        type: {
+          type: 'string',
+          description:
+            'Engine Resource class such as "StyleBoxFlat", a registered class_name, or a GDScript path such as "items/item_stats.gd". A class_name is known only after the editor or an import has scanned the project.',
+        },
+        properties: {
+          type: 'object',
+          description:
+            'Property values to set, keyed by property name as written, with the same value rules as set_node_properties. script and resource_path are refused.',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Replace an existing file at resourcePath (default: false).',
+        },
+      },
+      required: ['projectPath', 'resourcePath', 'type'],
+    },
+    outputSchema: resourceFileOutputSchema,
+  },
+  {
+    name: 'set_resource_properties',
+    description:
+      'Set property values in an existing .tres resource file and save it. Properties not named, sub-resources and uids stay as the file has them. Values are checked against declared types as in set_node_properties (Property Values in docs/tools.md); one invalid name or value errors and writes nothing. Returns: resourcePath, resourceType, scriptPath and the named properties read back from the saved file. Errors while a runtime session is live on this project.',
+    annotations: { idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+        resourcePath: {
+          type: 'string',
+          description: 'Path of the .tres file inside the project, e.g. "items/sword.tres".',
+        },
+        properties: {
+          type: 'object',
+          description:
+            'Property values to set, at least one, keyed by property name as written, with the same value rules as set_node_properties. script and resource_path are refused.',
+        },
+      },
+      required: ['projectPath', 'resourcePath', 'properties'],
+    },
+    outputSchema: resourceFileOutputSchema,
+  },
 ] as const satisfies readonly ToolDefinition[];
 
 export async function handleCreateScene(
@@ -664,5 +746,121 @@ export async function handleBatchSceneOperations(
       refineSceneWrites: (payload) =>
         batchSceneWrites(resolvedOperations, parsed.value.projectPath, payload.results),
     },
+  );
+}
+
+const TEXT_RESOURCE_SUFFIX = '.tres';
+
+/** Resolves `resourcePath` for a write; only a text resource can be checked and edited key by key, so a `.res` or any other suffix is refused. */
+function parseResourcePathArg(
+  args: OperationParams,
+): Result<{ projectPath: string; raw: string; relPath: string; absPath: string }, ToolResponse> {
+  const parsed = parseProjectArgs(args);
+  if (!parsed.ok) return parsed;
+  const raw = requireString(args, 'resourcePath');
+  if (!raw.ok) return raw;
+  const resolved = resolveProjectPath(parsed.value.projectPath, raw.value, 'write');
+  if (!resolved) {
+    return err(
+      createErrorResponse(projectSubPathError('resource path', raw.value), [
+        ...PROJECT_SUB_PATH_SOLUTIONS,
+      ]),
+    );
+  }
+  if (!resolved.relPath.toLowerCase().endsWith(TEXT_RESOURCE_SUFFIX)) {
+    return err(
+      createErrorResponse('resourcePath must name a .tres file', [
+        'Pass a path ending in .tres. A binary .res file cannot be checked as text',
+      ]),
+    );
+  }
+  return ok({
+    projectPath: parsed.value.projectPath,
+    raw: raw.value,
+    relPath: resolved.relPath,
+    absPath: resolved.absPath,
+  });
+}
+
+export async function handleCreateResource(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const resource = parseResourcePathArg(args);
+  if (!resource.ok) return resource;
+  const type = requireString(args, 'type');
+  if (!type.ok) return type;
+  const properties = optionalObject(args, 'properties');
+  if (!properties.ok) return properties;
+  const overwrite = optionalBoolean(args, 'overwrite');
+  if (!overwrite.ok) return overwrite;
+
+  if (existsSync(resource.value.absPath) && overwrite.value !== true) {
+    return err(
+      createErrorResponse(`Resource file already exists: ${resource.value.raw}`, [
+        'Pass overwrite: true to replace it',
+        'Use set_resource_properties to change values in the existing file',
+      ]),
+    );
+  }
+
+  const params: OperationParams = {
+    resourcePath: resource.value.relPath,
+    type: type.value,
+    properties: properties.value ?? {},
+    overwrite: overwrite.value ?? false,
+  };
+  return executeSceneOp(
+    runner,
+    'create_resource',
+    params,
+    resource.value.projectPath,
+    'Failed to create resource',
+    ['Check the type and the property names'],
+    undefined,
+    // The loss guard reads .tscn text only; the GDScript side keeps a .tres whole instead.
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
+  );
+}
+
+export async function handleSetResourceProperties(
+  runner: GodotRunner,
+  args: OperationParams,
+): Promise<HandlerResult> {
+  args = normalizeParameters(args);
+  const resource = parseResourcePathArg(args);
+  if (!resource.ok) return resource;
+  const properties = requireObject(args, 'properties');
+  if (!properties.ok) return properties;
+  if (Object.keys(properties.value).length === 0) {
+    return err(
+      createErrorResponse('properties must name at least one property', [
+        'Pass the properties to change, e.g. {"power": 20}',
+      ]),
+    );
+  }
+
+  if (!existsSync(resource.value.absPath)) {
+    return err(
+      createErrorResponse(`Resource file does not exist: ${resource.value.raw}`, [
+        'Use create_resource to create it',
+      ]),
+    );
+  }
+
+  const params: OperationParams = {
+    resourcePath: resource.value.relPath,
+    properties: properties.value,
+  };
+  return executeSceneOp(
+    runner,
+    'set_resource_properties',
+    params,
+    resource.value.projectPath,
+    'Failed to set resource properties',
+    ['Check the property names and values'],
+    undefined,
+    { parseStdoutAsJson: true, mutatesSceneFile: true },
   );
 }
