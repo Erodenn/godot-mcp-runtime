@@ -1013,15 +1013,16 @@ func _preflight_click(target: Control) -> String:
 
 # The nearest ancestor that clips the point away: a ScrollContainer or a clip_contents Control whose rect does not hold it. Geometry only, so it answers on engines without the hovered-control API.
 func _clipping_ancestor(target: Control, point: Vector2) -> Control:
-	var ancestor := target.get_parent()
-	while ancestor is Control:
-		var ctrl := ancestor as Control
-		if _clips_children(ctrl) and not _control_viewport_rect(ctrl).has_point(point):
-			return ctrl
-		if ctrl.top_level:
-			break
-		ancestor = ctrl.get_parent()
+	var item: CanvasItem = target
+	while _inherits_clip(item):
+		item = item.get_parent() as CanvasItem
+		if item is Control and _clips_children(item as Control) and not _control_viewport_rect(item as Control).has_point(point):
+			return item as Control
 	return null
+
+# The engine clips through CanvasItem parents only: a top_level item, or one under a plain Node, a CanvasLayer or a Window, starts a new chain.
+func _inherits_clip(item: CanvasItem) -> bool:
+	return not item.top_level and item.get_parent() is CanvasItem
 
 func _clip_refusal(target: Control) -> String:
 	var clipper := _clipping_ancestor(target, _control_viewport_rect(target).get_center())
@@ -1397,7 +1398,7 @@ func _control_viewport_rect(ctrl: Control) -> Rect2:
 		return Rect2(origin, drawn_size)
 	return xform * Rect2(Vector2.ZERO, ctrl.size)
 
-# A Control clips its children when it says so or when it is a ScrollContainer (which always clips). `clip` is the screen region the ancestors leave visible so far; `has_clip` tells an unset region from an empty one.
+# A Control clips its children when it says so or when it is a ScrollContainer (which always clips).
 func _clips_children(ctrl: Control) -> bool:
 	return ctrl.clip_contents or ctrl is ScrollContainer
 
@@ -1411,22 +1412,21 @@ func _visible_part(rect: Rect2, region: Rect2) -> Variant:
 		return null
 	return region.intersection(rect)
 
-# `scope` limits what is listed to that node and its descendants. The walk still passes through the ancestors above it, unlisted, so their visibility and clipping apply to the scoped controls exactly as in the unscoped walk; branches that cannot reach the scope are skipped. The default (null) lists everything, which is what the UI snapshot uses.
+# `clip` is the screen region the ancestors leave visible (`has_clip` tells unset from empty). The walk passes through the ancestors above `scope` unlisted, so their clipping still applies.
 func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "", clip: Rect2 = Rect2(), has_clip: bool = false, scope: Node = null) -> void:
 	var in_scope := scope == null or node == scope or scope.is_ancestor_of(node)
 	if not in_scope and not node.is_ancestor_of(scope):
 		return
+	var clipped := has_clip and node is CanvasItem and _inherits_clip(node as CanvasItem)
 	var child_clip := clip
-	var child_has_clip := has_clip
+	var child_has_clip := clipped
 	if node is Control:
 		var ctrl := node as Control
 		if visible_only and not ctrl.is_visible_in_tree():
 			return
-		if ctrl.top_level:
-			child_has_clip = false
 		var rect := _control_viewport_rect(ctrl)
 		var region := ctrl.get_viewport().get_visible_rect()
-		if has_clip and not ctrl.top_level:
+		if clipped:
 			region = region.intersection(clip)
 		var visible_part: Variant = _visible_part(rect, region)
 		var on_screen: bool = visible_part != null
