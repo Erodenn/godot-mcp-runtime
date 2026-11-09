@@ -215,6 +215,14 @@ export interface CaptureOptions {
   track?: string[];
 }
 
+/** `CaptureOptions` as `assertCanStart` resolved and checked them. */
+interface CaptureSettings {
+  timelineMs: number | null;
+  targetFps: number;
+  timelineBuckets: number;
+  timelineTop: number;
+}
+
 export interface TrackSample {
   frame: number;
   values: Record<string, unknown>;
@@ -1489,13 +1497,13 @@ export class DebuggerProfiler {
     return (await this.open(seconds, captureLimit, options)).started;
   }
 
-  /** Throws what `start` would refuse; the tools check first because a track_start replaces a running track, and a refused call must not take it down. */
+  /** Throws what `start` would refuse, else returns the settings with defaults applied; the tools check first because a track_start replaces a running track, and a refused call must not take it down. */
   assertCanStart(
     seconds: number,
     captureLimit: number,
     options: CaptureOptions = {},
     maxSeconds: number = PROFILE_MAX_SECONDS,
-  ): void {
+  ): CaptureSettings {
     const timelineMs = options.timelineMs ?? null;
     const targetFps = options.targetFps ?? DEFAULT_TARGET_FPS;
     if (!Number.isFinite(seconds) || seconds <= PROFILE_SECONDS_FLOOR || seconds > maxSeconds) {
@@ -1562,6 +1570,7 @@ export class DebuggerProfiler {
       throw new ProfilerError('profile_disconnected', this.error ?? 'Profiler closed');
     }
     this.assertIdle();
+    return { timelineMs, targetFps, timelineBuckets, timelineTop };
   }
 
   private async open(
@@ -1570,9 +1579,13 @@ export class DebuggerProfiler {
     options: CaptureOptions,
     maxSeconds: number = PROFILE_MAX_SECONDS,
   ): Promise<{ started: ProfileStartResult; capture: Capture }> {
-    this.assertCanStart(seconds, captureLimit, options, maxSeconds);
+    const { timelineMs, targetFps, timelineBuckets, timelineTop } = this.assertCanStart(
+      seconds,
+      captureLimit,
+      options,
+      maxSeconds,
+    );
     const visual = options.visual === true;
-    const timelineMs = options.timelineMs ?? null;
 
     await this.wait(
       () => this.threadId !== null,
@@ -1606,7 +1619,7 @@ export class DebuggerProfiler {
       closedBy: null,
       monitors: newMonitorCapture(this.lastCompilations),
       visual: visual ? newVisualCapture() : null,
-      targetFps: options.targetFps ?? DEFAULT_TARGET_FPS,
+      targetFps,
       slowFrames: 0,
       frameCapMs: sanitizeFrameCapMs(options.frameCapMs),
       frameCapUnknown: options.frameCapMs === null,
@@ -1619,8 +1632,8 @@ export class DebuggerProfiler {
               timelineBucketMs(timelineMs, seconds),
               seconds,
               options.track ?? [],
-              options.timelineTop ?? TIMELINE_TOP_DEFAULT,
-              options.timelineBuckets ?? TIMELINE_BUCKETS_DEFAULT,
+              timelineTop,
+              timelineBuckets,
             ),
     };
     const capture = this.capture;
