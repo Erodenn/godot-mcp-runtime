@@ -721,6 +721,10 @@ func save_scene_to_path(scene_root: Node, save_path: String) -> bool:
 		log_error("Failed to pack scene: " + str(result))
 		return false
 
+	# full_path passed the containment check above; a save-as into a folder that does not exist yet creates it, as create_scene does.
+	if not _ensure_res_dir(full_path):
+		log_error("Failed to create the folder for the scene: " + _project_relative(full_path))
+		return false
 	var is_new_file := not FileAccess.file_exists(full_path)
 	var save_error: int = ResourceSaver.save(packed_scene, full_path)
 	if save_error != OK:
@@ -910,6 +914,9 @@ func _apply_resource_properties(res: Resource, props: Variant) -> Dictionary:
 # save_scene_to_path without pack(): the uids the headless saver drops are read from the file being replaced and put back.
 func _save_resource_to_path(res: Resource, full_path: String) -> bool:
 	var uids := _read_scene_uids(full_path)
+	if not _ensure_res_dir(full_path):
+		log_error("Failed to create the folder for the resource: " + _project_relative(full_path))
+		return false
 	var is_new_file := not FileAccess.file_exists(full_path)
 	var save_error: int = ResourceSaver.save(res, full_path)
 	if save_error != OK:

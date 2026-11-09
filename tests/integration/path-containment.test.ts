@@ -175,6 +175,25 @@ describe('project-root containment (normalize_scene_path choke point)', () => {
     60000,
   );
 
+  itGodot(
+    'save_scene newPath into a folder that does not exist creates the folder',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1]!;
+      const target = join(tmpProject, 'made', 'deep', 'copy.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'save_scene',
+        { scenePath: 'main.tscn', newPath: 'made/deep/copy.tscn' },
+        tmpProject,
+        30000,
+      );
+
+      expect(stdout).toContain(OPERATION_RESULT_SENTINEL);
+      expect(existsSync(target)).toBe(true);
+    },
+    60000,
+  );
+
   // A property value is the one path that arrives with no Node-side validator, so the script is the only guard.
   itGodot(
     'set_node_properties rejects a res:// property value that escapes the project root',
