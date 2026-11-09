@@ -6,7 +6,7 @@ import { logDebug } from './logger.js';
 import { getErrorMessage } from './error-response.js';
 import { normalizeExitCode } from './output-parsing.js';
 import { godotSpawnOptions } from './godot-spawn-options.js';
-import { killProcessTree, TASKKILL_TIMEOUT_MS } from './process-tree.js';
+import { killProcessTree, TASKKILL_TIMEOUT_MS, type KillOutcome } from './process-tree.js';
 
 /** Each captured stream keeps only its last this many characters. */
 export const MOVIE_OUTPUT_CAPTURE_MAX_CHARS = 64 * 1024;
@@ -28,7 +28,7 @@ export interface MovieProcessResult {
 }
 
 export interface MovieRunHooks {
-  /** Called once when the child is known not to be running (it reported `close`, exited after the timeout's tree kill, or never started), not when the call merely gives up on a child that outlived its timeout kill: a caller tracking 'a movie process uses this project' ends that here, not on the result. */
+  /** Called once when the child is known not to be running (it reported `close`, exited after a timeout tree kill that did not fail, or never started), not when the call merely gives up on a child that outlived its timeout kill: a caller tracking 'a movie process uses this project' ends that here, not on the result. */
   onClosed?: () => void;
 }
 
@@ -41,7 +41,7 @@ export type RunMovieProcess = (
 
 export interface MovieProcessDeps {
   spawn: typeof spawn;
-  killTree: (proc: ChildProcess) => void;
+  killTree: (proc: ChildProcess) => KillOutcome;
 }
 
 const defaultMovieProcessDeps: MovieProcessDeps = {
@@ -50,7 +50,7 @@ const defaultMovieProcessDeps: MovieProcessDeps = {
 };
 
 /** Children still running: the first spawn registers one exit hook over this set so a server exiting mid-run leaves no Godot window. A child leaves only when it reports closing (or never started), not when its call resolves, so one that outlived a timeout kill gets a second attempt; each is kept with its own call's tree kill. */
-const activeMovieChildren = new Map<ChildProcess, (proc: ChildProcess) => void>();
+const activeMovieChildren = new Map<ChildProcess, MovieProcessDeps['killTree']>();
 let exitHookRegistered = false;
 
 /** Kills the tree of every child still running; the body of the exit hook. Never throws. */
@@ -99,6 +99,7 @@ export function runMovieProcess(
     let stderr = '';
     let timedOut = false;
     let exitedAfterKill = false;
+    let killFailed = false;
     const timers: { timeout?: NodeJS.Timeout; grace?: NodeJS.Timeout } = {};
 
     const finish = (result: MovieProcessResult): void => {
@@ -146,7 +147,8 @@ export function runMovieProcess(
     });
     child.on('exit', () => {
       // Only an exit after the tree kill confirms it: before it, a launcher can exit while the engine it started runs on. The child stays in the exit-hook set until `close`, since a descendant may still hold its pipes.
-      if (!timedOut) return;
+      // A failed tree kill may have reached only a wrapper pid, so its exit says nothing of the engine: only `close` confirms.
+      if (!timedOut || killFailed) return;
       exitedAfterKill = true;
       reportClosed();
     });
@@ -158,7 +160,12 @@ export function runMovieProcess(
 
     timers.timeout = setTimeout(() => {
       timedOut = true;
-      deps.killTree(child);
+      try {
+        killFailed = deps.killTree(child) === 'failed';
+      } catch (error) {
+        logDebug(`Non-fatal: the movie process tree kill threw: ${getErrorMessage(error)}`);
+        killFailed = true;
+      }
       timers.grace = setTimeout(() => {
         finish({
           exitCode: null,

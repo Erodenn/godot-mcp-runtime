@@ -13,6 +13,7 @@ import {
 import {
   MOVIE_CHECK_RUN_STALE_MS,
   MOVIE_RUNTIME_WARNINGS_MAX,
+  MOVIE_STALE_CLEANUP_WAIT_MS,
   MOVIE_TIMEOUT_BASE_MS,
   MOVIE_TIMEOUT_PER_FRAME_MS,
   buildMovieArgs,
@@ -904,6 +905,87 @@ describe('render_movie leftover check runs', () => {
     expect(existsSync(leftover)).toBe(false);
     expect(existsSync(recent)).toBe(true);
     expect(existsSync(kept)).toBe(true);
+  });
+
+  describe('removal of leftovers', () => {
+    interface RemovalProbe {
+      removed: string[];
+      queueHolderAtRemoval: Array<string | null>;
+      spawnsAtRemoval: number[];
+      release: () => void;
+    }
+
+    function setupWithSlowRemoval(never = false) {
+      const base = setup();
+      const probe: RemovalProbe = {
+        removed: [],
+        queueHolderAtRemoval: [],
+        spawnsAtRemoval: [],
+        release: () => {},
+      };
+      const gate = new Promise<void>((done) => {
+        probe.release = done;
+      });
+      const handler = createRenderMovieHandler({
+        runProcess: base.stub.runProcess,
+        displayAvailable: () => true,
+        removeRunDir: async (runDir) => {
+          probe.removed.push(runDir);
+          probe.queueHolderAtRemoval.push(base.fake.queue.running);
+          probe.spawnsAtRemoval.push(base.stub.calls.length);
+          if (never) return new Promise<string | null>(() => {});
+          await gate;
+          return null;
+        },
+      });
+      return { ...base, handler, probe };
+    }
+
+    it('removes a leftover outside the queued step, after the spawn, without holding the queue', async () => {
+      const { dir, runner, handler, probe } = setupWithSlowRemoval();
+      const leftover = seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
+      const recent = seedRun(dir, 'check-2-live', MS_PER_SECOND);
+
+      const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+      await vi.waitFor(() => expect(probe.removed.length).toBe(1));
+
+      expect(probe.removed).toEqual([leftover]);
+      expect(probe.removed).not.toContain(recent);
+      expect(probe.queueHolderAtRemoval).toEqual([null]);
+      expect(probe.spawnsAtRemoval).toEqual([1]);
+      probe.release();
+      payloadOf(await pending);
+    });
+
+    it('answers within the cleanup wait cap when a removal never finishes, and says nothing of it', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const { dir, runner, handler, probe } = setupWithSlowRemoval(true);
+        seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
+
+        const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+        await vi.waitFor(() => expect(probe.removed.length).toBe(1));
+        await vi.advanceTimersByTimeAsync(MOVIE_STALE_CLEANUP_WAIT_MS);
+        payloadOf(await pending);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not remove anything when the call is refused at the gate', async () => {
+      const { dir, runner, handler, probe, stub } = setupWithSlowRemoval();
+      seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
+
+      const result = await handler(
+        runner,
+        { projectPath: dir },
+        makeContext({ elicit: async () => ({ action: 'decline' }) }),
+      );
+
+      expectErrorMatching(result, /User declined render_movie/);
+      expect(probe.removed).toEqual([]);
+      expect(stub.calls.length).toBe(0);
+    });
   });
 
   it('names a check run so a later start can tell it from a kept one', async () => {

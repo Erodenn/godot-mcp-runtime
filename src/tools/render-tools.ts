@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs';
+import { readdir, rm, stat } from 'fs/promises';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import type { GodotRunner } from '../utils/godot-runner.js';
@@ -595,21 +596,54 @@ const CHECK_RUN_ID_PREFIX = 'check-';
 export const MOVIE_CHECK_RUN_STALE_MS =
   MOVIE_TIMEOUT_BASE_MS + MAX_MOVIE_FRAMES * MOVIE_TIMEOUT_PER_FRAME_MS + MOVIE_KILL_WORST_CASE_MS;
 
-/** Removes the check-mode run directories a server that died mid-run left behind (a check run deletes its own files on every path out). Frames and video runs are kept for the caller and never touched. Never throws. */
-function removeStaleCheckRuns(root: string): void {
+/** The longest the answer waits for the removal of leftover check runs, which proceeds beside the render and is not part of its budget; a removal still running then carries on unawaited. */
+export const MOVIE_STALE_CLEANUP_WAIT_MS = 2000;
+
+/** Removes the check-mode run directories a server that died mid-run left behind (a check run deletes its own files on every path out). Frames and video runs are kept for the caller and never touched. Asynchronous, so a large directory never blocks the event loop; runs after the spawn, outside the queued step, so it neither holds the queue nor draws on the step's charge. Never rejects. */
+async function removeStaleCheckRuns(
+  root: string,
+  removeDir: (runDir: string) => Promise<string | null>,
+): Promise<void> {
   const now = Date.now();
   const base = moviesDir(root);
   try {
     if (!existsSync(base)) return;
-    for (const entry of readdirSync(base, { withFileTypes: true })) {
+    for (const entry of await readdir(base, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith(CHECK_RUN_ID_PREFIX)) continue;
       const runDir = join(base, entry.name);
-      if (now - statSync(runDir).mtimeMs < MOVIE_CHECK_RUN_STALE_MS) continue;
-      const failure = removeRunDir(runDir);
+      if (now - (await stat(runDir)).mtimeMs < MOVIE_CHECK_RUN_STALE_MS) continue;
+      const failure = await removeDir(runDir);
       if (failure !== null) logDebug(`render_movie could not remove ${runDir}: ${failure}`);
     }
   } catch (error) {
     logDebug(`render_movie could not look for leftover check runs: ${getErrorMessage(error)}`);
+  }
+}
+
+async function removeRunDirAsync(runDir: string): Promise<string | null> {
+  try {
+    await rm(runDir, {
+      recursive: true,
+      force: true,
+      maxRetries: MOVIE_CLEANUP_MAX_RETRIES,
+      retryDelay: MOVIE_CLEANUP_RETRY_DELAY_MS,
+    });
+    return null;
+  } catch (error) {
+    return getErrorMessage(error);
+  }
+}
+
+/** Resolves when `work` does or after `ms`, whichever is first. */
+async function settleWithin(work: Promise<void>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const cap = new Promise<void>((done) => {
+    timer = setTimeout(done, ms);
+  });
+  try {
+    await Promise.race([work, cap]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -813,6 +847,8 @@ function measurementWarnings(
 export interface RenderMovieDeps {
   runProcess: RunMovieProcess;
   displayAvailable: () => boolean;
+  /** Removes one leftover run directory; resolves to the failure message, or null. Replaceable for tests. */
+  removeRunDir?: (runDir: string) => Promise<string | null>;
 }
 
 interface RunContext {
@@ -1103,7 +1139,6 @@ export function createRenderMovieHandler(
         runner.repairStrandedBridge(root);
         const stranded = refuseIfBridgeEntryStranded(root);
         if (stranded !== null) return err(stranded);
-        removeStaleCheckRuns(root);
         try {
           if (!isUnderDir(moviesDir(root), runDir)) {
             throw new Error('the run directory is outside the movies directory');
@@ -1146,6 +1181,9 @@ export function createRenderMovieHandler(
     }
     if (!('started' in launched)) return launched;
 
+    // Past the gate and the second session check, and no live run owns a stale check directory: removed beside the render, not inside the queued step.
+    const staleCleanup = removeStaleCheckRuns(root, deps.removeRunDir ?? removeRunDirAsync);
+
     let response: HandlerResult;
     try {
       const result = await launched.started;
@@ -1165,6 +1203,8 @@ export function createRenderMovieHandler(
         ]),
       );
     }
+
+    await settleWithin(staleCleanup, MOVIE_STALE_CLEANUP_WAIT_MS);
 
     if (!response.ok) {
       const failure = removeRunDir(runDir);

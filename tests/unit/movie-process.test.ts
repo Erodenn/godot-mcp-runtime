@@ -209,6 +209,57 @@ describe('runMovieProcess', () => {
       expect(result.killUnconfirmed).toBeUndefined();
     });
 
+    it('does not count an exit as a confirmed kill when the tree kill failed, and fires once it closes', async () => {
+      vi.useFakeTimers();
+      const child = createFakeChild();
+      const deps = createDeps(child);
+      deps.killTreeMock.mockReturnValue('failed');
+      const onClosed = vi.fn();
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, deps, { onClosed });
+      vi.advanceTimersByTime(TEST_TIMEOUT_MS);
+      child.emit('exit', null, 'SIGKILL');
+      expect(onClosed).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(MOVIE_KILL_GRACE_MS);
+      const result = await promise;
+      expect(result.timedOut).toBe(true);
+      expect(result.killUnconfirmed).toBe(true);
+      expect(onClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null);
+      expect(onClosed).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['signalled', 'not-running'] as const)(
+      'counts an exit after a %s tree kill as a confirmed kill',
+      async (outcome) => {
+        vi.useFakeTimers();
+        const child = createFakeChild();
+        const deps = createDeps(child);
+        deps.killTreeMock.mockReturnValue(outcome);
+        const onClosed = vi.fn();
+        const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, deps, { onClosed });
+        vi.advanceTimersByTime(TEST_TIMEOUT_MS);
+        child.emit('exit', null, 'SIGKILL');
+        expect(onClosed).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(MOVIE_KILL_GRACE_MS);
+        expect((await promise).killUnconfirmed).toBeUndefined();
+      },
+    );
+
+    it('treats a tree kill that throws as a failed one', async () => {
+      vi.useFakeTimers();
+      const child = createFakeChild();
+      const deps = createDeps(child);
+      deps.killTreeMock.mockImplementation(() => {
+        throw new Error('spawnSync EPERM');
+      });
+      const promise = runMovieProcess('/fake/godot', [], TEST_TIMEOUT_MS, deps);
+      vi.advanceTimersByTime(TEST_TIMEOUT_MS);
+      child.emit('exit', null, 'SIGKILL');
+      vi.advanceTimersByTime(MOVIE_KILL_GRACE_MS);
+      expect((await promise).killUnconfirmed).toBe(true);
+    });
+
     it('does not fire on an exit before any timeout kill: a launcher can exit while the engine it started runs on', async () => {
       const child = createFakeChild();
       const onClosed = vi.fn();
