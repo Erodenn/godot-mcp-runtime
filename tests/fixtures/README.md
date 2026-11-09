@@ -45,6 +45,15 @@ Contents:
 - `project.godot`: the `[display]` section with the viewport size, the window override and `window/stretch/mode="canvas_items"`
 - `stretch_probe.tscn`, `stretch_probe.gd`: a `ClickBtn` Button whose `pressed` handler increments `press_count`, and a `GhostBtn` Button with `mouse_filter` ignore (nothing can reach it, and no control lies behind it) whose handler increments `ghost_press_count`. The root `Control` ignores the mouse too
 
+## `godot-canvas-layer-project/`
+
+A 1280x720 viewport in a window of the same size under `canvas_items` stretch. Copy it to a tmp dir before launching (`canvasLayerFixtureProjectPath` in `tests/helpers/fixture-paths.ts`); the tests pick the scene with `runProjectOrSkip`'s `scene` option (`canvasLayerProbeScenePath`, `contentScaleProbeScenePath`). The scripts type their members.
+
+Contents:
+- `project.godot`: the `[display]` section with the viewport and window override at 1280x720 and `window/stretch/mode="canvas_items"`
+- `canvas_layer_probe.tscn`, `canvas_layer_probe.gd`: a `CanvasLayer` with offset (150, 80) and scale 2 holding `LayeredBtn`, a `DecoyBtn` under the root at the position `LayeredBtn` would have without the layer (the click lands there if the layer transform is left out), and a `PlainBtn` in the default canvas for the viewport `canvas_transform` test. Each `pressed` handler increments a counter on the root
+- `content_scale_probe.tscn`, `content_scale_probe.gd`: three adjacent Buttons (`LeftBtn`, `MiddleBtn`, `RightBtn`) and a `_ready` that sets `Window.content_scale_factor` to 0.7; a click at 1/0.7 of the middle button lands on the right one
+
 ## `godot-profiling-project/`
 
 The same shape, with a `_process` loop that burns measurable time (`hot_loop.gd::burn`).

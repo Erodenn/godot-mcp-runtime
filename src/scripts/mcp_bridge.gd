@@ -988,12 +988,12 @@ func _preflight_click(target: Control) -> String:
 	for _pass: int in CLICK_PREFLIGHT_MAX_PASSES:
 		if not is_instance_valid(target) or not target.is_visible_in_tree():
 			return "UI element is no longer visible"
-		var center := target.get_global_rect().get_center()
+		var center := _control_viewport_rect(target).get_center()
 		_inject_motion_at(center)
 		await get_tree().process_frame
 		if not is_instance_valid(target) or not target.is_visible_in_tree():
 			return "UI element is no longer visible"
-		if target.get_global_rect().get_center().is_equal_approx(center):
+		if _control_viewport_rect(target).get_center().is_equal_approx(center):
 			settled = true
 			break
 	if not settled:
@@ -1014,7 +1014,7 @@ func _clipping_ancestor(target: Control, point: Vector2) -> Control:
 	var ancestor := target.get_parent()
 	while ancestor is Control:
 		var ctrl := ancestor as Control
-		if _clips_children(ctrl) and not ctrl.get_global_rect().has_point(point):
+		if _clips_children(ctrl) and not _control_viewport_rect(ctrl).has_point(point):
 			return ctrl
 		if ctrl.top_level:
 			break
@@ -1022,7 +1022,7 @@ func _clipping_ancestor(target: Control, point: Vector2) -> Control:
 	return null
 
 func _clip_refusal(target: Control) -> String:
-	var clipper := _clipping_ancestor(target, target.get_global_rect().get_center())
+	var clipper := _clipping_ancestor(target, _control_viewport_rect(target).get_center())
 	if clipper == null:
 		return ""
 	return "clipped by %s (%s); nothing was pressed" % [str(clipper.get_path()), "scroll it or enlarge it" if clipper is ScrollContainer else "clip_contents hides the target centre"]
@@ -1034,7 +1034,7 @@ func _scroll_into_view(target: Control) -> Array:
 	while ancestor is Control:
 		if ancestor is ScrollContainer and is_instance_valid(target):
 			var scroller := ancestor as ScrollContainer
-			if not scroller.get_global_rect().has_point(target.get_global_rect().get_center()):
+			if not _control_viewport_rect(scroller).has_point(_control_viewport_rect(target).get_center()):
 				var before := Vector2i(scroller.scroll_horizontal, scroller.scroll_vertical)
 				scroller.ensure_control_visible(target)
 				if before != Vector2i(scroller.scroll_horizontal, scroller.scroll_vertical):
@@ -1098,7 +1098,7 @@ func _inject_action(action: Dictionary, pressed: bool) -> void:
 func _inject_click_element(action: Dictionary, target: Control, pressed: bool) -> void:
 	var button_result := _resolve_button_name(str(action.get("button", "left")))
 	var button_index: MouseButton = button_result[0]
-	var center := _viewport_to_window(target.get_global_rect().get_center())
+	var center := _viewport_to_window(_control_viewport_rect(target).get_center())
 	var event := InputEventMouseButton.new()
 	event.button_index = button_index
 	event.pressed = pressed
@@ -1367,6 +1367,19 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 func _rect_number(number: float) -> Variant:
 	return number if is_finite(number) else null
 
+# Where the control is drawn, in viewport pixels: its local rect under get_global_transform_with_canvas(), which adds the transform of the CanvasLayer it sits in (offset, scale, rotation, follow_viewport) or, with no layer, the viewport's canvas_transform (a Camera2D). get_global_rect() is in the layer's own space and leaves both out. The one place a control's on-screen position is read, so a rect and the click centre cannot disagree. Without rotation or skew the bounds are built directly, so an identity transform reports exactly position and size; otherwise they are the axis-aligned bounds of the transformed rect.
+func _control_viewport_rect(ctrl: Control) -> Rect2:
+	var xform := ctrl.get_global_transform_with_canvas()
+	if is_zero_approx(xform.x.y) and is_zero_approx(xform.y.x):
+		var drawn_size := Vector2(ctrl.size.x * absf(xform.x.x), ctrl.size.y * absf(xform.y.y))
+		var origin := xform.origin
+		if xform.x.x < 0.0:
+			origin.x -= drawn_size.x
+		if xform.y.y < 0.0:
+			origin.y -= drawn_size.y
+		return Rect2(origin, drawn_size)
+	return xform * Rect2(Vector2.ZERO, ctrl.size)
+
 # A Control clips its children when it says so or when it is a ScrollContainer (which always clips). `clip` is the screen region the ancestors leave visible so far; `has_clip` tells an unset region from an empty one.
 func _clips_children(ctrl: Control) -> bool:
 	return ctrl.clip_contents or ctrl is ScrollContainer
@@ -1394,7 +1407,7 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 			return
 		if ctrl.top_level:
 			child_has_clip = false
-		var rect := ctrl.get_global_rect()
+		var rect := _control_viewport_rect(ctrl)
 		var region := ctrl.get_viewport().get_visible_rect()
 		if has_clip and not ctrl.top_level:
 			region = region.intersection(clip)
