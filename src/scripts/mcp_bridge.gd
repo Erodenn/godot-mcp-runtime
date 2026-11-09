@@ -98,6 +98,9 @@ const PARENT_WATCH_PORT_ENV := "MCP_PARENT_WATCH_PORT"
 # A server killed outright is noticed within two checks: the first write after its death is answered with a reset, the second fails.
 const PARENT_WATCH_INTERVAL_MS := 2000
 
+# KEEP IN SYNC: FRAME_CAP_COMMAND and FRAME_CAP_FIELD in src/tools/profiler-tools.ts.
+const FRAME_CAP_COMMAND := "frame_cap"
+const FRAME_CAP_FIELD := "frame_cap_ms"
 # Profiler track caps. KEEP IN SYNC: MAX_TRACK_ENTRIES and MIN_TRACK_INTERVAL_MS with TRACK_MAX_ENTRIES and TRACK_MIN_INTERVAL_MS in src/tools/profiler-tools.ts.
 # A track samples from _process on its own clock so a profiler timeline can place samples by frame while other commands (a long input batch) hold this peer.
 const MAX_TRACK_ENTRIES := 4
@@ -132,6 +135,8 @@ const RUN_SCRIPT_TIMED_OUT_FIELD := "timed_out"
 const RUN_SCRIPT_DEFAULT_TIMEOUT_MS := 30000
 # The bridge answers this much before the Node side's timeout (never below half of it), so the typed reply wins the race.
 const RUN_SCRIPT_REPLY_MARGIN_MS := 250
+const RUN_SCRIPT_MIN_BUDGET_FRACTION := 0.5
+const RUN_SCRIPT_UNSEEN_AWAIT_ERROR := "run_script: execute awaits, but the bridge did not find the await in its source, so its result was lost. It is not cancelled and may still resume and change the game. Put the await on a line of its own inside execute."
 const RUN_SCRIPT_TIMED_OUT_ERROR := "run_script timed out: execute was still awaiting after %d ms and has not returned. It is not cancelled and may still resume and change the game; the next call may race with it."
 # Markers around compiling the source, so the Node side keeps a probe's compile errors out of the game's error log.
 # KEEP IN SYNC: COMPILE_BEGIN_SENTINEL and COMPILE_END_SENTINEL in src/utils/bridge-protocol.ts.
@@ -434,7 +439,7 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 			_handle_track_start(peer, payload)
 		"track_stop":
 			_handle_track_stop(peer)
-		"frame_cap":
+		FRAME_CAP_COMMAND:
 			_handle_frame_cap(peer)
 		"ping":
 			_send_response(peer, {"status": "pong", "session_token": session_token, "project_path": ProjectSettings.globalize_path("res://")})
@@ -728,7 +733,7 @@ func _run_action(index: int, action: Variant, watch: Array, batch_start_frame: i
 		elif target is BaseButton and (target as BaseButton).disabled:
 			entry["error"] = "UI element '%s' is disabled" % identifier
 		else:
-			# Before any press: a click that would land on another control is refused here, so a failure never hides a side effect.
+			# Before any press: a click that would land on another control is refused here, so a refused click presses nothing (the preflight's pointer motions still reach the game).
 			var scrolled := await _scroll_into_view(target)
 			if not scrolled.is_empty():
 				entry["scrolled"] = scrolled
@@ -982,7 +987,7 @@ func _resolve_button_name(button_name: String) -> Array:
 		_:
 			return [MOUSE_BUTTON_NONE, "unknown button: '%s' (use 'left', 'right', or 'middle')" % button_name]
 
-# Resolves which control would receive the click before anything is pressed. A mouse motion to the target centre makes the viewport resolve hover on the next frame; the centre is re-read each pass because a layout refresh (a container re-sort after the previous action) can move the target after the last read. Returns "" when the click may go ahead, otherwise the error text. Without the hovered-control API there is nothing to ask, so it returns "" and the post-click verdict stays the only check.
+# "" when the click may go ahead, else the refusal. The centre is re-read each pass: a layout refresh can move the target after the last read. Without the hovered-control API only the clip check runs.
 func _preflight_click(target: Control) -> String:
 	if not _has_hover_api():
 		return _clip_refusal(target)
@@ -1013,15 +1018,16 @@ func _preflight_click(target: Control) -> String:
 
 # The nearest ancestor that clips the point away: a ScrollContainer or a clip_contents Control whose rect does not hold it. Geometry only, so it answers on engines without the hovered-control API.
 func _clipping_ancestor(target: Control, point: Vector2) -> Control:
-	var ancestor := target.get_parent()
-	while ancestor is Control:
-		var ctrl := ancestor as Control
-		if _clips_children(ctrl) and not _control_viewport_rect(ctrl).has_point(point):
-			return ctrl
-		if ctrl.top_level:
-			break
-		ancestor = ctrl.get_parent()
+	var item: CanvasItem = target
+	while _inherits_clip(item):
+		item = item.get_parent() as CanvasItem
+		if item is Control and _clips_children(item as Control) and not _control_viewport_rect(item as Control).has_point(point):
+			return item as Control
 	return null
+
+# The engine clips through CanvasItem parents only: a top_level item, or one under a plain Node, a CanvasLayer or a Window, starts a new chain.
+func _inherits_clip(item: CanvasItem) -> bool:
+	return not item.top_level and item.get_parent() is CanvasItem
 
 func _clip_refusal(target: Control) -> String:
 	var clipper := _clipping_ancestor(target, _control_viewport_rect(target).get_center())
@@ -1288,7 +1294,7 @@ func _handle_frame_cap(peer: PeerState) -> void:
 	var low_processor_ms := 0.0
 	if OS.low_processor_usage_mode:
 		low_processor_ms = float(OS.low_processor_usage_mode_sleep_usec) / 1000.0
-	_send_response(peer, {"frame_cap_ms": pacing_ms + maxf(delay_ms, 0.0) + low_processor_ms})
+	_send_response(peer, {FRAME_CAP_FIELD: pacing_ms + maxf(delay_ms, 0.0) + low_processor_ms})
 
 # Past max_ms or a full buffer nothing new is taken, so a track nobody stops cannot grow without bound.
 func _poll_track() -> void:
@@ -1384,7 +1390,7 @@ func _handle_get_ui_elements(peer: PeerState, payload: Dictionary) -> void:
 func _rect_number(number: float) -> Variant:
 	return number if is_finite(number) else null
 
-# Where the control is drawn, in viewport pixels: its local rect under get_global_transform_with_canvas(), which adds the transform of the CanvasLayer it sits in (offset, scale, rotation, follow_viewport) or, with no layer, the viewport's canvas_transform (a Camera2D). get_global_rect() is in the layer's own space and leaves both out. The one place a control's on-screen position is read, so a rect and the click centre cannot disagree. Without rotation or skew the bounds are built directly, so an identity transform reports exactly position and size; otherwise they are the axis-aligned bounds of the transformed rect.
+# Viewport pixels, the one place a control's on-screen position is read: get_global_rect() leaves out the CanvasLayer or canvas_transform that get_global_transform_with_canvas() adds.
 func _control_viewport_rect(ctrl: Control) -> Rect2:
 	var xform := ctrl.get_global_transform_with_canvas()
 	if is_zero_approx(xform.x.y) and is_zero_approx(xform.y.x):
@@ -1397,13 +1403,16 @@ func _control_viewport_rect(ctrl: Control) -> Rect2:
 		return Rect2(origin, drawn_size)
 	return xform * Rect2(Vector2.ZERO, ctrl.size)
 
-# A Control clips its children when it says so or when it is a ScrollContainer (which always clips). `clip` is the screen region the ancestors leave visible so far; `has_clip` tells an unset region from an empty one.
+# A Control clips its children when it says so or when it is a ScrollContainer (which always clips).
 func _clips_children(ctrl: Control) -> bool:
 	return ctrl.clip_contents or ctrl is ScrollContainer
 
+func _rect_is_finite(rect: Rect2) -> bool:
+	return is_finite(rect.position.x) and is_finite(rect.position.y) and is_finite(rect.size.x) and is_finite(rect.size.y)
+
 # Whether any of the control's rect is reachable on screen, and the part of it that is. A rect with no area of its own (a spacer) counts as on screen when its point is inside the region. A non-finite rect is never claimed off screen.
 func _visible_part(rect: Rect2, region: Rect2) -> Variant:
-	if not (is_finite(rect.position.x) and is_finite(rect.position.y) and is_finite(rect.size.x) and is_finite(rect.size.y)):
+	if not _rect_is_finite(rect):
 		return rect
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
 		return rect if region.has_point(rect.position) else null
@@ -1411,22 +1420,21 @@ func _visible_part(rect: Rect2, region: Rect2) -> Variant:
 		return null
 	return region.intersection(rect)
 
-# `scope` limits what is listed to that node and its descendants. The walk still passes through the ancestors above it, unlisted, so their visibility and clipping apply to the scoped controls exactly as in the unscoped walk; branches that cannot reach the scope are skipped. The default (null) lists everything, which is what the UI snapshot uses.
+# `clip` is the screen region the ancestors leave visible (`has_clip` tells unset from empty). The walk passes through the ancestors above `scope` unlisted, so their clipping still applies.
 func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_only: bool, type_filter: String = "", clip: Rect2 = Rect2(), has_clip: bool = false, scope: Node = null) -> void:
 	var in_scope := scope == null or node == scope or scope.is_ancestor_of(node)
 	if not in_scope and not node.is_ancestor_of(scope):
 		return
+	var clipped := has_clip and node is CanvasItem and _inherits_clip(node as CanvasItem)
 	var child_clip := clip
-	var child_has_clip := has_clip
+	var child_has_clip := clipped
 	if node is Control:
 		var ctrl := node as Control
 		if visible_only and not ctrl.is_visible_in_tree():
 			return
-		if ctrl.top_level:
-			child_has_clip = false
 		var rect := _control_viewport_rect(ctrl)
 		var region := ctrl.get_viewport().get_visible_rect()
-		if has_clip and not ctrl.top_level:
+		if clipped:
 			region = region.intersection(clip)
 		var visible_part: Variant = _visible_part(rect, region)
 		var on_screen: bool = visible_part != null
@@ -1450,7 +1458,8 @@ func _collect_control_nodes(node: Node, elements: Array[Dictionary], visible_onl
 				"visible": ctrl.is_visible_in_tree(),
 				"onScreen": on_screen,
 			}
-			if on_screen and visible_part != rect:
+			# NAN != NAN, so a non-finite rect would otherwise always differ from itself.
+			if on_screen and _rect_is_finite(rect) and visible_part != rect:
 				var part: Rect2 = visible_part
 				element["visibleRect"] = {"x": part.position.x, "y": part.position.y, "width": part.size.x, "height": part.size.y}
 			if ctrl is Button:
@@ -1545,10 +1554,12 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 		_run_execute.call(instance, outcome)
 	else:
 		# Not a coroutine, so called plainly: awaiting its value would raise on a returned freed Object.
-		outcome["value"] = Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
-		outcome["done"] = true
+		_run_execute_plainly.call(instance, outcome)
+		if not outcome["done"]:
+			_send_response(peer, {"error": RUN_SCRIPT_UNSEEN_AWAIT_ERROR})
+			return
 	if not outcome["done"]:
-		var budget_ms := maxi(timeout_ms - RUN_SCRIPT_REPLY_MARGIN_MS, int(timeout_ms * 0.5))
+		var budget_ms := maxi(timeout_ms - RUN_SCRIPT_REPLY_MARGIN_MS, int(timeout_ms * RUN_SCRIPT_MIN_BUDGET_FRACTION))
 		var deadline_ms := Time.get_ticks_msec() + budget_ms
 		while not outcome["done"] and Time.get_ticks_msec() < deadline_ms:
 			await get_tree().process_frame
@@ -1566,27 +1577,73 @@ func _handle_run_script(peer: PeerState, payload: Dictionary) -> void:
 	var serialized: Variant = _serialize_value(result)
 	_send_response(peer, {"success": true, "result": serialized})
 
-# GDScript makes a function a coroutine exactly when its own body holds an await. The body runs from `func execute` to the next line at column 0 that is not a comment; a comment's text is dropped before the check, and a stray match in a string only sends a plain function down the awaiting path.
+# GDScript makes a function a coroutine exactly when its own body holds an await. The body runs from `func execute` to the next line at column 0, read with strings and comments blanked so a multi-line literal cannot end it early.
 func _execute_body_awaits(source: String) -> bool:
 	var await_word := RegEx.create_from_string("\\bawait\\b")
+	var entry_line := RegEx.create_from_string("^(?:@\\w+(?:\\([^)]*\\))?\\s*)*func\\s+%s\\s*\\(" % RUN_SCRIPT_ENTRY_METHOD)
 	var in_body := false
-	for line: String in source.split("\n"):
-		var trimmed := line.strip_edges()
-		var at_column_zero := line.length() > 0 and line[0] != " " and line[0] != "\t"
-		if at_column_zero and not trimmed.begins_with("#"):
+	for line: String in _blank_literals(source).split("\n"):
+		if line.length() > 0 and line[0] != " " and line[0] != "\t":
 			if in_body:
 				return false
-			in_body = trimmed.begins_with("func %s(" % RUN_SCRIPT_ENTRY_METHOD) or trimmed.begins_with("func %s (" % RUN_SCRIPT_ENTRY_METHOD)
-			if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
-				return true
-			continue
-		if in_body and await_word.search(trimmed.get_slice("#", 0)) != null:
+			in_body = entry_line.search(line) != null
+		if in_body and await_word.search(line) != null:
 			return true
 	return false
 
 func _run_execute(instance: Variant, outcome: Dictionary) -> void:
 	outcome["value"] = await Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
 	outcome["done"] = true
+
+# A coroutine called here raises in this frame, not the caller's, so the handler still replies; `done` stays false.
+func _run_execute_plainly(instance: Variant, outcome: Dictionary) -> void:
+	outcome["value"] = Callable(instance, RUN_SCRIPT_ENTRY_METHOD).call(get_tree())
+	outcome["done"] = true
+
+# The source with string contents and comments turned into spaces, and every line break inside a string, a bracket or after a backslash joined, so each remaining line is one logical line.
+func _blank_literals(source: String) -> String:
+	var text := source.replace("\r", "")
+	var out := ""
+	var quote := ""
+	var depth := 0
+	var i := 0
+	while i < text.length():
+		var c := text[i]
+		if quote != "":
+			if c == "\\":
+				out += "  "
+				i += 2
+			elif text.substr(i, quote.length()) == quote:
+				out += " ".repeat(quote.length())
+				i += quote.length()
+				quote = ""
+			else:
+				out += " "
+				i += 1
+			continue
+		if c == "#":
+			var line_end := text.find("\n", i)
+			if line_end == -1:
+				line_end = text.length()
+			out += " ".repeat(line_end - i)
+			i = line_end
+			continue
+		if c == "\"" or c == "'":
+			quote = c.repeat(3) if text.substr(i, 3) == c.repeat(3) else c
+			out += " ".repeat(quote.length())
+			i += quote.length()
+			continue
+		if c == "\\" and text.substr(i + 1, 1) == "\n":
+			out += "  "
+			i += 2
+			continue
+		if c == "(" or c == "[" or c == "{":
+			depth += 1
+		elif (c == ")" or c == "]" or c == "}") and depth > 0:
+			depth -= 1
+		out += " " if c == "\n" and depth > 0 else c
+		i += 1
+	return out
 
 # The list runs from the script to its base scripts, so the first match is the one a call reaches.
 func _script_method_info(script: Script, method_name: String) -> Dictionary:
