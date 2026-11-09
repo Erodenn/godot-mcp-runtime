@@ -1,7 +1,7 @@
 /** Headless operations run from MainLoop._initialize, after autoload singletons are registered as GDScript globals; under _init player.gd failed to compile and saves dropped its script. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, existsSync, readFileSync } from 'fs';
+import { cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -191,6 +191,51 @@ describe('a headless save that drops content says so and keeps the file as it wa
         ).toEqual([]);
       }
       expect(existsSync(join(projectPath, '.mcp', 'godot-runtime', 'scene-backups'))).toBe(false);
+    },
+    CASE_TIMEOUT_MS,
+  );
+});
+
+const STAGE_SCENE = 'stage.tscn';
+const STAGE_TEXT = '[gd_scene format=3]\n\n[node name="Stage" type="Node2D"]\n';
+const INSTANCE_NAME = 'Hero';
+
+describe('instancing a scripted scene whose script names an autoload keeps the script', () => {
+  itGodot(
+    'add_node with a scene path writes the instance link and no script override, and the script resolves',
+    async () => {
+      writeFileSync(join(projectPath, STAGE_SCENE), STAGE_TEXT, 'utf8');
+      const result = await handleAddNode(runner, {
+        projectPath,
+        scenePath: STAGE_SCENE,
+        nodeType: PLAYER_SCENE,
+        nodeName: INSTANCE_NAME,
+      });
+      expectMatchesOutputSchema('add_node', result);
+
+      const text = sceneText(STAGE_SCENE);
+      const lines = text.split('\n');
+      const at = lines.findIndex((line) => line.startsWith(`[node name="${INSTANCE_NAME}"`));
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(lines[at]).toMatch(/instance=ExtResource\("[^"]+"\)/);
+      // The instance's block runs to the next section header; none of its lines may override the script.
+      const block: string[] = [];
+      for (const line of lines.slice(at + 1)) {
+        if (line.startsWith('[')) break;
+        block.push(line);
+      }
+      expect(block.filter((line) => /^script/.test(line))).toEqual([]);
+      expect(text).not.toContain('script = null');
+      expect(extResourceLine(STAGE_SCENE, 'res://player.tscn')).toContain('PackedScene');
+
+      const tree = expectMatchesOutputSchema(
+        'get_scene_tree',
+        await handleGetSceneTree(runner, { projectPath, scenePath: STAGE_SCENE }),
+      );
+      const children = tree.children as Array<{ name: string; script: string }>;
+      expect(children.find((child) => child.name === INSTANCE_NAME)?.script).toBe(
+        'res://player.gd',
+      );
     },
     CASE_TIMEOUT_MS,
   );
