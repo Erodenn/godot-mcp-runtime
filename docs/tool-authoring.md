@@ -119,7 +119,7 @@ Any tool that starts a Godot project or forwards arbitrary GDScript to a running
 - Put the call after every check that can refuse the call, and outside the session queue.
 - Add the confirmation warnings the call returns to the response `warnings` array.
 
-Extend `tests/unit/handlers/runtime-handlers.test.ts` with accept, decline, cancel and second-call coverage for a new tool. See `SECURITY.md` for what the prompts do and do not protect.
+Extend the handler's own test file with accept, decline, cancel and second-call coverage for a new tool, following the pattern in `tests/unit/handlers/runtime-handlers.test.ts`. See `SECURITY.md` for what the prompts do and do not protect.
 
 ## 7. Pre-merge checklist
 

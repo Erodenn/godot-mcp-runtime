@@ -295,8 +295,7 @@ describe('scanTscn reads statements where the engine reads them', () => {
   });
 
   it('never keeps an earlier value of a key whose later assignment it could not read', () => {
-    // The engine keeps the last assignment. A scan that kept the first would
-    // show the launch gate a script that is not the one that runs.
+    // The engine keeps the last assignment.
     const decoy = 'script/source = "extends Node"';
     for (const later of [
       'script/source = "extends Node" + evil',

@@ -121,7 +121,7 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 - **Failures.** A declined or cancelled prompt, and one that goes unanswered, refuse the call. A client without elicitation proceeds with a warning that reaches the response `warnings`, or the error through `withConfirmationWarnings` when the first call fails.
 - **Opt-out.** `GODOT_MCP_DISABLE_ELICITATION=true` skips both prompts with one warning. The failure handling lives in `confirmFirstUse` alone, so a new tool calls it and does not copy it.
 
-If you add a tool that launches a project or forwards GDScript to the bridge, call `confirmFirstUse` and extend `tests/unit/handlers/runtime-handlers.test.ts` with accept, decline, cancel and second-call cases following the pattern there. A launcher that takes a `scene` argument also calls `rejectNonSceneLaunchArg` first, because the engine ignores a non-scene argument and runs the main scene.
+If you add a tool that launches a project or forwards GDScript to the bridge, call `confirmFirstUse` and extend the handler's own test file with accept, decline, cancel and second-call cases, following the pattern in `tests/unit/handlers/runtime-handlers.test.ts`. A launcher that takes a `scene` argument also calls `rejectNonSceneLaunchArg` first, because the engine ignores a non-scene argument and runs the main scene.
 
 ### MCP SDK: `Server` vs `McpServer`
 

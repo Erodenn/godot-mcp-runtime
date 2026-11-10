@@ -23,7 +23,6 @@ import {
 } from '../../src/utils/artifact-paths.js';
 
 const BRIDGE_WAIT_MS = 20000;
-/** Where 3.x kept a `.gd` copy and a `.policy.json` per script. */
 const SCRIPT_COPY_DIR_NAME = 'scripts';
 const BRIDGE_COMMAND_TIMEOUT_MS = 15000;
 const CASE_TIMEOUT_MS = 60000;

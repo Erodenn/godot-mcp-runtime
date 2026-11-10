@@ -109,7 +109,6 @@ describe('tokenize: line continuation', () => {
 });
 
 describe('tokenize: member chains across whitespace/newlines', () => {
-  // Skeleton-key bypass: `OS .execute`, `OS. execute` and `OS.` + newline + `execute` must not slip past two-segment policy rules.
   it('coalesces OS .execute (space before the dot)', () => {
     expect(chains('OS .execute()\n')).toEqual([['OS', 'execute']]);
   });
