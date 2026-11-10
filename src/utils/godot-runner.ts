@@ -1062,9 +1062,9 @@ export class GodotRunner {
     );
   }
 
-  /** Run `operation` with the session queue held, for a handler whose steps must be one. `label` names the tool for callers made to wait; `requestedAt` is when the call began, if it did work (a confirmation prompt) before asking. @throws {SessionQueueTimeoutError} */
-  runExclusive<T>(label: string, operation: () => Promise<T>, requestedAt?: number): Promise<T> {
-    return this.queue.run(label, operation, requestedAt);
+  /** Run `operation` with the session queue held, for a handler whose steps must be one. `label` names the tool for callers made to wait; `preQueueMs` is the time the call spent before asking (a confirmation prompt), charged like a queue wait. @throws {SessionQueueTimeoutError} */
+  runExclusive<T>(label: string, operation: () => Promise<T>, preQueueMs?: number): Promise<T> {
+    return this.queue.run(label, operation, preQueueMs);
   }
 
   /** How the enclosing operation got its turn (wait and what it waited behind), or null outside one. */

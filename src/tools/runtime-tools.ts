@@ -1044,10 +1044,10 @@ async function startSpawnedSession(
     ctx,
   );
   if (!confirmation.ok) return confirmation;
-  const { warnings, promptedAt } = confirmation.value;
+  const { warnings, promptMs } = confirmation.value;
 
   // Start, bridge wait and failed-start teardown are one operation on `started`, never on the current session.
-  // The confirmation stays outside the turn; dating the turn from the prompt charges its time to the start's budget.
+  // The confirmation stays outside the turn; passing its duration dates the turn that much earlier, charging it to the start's budget.
   const launched = await runSessionExclusive(
     runner,
     'run_project',
@@ -1058,7 +1058,7 @@ async function startSpawnedSession(
         bridgePort: bridgePort.value,
         profiling: isProfiling,
       }),
-    promptedAt ?? undefined,
+    promptMs,
   );
   return withConfirmationWarnings(launched, warnings);
 }
@@ -2382,13 +2382,13 @@ export async function handleRunScript(
   const noMargin = timeoutLeavesNoAnswerMargin('run_script', requestedTimeoutMs);
   if (noMargin) return err(noMargin);
 
-  // Asks once per project per server session, whatever the session mode; the prompt stays outside the queue turn, which is dated from it so its time comes off the timeout.
+  // Asks once per project per server session, whatever the session mode; the prompt stays outside the queue turn, and its duration is passed in so its time comes off the timeout.
   const confirmation = await confirmFirstUse(
     { kind: 'script', toolName: 'run_script', projectPath: sessionProjectPath },
     ctx,
   );
   if (!confirmation.ok) return confirmation;
-  const { warnings: confirmationWarnings, promptedAt } = confirmation.value;
+  const { warnings: confirmationWarnings, promptMs } = confirmation.value;
 
   const response = await runSessionExclusive(
     runner,
@@ -2427,7 +2427,7 @@ export async function handleRunScript(
         wording,
       });
     },
-    promptedAt ?? undefined,
+    promptMs,
   );
   return withConfirmationWarnings(response, confirmationWarnings);
 }

@@ -82,6 +82,8 @@ export interface McpContext {
   /** Skips the confirmation prompts, treated as accepted (fail-open), for clients that cannot surface elicitation (Claude Desktop auto-cancels them). */
   disableElicitation: boolean;
   sessionState: SessionState;
+  /** The clock a confirmation prompt is timed with: `Date.now` in the server, a clock the test controls in tests, so a budget edge never moves by a real millisecond. */
+  now: () => number;
 }
 
 /** The flags that turn on only for the exact string `true`, and what each being off means. */
@@ -120,6 +122,7 @@ export function createNullContext(overrides?: Partial<McpContext>): McpContext {
       runProjectConfirmed: new Set<string>(),
       runScriptConfirmed: new Set<string>(),
     },
+    now: () => 0,
     ...overrides,
   };
 }

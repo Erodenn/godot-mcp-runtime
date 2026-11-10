@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
@@ -52,6 +52,7 @@ import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.
 import { expectMatchesOutputSchema } from '../../helpers/schema-assert.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
+import { makeContext } from '../../helpers/runtime-fakes.js';
 import { ElicitationUnsupportedError } from '../../../src/utils/mcp-context.js';
 import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
@@ -72,24 +73,6 @@ afterAll(() => {
   if (savedDisplay === undefined) delete process.env.DISPLAY;
   else process.env.DISPLAY = savedDisplay;
 });
-
-/** Test context with the given elicitor; the default accepts every prompt (the launch and the run_script confirmations). */
-function makeContext(
-  opts: {
-    elicit?: Elicitor;
-    disableElicitation?: boolean;
-  } = {},
-): McpContext {
-  const defaultElicit: Elicitor = async () => ({
-    action: 'accept',
-    content: { confirm: true },
-  });
-  return {
-    elicitor: opts.elicit ?? defaultElicit,
-    disableElicitation: opts.disableElicitation === true,
-    sessionState: { runProjectConfirmed: new Set<string>(), runScriptConfirmed: new Set<string>() },
-  };
-}
 
 const acceptingContext = makeContext;
 const declineElicitor: Elicitor = async () => ({ action: 'decline' });
@@ -172,8 +155,8 @@ interface RuntimeFake {
   setQueueBusyBehind(label: string | null): void;
   /** The call got its turn after waiting `waitedMs` behind `behind`. Null (the default): no wait. */
   setQueueWait(waitedMs: number | null, behind?: string): void;
-  /** The `requestedAt` each runExclusive call was given, in call order. */
-  exclusiveRequestedAt(): Array<number | undefined>;
+  /** The `preQueueMs` each runExclusive call was given, in call order. */
+  exclusivePreQueueMs(): number[];
   /** Makes attachProject report that this server's live attached session on
    *  the project was kept, listening on `port`. Null (the default): a fresh attach. */
   setAlreadyAttached(port: number | null): void;
@@ -221,7 +204,7 @@ function createRuntimeFake(): RuntimeFake {
   let actionSentinelTimedOut = false;
   let queueBusyBehind: string | null = null;
   let queueWait: { waitedMs: number; behind: string } | null = null;
-  const exclusiveRequestedAt: Array<number | undefined> = [];
+  const exclusivePreQueueMs: number[] = [];
   let turnStart: { requestedAt: number; preQueueMs: number } | null = null;
   let profilerStreamProblem: string | null = null;
   let alreadyAttachedPort: number | null = null;
@@ -265,20 +248,12 @@ function createRuntimeFake(): RuntimeFake {
     })),
     // The session queue: one operation at a time. The fake runs the
     // operation at once, or fails the wait the way a busy queue does.
-    async runExclusive<T>(
-      label: string,
-      operation: () => Promise<T>,
-      requestedAt?: number,
-    ): Promise<T> {
-      exclusiveRequestedAt.push(requestedAt);
+    async runExclusive<T>(label: string, operation: () => Promise<T>, preQueueMs = 0): Promise<T> {
+      exclusivePreQueueMs.push(preQueueMs);
       if (queueBusyBehind !== null) {
         throw new SessionQueueTimeoutError(label, queueBusyBehind, QUEUE_WAITED_MS);
       }
-      const queuedAt = Date.now();
-      turnStart = {
-        requestedAt: requestedAt ?? queuedAt,
-        preQueueMs: queuedAt - (requestedAt ?? queuedAt),
-      };
+      turnStart = { requestedAt: Date.now() - preQueueMs, preQueueMs };
       try {
         return await operation();
       } finally {
@@ -491,8 +466,8 @@ function createRuntimeFake(): RuntimeFake {
     setQueueWait(waitedMs, behind = 'run_project') {
       queueWait = waitedMs === null ? null : { waitedMs, behind };
     },
-    exclusiveRequestedAt() {
-      return [...exclusiveRequestedAt];
+    exclusivePreQueueMs() {
+      return [...exclusivePreQueueMs];
     },
     setAlreadyAttached(port) {
       alreadyAttachedPort = port;
@@ -4373,25 +4348,10 @@ describe('a confirmation prompt is charged against the call it held up', () => {
   const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1\n';
   /** How long the fake user takes to answer the prompt. */
   const PROMPT_MS = 12000;
-  let clockOffsetMs = 0;
 
-  beforeEach(() => {
-    clockOffsetMs = 0;
-    const frozenNow = Date.now();
-    vi.spyOn(Date, 'now').mockImplementation(() => frozenNow + clockOffsetMs);
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  /** Accepts after `promptMs` of fake time has passed. */
+  /** Accepts after `promptMs` on the context's clock. */
   function slowAccept(promptMs: number): McpContext {
-    return makeContext({
-      elicit: async () => {
-        clockOffsetMs += promptMs;
-        return { action: 'accept', content: { confirm: true } };
-      },
-    });
+    return makeContext({ promptMs });
   }
 
   function scriptFake(dir: string): RuntimeFake {
@@ -4438,7 +4398,6 @@ describe('a confirmation prompt is charged against the call it held up', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
-    const before = Date.now();
 
     const result = await handleRunProject(
       fake.asRunner,
@@ -4447,10 +4406,7 @@ describe('a confirmation prompt is charged against the call it held up', () => {
     );
 
     expect(hasError(result)).toBe(false);
-    const [requestedAt] = fake.exclusiveRequestedAt();
-    expect(requestedAt).toBeDefined();
-    expect(requestedAt!).toBeLessThanOrEqual(before + PROMPT_MS - 1);
-    expect(requestedAt!).toBeGreaterThanOrEqual(before);
+    expect(fake.exclusivePreQueueMs()).toEqual([PROMPT_MS]);
   });
 });
 

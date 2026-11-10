@@ -92,10 +92,10 @@ export async function runSessionExclusive(
   runner: GodotRunner,
   toolName: string,
   operation: () => Promise<HandlerResult>,
-  requestedAt?: number,
+  preQueueMs?: number,
 ): Promise<HandlerResult> {
   try {
-    return await runner.runExclusive(toolName, operation, requestedAt);
+    return await runner.runExclusive(toolName, operation, preQueueMs);
   } catch (error) {
     if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
     throw error;

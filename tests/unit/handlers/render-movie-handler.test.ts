@@ -1161,15 +1161,7 @@ describe('render_movie charges its confirmation prompt against the request timeo
     const { dir, runner, stub, handler } = setup();
     const worstCaseMs = computeMovieTimeoutMs(TEST_FRAMES) + MOVIE_KILL_WORST_CASE_MS;
     const promptMs = CLIENT_ANSWER_CEILING_MS - worstCaseMs + 1;
-    let clockOffsetMs = 0;
-    const frozenNow = Date.now();
-    vi.spyOn(Date, 'now').mockImplementation(() => frozenNow + clockOffsetMs);
-    const ctx = makeContext({
-      elicit: async () => {
-        clockOffsetMs += promptMs;
-        return { action: 'accept', content: { confirm: true } };
-      },
-    });
+    const ctx = makeContext({ promptMs });
 
     const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx);
 

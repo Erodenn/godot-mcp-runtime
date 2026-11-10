@@ -22,9 +22,9 @@ export class SessionQueueTimeoutError extends Error {
 
 /** What the holding operation knows about how it got its turn; a start charges the wait against its budget. */
 export interface QueueTurn {
-  /** When the tool call began, which is earlier than its queue entry when it prompted a human first. */
+  /** When the tool call began: its queue entry less `preQueueMs`. */
   readonly requestedAt: number;
-  /** Time spent between `requestedAt` and asking for the turn (a confirmation prompt); charged like the queue wait. */
+  /** Time the call spent before asking for the turn (a confirmation prompt), as its caller measured it; charged like the queue wait. */
   readonly preQueueMs: number;
   /** Time spent in the queue only. */
   readonly waitedMs: number;
@@ -72,15 +72,15 @@ export class SessionQueue {
     };
   }
 
-  /** Run `operation` when the queue is free, or directly when called from inside the running operation. `requestedAt` is when the call began, when that was before this queue entry; the wait for a turn is bounded from it. @throws {SessionQueueTimeoutError} when the turn did not come in time; `operation` was not started. */
-  async run<T>(label: string, operation: () => Promise<T>, requestedAt?: number): Promise<T> {
+  /** Run `operation` when the queue is free, or directly when called from inside the running operation. `preQueueMs` is the time the call already spent before this queue entry (a confirmation prompt); the turn is dated that much earlier and the wait for it bounded from there. @throws {SessionQueueTimeoutError} when the turn did not come in time; `operation` was not started. */
+  async run<T>(label: string, operation: () => Promise<T>, preQueueMs = 0): Promise<T> {
     const active = this.context.getStore();
     if (active !== undefined && active === this.holder) return operation();
 
     const queuedAt = Date.now();
     const holder: Holder = {
       label,
-      requestedAt: Math.min(requestedAt ?? queuedAt, queuedAt),
+      requestedAt: queuedAt - Math.max(0, preQueueMs),
       queuedAt,
       waitedMs: 0,
       behind: null,

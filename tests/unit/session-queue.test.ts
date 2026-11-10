@@ -107,11 +107,11 @@ describe('SessionQueue', () => {
     const spentBeforeMs = LONG_WAIT_MS - SHORT_WAIT_MS;
 
     const error = await queue
-      .run('run_script', async () => 'ran', Date.now() - spentBeforeMs)
+      .run('run_script', async () => 'ran', spentBeforeMs)
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(SessionQueueTimeoutError);
-    expect((error as SessionQueueTimeoutError).preQueueMs).toBeGreaterThanOrEqual(spentBeforeMs);
+    expect((error as SessionQueueTimeoutError).preQueueMs).toBe(spentBeforeMs);
     expect((error as SessionQueueTimeoutError).message).toContain('before asking for its turn');
     holding.open();
     await held;
@@ -120,7 +120,6 @@ describe('SessionQueue', () => {
   it('reports the time a call spent before asking apart from its queue wait', async () => {
     const queue = new SessionQueue();
     const spentBeforeMs = 5000;
-    const requestedAt = Date.now() - spentBeforeMs;
     let seen: ReturnType<SessionQueue['turn']> = null;
 
     await queue.run(
@@ -128,11 +127,10 @@ describe('SessionQueue', () => {
       async () => {
         seen = queue.turn();
       },
-      requestedAt,
+      spentBeforeMs,
     );
 
-    expect(seen).toMatchObject({ requestedAt, waitedMs: 0 });
-    expect(seen!.preQueueMs).toBeGreaterThanOrEqual(spentBeforeMs);
+    expect(seen).toMatchObject({ preQueueMs: spentBeforeMs, waitedMs: 0 });
   });
 
   it('skips a waiter that gave up: the next one in line gets the turn', async () => {

@@ -167,7 +167,12 @@ describe('the context the server builds from the environment', () => {
       GODOT_MCP_DISABLE_SECURITY: 'true',
     });
     expect(ctx.disableElicitation).toBe(false);
-    expect(Object.keys(ctx).sort()).toEqual(['disableElicitation', 'elicitor', 'sessionState']);
+    expect(Object.keys(ctx).sort()).toEqual([
+      'disableElicitation',
+      'elicitor',
+      'now',
+      'sessionState',
+    ]);
   });
 
   // Breaks when a startup line names a removed flag.

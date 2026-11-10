@@ -1103,7 +1103,7 @@ export function createRenderMovieHandler(
       ctx,
     );
     if (!confirmation.ok) return confirmation;
-    const { warnings: confirmationWarnings, promptedAt } = confirmation.value;
+    const { warnings: confirmationWarnings, promptMs } = confirmation.value;
 
     const runId = `${mode === 'check' ? CHECK_RUN_ID_PREFIX : ''}${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);
@@ -1182,7 +1182,7 @@ export function createRenderMovieHandler(
             throw error;
           }
         },
-        promptedAt ?? undefined,
+        promptMs,
       );
     } catch (error) {
       if (error instanceof SessionQueueTimeoutError) {

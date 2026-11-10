@@ -34,20 +34,29 @@ export interface RuntimeFake {
   setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
 }
 
+/** Test context with the given elicitor; the default accepts every prompt. Its clock moves only by `promptMs` per prompt (0 by default), so a budget edge holds to the millisecond. */
 export function makeContext(
   opts: {
     elicit?: Elicitor;
     disableElicitation?: boolean;
+    /** How long each prompt stays open on the context's clock before it is answered. */
+    promptMs?: number;
   } = {},
 ): McpContext {
   const defaultElicit: Elicitor = async () => ({
     action: 'accept',
     content: { confirm: true },
   });
+  const answer = opts.elicit ?? defaultElicit;
+  let clockMs = 0;
   return {
-    elicitor: opts.elicit ?? defaultElicit,
+    elicitor: async (request) => {
+      clockMs += opts.promptMs ?? 0;
+      return answer(request);
+    },
     disableElicitation: opts.disableElicitation === true,
     sessionState: { runProjectConfirmed: new Set<string>(), runScriptConfirmed: new Set<string>() },
+    now: () => clockMs,
   };
 }
 

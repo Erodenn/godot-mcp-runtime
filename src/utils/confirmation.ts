@@ -78,8 +78,8 @@ export interface ConfirmationRequest {
 export interface ConfirmationOutcome {
   /** At most one entry: set when the action went ahead without anyone being asked. */
   warnings: string[];
-  /** When the prompt was shown, or null when nobody was prompted; the caller charges the time since against its budget. */
-  promptedAt: number | null;
+  /** How long the prompt was open by `ctx.now`, 0 when nobody was prompted; the caller charges it against its budget. */
+  promptMs: number;
 }
 
 /** Asks once per project per server session. A confirmed project returns at once; an accept, an operator opt-out (`disableElicitation`) and a client that cannot be asked all record the project. Any other answer (decline, cancel, an unanswered prompt) refuses and records nothing. This is the only `ctx.elicitor` call in `src/`. */
@@ -95,7 +95,7 @@ export async function confirmFirstUse(
       ? ctx.sessionState.runProjectConfirmed
       : ctx.sessionState.runScriptConfirmed;
   const projectKey = projectPathKey(absProjectPath, platform);
-  if (confirmed.has(projectKey)) return ok({ warnings: [], promptedAt: null });
+  if (confirmed.has(projectKey)) return ok({ warnings: [], promptMs: 0 });
 
   if (ctx.disableElicitation) {
     confirmed.add(projectKey);
@@ -103,13 +103,13 @@ export async function confirmFirstUse(
       warnings: [
         `Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); ${wording.proceeding} without user confirmation.`,
       ],
-      promptedAt: null,
+      promptMs: 0,
     });
   }
 
   let elicitResult: ElicitorResult;
   let warnings: string[] = [];
-  const promptedAt = Date.now();
+  const promptedAt = ctx.now();
   try {
     elicitResult = await ctx.elicitor({
       message: `${request.toolName} will ${wording.prompt(absProjectPath)}`,
@@ -134,6 +134,7 @@ export async function confirmFirstUse(
     ];
     elicitResult = { action: 'accept', content: { confirm: true } };
   }
+  const promptMs = Math.max(0, ctx.now() - promptedAt);
 
   if (!isElicitAccepted(elicitResult)) {
     // `cancel` means the client dismissed the prompt without a choice (Claude Desktop auto-cancels without showing it): told apart from an explicit `decline`, and only it points at the opt-out, since a decline is the user's answer and not to be worked around.
@@ -152,7 +153,7 @@ export async function confirmFirstUse(
     );
   }
   confirmed.add(projectKey);
-  return ok({ warnings, promptedAt });
+  return ok({ warnings, promptMs });
 }
 
 /** Adds a confirmation's warnings to an error result: the project is already recorded, so the first call is the only one that can say later calls go ahead unasked. A success payload carries them itself. */

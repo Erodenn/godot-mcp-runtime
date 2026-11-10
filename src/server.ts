@@ -84,6 +84,7 @@ function createContextFromServer(server: Server): McpContext {
     elicitor,
     disableElicitation,
     sessionState: { runProjectConfirmed: new Set<string>(), runScriptConfirmed: new Set<string>() },
+    now: () => Date.now(),
   };
 }
 
