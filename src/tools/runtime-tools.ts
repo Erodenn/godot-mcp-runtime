@@ -1366,7 +1366,7 @@ async function attachSession(
       projectPath,
       sessionMode: 'attached',
       bridgePort: readyPort,
-      warnings: [...startWarnings],
+      warnings: startWarnings,
       message:
         'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
     });

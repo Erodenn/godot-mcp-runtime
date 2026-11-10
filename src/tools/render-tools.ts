@@ -124,7 +124,7 @@ export const renderToolDefinitions = [
   {
     name: 'render_movie',
     description:
-      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, session or input (to interact: run_project, simulate_input). mode check (default): stats, likelyBlank, motion, inline frames, files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths, bytesWritten; warnings leads if unmeasured. Needs a display; asks the user once per project. Errors on timeout, failed run or live session.',
+      'Render `frames` frames of the project (or `scene`) in a separate movie-writer run: no bridge, session or input (to interact: run_project, simulate_input). mode check (default): stats, likelyBlank, motion, inline frames, files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths, bytesWritten; warnings leads if unmeasured or unconfirmed. Needs a display; asks the user once per project. Errors on timeout, failed run or live session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',

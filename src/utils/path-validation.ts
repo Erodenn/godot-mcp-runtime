@@ -129,7 +129,7 @@ export function resolveProjectPath(
   return { input: userPath, relPath, absPath, resPath: RES_PREFIX + relPath };
 }
 
-/** Extensions a `scene` argument of a launch may end in: Godot runs a positional argument as the scene only when it ends in one of these (case-sensitive), else the main scene runs, so any other argument is ignored and the main scene runs. */
+/** Extensions a `scene` argument of a launch may end in: Godot runs a positional argument as the scene only when it ends in one of these (case-sensitive), else the main scene runs. */
 export const LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
 
 /** Resource-file extensions the engine also runs as a command-line scene. */
@@ -154,7 +154,7 @@ export function isLaunchScenePath(scene: string): boolean {
 }
 
 /** True when `scene` ends, case-sensitively, in a resource-file extension the engine runs as a scene. */
-export function isResourceLaunchScenePath(scene: string): boolean {
+function isResourceLaunchScenePath(scene: string): boolean {
   return RESOURCE_LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
 }
 
