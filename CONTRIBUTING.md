@@ -113,12 +113,12 @@ Tool input schemas declare camelCase params. `normalizeParameters` converts inco
 
 ### Confirmation prompts
 
-`run_script` runs agent-written GDScript in a running game, and `run_project` starts a project whose autoloads and main scene run as the user. Neither is inspected. Instead, `confirmFirstUse` in `src/utils/confirmation.ts` asks the user once per project per server session, and every tool that starts a project or injects code calls it. `SECURITY.md` is the public statement of what this covers.
+`run_script` runs agent-written GDScript in a running game, and `run_project` starts a project whose autoloads and main scene run as the user. Neither is inspected. Instead, `confirmFirstUse` in `src/utils/confirmation.ts` asks the user once per project per server session before the launch and `run_script` paths. It is a heads-up, not a barrier: the headless tools run every registered autoload's `_init` and the scenes they load, and `launch_editor` opens the editor, all with no prompt, so an agent that can write files can run code without one. `SECURITY.md` is the public statement of what this covers.
 
 - **Launchers.** `run_project` in spawn mode and `render_movie` call `confirmFirstUse` with `kind: 'launch'`. `run_project` with `attach: true` calls nothing, because the user starts that process.
 - **Code-running tools.** `run_script` calls it with `kind: 'script'`, which keeps its own per-project set apart from the launch one. A launch accept does not admit `run_script`, and an attached session still asks.
-- **Order.** Call it after every check that can refuse the call and before anything is written or spawned, so an impossible call never asks. Keep it outside the session queue, because a prompt can stay open for minutes.
-- **Failures.** A declined or cancelled prompt, and one that goes unanswered, refuse the call. A client without elicitation proceeds with a warning that reaches the response `warnings`.
+- **Order.** Call it after every check that can refuse the call and before anything is written or spawned, so an impossible call never asks. Keep it outside the session queue, because a prompt stays open up to 45 s, and pass its `promptedAt` to `runSessionExclusive` so that time is charged against the call's budget.
+- **Failures.** A declined or cancelled prompt, and one that goes unanswered, refuse the call. A client without elicitation proceeds with a warning that reaches the response `warnings`, or the error through `withConfirmationWarnings` when the first call fails.
 - **Opt-out.** `GODOT_MCP_DISABLE_ELICITATION=true` skips both prompts with one warning. The failure handling lives in `confirmFirstUse` alone, so a new tool calls it and does not copy it.
 
 If you add a tool that launches a project or forwards GDScript to the bridge, call `confirmFirstUse` and extend `tests/unit/handlers/runtime-handlers.test.ts` with accept, decline, cancel and second-call cases following the pattern there. A launcher that takes a `scene` argument also calls `rejectNonSceneLaunchArg` first, because the engine ignores a non-scene argument and runs the main scene.
