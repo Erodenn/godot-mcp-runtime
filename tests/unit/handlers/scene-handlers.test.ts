@@ -663,6 +663,49 @@ describe('handleBatchSceneOperations', () => {
     expect(Object.keys(payload)[0]).toBe('warnings');
     expect(payload.results).toHaveLength(2);
   });
+
+  it('repeats each entry scenePath as the caller sent it, though Godot gets the relative path', async () => {
+    const sent = [
+      `res://${fixtureScenePath}`,
+      `./${fixtureScenePath}`,
+      `res://${fixtureScenePath}`,
+    ];
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({
+        results: [
+          {
+            operation: 'add_node',
+            scenePath: fixtureScenePath,
+            success: true,
+            nodeName: 'A',
+            nodeType: 'Node2D',
+            nodePath: 'root/A',
+          },
+          { operation: 'add_node', scenePath: fixtureScenePath, error: 'failed' },
+          { operation: 'save', scenePath: fixtureScenePath, skipped: true },
+        ],
+      }),
+    });
+    const result = await handleBatchSceneOperations(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      operations: [
+        { operation: 'add_node', scenePath: sent[0], nodeType: 'Node2D', nodeName: 'A' },
+        { operation: 'add_node', scene_path: sent[1], nodeType: 'Node2D', nodeName: 'B' },
+        { operation: 'save', scenePath: sent[2] },
+      ],
+    });
+    const forwarded = fake.calls[0]?.params.operations as Array<{ scenePath: string }>;
+    expect(forwarded.map((item) => item.scenePath)).toEqual([
+      fixtureScenePath,
+      fixtureScenePath,
+      fixtureScenePath,
+    ]);
+    const payload = expectMatchesOutputSchema('batch_scene_operations', result);
+    const results = payload.results as Array<{ scenePath: string }>;
+    expect(results.map((entry) => entry.scenePath)).toEqual(sent);
+    const text = (unwrap(result).content[0] as { text: string }).text;
+    expect((JSON.parse(text) as typeof payload).results).toEqual(payload.results);
+  });
 });
 
 describe('scene tools accept every project path spelling', () => {

@@ -25,6 +25,7 @@ import {
 } from '../utils/arg-parsing.js';
 import { err, ok, type Result } from '../utils/result.js';
 import { executeSceneOp } from '../utils/headless-op.js';
+import { createStructuredResponse } from '../utils/structured-response.js';
 import { batchSceneWrites, inPlaceSceneWrite, loadSpriteTouch } from '../utils/scene-loss-guard.js';
 
 const resourceFileOutputSchema = {
@@ -732,7 +733,7 @@ export async function handleBatchSceneOperations(
     operations: resolvedOperations,
     abortOnError: abortOnError.value ?? false,
   };
-  return executeSceneOp(
+  const result = await executeSceneOp(
     runner,
     'batch_scene_operations',
     params,
@@ -748,6 +749,21 @@ export async function handleBatchSceneOperations(
         batchSceneWrites(resolvedOperations, parsed.value.projectPath, payload.results),
     },
   );
+  return withSentScenePaths(result, operations.value);
+}
+
+/** Godot is handed each item's resolved path; an entry repeats the `scenePath` the caller sent, so it can be matched to its input (docs/tools.md "Response conventions"). `operations` passed checkBatchOperationItems, so every item is an object. */
+function withSentScenePaths(result: HandlerResult, operations: unknown[]): HandlerResult {
+  const payload = result.ok ? result.value.structuredContent : undefined;
+  if (payload === undefined || !Array.isArray(payload.results)) return result;
+  const results = (payload.results as unknown[]).map((entry, index) => {
+    const sent = normalizeParameters((operations[index] ?? {}) as OperationParams).scenePath;
+    if (typeof entry !== 'object' || entry === null || typeof sent !== 'string' || sent === '') {
+      return entry;
+    }
+    return { ...entry, scenePath: sent };
+  });
+  return createStructuredResponse({ ...payload, results });
 }
 
 const TEXT_RESOURCE_SUFFIX = '.tres';
