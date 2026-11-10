@@ -113,9 +113,9 @@ export function createFakeRunner(options: FakeRunnerOptions = {}): FakeRunner {
     repairStrandedBridge(projectPath: string): void {
       repairs.push(projectPath);
     },
-    runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
+    runExclusive<T>(label: string, operation: () => Promise<T>, requestedAt?: number): Promise<T> {
       if (options.exclusiveThrows) return Promise.reject(options.exclusiveThrows);
-      return queue.run(label, operation);
+      return queue.run(label, operation, requestedAt);
     },
     queueTurn() {
       return queue.turn();

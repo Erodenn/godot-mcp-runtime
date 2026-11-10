@@ -1644,7 +1644,7 @@ describe('multi-project runtime sessions', () => {
   function stubQueueTurn(ageMs: number, waitedMs: number, behind: string | null): void {
     const queue = (runner as unknown as { queue: { turn(): unknown } }).queue;
     const requestedAt = Date.now() - ageMs;
-    queue.turn = () => ({ requestedAt, waitedMs, behind });
+    queue.turn = () => ({ requestedAt, preQueueMs: 0, waitedMs, behind });
   }
 
   it('a start that got its turn with too little time left is refused before anything is stopped or launched', async () => {

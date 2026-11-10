@@ -18,6 +18,8 @@ import {
 const SDK_DEFAULT_CLIENT_TIMEOUT_MS = 60000;
 /** A wait short enough for a real-time test of the timeout. */
 const SHORT_WAIT_MS = 40;
+/** A queue timeout no test waits out in real time. */
+const LONG_WAIT_MS = 60000;
 
 /** A promise and the function that resolves it, for holding an operation open. */
 function gate(): { opened: Promise<void>; open: () => void } {
@@ -95,6 +97,42 @@ describe('SessionQueue', () => {
 
     holding.open();
     await held;
+  });
+
+  // Red when the timer is not shortened by preQueueMs: the waiter would sit out the full LONG_WAIT_MS and the test times out.
+  it('bounds the wait for a turn from when the call began, not from when it asked', async () => {
+    const queue = new SessionQueue(LONG_WAIT_MS);
+    const holding = gate();
+    const held = queue.run('simulate_input', () => holding.opened);
+    const spentBeforeMs = LONG_WAIT_MS - SHORT_WAIT_MS;
+
+    const error = await queue
+      .run('run_script', async () => 'ran', Date.now() - spentBeforeMs)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SessionQueueTimeoutError);
+    expect((error as SessionQueueTimeoutError).preQueueMs).toBeGreaterThanOrEqual(spentBeforeMs);
+    expect((error as SessionQueueTimeoutError).message).toContain('before asking for its turn');
+    holding.open();
+    await held;
+  });
+
+  it('reports the time a call spent before asking apart from its queue wait', async () => {
+    const queue = new SessionQueue();
+    const spentBeforeMs = 5000;
+    const requestedAt = Date.now() - spentBeforeMs;
+    let seen: ReturnType<SessionQueue['turn']> = null;
+
+    await queue.run(
+      'run_script',
+      async () => {
+        seen = queue.turn();
+      },
+      requestedAt,
+    );
+
+    expect(seen).toMatchObject({ requestedAt, waitedMs: 0 });
+    expect(seen!.preQueueMs).toBeGreaterThanOrEqual(spentBeforeMs);
   });
 
   it('skips a waiter that gave up: the next one in line gets the turn', async () => {
@@ -209,7 +247,9 @@ describe('chargeQueueWait', () => {
   /** A runner whose caller got its turn after `waitedMs` behind `BEHIND`. */
   function runnerWaited(waitedMs: number | null): GodotRunner {
     const turn =
-      waitedMs === null ? null : { requestedAt: 0, waitedMs, behind: waitedMs > 0 ? BEHIND : null };
+      waitedMs === null
+        ? null
+        : { requestedAt: 0, preQueueMs: 0, waitedMs, behind: waitedMs > 0 ? BEHIND : null };
     return { queueTurn: () => turn } as unknown as GodotRunner;
   }
 
@@ -219,6 +259,30 @@ describe('chargeQueueWait', () => {
       budgetMs: BUDGET_MS,
     });
     expect(charged).toEqual({ ok: true, value: BUDGET_MS });
+  });
+
+  /** A runner whose caller spent `preQueueMs` on a prompt and then got the queue at once. */
+  function runnerPrompted(preQueueMs: number): GodotRunner {
+    const turn = { requestedAt: 0, preQueueMs, waitedMs: 0, behind: null };
+    return { queueTurn: () => turn } as unknown as GodotRunner;
+  }
+
+  it('takes a confirmation prompt off a shortened budget and a fixed worst case, like a queue wait', () => {
+    expect(
+      chargeQueueWait(runnerPrompted(WAITED_MS), 'run_script', {
+        kind: 'shorten',
+        budgetMs: BUDGET_MS,
+      }),
+    ).toEqual({ ok: true, value: BUDGET_MS - WAITED_MS });
+    const refused = chargeQueueWait(runnerPrompted(WAITED_MS + 1), 'render_movie', {
+      kind: 'fixed',
+      worstCaseMs: CLIENT_ANSWER_CEILING_MS - WAITED_MS,
+    });
+    expect(hasError(refused)).toBe(true);
+    expect(JSON.stringify(refused)).toContain(
+      `spent ${WAITED_MS + 1} ms before asking for its turn`,
+    );
+    expect(JSON.stringify(refused)).not.toContain('waited 0 ms');
   });
 
   it('takes the wait off a shortened budget', () => {

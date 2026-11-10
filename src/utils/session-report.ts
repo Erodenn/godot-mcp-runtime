@@ -92,9 +92,10 @@ export async function runSessionExclusive(
   runner: GodotRunner,
   toolName: string,
   operation: () => Promise<HandlerResult>,
+  requestedAt?: number,
 ): Promise<HandlerResult> {
   try {
-    return await runner.runExclusive(toolName, operation);
+    return await runner.runExclusive(toolName, operation, requestedAt);
   } catch (error) {
     if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
     throw error;
@@ -132,19 +133,29 @@ export function timeoutLeavesNoAnswerMargin(
   );
 }
 
-/** Charge the queue wait against a command and return the milliseconds it may use; call inside `runSessionExclusive` after the gate and before the send. `shorten` refuses under `QUEUE_CHARGED_COMMAND_FLOOR_MS`; `fixed` refuses when the worst case fits the client timeout alone but not after the wait and the response margin (a worst case already over the client timeout is not refused: it never was promised an answer in that time). */
+/** Charge the time before the turn (the queue wait, and a confirmation prompt before it) against a command and return the milliseconds it may use; call inside `runSessionExclusive` after the gate and before the send. `shorten` refuses under `QUEUE_CHARGED_COMMAND_FLOOR_MS`; `fixed` refuses when the worst case fits the client timeout alone but not after the wait and the response margin (a worst case already over the client timeout is not refused: it never was promised an answer in that time). */
 export function chargeQueueWait(
   runner: GodotRunner,
   toolName: string,
   need: QueueChargeNeed,
 ): Result<number, ToolResponse> {
   const turn = runner.queueTurn();
-  const waitedMs = turn?.waitedMs ?? 0;
+  const queueWaitMs = turn?.waitedMs ?? 0;
+  const preQueueMs = turn?.preQueueMs ?? 0;
+  const waitedMs = queueWaitMs + preQueueMs;
   const behind = turn?.behind ?? 'another operation';
+  const spent = [
+    ...(preQueueMs > 0
+      ? [`spent ${preQueueMs} ms before asking for its turn (its confirmation prompt)`]
+      : []),
+    ...(queueWaitMs > 0 || preQueueMs === 0
+      ? [`waited ${queueWaitMs} ms for ${behind} to finish`]
+      : []),
+  ].join(' and ');
   const refuse = (detail: string): Result<number, ToolResponse> =>
     err(
       createErrorResponse(
-        `${toolName} waited ${waitedMs} ms for ${behind} to finish, ${detail} Nothing was sent; retry the call now that the queue is free.`,
+        `${toolName} ${spent}, ${detail} Nothing was sent; retry the call now that the queue is free.`,
         [
           `Retry ${toolName}: it is not charged for a wait that did not happen`,
           'A runtime session runs one operation at a time: issue runtime calls one after another, not in parallel',

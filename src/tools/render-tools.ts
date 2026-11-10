@@ -1099,6 +1099,7 @@ export function createRenderMovieHandler(
       ctx,
     );
     if (!confirmation.ok) return confirmation;
+    const { warnings: confirmationWarnings, promptedAt } = confirmation.value;
 
     const runId = `${mode === 'check' ? CHECK_RUN_ID_PREFIX : ''}${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);
@@ -1116,7 +1117,7 @@ export function createRenderMovieHandler(
       runDir,
       outputPath,
       timeoutMs: computeMovieTimeoutMs(frames),
-      confirmationWarnings: confirmation.value.warnings,
+      confirmationWarnings,
     };
 
     // The last session check, the first disk write and the spawn are one step under the session queue, with the run registered before the spawn:
@@ -1125,58 +1126,64 @@ export function createRenderMovieHandler(
     type Launch = HandlerResult | { started: Promise<MovieProcessResult> };
     let launched: Launch;
     try {
-      launched = await runner.runExclusive<Launch>('render_movie', async () => {
-        // The wait for this turn counts against the client's request timeout.
-        const charged = chargeQueueWait(runner, 'render_movie', {
-          kind: 'fixed',
-          worstCaseMs: rc.timeoutMs + MOVIE_KILL_WORST_CASE_MS,
-        });
-        if (!charged.ok) return charged;
-        // The confirmation can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
-        const busyAfterConfirmation = refuseIfSessionLiveOnProject(runner, root);
-        if (busyAfterConfirmation !== null) return err(busyAfterConfirmation);
-        // A bridge a dead server stranded would load into the movie run: removed here, where the confirmation has passed and a write to project.godot is allowed. The check after it is the refusal for an entry the repair left.
-        runner.repairStrandedBridge(root);
-        const stranded = refuseIfBridgeEntryStranded(root);
-        if (stranded !== null) return err(stranded);
-        try {
-          if (!isUnderDir(moviesDir(root), runDir)) {
-            throw new Error('the run directory is outside the movies directory');
+      launched = await runner.runExclusive<Launch>(
+        'render_movie',
+        async () => {
+          // The wait for this turn and the prompt before it count against the client's request timeout.
+          const charged = chargeQueueWait(runner, 'render_movie', {
+            kind: 'fixed',
+            worstCaseMs: rc.timeoutMs + MOVIE_KILL_WORST_CASE_MS,
+          });
+          if (!charged.ok) return charged;
+          // The confirmation can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
+          const busyAfterConfirmation = refuseIfSessionLiveOnProject(runner, root);
+          if (busyAfterConfirmation !== null) return err(busyAfterConfirmation);
+          // A bridge a dead server stranded would load into the movie run: removed here, where the confirmation has passed and a write to project.godot is allowed. The check after it is the refusal for an entry the repair left.
+          runner.repairStrandedBridge(root);
+          const stranded = refuseIfBridgeEntryStranded(root);
+          if (stranded !== null) return err(stranded);
+          try {
+            if (!isUnderDir(moviesDir(root), runDir)) {
+              throw new Error('the run directory is outside the movies directory');
+            }
+            BridgeManager.ensureArtifactRoot(root);
+            mkdirSync(runDir, { recursive: true });
+          } catch (error) {
+            return err(
+              createErrorResponse(
+                `render_movie could not prepare its output directory: ${getErrorMessage(error)}`,
+                ['Check write permissions on the project directory (.mcp/godot-runtime/movies/)'],
+              ),
+            );
           }
-          BridgeManager.ensureArtifactRoot(root);
-          mkdirSync(runDir, { recursive: true });
-        } catch (error) {
-          return err(
-            createErrorResponse(
-              `render_movie could not prepare its output directory: ${getErrorMessage(error)}`,
-              ['Check write permissions on the project directory (.mcp/godot-runtime/movies/)'],
-            ),
-          );
-        }
-        const endMovieRun = runner.beginMovieRun(root);
-        try {
-          return {
-            started: deps.runProcess(
-              launchGodotPath,
-              buildMovieArgs({
-                projectPath: root,
-                outputPath,
-                fps,
-                frames,
-                ...(scene !== undefined ? { scene } : {}),
-              }),
-              rc.timeoutMs,
-              { onClosed: endMovieRun },
-            ),
-          };
-        } catch (error) {
-          // Nothing was started, so nothing will report closing.
-          endMovieRun();
-          throw error;
-        }
-      });
+          const endMovieRun = runner.beginMovieRun(root);
+          try {
+            return {
+              started: deps.runProcess(
+                launchGodotPath,
+                buildMovieArgs({
+                  projectPath: root,
+                  outputPath,
+                  fps,
+                  frames,
+                  ...(scene !== undefined ? { scene } : {}),
+                }),
+                rc.timeoutMs,
+                { onClosed: endMovieRun },
+              ),
+            };
+          } catch (error) {
+            // Nothing was started, so nothing will report closing.
+            endMovieRun();
+            throw error;
+          }
+        },
+        promptedAt ?? undefined,
+      );
     } catch (error) {
-      if (error instanceof SessionQueueTimeoutError) return err(sessionBusyError(error));
+      if (error instanceof SessionQueueTimeoutError) {
+        return err(sessionBusyError(error));
+      }
       launched = { started: Promise.reject(error) };
     }
     if (!('started' in launched)) return launched;

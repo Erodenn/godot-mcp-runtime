@@ -18,7 +18,7 @@ import { projectPathKey } from './output-parsing.js';
 import { ok, err, type Result } from './result.js';
 
 /** Offered only for a prompt the client dismissed by itself, never for a user's decline. */
-export const ELICITATION_OPT_OUT_SOLUTION =
+const ELICITATION_OPT_OUT_SOLUTION =
   'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them';
 
 /** Refuses a `scene` argument the engine would not run as a scene: Godot silently runs the main scene instead of any other argument. Called by every launcher before its confirmation. */
@@ -78,6 +78,8 @@ export interface ConfirmationRequest {
 export interface ConfirmationOutcome {
   /** At most one entry: set when the action went ahead without anyone being asked. */
   warnings: string[];
+  /** When the prompt was shown, or null when nobody was prompted; the caller charges the time since against its budget. */
+  promptedAt: number | null;
 }
 
 /** Asks once per project per server session. A confirmed project returns at once; an accept, an operator opt-out (`disableElicitation`) and a client that cannot be asked all record the project. Any other answer (decline, cancel, an unanswered prompt) refuses and records nothing. This is the only `ctx.elicitor` call in `src/`. */
@@ -93,7 +95,7 @@ export async function confirmFirstUse(
       ? ctx.sessionState.runProjectConfirmed
       : ctx.sessionState.runScriptConfirmed;
   const projectKey = projectPathKey(absProjectPath, platform);
-  if (confirmed.has(projectKey)) return ok({ warnings: [] });
+  if (confirmed.has(projectKey)) return ok({ warnings: [], promptedAt: null });
 
   if (ctx.disableElicitation) {
     confirmed.add(projectKey);
@@ -101,11 +103,13 @@ export async function confirmFirstUse(
       warnings: [
         `Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); ${wording.proceeding} without user confirmation.`,
       ],
+      promptedAt: null,
     });
   }
 
   let elicitResult: ElicitorResult;
   let warnings: string[] = [];
+  const promptedAt = Date.now();
   try {
     elicitResult = await ctx.elicitor({
       message: `${request.toolName} will ${wording.prompt(absProjectPath)}`,
@@ -148,5 +152,5 @@ export async function confirmFirstUse(
     );
   }
   confirmed.add(projectKey);
-  return ok({ warnings });
+  return ok({ warnings, promptedAt });
 }

@@ -103,9 +103,10 @@ export class StartBudgetExhaustedError extends Error {
     readonly waitedMs: number,
     readonly behind: string | null,
     readonly remainingMs: number,
+    readonly preQueueMs: number,
   ) {
     super(
-      `The runtime session queue was busy: this start waited ${waitedMs} ms${behind !== null ? ` behind ${behind}` : ''}, which leaves ${Math.max(0, remainingMs)} ms to wait for the bridge, under the ${BRIDGE_WAIT_FLOOR_MS} ms a start needs. Nothing was stopped or launched; retry.`,
+      `${waitedMs > 0 ? 'The runtime session queue was busy: this' : 'This'} start ${preQueueMs > 0 ? `spent ${preQueueMs} ms before asking for its turn (its confirmation prompt) and ` : ''}waited ${waitedMs} ms${behind !== null ? ` behind ${behind}` : ''}, which leaves ${Math.max(0, remainingMs)} ms to wait for the bridge, under the ${BRIDGE_WAIT_FLOOR_MS} ms a start needs. Nothing was stopped or launched; retry.`,
     );
     this.name = 'StartBudgetExhaustedError';
   }
@@ -1061,9 +1062,9 @@ export class GodotRunner {
     );
   }
 
-  /** Run `operation` with the session queue held, for a handler whose steps must be one. `label` names the tool for callers made to wait. @throws {SessionQueueTimeoutError} */
-  runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
-    return this.queue.run(label, operation);
+  /** Run `operation` with the session queue held, for a handler whose steps must be one. `label` names the tool for callers made to wait; `requestedAt` is when the call began, if it did work (a confirmation prompt) before asking. @throws {SessionQueueTimeoutError} */
+  runExclusive<T>(label: string, operation: () => Promise<T>, requestedAt?: number): Promise<T> {
+    return this.queue.run(label, operation, requestedAt);
   }
 
   /** How the enclosing operation got its turn (wait and what it waited behind), or null outside one. */
@@ -1309,7 +1310,7 @@ export class GodotRunner {
           : SPAWNED_STOP_WORST_CASE_MS;
     const remaining = startBridgeWaitDeadline(mode, turn.requestedAt) - Date.now() - replaceReserve;
     if (remaining >= BRIDGE_WAIT_FLOOR_MS) return;
-    throw new StartBudgetExhaustedError(turn.waitedMs, turn.behind, remaining);
+    throw new StartBudgetExhaustedError(turn.waitedMs, turn.behind, remaining, turn.preQueueMs);
   }
 
   /** The record a start would replace, after any stop already running on it finishes: a stop does not queue, and replacing a half-stopped record races its artifact removal. */

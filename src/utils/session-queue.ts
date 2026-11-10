@@ -10,9 +10,10 @@ export class SessionQueueTimeoutError extends Error {
     readonly waiting: string,
     readonly behind: string,
     readonly waitedMs: number,
+    readonly preQueueMs: number = 0,
   ) {
     super(
-      `${waiting} waited ${waitedMs} ms for ${behind} to finish and gave up; nothing was sent for it. ` +
+      `${waiting} waited ${waitedMs} ms for ${behind} to finish and gave up${preQueueMs > 0 ? `, after ${preQueueMs} ms the call had already spent before asking for its turn` : ''}; nothing was sent for it. ` +
         `Runtime sessions run one operation at a time: retry once ${behind} has returned.`,
     );
     this.name = 'SessionQueueTimeoutError';
@@ -21,7 +22,11 @@ export class SessionQueueTimeoutError extends Error {
 
 /** What the holding operation knows about how it got its turn; a start charges the wait against its budget. */
 export interface QueueTurn {
+  /** When the tool call began, which is earlier than its queue entry when it prompted a human first. */
   readonly requestedAt: number;
+  /** Time spent between `requestedAt` and asking for the turn (a confirmation prompt); charged like the queue wait. */
+  readonly preQueueMs: number;
+  /** Time spent in the queue only. */
   readonly waitedMs: number;
   readonly behind: string | null;
 }
@@ -29,6 +34,7 @@ export interface QueueTurn {
 interface Holder {
   readonly label: string;
   readonly requestedAt: number;
+  readonly queuedAt: number;
   waitedMs: number;
   behind: string | null;
 }
@@ -58,15 +64,27 @@ export class SessionQueue {
   turn(): QueueTurn | null {
     const active = this.context.getStore();
     if (active === undefined || active !== this.holder) return null;
-    return { requestedAt: active.requestedAt, waitedMs: active.waitedMs, behind: active.behind };
+    return {
+      requestedAt: active.requestedAt,
+      preQueueMs: active.queuedAt - active.requestedAt,
+      waitedMs: active.waitedMs,
+      behind: active.behind,
+    };
   }
 
-  /** Run `operation` when the queue is free, or directly when called from inside the running operation. @throws {SessionQueueTimeoutError} when the turn did not come in time; `operation` was not started. */
-  async run<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  /** Run `operation` when the queue is free, or directly when called from inside the running operation. `requestedAt` is when the call began, when that was before this queue entry; the wait for a turn is bounded from it. @throws {SessionQueueTimeoutError} when the turn did not come in time; `operation` was not started. */
+  async run<T>(label: string, operation: () => Promise<T>, requestedAt?: number): Promise<T> {
     const active = this.context.getStore();
     if (active !== undefined && active === this.holder) return operation();
 
-    const holder: Holder = { label, requestedAt: Date.now(), waitedMs: 0, behind: null };
+    const queuedAt = Date.now();
+    const holder: Holder = {
+      label,
+      requestedAt: Math.min(requestedAt ?? queuedAt, queuedAt),
+      queuedAt,
+      waitedMs: 0,
+      behind: null,
+    };
     await this.acquire(holder);
     try {
       return await this.context.run(holder, operation);
@@ -81,7 +99,7 @@ export class SessionQueue {
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
-      const startedAt = holder.requestedAt;
+      const preQueueMs = holder.queuedAt - holder.requestedAt;
       const waiter: Waiter = {
         holder,
         grant: () => {
@@ -89,17 +107,21 @@ export class SessionQueue {
           resolve();
         },
       };
-      const timer = setTimeout(() => {
-        const index = this.waiters.indexOf(waiter);
-        if (index !== -1) this.waiters.splice(index, 1);
-        reject(
-          new SessionQueueTimeoutError(
-            holder.label,
-            this.holder?.label ?? 'another operation',
-            Date.now() - startedAt,
-          ),
-        );
-      }, this.waitTimeoutMs);
+      const timer = setTimeout(
+        () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index !== -1) this.waiters.splice(index, 1);
+          reject(
+            new SessionQueueTimeoutError(
+              holder.label,
+              this.holder?.label ?? 'another operation',
+              Date.now() - holder.queuedAt,
+              preQueueMs,
+            ),
+          );
+        },
+        Math.max(0, this.waitTimeoutMs - preQueueMs),
+      );
       this.waiters.push(waiter);
     });
   }
@@ -109,7 +131,7 @@ export class SessionQueue {
     const next = this.waiters.shift();
     this.holder = next?.holder ?? null;
     if (next === undefined) return;
-    next.holder.waitedMs = Date.now() - next.holder.requestedAt;
+    next.holder.waitedMs = Date.now() - next.holder.queuedAt;
     next.holder.behind = holder.label;
     next.grant();
   }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Ajv from 'ajv';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
@@ -18,8 +18,12 @@ import {
   handleRunProject,
   handleLaunchEditor,
   runtimeToolDefinitions,
+  RUN_SCRIPT_DEFAULT_TIMEOUT_MS,
 } from '../../../src/tools/runtime-tools.js';
-import { MAX_RUNTIME_TIMEOUT_MS } from '../../../src/utils/session-report.js';
+import {
+  MAX_RUNTIME_TIMEOUT_MS,
+  QUEUE_CHARGED_COMMAND_FLOOR_MS,
+} from '../../../src/utils/session-report.js';
 import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 import { encodePng, solidRgba } from '../../helpers/png-fixtures.js';
 import { screenshotsDir } from '../../../src/utils/artifact-paths.js';
@@ -168,6 +172,8 @@ interface RuntimeFake {
   setQueueBusyBehind(label: string | null): void;
   /** The call got its turn after waiting `waitedMs` behind `behind`. Null (the default): no wait. */
   setQueueWait(waitedMs: number | null, behind?: string): void;
+  /** The `requestedAt` each runExclusive call was given, in call order. */
+  exclusiveRequestedAt(): Array<number | undefined>;
   /** Makes attachProject report that this server's live attached session on
    *  the project was kept, listening on `port`. Null (the default): a fresh attach. */
   setAlreadyAttached(port: number | null): void;
@@ -215,6 +221,8 @@ function createRuntimeFake(): RuntimeFake {
   let actionSentinelTimedOut = false;
   let queueBusyBehind: string | null = null;
   let queueWait: { waitedMs: number; behind: string } | null = null;
+  const exclusiveRequestedAt: Array<number | undefined> = [];
+  let turnStart: { requestedAt: number; preQueueMs: number } | null = null;
   let profilerStreamProblem: string | null = null;
   let alreadyAttachedPort: number | null = null;
   // Defaults model a healthy inject; tests override via setBridgeAutoloadRegistered / setOtherLiveOwners.
@@ -257,16 +265,35 @@ function createRuntimeFake(): RuntimeFake {
     })),
     // The session queue: one operation at a time. The fake runs the
     // operation at once, or fails the wait the way a busy queue does.
-    async runExclusive<T>(label: string, operation: () => Promise<T>): Promise<T> {
+    async runExclusive<T>(
+      label: string,
+      operation: () => Promise<T>,
+      requestedAt?: number,
+    ): Promise<T> {
+      exclusiveRequestedAt.push(requestedAt);
       if (queueBusyBehind !== null) {
         throw new SessionQueueTimeoutError(label, queueBusyBehind, QUEUE_WAITED_MS);
       }
-      return operation();
+      const queuedAt = Date.now();
+      turnStart = {
+        requestedAt: requestedAt ?? queuedAt,
+        preQueueMs: queuedAt - (requestedAt ?? queuedAt),
+      };
+      try {
+        return await operation();
+      } finally {
+        turnStart = null;
+      }
     },
     queueTurn() {
-      return queueWait === null
-        ? null
-        : { requestedAt: 0, waitedMs: queueWait.waitedMs, behind: queueWait.behind };
+      const preQueueMs = turnStart?.preQueueMs ?? 0;
+      if (queueWait === null && preQueueMs === 0) return null;
+      return {
+        requestedAt: turnStart?.requestedAt ?? 0,
+        preQueueMs,
+        waitedMs: queueWait?.waitedMs ?? 0,
+        behind: queueWait?.behind ?? null,
+      };
     },
     // The record a start created, read back through its reference. The fake
     // has one session, so the reference is its project path.
@@ -463,6 +490,9 @@ function createRuntimeFake(): RuntimeFake {
     },
     setQueueWait(waitedMs, behind = 'run_project') {
       queueWait = waitedMs === null ? null : { waitedMs, behind };
+    },
+    exclusiveRequestedAt() {
+      return [...exclusiveRequestedAt];
     },
     setAlreadyAttached(port) {
       alreadyAttachedPort = port;
@@ -2212,7 +2242,6 @@ describe('handleRunScript confirmation', () => {
   const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn null\n';
   const OS_EXECUTE_SCRIPT =
     'extends RefCounted\nfunc execute(scene_tree):\n\tOS.execute("rm", ["-rf", "/"])\n\treturn 0\n';
-  /** Where 3.x kept a `.gd` copy and a `.policy.json` per script. */
   const SCRIPT_COPY_DIR_NAME = 'scripts';
   const SCRIPT_PROMPT_START = 'run_script will run GDScript written by the agent';
   const DECLINED_SCRIPT_ADVICE = 'do not call run_script on this project again';
@@ -3763,6 +3792,7 @@ describe('a start that got its turn too late to wait for the bridge', () => {
         LATE_START_WAITED_MS,
         'simulate_input',
         LATE_START_REMAINING_MS,
+        0,
       ),
     );
 
@@ -3787,7 +3817,7 @@ describe('a start that got its turn too late to wait for the bridge', () => {
   it('an attach reports it the same way', async () => {
     const fake = createRuntimeFake();
     fake.setAttachProjectError(
-      new StartBudgetExhaustedError(LATE_START_WAITED_MS, null, LATE_START_REMAINING_MS),
+      new StartBudgetExhaustedError(LATE_START_WAITED_MS, null, LATE_START_REMAINING_MS, 0),
     );
 
     const result = await handleRunProject(fake.asRunner, {
@@ -4336,5 +4366,90 @@ describe('the bridge reports a non-finite count the tools turn into a warning', 
     const payload = expectMatchesOutputSchema('simulate_input', result);
     expect(payload.warnings).toEqual(['1 non-finite numbers (INF, NAN) were returned as null']);
     expect(JSON.stringify(payload)).not.toContain(NON_FINITE_COUNT_FIELD);
+  });
+});
+
+describe('a confirmation prompt is charged against the call it held up', () => {
+  const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1\n';
+  /** How long the fake user takes to answer the prompt. */
+  const PROMPT_MS = 12000;
+  let clockOffsetMs = 0;
+
+  beforeEach(() => {
+    clockOffsetMs = 0;
+    const frozenNow = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => frozenNow + clockOffsetMs);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Accepts after `promptMs` of fake time has passed. */
+  function slowAccept(promptMs: number): McpContext {
+    return makeContext({
+      elicit: async () => {
+        clockOffsetMs += promptMs;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+  }
+
+  function scriptFake(dir: string): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
+    return fake;
+  }
+
+  // Red when run_script's turn is not dated from before its prompt: the bridge gets the whole default timeout.
+  it('run_script sends what is left of its timeout after the prompt', async () => {
+    const dir = tmp.makeProject('prompt-charge-script-');
+    const fake = scriptFake(dir);
+
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: VALID_SCRIPT },
+      slowAccept(PROMPT_MS),
+    );
+
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(1);
+    expect(fake.bridgeCalls[0]!.timeoutMs).toBe(RUN_SCRIPT_DEFAULT_TIMEOUT_MS - PROMPT_MS);
+  });
+
+  it('run_script refuses with nothing sent when the prompt used its timeout, and names the prompt', async () => {
+    const dir = tmp.makeProject('prompt-charge-script-late-');
+    const fake = scriptFake(dir);
+    const latePromptMs = RUN_SCRIPT_DEFAULT_TIMEOUT_MS - QUEUE_CHARGED_COMMAND_FLOOR_MS + 1;
+
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: VALID_SCRIPT },
+      slowAccept(latePromptMs),
+    );
+
+    expectErrorMatching(result, new RegExp(`spent ${latePromptMs} ms before asking for its turn`));
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  // Red when the spawn start is queued without its call start: the runner's start budget would not see the prompt.
+  it('run_project dates its start from before the prompt', async () => {
+    const dir = tmp.makeProject('prompt-charge-launch-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const before = Date.now();
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      slowAccept(PROMPT_MS),
+    );
+
+    expect(hasError(result)).toBe(false);
+    const [requestedAt] = fake.exclusiveRequestedAt();
+    expect(requestedAt).toBeDefined();
+    expect(requestedAt!).toBeLessThanOrEqual(before + PROMPT_MS - 1);
+    expect(requestedAt!).toBeGreaterThanOrEqual(before);
   });
 });

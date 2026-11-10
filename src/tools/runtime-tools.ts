@@ -726,7 +726,7 @@ export const runtimeToolDefinitions = [
           type: 'integer',
           minimum: MIN_RUNTIME_TIMEOUT_MS,
           maximum: MAX_RUNTIME_TIMEOUT_MS,
-          description: `Timeout in ms, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
+          description: `Timeout in ms, a whole number from ${MIN_RUNTIME_TIMEOUT_MS} to ${MAX_RUNTIME_TIMEOUT_MS} (default: ${RUN_SCRIPT_DEFAULT_TIMEOUT_MS}); a value from ${CLIENT_ANSWER_CEILING_MS + 1} to ${CLIENT_REQUEST_TIMEOUT_MS} is refused, since the answer would not fit a client's ${CLIENT_REQUEST_TIMEOUT_MS / MS_PER_SECOND}s request timeout. Increase for long-running scripts. Time spent on the confirmation prompt and waiting for the session queue comes off it; a call left with under ${QUEUE_CHARGED_COMMAND_FLOOR_MS} ms is refused with nothing sent.`,
         },
       },
       required: ['script'],
@@ -1040,18 +1040,23 @@ async function startSpawnedSession(
     ctx,
   );
   if (!confirmation.ok) return confirmation;
-  const { warnings } = confirmation.value;
+  const { warnings, promptedAt } = confirmation.value;
 
   // Start, bridge wait and failed-start teardown are one operation on `started`, never on the current session.
-  // The confirmation stays outside: a prompt can be held open for minutes.
-  return runSessionExclusive(runner, 'run_project', () =>
-    launchSpawnedSession(runner, projectPath, warnings, {
-      scene: resolvedScene,
-      background: isBackground,
-      bridgePort: bridgePort.value,
-      profiling: isProfiling,
-    }),
+  // The confirmation stays outside the turn; dating the turn from the prompt charges its time to the start's budget.
+  const launched = await runSessionExclusive(
+    runner,
+    'run_project',
+    () =>
+      launchSpawnedSession(runner, projectPath, warnings, {
+        scene: resolvedScene,
+        background: isBackground,
+        bridgePort: bridgePort.value,
+        profiling: isProfiling,
+      }),
+    promptedAt ?? undefined,
   );
+  return launched;
 }
 
 async function launchSpawnedSession(
@@ -2350,7 +2355,7 @@ export async function handleRunScript(
   const session = requireRuntimeSession(runner, wording);
   if (!session.ok) return session;
   const sessionProjectPath = session.value.projectPath;
-  // Captured with the path: the payload reports the session the script was confirmed for.
+  // Captured with the path: the session is re-checked once the turn comes, and the payload reports this one.
   const sessionMode = session.value.mode;
   const tip = sessionMode === 'attached' ? RUN_SCRIPT_TIP_ATTACHED : RUN_SCRIPT_TIP;
 
@@ -2373,48 +2378,54 @@ export async function handleRunScript(
   const noMargin = timeoutLeavesNoAnswerMargin('run_script', requestedTimeoutMs);
   if (noMargin) return err(noMargin);
 
-  // Asks once per project per server session, whatever the session mode; the prompt can be held open for minutes, so it stays outside the queue turn.
+  // Asks once per project per server session, whatever the session mode; the prompt stays outside the queue turn, which is dated from it so its time comes off the timeout.
   const confirmation = await confirmFirstUse(
     { kind: 'script', toolName: 'run_script', projectPath: sessionProjectPath },
     ctx,
   );
   if (!confirmation.ok) return confirmation;
-  const confirmationWarnings = confirmation.value.warnings;
+  const { warnings: confirmationWarnings, promptedAt } = confirmation.value;
 
-  return runSessionExclusive(runner, 'run_script', async () => {
-    // A confirmation prompt can be held open for minutes: re-check the session now the turn has come; the script was confirmed for that session only.
-    const current = requireRuntimeSession(runner, wording);
-    if (!current.ok) return current;
-    if (
-      sessionKey(current.value.projectPath) !== sessionKey(sessionProjectPath) ||
-      current.value.mode !== sessionMode
-    ) {
-      return err(
-        createErrorResponse(
-          `The current session changed while this call was waiting (it was ${sessionProjectPath}, it is now ${current.value.projectPath}). The script was not executed.`,
-          [
-            'Call run_script again to run it on the session that is current now',
-            'Or call switch_project first if it should run on the other session',
-          ],
-        ),
-      );
-    }
-    // The queue wait comes off the timeout.
-    const charged = chargeQueueWait(runner, 'run_script', {
-      kind: 'shorten',
-      budgetMs: requestedTimeoutMs,
-    });
-    if (!charged.ok) return charged;
-    return executeAdmittedScript(runner, {
-      script,
-      timeout: charged.value,
-      sessionProjectPath,
-      sessionMode,
-      tip,
-      confirmationWarnings,
-      wording,
-    });
-  });
+  const response = await runSessionExclusive(
+    runner,
+    'run_script',
+    async () => {
+      // The current session can change during the prompt or the queue wait: the script goes only to the session it was checked against.
+      const current = requireRuntimeSession(runner, wording);
+      if (!current.ok) return current;
+      if (
+        sessionKey(current.value.projectPath) !== sessionKey(sessionProjectPath) ||
+        current.value.mode !== sessionMode
+      ) {
+        return err(
+          createErrorResponse(
+            `The current session changed while this call was waiting (it was ${sessionProjectPath}, it is now ${current.value.projectPath}). The script was not executed.`,
+            [
+              'Call run_script again to run it on the session that is current now',
+              'Or call switch_project first if it should run on the other session',
+            ],
+          ),
+        );
+      }
+      // The queue wait and the prompt come off the timeout.
+      const charged = chargeQueueWait(runner, 'run_script', {
+        kind: 'shorten',
+        budgetMs: requestedTimeoutMs,
+      });
+      if (!charged.ok) return charged;
+      return executeAdmittedScript(runner, {
+        script,
+        timeout: charged.value,
+        sessionProjectPath,
+        sessionMode,
+        tip,
+        confirmationWarnings,
+        wording,
+      });
+    },
+    promptedAt ?? undefined,
+  );
+  return response;
 }
 
 async function executeAdmittedScript(

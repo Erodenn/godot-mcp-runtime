@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import Ajv from 'ajv';
 import { basename, dirname, extname, join, resolve } from 'path';
 import {
@@ -28,6 +28,8 @@ import { moviesDir } from '../../../src/utils/artifact-paths.js';
 import { BridgeManager, BridgeRegistryUnreadableError } from '../../../src/utils/bridge-manager.js';
 import { projectPathKey } from '../../../src/utils/output-parsing.js';
 import { SessionQueueTimeoutError } from '../../../src/utils/session-queue.js';
+import { CLIENT_ANSWER_CEILING_MS } from '../../../src/utils/session-report.js';
+import { MOVIE_KILL_WORST_CASE_MS } from '../../../src/utils/movie-process.js';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import type { MovieProcessResult, RunMovieProcess } from '../../../src/utils/movie-process.js';
 import { MOTION_MIN_CHANGED_PIXELS } from '../../../src/utils/pixel-stats.js';
@@ -1146,6 +1148,33 @@ describe('render_movie launch confirmation', () => {
     expect(warnings.filter((w) => w.startsWith('SCRIPT ERROR: flood'))).toHaveLength(
       MOVIE_RUNTIME_WARNINGS_MAX,
     );
+  });
+});
+
+describe('render_movie charges its confirmation prompt against the request timeout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Red when the movie's turn is not dated from before its prompt: the run is spawned and answers after the client gave up.
+  it('refuses with nothing spawned when the prompt left the run no room to answer', async () => {
+    const { dir, runner, stub, handler } = setup();
+    const worstCaseMs = computeMovieTimeoutMs(TEST_FRAMES) + MOVIE_KILL_WORST_CASE_MS;
+    const promptMs = CLIENT_ANSWER_CEILING_MS - worstCaseMs + 1;
+    let clockOffsetMs = 0;
+    const frozenNow = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => frozenNow + clockOffsetMs);
+    const ctx = makeContext({
+      elicit: async () => {
+        clockOffsetMs += promptMs;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx);
+
+    expectErrorMatching(result, /before asking for its turn \(its confirmation prompt\)/);
+    expect(stub.calls).toHaveLength(0);
   });
 });
 
