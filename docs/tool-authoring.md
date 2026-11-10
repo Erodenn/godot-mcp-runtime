@@ -109,15 +109,17 @@ If your tool's `inputSchema` has:
 
 ---
 
-## 6. Security policy for GDScript-executing tools
+## 6. Confirmation prompts
 
-Any tool that forwards arbitrary GDScript to a running Godot process - `run_script` today, and any future sibling - MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
+Any tool that starts a Godot project or forwards arbitrary GDScript to a running one MUST call `confirmFirstUse` from `src/utils/confirmation.ts` before it spawns or sends anything. It asks the user once per project per server session and applies the shared handling for decline, cancel, no answer, an unsupported client and `GODOT_MCP_DISABLE_ELICITATION`. Don't write a second prompt or a "trusted" shortcut that skips it.
 
-For tools that launch a Godot project (`run_project`) or attach to one, the helpers `parseAutoloadSection` (`src/utils/autoload-ini.ts`), `collectSceneScripts` (`src/utils/scene-parsing.ts`) and `resolveLaunchScene` (`src/utils/launch-scene.ts`) drive the pre-flight scan over autoloads and the launched scene's scripts, recursing transitively into every PackedScene the scene instances. The scan lives in `runLaunchGate` (`src/utils/launch-gate.ts`), which `run_project` and `render_movie` both call. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1, and on a script or text scene the scan could not read. A launcher that takes a `scene` argument rejects one that is not a scene file with `rejectNonSceneLaunchArg` before it calls the gate, because the engine ignores such an argument and runs the main scene, which the gate would not have scanned.
+- A launcher (`run_project` in spawn mode, `render_movie`) passes `kind: 'launch'`. `run_project` with `attach: true` calls nothing, since the user starts that process.
+- A tool that injects code (`run_script`) passes `kind: 'script'`. It keeps a separate per-project set, so a launch accept does not cover it and an attached session still asks.
+- A launcher that takes a `scene` argument calls `rejectNonSceneLaunchArg` first, because the engine ignores a non-scene argument and runs the main scene.
+- Put the call after every check that can refuse the call, and outside the session queue.
+- Add the confirmation warnings the call returns to the response `warnings` array.
 
-If you add a new GDScript-executing tool, also extend the test suite in `tests/unit/handlers/runtime-handlers.test.ts` with Tier 1 / Tier 2 / Tier 3 / strict-mode coverage following the pattern there.
-
-See `docs/security.md` for the full catalogue and tier rationale.
+Extend `tests/unit/handlers/runtime-handlers.test.ts` with accept, decline, cancel and second-call coverage for a new tool. See `SECURITY.md` for what the prompts do and do not protect.
 
 ## 7. Pre-merge checklist
 

@@ -111,25 +111,17 @@ Tool handlers return `Result<HandlerResult, ToolResponse>`, not a raw `ToolRespo
 
 Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/parameter-conversion.ts`. Keys under `properties` and `value` are opaque and are never converted, in either direction.
 
-### `run_script` and `run_project` security gate
+### Confirmation prompts
 
-`run_script` accepts arbitrary GDScript and forwards it to a running Godot process, where it executes with full user privileges. `run_project` launches autoloads and the main scene, which is equally arbitrary code. Both route through a static-analysis gate in `src/utils/run-script-policy.ts` before reaching the bridge.
+`run_script` runs agent-written GDScript in a running game, and `run_project` starts a project whose autoloads and main scene run as the user. Neither is inspected. Instead, `confirmFirstUse` in `src/utils/confirmation.ts` asks the user once per project per server session, and every tool that starts a project or injects code calls it. `SECURITY.md` is the public statement of what this covers.
 
-The gate emits a three-tier decision:
+- **Launchers.** `run_project` in spawn mode and `render_movie` call `confirmFirstUse` with `kind: 'launch'`. `run_project` with `attach: true` calls nothing, because the user starts that process.
+- **Code-running tools.** `run_script` calls it with `kind: 'script'`, which keeps its own per-project set apart from the launch one. A launch accept does not admit `run_script`, and an attached session still asks.
+- **Order.** Call it after every check that can refuse the call and before anything is written or spawned, so an impossible call never asks. Keep it outside the session queue, because a prompt can stay open for minutes.
+- **Failures.** A declined or cancelled prompt, and one that goes unanswered, refuse the call. A client without elicitation proceeds with a warning that reaches the response `warnings`.
+- **Opt-out.** `GODOT_MCP_DISABLE_ELICITATION=true` skips both prompts with one warning. The failure handling lives in `confirmFirstUse` alone, so a new tool calls it and does not copy it.
 
-- **Tier 1: hard block.** Direct exec (`OS.execute`/`shell_open`/`create_instance`), native libraries (`GDExtensionManager.load_extension`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `GDScript.new`, `str_to_var`), non-literal dispatch on a guarded receiver (`Object.call(var)`). A reflective call with a literal method name is judged as the call it makes, after its escapes are decoded and any dispatch it names is followed, so `OS.call("execute", ...)` and `OS.call("call", "\u0065xecute")` are blocked like `OS.execute(...)`. Server rejects without forwarding.
-- **Tier 2: elicit.** Filesystem and resource writes (`FileAccess.open`, `DirAccess.remove` and the `make_dir` family, `ResourceSaver.save`, `ConfigFile`, `Image.save_png` and siblings, `take_over_path`, `ZIPPacker`/`PCKPacker`, the `ResourceUID` mutators, `OS.move_to_trash`), a non-literal `load`/`preload` path (`load(var)`), a guarded singleton used as a value (`var o = OS`), `source_code`, `instance_from_id`, `JavaScriptBridge.eval`, and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
-- **Tier 3: warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
-
-`GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch - MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
-
-`GODOT_MCP_DISABLE_ELICITATION=true` is the opposite escape hatch, for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds fail-open: the launch gate shared by `run_project` and `render_movie` is bypassed and Tier 2 `run_script` findings run with a warning (audited as `elicit_bypassed`). Tier 1 hard blocks are unaffected. When both flags are set, strict mode wins and `GODOT_MCP_DISABLE_ELICITATION` is ignored.
-
-`GODOT_MCP_DISABLE_SECURITY=true` turns the whole gate off: no scan, no tier decision, no elicitation, no warnings, no sidecar, for both handlers. Tier 1 is included, unlike the elicitation opt-out. It outranks both flags above, which is the reverse of the strict/disable-elicitation precedence - a flag whose purpose is turning the gate off would be useless if a stricter flag outranked it. Enabling it is an operator's decision, not an agent's.
-
-Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/godot-runtime/scripts/`, unless the gate is disabled. See `docs/security.md` for the full rule catalogue and the three-flag resolution order.
-
-When adding a new tool that forwards GDScript to the bridge, route it through the same policy evaluator - don't inline rejection logic.
+If you add a tool that launches a project or forwards GDScript to the bridge, call `confirmFirstUse` and extend `tests/unit/handlers/runtime-handlers.test.ts` with accept, decline, cancel and second-call cases following the pattern there. A launcher that takes a `scene` argument also calls `rejectNonSceneLaunchArg` first, because the engine ignores a non-scene argument and runs the main scene.
 
 ### MCP SDK: `Server` vs `McpServer`
 

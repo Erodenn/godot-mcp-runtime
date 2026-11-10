@@ -168,11 +168,7 @@ All are set in the same `env` block as `GODOT_PATH`:
 | -------- | ------------------------------------------- |
 | `DEBUG`  | `"true"` enables verbose `[DEBUG]` logging. |
 
-The three security-gate flags below share one axis (see [`docs/security.md`](docs/security.md) for the full picture) and are wide enough to wrap badly in a table, so they get a list instead:
-
-- **`GODOT_MCP_DISABLE_ELICITATION`** - `"true"` disables the confirmation prompts for `run_project`, `render_movie` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply.
-- **`GODOT_MCP_STRICT`** - `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.
-- **`GODOT_MCP_DISABLE_SECURITY`** - `"true"` turns the entire `run_script`/`run_project` security gate off: no scan, no block, no elicitation, no warnings, no audit sidecars - Tier 1 included. Overrides `GODOT_MCP_STRICT` when both are set. **Enabling this is a human decision - an agent should decline to set it on a user's behalf.**
+- **`GODOT_MCP_DISABLE_ELICITATION`** - `"true"` skips the confirmation prompts for the first `run_project` launch, `render_movie` and `run_script` on a project. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). The action proceeds with a warning.
 
 ```json
 {
@@ -200,12 +196,16 @@ The three security-gate flags below share one axis (see [`docs/security.md`](doc
 >
 > Setting the variable from a wrapper `.bat` does not propagate to the MCP server - the path must live in the client's `env` block above.
 
+### Security
+
+The server does not sandbox anything. A launched project and `run_script` run with your user permissions, and the server asks you to confirm once per project per session before the first of each. [`SECURITY.md`](SECURITY.md) lists what runs code, what the agent can change and how to report a vulnerability.
+
 ## Docs
 
 - [`docs/tools.md`](docs/tools.md): full tool reference, grouped by category
 - [`docs/tool-authoring.md`](docs/tool-authoring.md): standards for adding or modifying tools
 - [`docs/architecture.md`](docs/architecture.md): source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
-- [`docs/security.md`](docs/security.md): `run_script` / `run_project` security model, full rule catalogue, strict-mode behavior
+- [`SECURITY.md`](SECURITY.md): trust model, what runs code, what the confirmation prompts cover, how to report a vulnerability
 - [`docs/migration-4.0.md`](docs/migration-4.0.md): every breaking change from 3.8.1 to 4.0, with its before and after
 
 ## Acknowledgments

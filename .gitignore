@@ -27,6 +27,7 @@ Thumbs.db
 /*.md
 !README.md
 !CONTRIBUTING.md
+!SECURITY.md
 
 # Godot MCP working directory
 .mcp/
