@@ -5,6 +5,10 @@ import {
   RUN_SCRIPT_TIMEOUT_FIELD,
 } from '../../../src/tools/runtime-tools.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
+import { makeContext } from '../../helpers/runtime-fakes.js';
+
+/** Accepts every confirmation prompt, so a script goes to the bridge. */
+const scriptCtx = makeContext();
 
 const REQUESTED_TIMEOUT_MS = 12000;
 const SENT_TIMEOUT_TOLERANCE_MS = 2000;
@@ -49,10 +53,14 @@ describe('handleRunScript with an execute that awaits', () => {
     const { handleRunScript } = await import('../../../src/tools/runtime-tools.js');
     const sent: SentCommand[] = [];
     const fake = makeFakeRunner(JSON.stringify({ success: true, result: 1 }), [], sent);
-    const result = await handleRunScript(fake, {
-      script: AWAITING_SCRIPT,
-      timeout: REQUESTED_TIMEOUT_MS,
-    });
+    const result = await handleRunScript(
+      fake,
+      {
+        script: AWAITING_SCRIPT,
+        timeout: REQUESTED_TIMEOUT_MS,
+      },
+      scriptCtx,
+    );
     expect(result.ok).toBe(true);
     expect(sent).toHaveLength(1);
     const forwarded = sent[0]!.params[RUN_SCRIPT_TIMEOUT_FIELD];
@@ -73,7 +81,7 @@ describe('handleRunScript with an execute that awaits', () => {
       ['SCRIPT ERROR: Invalid access to property after the await'],
       [],
     );
-    const result = await handleRunScript(fake, { script: AWAITING_SCRIPT });
+    const result = await handleRunScript(fake, { script: AWAITING_SCRIPT }, scriptCtx);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     const text = JSON.stringify(result.error);

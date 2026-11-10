@@ -1,70 +1,16 @@
-/** .tscn parsing for the run-script security pipeline: one scanner following Godot's own statement grammar, and a transitive collection of the scripts a scene brings with it, reporting what it cannot read rather than skipping it.
- * Not read (see `docs/security.md`): resource files other than scripts, scenes and `SCRIPT_INERT_EXTENSIONS` (so a `.res` or `.material` is reported, and so is an imported asset's binary remap target other than a texture), binary `.scn` and `uid://`-only references (each reported); an `ext_resource` with both `uid` and `path` is read by `path` while the engine prefers `uid`, so a stale `path` goes unreported. */
+/** .tscn parsing: one scanner following Godot's own statement grammar, and the `.gd` references of a scene. */
 
 import { readFileSync } from 'fs';
-import { join, resolve } from 'path';
-import { fileIdentityKey, resolveProjectPath } from './path-validation.js';
+import { join } from 'path';
 
 /** Longest slice of a source line kept in a header's `raw` text and in problem reports. */
 const TSCN_RAW_SNIPPET_MAX = 200;
 const TSCN_RES_PREFIX = 'res://';
 const GDSCRIPT_EXTENSION = '.gd';
-/** Path extensions an `ext_resource` is walked as a scene for, whatever its `type` says: `.tres` and `.escn` share the statement grammar; a binary `.scn` is walked and reported as not text. */
-const SCENE_FILE_EXTENSIONS: readonly string[] = ['.tscn', '.scn', '.escn', '.tres'];
-/** Image, audio, font and shader extensions, never reported themselves; when one has a sibling `<file>.import`, the engine loads its remap target instead, and the walk follows that (`readImportRemap`). Any other `res://` reference the walk does not read is reported as not scanned: a `.res`, `.material` or `.mesh` can be binary and can embed a script. */
-const SCRIPT_INERT_EXTENSIONS: readonly string[] = [
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.webp',
-  '.svg',
-  '.svgz',
-  '.bmp',
-  '.tga',
-  '.exr',
-  '.hdr',
-  '.dds',
-  '.ktx',
-  '.ogg',
-  '.wav',
-  '.mp3',
-  '.ttf',
-  '.otf',
-  '.woff',
-  '.woff2',
-  '.gdshader',
-  '.gdshaderinc',
-  '.shader',
-];
-const IMPORT_FILE_SUFFIX = '.import';
-/** Import remap targets the engine hands to a texture loader by extension (`CompressedTexture2D`, its layered, cubemap and 3D forms), which builds a texture and attaches no script; checked for `.ctex` against Godot 4.6.2. Audio and font imports (`.oggvorbisstr`, `.mp3str`, `.sample`, `.fontdata`) are saved as binary resources, which the binary resource loader reads and which can carry a script, so they are not here. */
-const IMPORT_ONLY_INERT_EXTENSIONS: readonly string[] = [
-  '.ctex',
-  '.ctexarray',
-  '.ccube',
-  '.ccubearray',
-  '.ctex3d',
-];
-const IMPORT_REMAP_TAG = 'remap';
-const IMPORT_DEPS_TAG = 'deps';
-const IMPORT_PATH_KEY = 'path';
-/** A feature-tagged remap path (`path.s3tc`, `path.etc2`), which the engine loads on a platform with that feature. */
-const IMPORT_FEATURE_PATH_PREFIX = 'path.';
-const IMPORT_DEST_FILES_KEY = 'dest_files';
-/** What may surround the strings of a `dest_files` value: an array literal or a `PackedStringArray(...)`. */
-const DEST_FILES_FRAME_PATTERN = /^(?:PackedStringArray)?[\s[\](),]*$/;
-/** `type` values that mark an `ext_resource` as a script: Godot's loaders take the base or concrete class, so a hand-edited `type="GDScript"` loads as `Script` does. */
-const SCRIPT_TYPE_HINTS: ReadonlySet<string> = new Set(['Script', 'GDScript', 'CSharpScript']);
 const UNICODE_SHORT_ESCAPE_DIGITS = 4;
 const UNICODE_LONG_ESCAPE_DIGITS = 6;
 const HEX_BASE = 16;
 const UNICODE_MAX_CODE_POINT = 0x10ffff;
-const INLINE_SCRIPT_SOURCE_KEY = 'script/source';
-const GDSCRIPT_RESOURCE_TYPE = 'GDScript';
-/** The section holding the properties of a `.tres` file's own resource. */
-const MAIN_RESOURCE_TAG = 'resource';
-/** Names a `.tres` file's own resource where an inline script's sub-resource id would stand. */
-const MAIN_RESOURCE_SCRIPT_ID = 'resource';
 const SCENE_HEADER_TAGS: ReadonlySet<string> = new Set(['gd_scene', 'gd_resource']);
 const SIMPLE_ESCAPES: ReadonlyMap<string, string> = new Map([
   ['n', '\n'],
@@ -107,16 +53,12 @@ const BARE_WORD_VALUES: ReadonlySet<string> = new Set([
 const NEGATIVE_WORD_VALUES: ReadonlySet<string> = new Set(['inf', 'nan']);
 /** Characters that mark a quoted string as a StringName (`&`, and `@` in older files) or a NodePath (`^`). */
 const STRING_PREFIXES = '&^@';
-/** Malformed statements listed per scene before the rest are folded into one count. */
-const MAX_MALFORMED_REPORTED_PER_SCENE = 20;
-const NOT_TEXT_SCENE_REASON =
-  'not a text scene (no [gd_scene] header); binary scenes cannot be scanned';
 
 function isFileNotFound(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
-/** Reads a scene file's content, null when missing: a stale ext_resource reference must not crash the pre-flight. */
+/** Reads a scene file's content, null when missing: a stale ext_resource reference must not crash the caller. */
 function readSceneFileSafe(scenePath: string): string | null {
   try {
     return readFileSync(scenePath, 'utf8');
@@ -618,288 +560,9 @@ function resReferenceToAbs(projectDir: string, resPath: string): string {
   return join(projectDir, rel);
 }
 
-/** An inline `[sub_resource type="GDScript"]`, or a `.tres` that is itself a GDScript, and its source. */
-export interface InlineSceneScript {
-  scenePath: string;
-  id: string;
-  source: string;
-}
-
-export interface UnscannedSceneItem {
-  scenePath: string;
-  reason: string;
-  /** True when `scenePath` exists and reading it failed (permission error, a directory in its place): unlike files of a kind the scan does not read, the scan set out to read it. */
-  readFailed?: true;
-  /** True for a scene reference that did not resolve to a file inside the project; like `readFailed`, the scan set out to follow it. */
-  unresolved?: true;
-  /** True for a statement the scan read but could not take as written (a `TscnScan.malformed` entry, or a script source that is not one plain string): the engine may load something from it the scan did not see, so callers treat it like `readFailed`. */
-  malformed?: true;
-}
-
-export interface SceneScriptCollection {
-  scripts: string[];
-  inlineScripts: InlineSceneScript[];
-  unscanned: UnscannedSceneItem[];
-}
-
 function resPathOf(attrs: Map<string, string>): string | null {
   const path = attrs.get('path');
   return path !== undefined && path.startsWith(TSCN_RES_PREFIX) ? path : null;
-}
-
-export interface ImportRemap {
-  /** Every `[remap]` `path` and `path.<feature>` value, then every `[deps]` `dest_files` entry, once each, as written. */
-  targets: string[];
-  /** What could not be taken as written; the engine may load a target from it that is not in `targets`. */
-  problems: string[];
-}
-
-/** The strings of a `dest_files` value, or null when it is not an array of plain strings. */
-function destFileStrings(raw: string): string[] | null {
-  const strings: string[] = [];
-  let frame = '';
-  let i = 0;
-  while (i < raw.length) {
-    if (raw[i] !== '"') {
-      frame += raw[i];
-      i++;
-      continue;
-    }
-    const quoted = readQuoted(raw, i, raw.length);
-    if (quoted === null) return null;
-    strings.push(quoted.value);
-    i = quoted.end;
-  }
-  return DEST_FILES_FRAME_PATTERN.test(frame) ? strings : null;
-}
-
-/** Reads a `<file>.import` with the text-resource statement grammar, which is the parser the engine's import loader uses. Over-reads where the engine is narrower (every `[remap]` section, every feature path, and `dest_files`, which the engine does not load from), and reports what it cannot take as written: a statement outside any section, a path value that is not one plain string, a key assigned twice (the engine keeps the first `path`, the scanner the last). */
-export function readImportRemap(content: string): ImportRemap {
-  const scan = scanTscn(content);
-  const targets = new Set<string>();
-  const problems: string[] = scan.malformed.map(
-    (problem) => `${problem.reason} at line ${problem.line}: ${problem.raw}`,
-  );
-  const firstHeaderLine = scan.headers[0]?.line ?? Number.POSITIVE_INFINITY;
-  const lines = content.replace(BYTE_ORDER_MARK, '').split('\n');
-  for (let index = 0; index < lines.length && index + 1 < firstHeaderLine; index++) {
-    const text = lines[index]!.trim();
-    if (text !== '' && !text.startsWith(';')) {
-      problems.push(`statement before any section at line ${index + 1}: ${snippet(text)}`);
-    }
-  }
-  const isPathKey = (key: string): boolean =>
-    key === IMPORT_PATH_KEY || key.startsWith(IMPORT_FEATURE_PATH_PREFIX);
-  for (const header of scan.headers) {
-    if (header.tag === IMPORT_REMAP_TAG) {
-      for (const [key, value] of header.stringProps) {
-        if (isPathKey(key)) targets.add(value);
-      }
-      for (const key of header.rawProps.keys()) {
-        if (isPathKey(key)) problems.push(`[remap] ${key} is not one plain string`);
-      }
-      for (const key of header.repeatedKeys) {
-        if (isPathKey(key)) problems.push(`[remap] ${key} is assigned more than once`);
-      }
-    } else if (header.tag === IMPORT_DEPS_TAG) {
-      const single = header.stringProps.get(IMPORT_DEST_FILES_KEY);
-      if (single !== undefined) targets.add(single);
-      const raw = header.rawProps.get(IMPORT_DEST_FILES_KEY);
-      if (raw === undefined) continue;
-      const strings = destFileStrings(raw);
-      if (strings === null) problems.push(`[deps] dest_files is not a list of plain strings`);
-      else for (const value of strings) targets.add(value);
-    }
-  }
-  return { targets: Array.from(targets), problems };
-}
-
-/** Transitively walks the scenes `scenePath` references, collecting the `.gd` files their ext_resources name and the source of inline GDScript: a hostile script in an instanced PackedScene is invisible to a single-scene scan.
- * References are classified by path, not `type`, which a hand-edited scene can set to anything; what the walk cannot follow but could bring a script in is listed in `unscanned`, never dropped. Cycle-safe by resolved path; nothing throws on a stale or unreadable reference. */
-export function collectSceneScripts(scenePath: string, projectDir: string): SceneScriptCollection {
-  const visited = new Set<string>();
-  const scripts = new Set<string>();
-  const inlineScripts: InlineSceneScript[] = [];
-  const unscanned: UnscannedSceneItem[] = [];
-  // One notice per resource file, however many scenes reference it.
-  const reportedResources = new Set<string>();
-  // Each `.import` is read once, however many scenes reference its asset.
-  const followedImports = new Set<string>();
-
-  // An imported asset loads as its remap target, chosen by the target's extension, so each target is classified the way a direct reference would be.
-  function followImportRemap(assetPath: string, fromScenePath: string): void {
-    const importFile = resolveProjectPath(projectDir, assetPath + IMPORT_FILE_SUFFIX, 'read');
-    if (importFile === null) {
-      unscanned.push({
-        scenePath: fromScenePath,
-        reason: `import file of ${assetPath} could not be resolved to a file inside the project and was not read`,
-        unresolved: true,
-      });
-      return;
-    }
-    const importKey = fileIdentityKey(importFile.absPath);
-    if (followedImports.has(importKey)) return;
-    followedImports.add(importKey);
-    let content: string;
-    try {
-      content = readFileSync(importFile.absPath, 'utf8');
-    } catch (err) {
-      if (isFileNotFound(err)) return;
-      const detail = err instanceof Error ? err.message : String(err);
-      unscanned.push({
-        scenePath: importFile.absPath,
-        reason: `import file could not be read (${detail}), so what ${assetPath} loads was not scanned`,
-        readFailed: true,
-      });
-      return;
-    }
-    const remap = readImportRemap(content);
-    for (const problem of remap.problems.slice(0, MAX_MALFORMED_REPORTED_PER_SCENE)) {
-      unscanned.push({ scenePath: importFile.absPath, reason: problem, malformed: true });
-    }
-    if (remap.problems.length > MAX_MALFORMED_REPORTED_PER_SCENE) {
-      unscanned.push({
-        scenePath: importFile.absPath,
-        reason: `${remap.problems.length - MAX_MALFORMED_REPORTED_PER_SCENE} more malformed statements`,
-        malformed: true,
-      });
-    }
-    for (const target of remap.targets) {
-      const lowered = target.toLowerCase();
-      if (IMPORT_ONLY_INERT_EXTENSIONS.some((ext) => lowered.endsWith(ext))) continue;
-      const resolved = resolveProjectPath(projectDir, target, 'read');
-      if (resolved === null) {
-        unscanned.push({
-          scenePath: importFile.absPath,
-          reason: `remap target ${target} could not be resolved to a file inside the project and was not followed`,
-          unresolved: true,
-        });
-      } else if (lowered.endsWith(GDSCRIPT_EXTENSION)) {
-        scripts.add(resolved.absPath);
-      } else if (SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
-        walk(resolved.absPath);
-      } else if (!reportedResources.has(lowered)) {
-        reportedResources.add(lowered);
-        unscanned.push({
-          scenePath: importFile.absPath,
-          reason: `resource ${target}, which ${assetPath} is imported as, is not scanned (a resource file can carry a script)`,
-        });
-      }
-    }
-  }
-
-  function walk(currentScenePath: string): void {
-    const absScenePath = resolve(currentScenePath);
-    if (visited.has(absScenePath)) return;
-    visited.add(absScenePath);
-    const skip = (reason: string): void => {
-      unscanned.push({ scenePath: absScenePath, reason });
-    };
-    // A scene reference is followed only when it stays inside the project, so
-    // a `res://../x.tscn` the engine would refuse is never read off the disk.
-    const followScene = (path: string): void => {
-      const resolved = resolveProjectPath(projectDir, path, 'read');
-      if (resolved === null) {
-        unscanned.push({
-          scenePath: absScenePath,
-          reason: `reference ${path} could not be resolved to a file inside the project and was not followed`,
-          unresolved: true,
-        });
-      } else walk(resolved.absPath);
-    };
-
-    let content: string | null;
-    try {
-      content = readSceneFileSafe(currentScenePath);
-    } catch (err) {
-      // The file is there and could not be read: one entry, and the walk goes on, since a throw would abandon every scene and autoload not yet reached, with nothing naming them.
-      const detail = err instanceof Error ? err.message : String(err);
-      unscanned.push({
-        scenePath: absScenePath,
-        reason: `scene file could not be read (${detail})`,
-        readFailed: true,
-      });
-      return;
-    }
-    if (content === null) {
-      skip('scene file not found');
-      return;
-    }
-    const scan = scanTscn(content);
-    if (!scan.isTextResource) {
-      skip(NOT_TEXT_SCENE_REASON);
-      return;
-    }
-
-    // A `.tres` whose own type is GDScript carries its source under `[resource]`.
-    const fileIsScript = scan.headers[0]?.attrs.get('type') === GDSCRIPT_RESOURCE_TYPE;
-    const hasSourceProperty = (header: TscnHeader): boolean =>
-      header.stringProps.has(INLINE_SCRIPT_SOURCE_KEY) ||
-      header.rawProps.has(INLINE_SCRIPT_SOURCE_KEY);
-    const collectInlineScript = (header: TscnHeader, id: string): void => {
-      const source = header.stringProps.get(INLINE_SCRIPT_SOURCE_KEY);
-      if (source !== undefined) {
-        inlineScripts.push({ scenePath: absScenePath, id, source });
-      } else if (header.rawProps.has(INLINE_SCRIPT_SOURCE_KEY)) {
-        // The engine converts any value to source text (`&"..."`), so it compiles what was not read.
-        unscanned.push({
-          scenePath: absScenePath,
-          reason: `inline GDScript ${id} has no readable script/source (the value is not one plain string)`,
-          malformed: true,
-        });
-      } else skip(`inline GDScript ${id} has no readable script/source`);
-    };
-
-    for (const header of scan.headers) {
-      if (header.tag === 'ext_resource') {
-        const type = header.attrs.get('type') ?? '';
-        const path = resPathOf(header.attrs);
-        const lowered = path === null ? '' : path.toLowerCase();
-        if (path !== null && lowered.endsWith(GDSCRIPT_EXTENSION)) {
-          scripts.add(resReferenceToAbs(projectDir, path));
-        } else if (path !== null && SCENE_FILE_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
-          followScene(path);
-        } else if (type === 'PackedScene') {
-          if (path === null) skip(`PackedScene ext_resource has no res:// path: ${header.raw}`);
-          else followScene(path);
-        } else if (SCRIPT_TYPE_HINTS.has(type)) {
-          if (path === null) skip(`Script ext_resource has no res:// path: ${header.raw}`);
-          else skip(`script ${path} is not GDScript and is not scanned`);
-        } else if (path === null) {
-          skip(`ext_resource has no res:// path and was not followed: ${header.raw}`);
-        } else if (!SCRIPT_INERT_EXTENSIONS.some((ext) => lowered.endsWith(ext))) {
-          if (!reportedResources.has(lowered)) {
-            reportedResources.add(lowered);
-            skip(`resource ${path} is not scanned (a resource file can carry a script)`);
-          }
-        } else {
-          followImportRemap(path, absScenePath);
-        }
-      } else if (
-        header.tag === 'sub_resource' &&
-        header.attrs.get('type') === GDSCRIPT_RESOURCE_TYPE
-      ) {
-        collectInlineScript(header, header.attrs.get('id') ?? '?');
-      } else if (header.tag === MAIN_RESOURCE_TAG && (fileIsScript || hasSourceProperty(header))) {
-        collectInlineScript(header, MAIN_RESOURCE_SCRIPT_ID);
-      }
-    }
-    // A malformed header loses the properties under it whatever its tag, and a malformed statement may hold something the engine loads, so each is reported up to a cap: a file of broken lines says so once, not per line.
-    const reportMalformed = (reason: string): void => {
-      unscanned.push({ scenePath: absScenePath, reason, malformed: true });
-    };
-    for (const problem of scan.malformed.slice(0, MAX_MALFORMED_REPORTED_PER_SCENE)) {
-      reportMalformed(`${problem.reason} at line ${problem.line}: ${problem.raw}`);
-    }
-    if (scan.malformed.length > MAX_MALFORMED_REPORTED_PER_SCENE) {
-      reportMalformed(
-        `${scan.malformed.length - MAX_MALFORMED_REPORTED_PER_SCENE} more malformed statements`,
-      );
-    }
-  }
-
-  walk(scenePath);
-  return { scripts: Array.from(scripts), inlineScripts, unscanned };
 }
 
 /** The `[ext_resource path="res://....gd"]` references of one scene as absolute paths, whatever their `type` says. Not transitive and ignores inline sources; paths are returned even if the file is missing (the caller checks), and a missing scene yields `[]`. */

@@ -1,9 +1,0 @@
-[remap]
-
-importer="texture"
-type="CompressedTexture2D"
-path="res://payload.tres"
-
-[deps]
-
-source_file="res://variant_a.png"

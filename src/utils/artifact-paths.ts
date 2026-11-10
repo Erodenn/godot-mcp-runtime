@@ -13,7 +13,6 @@ const BRIDGE_DIR_NAME = 'bridge' as const;
 const BRIDGE_OWNERS_DIR_NAME = 'owners' as const;
 const BRIDGE_BARE_HEADER_MARKER_NAME = 'bare-autoload-header' as const;
 const SCREENSHOTS_DIR_NAME = 'screenshots' as const;
-const AUDIT_SCRIPTS_DIR_NAME = 'scripts' as const;
 const VALIDATE_DIR_NAME = 'validate' as const;
 const MOVIES_DIR_NAME = 'movies' as const;
 const SCENE_BACKUPS_DIR_NAME = 'scene-backups' as const;
@@ -71,11 +70,6 @@ export function bridgeBareHeaderMarkerPath(projectPath: string): string {
  * KEEP IN SYNC: `SCREENSHOT_DIR_RES_PATH` in `src/scripts/mcp_bridge.gd` builds the same directory, and `handleTakeScreenshot` in `src/tools/runtime-tools.ts` uses this as its containment root. */
 export function screenshotsDir(projectPath: string): string {
   return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, SCREENSHOTS_DIR_NAME);
-}
-
-/** `<project>/.mcp/godot-runtime/scripts` — run_script audit pairs, never cleaned. */
-export function auditScriptsDir(projectPath: string): string {
-  return join(mcpDir(projectPath), ARTIFACT_NAMESPACE_DIR_NAME, AUDIT_SCRIPTS_DIR_NAME);
 }
 
 /** `<project>/.mcp/godot-runtime/validate` — temp scripts, deleted per call. */

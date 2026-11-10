@@ -347,7 +347,7 @@ export const projectToolDefinitions = [
   {
     name: 'set_project_setting',
     description:
-      'Set one project.godot setting without launching Godot. Pass value (JSON, converted to a Godot literal) or literal (raw Godot text, e.g. "Vector2i(1280, 720)"), not both. Rewrites the last assignment in place or adds key/section; other lines stay byte for byte. Refuses keys that select code or the launch scene: autoload/*, editor_plugins/*, application/run/main_scene and main_loop_type with their .tag overrides. Returns: { section, key, value read back, created, sectionCreated, previous? }.',
+      'Set one project.godot setting without launching Godot. Pass value (JSON, converted to a Godot literal) or literal (raw Godot text, e.g. "Vector2i(1280, 720)"), not both. Rewrites the last assignment in place or adds key/section; other lines stay byte for byte. Refuses autoload/* (use the autoload tools). Returns: { section, key, value read back, created, sectionCreated, previous? }.',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',

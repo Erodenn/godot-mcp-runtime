@@ -219,7 +219,11 @@ function setup(options: SetupOptions = {}) {
   return { dir, runner: fake.asRunner, fake, stub, handler };
 }
 
-const NO_GATE = makeContext({ disableSecurity: true });
+/** The warning an operator opt-out adds to a launch. */
+const ELICITATION_DISABLED_LAUNCH_WARNING =
+  'Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); launching without user confirmation.';
+
+const ACCEPTING = makeContext();
 
 function payloadOf(result: unknown): Payload {
   expect(hasError(result), String(errorText(result))).toBe(false);
@@ -261,7 +265,7 @@ describe('render_movie arguments', () => {
     const result = await handler(
       runner,
       { projectPath: dir, frames: TEST_FRAMES, fps: 24 },
-      NO_GATE,
+      ACCEPTING,
     );
     payloadOf(result);
 
@@ -290,7 +294,7 @@ describe('render_movie arguments', () => {
   it('frames mode passes the same argument shape as check', async () => {
     const { dir, runner, stub, handler } = setup();
     payloadOf(
-      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, ACCEPTING),
     );
     const args = stub.calls[0]!.args;
     expect(args.filter((a) => a.startsWith('--'))).toEqual([
@@ -305,7 +309,7 @@ describe('render_movie arguments', () => {
 
   it('video mode writes movie.avi by default and movie.ogv on request', async () => {
     const avi = setup();
-    payloadOf(await avi.handler(avi.runner, { projectPath: avi.dir, mode: 'video' }, NO_GATE));
+    payloadOf(await avi.handler(avi.runner, { projectPath: avi.dir, mode: 'video' }, ACCEPTING));
     expect(flagValue(avi.stub.calls[0]!.args, '--write-movie').endsWith('/movie.avi')).toBe(true);
 
     const ogv = setup();
@@ -313,7 +317,7 @@ describe('render_movie arguments', () => {
       await ogv.handler(
         ogv.runner,
         { projectPath: ogv.dir, mode: 'video', format: 'ogv' },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     expect(flagValue(ogv.stub.calls[0]!.args, '--write-movie').endsWith('/movie.ogv')).toBe(true);
@@ -323,7 +327,7 @@ describe('render_movie arguments', () => {
     const { dir, runner, stub, handler } = setup();
     mkdirSync(join(dir, 'sub'), { recursive: true });
     writeFileSync(join(dir, 'sub', 'level.tscn'), '[gd_scene format=3]\n');
-    payloadOf(await handler(runner, { projectPath: dir, scene: 'sub/level.tscn' }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, scene: 'sub/level.tscn' }, ACCEPTING));
     const args = stub.calls[0]!.args;
     expect(args[args.length - 1]).toBe('res://sub/level.tscn');
   });
@@ -335,7 +339,7 @@ describe('render_movie arguments', () => {
     for (const spelling of ['res://sub/level.tscn', join(dir, 'sub', 'level.tscn')]) {
       stub.calls.length = 0;
       const payload = payloadOf(
-        await handler(runner, { projectPath: dir, scene: spelling }, NO_GATE),
+        await handler(runner, { projectPath: dir, scene: spelling }, ACCEPTING),
       );
       const args = stub.calls[0]!.args;
       expect(args[args.length - 1]).toBe('res://sub/level.tscn');
@@ -345,7 +349,7 @@ describe('render_movie arguments', () => {
 
   it('never passes --headless or --resolution', async () => {
     const { dir, runner, stub, handler } = setup();
-    payloadOf(await handler(runner, { projectPath: dir }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir }, ACCEPTING));
     const args = stub.calls[0]!.args;
     expect(args).not.toContain('--headless');
     expect(args).not.toContain('--resolution');
@@ -353,7 +357,7 @@ describe('render_movie arguments', () => {
 
   it('uses the default frames and fps when omitted', async () => {
     const { dir, runner, stub, handler } = setup();
-    payloadOf(await handler(runner, { projectPath: dir }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir }, ACCEPTING));
     const args = stub.calls[0]!.args;
     expect(flagValue(args, '--fixed-fps')).toBe(DEFAULT_FPS_ARG);
     expect(flagValue(args, '--quit-after')).toBe(DEFAULT_FRAMES_ARG);
@@ -361,7 +365,7 @@ describe('render_movie arguments', () => {
 
   it('passes computeMovieTimeoutMs(frames) as the timeout', async () => {
     const { dir, runner, stub, handler } = setup();
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     expect(stub.calls[0]!.timeoutMs).toBe(computeMovieTimeoutMs(TEST_FRAMES));
   });
 
@@ -384,14 +388,14 @@ describe('render_movie arguments', () => {
     ['inlineFrames', 2.5],
   ])('rejects %s = %s', async (key, value) => {
     const { dir, runner, stub, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, [key]: value }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, [key]: value }, ACCEPTING);
     expectErrorMatching(result, new RegExp(`Invalid ${key}: must be an integer in \\[`));
     expect(stub.calls.length).toBe(0);
   });
 
   it('rejects an unknown mode', async () => {
     const { dir, runner, stub, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, mode: 'bogus' }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, mode: 'bogus' }, ACCEPTING);
     expectErrorMatching(result, /Invalid mode for render_movie: "bogus"/);
     expect(stub.calls.length).toBe(0);
   });
@@ -401,7 +405,7 @@ describe('render_movie arguments', () => {
     const result = await handler(
       runner,
       { projectPath: dir, mode: 'video', format: 'mkv' },
-      NO_GATE,
+      ACCEPTING,
     );
     expectErrorMatching(result, /Invalid format for render_movie: "mkv"/);
     expect(stub.calls.length).toBe(0);
@@ -409,7 +413,7 @@ describe('render_movie arguments', () => {
 
   it('rejects format outside video mode', async () => {
     const { dir, runner, stub, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, format: 'avi' }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, format: 'avi' }, ACCEPTING);
     expectErrorMatching(
       result,
       /"format" applies only to mode "video" and cannot be combined with mode "check"/,
@@ -422,7 +426,7 @@ describe('render_movie arguments', () => {
     const result = await handler(
       runner,
       { projectPath: dir, mode: 'frames', inlineFrames: 2 },
-      NO_GATE,
+      ACCEPTING,
     );
     expectErrorMatching(
       result,
@@ -433,7 +437,7 @@ describe('render_movie arguments', () => {
 
   it('rejects a scene that escapes the project', async () => {
     const { dir, runner, stub, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, scene: '../outside.tscn' }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, scene: '../outside.tscn' }, ACCEPTING);
     expectErrorMatching(result, /Invalid scene path: ".*" resolves outside the project/);
     // Absolute in-project and res:// spellings are accepted, so the message
     // must not tell the caller the path has to be relative.
@@ -443,7 +447,7 @@ describe('render_movie arguments', () => {
 
   it('rejects a scene that does not exist', async () => {
     const { dir, runner, stub, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, scene: 'missing.tscn' }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, scene: 'missing.tscn' }, ACCEPTING);
     expectErrorMatching(result, /Scene file does not exist: missing\.tscn/);
     expect(stub.calls.length).toBe(0);
   });
@@ -451,14 +455,18 @@ describe('render_movie arguments', () => {
   it('accepts inline_frames and project_path snake_case aliases', async () => {
     const { dir, runner, handler } = setup();
     const payload = payloadOf(
-      await handler(runner, { project_path: dir, inline_frames: 1, frames: TEST_FRAMES }, NO_GATE),
+      await handler(
+        runner,
+        { project_path: dir, inline_frames: 1, frames: TEST_FRAMES },
+        ACCEPTING,
+      ),
     );
     expect(payload.inlineFrames).toHaveLength(1);
   });
 });
 
 // Godot runs a positional argument as the scene only when it ends in a scene extension; otherwise the
-// main scene renders and the gate would have scanned a scene nobody named.
+// main scene renders instead of the one named.
 describe('render_movie refuses a scene argument the engine would not run as a scene', () => {
   it.each([
     ['a file that is not a scene', 'icon.svg'],
@@ -487,7 +495,7 @@ describe('render_movie refuses a scene argument the engine would not run as a sc
   });
 });
 
-describe('render_movie asks again whether the bridge may load once the gate returns', () => {
+describe('render_movie asks again whether the bridge may load once the confirmation returns', () => {
   // The confirmation prompt can stay open as long as a human takes: a session started meanwhile has
   // injected the bridge, and the movie process would load it with no token or port.
   it('refuses when a session went live on the project while the prompt was open', async () => {
@@ -532,7 +540,11 @@ describe('render_movie and a start on the same project', () => {
       },
     });
 
-    const pending = ctx.handler(ctx.runner, { projectPath: ctx.dir, frames: TEST_FRAMES }, NO_GATE);
+    const pending = ctx.handler(
+      ctx.runner,
+      { projectPath: ctx.dir, frames: TEST_FRAMES },
+      ACCEPTING,
+    );
     await vi.waitFor(() => expect(ctx.stub.calls.length).toBe(1));
 
     // Red when the registration or the spawn is moved out of runExclusive:
@@ -558,7 +570,7 @@ describe('render_movie and a start on the same project', () => {
       stub: { result: { timedOut: true, exitCode: null, killUnconfirmed: true } },
     });
 
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
 
     expectErrorMatching(result, /a Godot process may still be running/);
     expect(fake.movieRuns.map((run) => run.ended)).toEqual([false]);
@@ -573,7 +585,7 @@ describe('render_movie and a start on the same project', () => {
       },
     });
 
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
 
     expectErrorMatching(result, /render_movie waited 30000 ms for run_project to finish/);
     expect(stub.calls.length).toBe(0);
@@ -596,7 +608,7 @@ describe('render_movie and a start on the same project', () => {
               release = done;
             }),
         );
-        const pending = ctx.handler(ctx.runner, { projectPath: ctx.dir, frames }, NO_GATE);
+        const pending = ctx.handler(ctx.runner, { projectPath: ctx.dir, frames }, ACCEPTING);
         await vi.advanceTimersByTimeAsync(QUEUE_HELD_MS);
         release();
         await held;
@@ -631,7 +643,7 @@ describe('render_movie and a start on the same project', () => {
     const refused = await edge.handler(
       edge.runner,
       { projectPath: edge.dir, frames: FRAMES_PAST_THE_CEILING },
-      NO_GATE,
+      ACCEPTING,
     );
     expectErrorMatching(refused, /render_movie can take up to \d+ ms.*Nothing was sent/);
     expect(edge.stub.calls.length).toBe(0);
@@ -642,7 +654,7 @@ describe('render_movie and a start on the same project', () => {
       await inside.handler(
         inside.runner,
         { projectPath: inside.dir, frames: FRAMES_AT_THE_CEILING },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     expect(inside.stub.calls.length).toBe(1);
@@ -669,7 +681,7 @@ describe('render_movie and a start on the same project', () => {
       return original(projectPath);
     };
 
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
 
     // Red when the second check is left ahead of runExclusive: a start could
     // then run between it and the registration.
@@ -712,7 +724,7 @@ describe('render_movie sampling helpers', () => {
 describe('render_movie refusals before any spawn', () => {
   it('refuses without a display', async () => {
     const { dir, runner, stub, handler } = setup({ display: false });
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /needs a display server/);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
@@ -725,7 +737,7 @@ describe('render_movie refusals before any spawn', () => {
       activeProjectPath: dir,
       activeProcess: { hasExited: false },
     });
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /runtime session is active on this project/);
     expect(stub.calls.length).toBe(0);
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
@@ -734,7 +746,7 @@ describe('render_movie refusals before any spawn', () => {
   it('tells the caller to switch first when the live session is not the current one', async () => {
     const { dir, runner, stub, handler } = setup();
     (runner as GodotRunner & { extraLiveSessionPaths: string[] }).extraLiveSessionPaths = [dir];
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /not the current one/);
     expect(JSON.stringify(unwrap(result).content)).toContain('switch_project');
     expect(stub.calls.length).toBe(0);
@@ -752,7 +764,7 @@ describe('render_movie refusals before any spawn', () => {
         port: 9900,
       },
     ];
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, new RegExp(`server pid ${OTHER_SESSION_PID}`));
     expectErrorMatching(result, /Wait for the other session to finish/);
     expect(stub.calls.length).toBe(0);
@@ -767,7 +779,7 @@ describe('render_movie refusals before any spawn', () => {
     unreadable.otherLiveSessionsOnProject = () => {
       throw new BridgeRegistryUnreadableError('cannot list the owners directory: EACCES');
     };
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /Could not read this project's bridge owner registry/);
     expectErrorMatching(result, /cannot list the owners directory: EACCES/);
     expectErrorMatching(result, /Refusing to start a movie run/);
@@ -775,9 +787,9 @@ describe('render_movie refusals before any spawn', () => {
     expect(existsSync(moviesDir(resolve(dir)))).toBe(false);
   });
 
-  // Nothing is written before the launch gate, the owner registry included:
+  // Nothing is written before the launch confirmation, the owner registry included:
   // an ordinary registry read unlinks the owner files of dead sessions.
-  it('asks the owner registry read-only, before the launch gate and after it', async () => {
+  it('asks the owner registry read-only, before the launch confirmation and after it', async () => {
     const { dir, runner, handler } = setup();
     const reads: unknown[] = [];
     const spied = runner as GodotRunner & {
@@ -788,7 +800,7 @@ describe('render_movie refusals before any spawn', () => {
       return [];
     };
 
-    payloadOf(await handler(runner, { projectPath: dir }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir }, ACCEPTING));
 
     expect(reads).toEqual(['read-only', 'read-only']);
   });
@@ -799,7 +811,7 @@ describe('render_movie refusals before any spawn', () => {
         'config_version=5\n\n[autoload]\n\nMcpBridge="*res://.mcp/godot-runtime/bridge/mcp_bridge.gd"\n',
     });
     const before = readFileSync(join(dir, 'project.godot'));
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /registers the McpBridge autoload/);
     // remove_autoload's parameter is autoloadName; "name" is not one it takes.
     expect(JSON.stringify(result)).toMatch(/remove_autoload with autoloadName \\"McpBridge\\"/);
@@ -808,7 +820,7 @@ describe('render_movie refusals before any spawn', () => {
     expect(readFileSync(join(dir, 'project.godot')).equals(before)).toBe(true);
   });
 
-  it('repairs a stranded bridge after the launch gate and then runs, leaving the entry removed', async () => {
+  it('repairs a stranded bridge after the launch confirmation and then runs, leaving the entry removed', async () => {
     const { dir, runner, fake, stub } = setup({
       projectGodot: STRANDED_BRIDGE_PROJECT,
     });
@@ -842,7 +854,7 @@ describe('render_movie refusals before any spawn', () => {
     expect(fake.repairs).toEqual([]);
   });
 
-  it('does not touch a stranded bridge before the launch gate: a declined gate repairs nothing', async () => {
+  it('does not touch a stranded bridge before the launch confirmation: a declined confirmation repairs nothing', async () => {
     const { dir, runner, fake, stub, handler } = setup({
       projectGodot: STRANDED_BRIDGE_PROJECT,
     });
@@ -861,7 +873,7 @@ describe('render_movie refusals before any spawn', () => {
   it('asks the runner to repair the project once per launch', async () => {
     const { dir, runner, fake, handler } = setup();
 
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
 
     expect(fake.repairs).toEqual([resolve(dir)]);
   });
@@ -870,13 +882,13 @@ describe('render_movie refusals before any spawn', () => {
     const { dir, runner, stub, handler } = setup({
       projectGodot: 'config_version=5\n\n[autoload]\n\nMcpBridge="*res://game/my_bridge.gd"\n',
     });
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     expect(stub.calls.length).toBe(1);
   });
 
   it('errors when no Godot executable is found', async () => {
     const { dir, runner, stub, handler } = setup({ runner: { godotPath: null } });
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /Could not find a valid Godot executable path/);
     expect(stub.calls.length).toBe(0);
   });
@@ -900,7 +912,7 @@ describe('render_movie leftover check runs', () => {
     const recent = seedRun(dir, 'check-2-live', MS_PER_SECOND);
     const kept = seedRun(dir, '3-frames-run', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
 
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
 
     expect(existsSync(leftover)).toBe(false);
     expect(existsSync(recent)).toBe(true);
@@ -946,7 +958,7 @@ describe('render_movie leftover check runs', () => {
       const leftover = seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
       const recent = seedRun(dir, 'check-2-live', MS_PER_SECOND);
 
-      const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+      const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
       await vi.waitFor(() => expect(probe.removed.length).toBe(1));
 
       expect(probe.removed).toEqual([leftover]);
@@ -963,7 +975,7 @@ describe('render_movie leftover check runs', () => {
         const { dir, runner, handler, probe } = setupWithSlowRemoval(true);
         seedRun(dir, 'check-1-dead', MOVIE_CHECK_RUN_STALE_MS + MS_PER_SECOND);
 
-        const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+        const pending = handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
         await vi.waitFor(() => expect(probe.removed.length).toBe(1));
         await vi.advanceTimersByTimeAsync(MOVIE_STALE_CLEANUP_WAIT_MS);
         payloadOf(await pending);
@@ -994,9 +1006,9 @@ describe('render_movie leftover check runs', () => {
       stub: { onRun: (info) => names.push(basename(info.dir)) },
     });
 
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     payloadOf(
-      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, ACCEPTING),
     );
 
     expect(names[0]!.startsWith('check-')).toBe(true);
@@ -1004,8 +1016,8 @@ describe('render_movie leftover check runs', () => {
   });
 });
 
-describe('render_movie launch gate', () => {
-  it('calls the launch gate before the spawn and a declined confirmation prevents it', async () => {
+describe('render_movie launch confirmation', () => {
+  it('confirms before the spawn and a declined confirmation prevents it', async () => {
     const declined = setup();
     const result = await declined.handler(
       declined.runner,
@@ -1052,78 +1064,84 @@ describe('render_movie launch gate', () => {
     expect(fresh.sessionState.runProjectConfirmed.has(key)).toBe(true);
   });
 
-  it('strict mode refuses a Tier 1 autoload before the spawn', async () => {
-    const { dir, runner, stub, handler } = setup({ projectGodot: EVIL_AUTOLOAD_PROJECT });
-    writeEvilAutoload(dir);
-    const result = await handler(runner, { projectPath: dir }, makeContext({ strict: true }));
-    expectErrorMatching(result, /Strict mode: refusing to launch project/);
-    expect(stub.calls.length).toBe(0);
-  });
-
-  it('disableSecurity skips the gate', async () => {
-    const { dir, runner, stub, handler } = setup({ projectGodot: EVIL_AUTOLOAD_PROJECT });
-    writeEvilAutoload(dir);
+  // Breaks when the message names a finding or scan again, when a second render of the same project asks, or when the message stops naming the project.
+  it('asks once per project with a message that names no findings', async () => {
+    const messages: string[] = [];
     const ctx = makeContext({
-      disableSecurity: true,
-      elicit: async () => {
-        throw new Error('the gate must not be consulted');
+      elicit: async (request) => {
+        messages.push(request.message);
+        return { action: 'accept', content: { confirm: true } };
       },
     });
+    const { dir, runner, handler } = setup({ projectGodot: EVIL_AUTOLOAD_PROJECT });
+    writeEvilAutoload(dir);
+
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(`render_movie will start the Godot project at ${resolve(dir)}`);
+    expect(messages[0]).toContain('run with your user permissions');
+    expect(messages[0]).not.toMatch(/finding|tier|scan|evil|OS\.execute/i);
+  });
+
+  // Breaks when a pre-launch scan of the project's scripts comes back: the autoload is read, flagged, or blocks the spawn.
+  it('launches a project whose autoload calls OS.execute with no scan warning', async () => {
+    const { dir, runner, stub, handler } = setup({ projectGodot: EVIL_AUTOLOAD_PROJECT });
+    writeEvilAutoload(dir);
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, makeContext()),
     );
     expect(stub.calls.length).toBe(1);
     expect(payload.warnings).toBeUndefined();
   });
 
-  it('gate findings arrive in warnings on success', async () => {
-    const { dir, runner, handler } = setup({ projectGodot: EVIL_AUTOLOAD_PROJECT });
-    writeEvilAutoload(dir);
-    const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, makeContext()),
-    );
-    expect(payload.warnings?.some((w) => w.includes('evil.gd'))).toBe(true);
+  // Breaks when disableElicitation stops skipping the prompt, or its one warning repeats on later renders.
+  it('disableElicitation skips the prompt with one warning on the first render only', async () => {
+    const { dir, runner, handler } = setup();
+    const ctx = makeContext({
+      disableElicitation: true,
+      elicit: async () => {
+        throw new Error('the prompt must not be shown');
+      },
+    });
+    const first = payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
+    expect(first.warnings).toEqual([ELICITATION_DISABLED_LAUNCH_WARNING]);
+
+    const second = payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
+    expect(second.warnings).toBeUndefined();
   });
 
+  // Breaks when a resource extension is read as a launch scene again and flagged, or refused.
   it.each(['level.tres', 'level.res', 'level.escn'])(
-    'renders %s as scene with a Not scanned warning, and strict mode refuses it',
+    'renders %s as the scene with no warning',
     async (scene) => {
       const { dir, runner, stub, handler } = setup();
       writeFileSync(join(dir, scene), 'not read');
       const payload = payloadOf(
         await handler(runner, { projectPath: dir, scene, frames: TEST_FRAMES }, makeContext()),
       );
-      expect(payload.warnings?.join('\n')).toContain(`Not scanned: ${scene}:`);
-      const callsBefore = stub.calls.length;
-
-      const strict = await handler(
-        runner,
-        { projectPath: dir, scene, frames: TEST_FRAMES },
-        makeContext({ strict: true }),
-      );
-      expectErrorMatching(
-        strict,
-        /Strict mode: refusing to launch project because the launch scene/,
-      );
-      expect(stub.calls.length).toBe(callsBefore);
+      expect(stub.calls.length).toBe(1);
+      expect(payload.warnings).toBeUndefined();
     },
   );
 
-  it('gate findings survive a flood of runtime error lines', async () => {
+  // Breaks when the confirmation warning goes into the capped runtime-error list.
+  it('the confirmation warning survives a flood of runtime error lines', async () => {
     const floodLines = MOVIE_RUNTIME_WARNINGS_MAX + RUNTIME_ERROR_FLOOD_EXTRA;
     const stderr = Array.from({ length: floodLines }, (_, i) => `SCRIPT ERROR: flood ${i}`).join(
       '\n',
     );
-    const { dir, runner, handler } = setup({
-      projectGodot: EVIL_AUTOLOAD_PROJECT,
-      stub: { result: { stderr } },
-    });
-    writeEvilAutoload(dir);
+    const { dir, runner, handler } = setup({ stub: { result: { stderr } } });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, makeContext()),
+      await handler(
+        runner,
+        { projectPath: dir, frames: TEST_FRAMES },
+        makeContext({ disableElicitation: true }),
+      ),
     );
     const warnings = payload.warnings!;
-    expect(warnings.some((w) => w.includes('evil.gd'))).toBe(true);
+    expect(warnings).toContain(ELICITATION_DISABLED_LAUNCH_WARNING);
     expect(warnings).toContain(`+${RUNTIME_ERROR_FLOOD_EXTRA} more runtime error lines`);
     expect(warnings.filter((w) => w.startsWith('SCRIPT ERROR: flood'))).toHaveLength(
       MOVIE_RUNTIME_WARNINGS_MAX,
@@ -1144,16 +1162,16 @@ describe('render_movie run outcomes', () => {
         },
       },
     });
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     expect(seen).toEqual([{ gdignore: true, runDir: true }]);
   });
 
   it('leaves project.godot byte-identical', async () => {
     const { dir, runner, handler } = setup();
     const before = readFileSync(join(dir, 'project.godot'));
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     payloadOf(
-      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(readFileSync(join(dir, 'project.godot')).equals(before)).toBe(true);
     expect(readFileSync(join(dir, 'project.godot'), 'utf8')).not.toContain('McpBridge');
@@ -1163,7 +1181,7 @@ describe('render_movie run outcomes', () => {
     const { dir, runner, handler } = setup({
       stub: { result: { timedOut: true, exitCode: null } },
     });
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
     expectErrorMatching(
       result,
       /render_movie timed out after \d+ ms and the Godot process tree was killed/,
@@ -1175,7 +1193,7 @@ describe('render_movie run outcomes', () => {
     const { dir, runner, handler } = setup({
       stub: { result: { timedOut: true, exitCode: null, killUnconfirmed: true } },
     });
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
     expectErrorMatching(result, /did not report exiting within \d+ ms/);
     expectErrorMatching(result, /a Godot process may still be running/);
     expect(errorText(result)).not.toMatch(/process tree was killed/);
@@ -1184,7 +1202,7 @@ describe('render_movie run outcomes', () => {
   it('a non-zero exit returns the stderr tail', async () => {
     const stderr = Array.from({ length: STDERR_LINES }, (_, i) => `err-${i + 1}-end`).join('\n');
     const { dir, runner, handler } = setup({ stub: { result: { exitCode: 1, stderr } } });
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
     expectErrorMatching(result, /Godot exited with code 1 before finishing the movie run/);
     const text = errorText(result)!;
     expect(text).toContain(`err-${STDERR_LINES}-end`);
@@ -1195,13 +1213,13 @@ describe('render_movie run outcomes', () => {
     const { dir, runner, handler } = setup({
       stub: { writeNothing: true, result: { exitCode: null, spawnError: 'spawn ENOENT' } },
     });
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /render_movie could not start Godot: spawn ENOENT/);
   });
 
   it('exit 0 with no frames is an error, not an empty success', async () => {
     const { dir, runner, handler } = setup({ stub: { writeNothing: true } });
-    const result = await handler(runner, { projectPath: dir }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir }, ACCEPTING);
     expectErrorMatching(result, /the movie writer exited cleanly but wrote no frames/);
     expect(movieRunDirs(dir)).toEqual([]);
   });
@@ -1210,7 +1228,7 @@ describe('render_movie run outcomes', () => {
 describe('render_movie check mode', () => {
   it('returns likelyBlank, motion, samples and inline images', async () => {
     const { dir, runner, handler } = setup();
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
     const payload = payloadOf(result);
 
     expect(payload.mode).toBe('check');
@@ -1250,7 +1268,7 @@ describe('render_movie check mode', () => {
       await contentLast.handler(
         contentLast.runner,
         { projectPath: contentLast.dir, frames: TEST_FRAMES },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     expect(notBlank.likelyBlank).toBe(false);
@@ -1262,7 +1280,7 @@ describe('render_movie check mode', () => {
       await blankLast.handler(
         blankLast.runner,
         { projectPath: blankLast.dir, frames: TEST_FRAMES },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     expect(blank.likelyBlank).toBe(true);
@@ -1271,7 +1289,7 @@ describe('render_movie check mode', () => {
   it('reports anyMotion false for identical frames', async () => {
     const { dir, runner, handler } = setup({ stub: { makeFrame: () => stillFrame() } });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.anyMotion).toBe(false);
     expect(payload.motion).toBe(0);
@@ -1293,7 +1311,7 @@ describe('render_movie check mode', () => {
     const { dir, runner, handler } = setup({
       stub: { makeFrame: (i) => (i % 2 === 0 ? stillFrame() : flickerFrame()) },
     });
-    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING);
     const payload = payloadOf(result);
 
     expect(MOTION_MIN_CHANGED_PIXELS).toBeGreaterThan(1);
@@ -1320,7 +1338,7 @@ describe('render_movie check mode', () => {
       displayAvailable: () => true,
     });
     const payload = payloadOf(
-      await sizing(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await sizing(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
 
     expect(payload.framesKept).toBe(false);
@@ -1331,7 +1349,7 @@ describe('render_movie check mode', () => {
 
   it('deletes its frames and the wav', async () => {
     const { dir, runner, handler } = setup();
-    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE));
+    payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING));
     expect(movieRunDirs(dir)).toEqual([]);
   });
 
@@ -1340,7 +1358,7 @@ describe('render_movie check mode', () => {
     const result = await handler(
       runner,
       { projectPath: dir, frames: TEST_FRAMES, inlineFrames: 0 },
-      NO_GATE,
+      ACCEPTING,
     );
     const payload = payloadOf(result);
     expect(imageBlocks(result)).toHaveLength(0);
@@ -1355,7 +1373,7 @@ describe('render_movie check mode', () => {
       await moving.handler(
         moving.runner,
         { projectPath: moving.dir, frames: TEST_FRAMES },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     const bad = payload.samples!.find((s) => s.index === INVALID_SAMPLED_FRAME)!;
@@ -1381,7 +1399,7 @@ describe('render_movie check mode', () => {
       stub: { makeFrame: (i) => (i === INVALID_SAMPLED_FRAME ? invalidPng() : stillFrame()) },
     });
     const unknown = payloadOf(
-      await still.handler(still.runner, { projectPath: still.dir, frames: TEST_FRAMES }, NO_GATE),
+      await still.handler(still.runner, { projectPath: still.dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(unknown.anyMotion).toBeNull();
   });
@@ -1389,7 +1407,7 @@ describe('render_movie check mode', () => {
   it('a single written frame leaves motion and anyMotion null with a warning', async () => {
     const { dir, runner, handler } = setup({ stub: { frameCount: 1 } });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.frameCount).toBe(1);
     expect(payload.measuredFrames).toBe(1);
@@ -1407,7 +1425,7 @@ describe('render_movie check mode', () => {
       stub: { makeFrame: (i) => (i === LAST_TEST_FRAME ? invalidPng() : movingFrame(i)) },
     });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.likelyBlank).toBeNull();
     expect(payload.warnings![0]).toMatch(
@@ -1419,7 +1437,7 @@ describe('render_movie check mode', () => {
     const WRITTEN = TEST_FRAMES - 2;
     const { dir, runner, handler } = setup({ stub: { frameCount: WRITTEN } });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.frameCount).toBe(WRITTEN);
     expect(payload.warnings).toContain(
@@ -1434,7 +1452,7 @@ describe('render_movie check mode', () => {
       },
     });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.warnings).toContain('SCRIPT ERROR: Parse Error: bad thing');
   });
@@ -1446,7 +1464,7 @@ describe('render_movie frames mode', () => {
     const result = await handler(
       runner,
       { projectPath: dir, mode: 'frames', frames: TEST_FRAMES },
-      NO_GATE,
+      ACCEPTING,
     );
     const payload = payloadOf(result);
 
@@ -1475,7 +1493,7 @@ describe('render_movie frames mode', () => {
       await handler(
         runner,
         { projectPath: dir, mode: 'frames', frames: FRAMES_ABOVE_LISTING_CAP },
-        NO_GATE,
+        ACCEPTING,
       ),
     );
     expect(payload.frameCount).toBe(FRAMES_ABOVE_LISTING_CAP);
@@ -1486,7 +1504,7 @@ describe('render_movie frames mode', () => {
   it('omits audioPath when no wav was written', async () => {
     const { dir, runner, handler } = setup({ stub: { writeAudio: false } });
     const payload = payloadOf(
-      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, NO_GATE),
+      await handler(runner, { projectPath: dir, mode: 'frames', frames: TEST_FRAMES }, ACCEPTING),
     );
     expect(payload.audioPath).toBeUndefined();
   });
@@ -1496,7 +1514,7 @@ describe('render_movie frames mode', () => {
     const result = await handler(
       runner,
       { projectPath: dir, mode: 'frames', frames: TEST_FRAMES },
-      NO_GATE,
+      ACCEPTING,
     );
     expect(hasError(result)).toBe(true);
     expect(movieRunDirs(dir)).toEqual([]);
@@ -1506,7 +1524,9 @@ describe('render_movie frames mode', () => {
 describe('render_movie video mode', () => {
   it('returns path, byteSize, format and states that stats are not available', async () => {
     const { dir, runner, handler } = setup();
-    const payload = payloadOf(await handler(runner, { projectPath: dir, mode: 'video' }, NO_GATE));
+    const payload = payloadOf(
+      await handler(runner, { projectPath: dir, mode: 'video' }, ACCEPTING),
+    );
     expect(payload.statsAvailable).toBe(false);
     expect(payload.statsNote).toMatch(/PNG frames/);
     expect(payload).not.toHaveProperty('likelyBlank');
@@ -1522,7 +1542,7 @@ describe('render_movie video mode', () => {
     const ogvResult = await ogv.handler(
       ogv.runner,
       { projectPath: ogv.dir, mode: 'video', format: 'ogv' },
-      NO_GATE,
+      ACCEPTING,
     );
     expectErrorMatching(
       ogvResult,
@@ -1535,7 +1555,7 @@ describe('render_movie video mode', () => {
     const aviResult = await avi.handler(
       avi.runner,
       { projectPath: avi.dir, mode: 'video' },
-      NO_GATE,
+      ACCEPTING,
     );
     expectErrorMatching(aviResult, /did not write an avi movie \(no output file\)/);
     expect(errorText(aviResult)).not.toMatch(/may not support the ogv/);
@@ -1543,7 +1563,7 @@ describe('render_movie video mode', () => {
 
   it('with an empty output file is an error', async () => {
     const { dir, runner, handler } = setup({ stub: { videoBytes: Buffer.alloc(0) } });
-    const result = await handler(runner, { projectPath: dir, mode: 'video' }, NO_GATE);
+    const result = await handler(runner, { projectPath: dir, mode: 'video' }, ACCEPTING);
     expectErrorMatching(result, /\(empty output file\)/);
   });
 });

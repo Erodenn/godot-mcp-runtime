@@ -2,8 +2,9 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { isAbsolute, join, relative } from 'path';
 import { tokenize, decodeStringLiteral, type Token } from './gdscript-scanner.js';
 import { resolveProjectPath } from './path-validation.js';
-import { UID_SCAN_MAX_DIRECTORIES } from './launch-scene.js';
 
+/** Most folders one scan enters before it stops and reports itself incomplete, counted apart from files: a tree of empty folders opens no file and would otherwise be walked without a bound. */
+const MAX_CLASS_SCAN_DIRECTORIES = 5000;
 /** Most `.gd` files one scan reads before it stops and reports itself incomplete. */
 export const MAX_CLASS_SCAN_FILES = 20_000;
 /** A script larger than this is not read; it is reported unread. */
@@ -93,7 +94,7 @@ function mentionsWord(source: string, name: string): boolean {
 export function scanClassNames(
   projectDir: string,
   extraScripts: readonly string[] = [],
-  maxDirectories: number = UID_SCAN_MAX_DIRECTORIES,
+  maxDirectories: number = MAX_CLASS_SCAN_DIRECTORIES,
 ): ClassNameMap {
   const byName = new Map<string, string[]>();
   const seen = new Set<string>();

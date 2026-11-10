@@ -11,7 +11,7 @@ import {
   handleGetProjectSettings,
   handleSetProjectSetting,
 } from '../../src/tools/project-tools.js';
-import { errorText, expectErrorMatching, unwrap } from '../helpers/assertions.js';
+import { errorText, expectErrorMatching, hasError, unwrap } from '../helpers/assertions.js';
 import { expectMatchesOutputSchema } from '../helpers/schema-assert.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
@@ -79,6 +79,17 @@ describe('settingTargetError', () => {
     expect(settingTargetError('', 'x')).not.toBeNull();
   });
 
+  // Breaks when a refusal's text says security again, or when the autoload refusal stops covering a feature-tag key.
+  it.each([
+    ['autoload', 'Globals'],
+    ['autoload', 'Globals.windows'],
+  ])('refuses %s / %s and says why without naming security', (section, key) => {
+    const refusal = settingTargetError(section, key);
+    expect(refusal?.message).toContain(`"${section}/${key}"`);
+    expect(`${refusal?.message} ${refusal?.solution}`).not.toMatch(/security/i);
+  });
+
+  // Breaks when any of the three keys the scan once refused is refused again, in any spelling or feature-tag variant.
   it.each([
     ['application', 'run/main_scene'],
     ['application/run', 'main_scene'],
@@ -88,21 +99,13 @@ describe('settingTargetError', () => {
     ['application/run', 'main_loop_type.web'],
     ['editor_plugins', 'enabled'],
     ['editor_plugins', 'enabled.editor'],
-    ['autoload', 'Globals.windows'],
-  ])('refuses %s / %s, a setting that selects what runs on launch', (section, key) => {
-    const refusal = settingTargetError(section, key);
-    expect(refusal?.message).toContain(`"${section}/${key}"`);
-    expect(refusal?.message).toMatch(/selects code or the launch scene/);
-  });
-
-  it.each([
     ['application', 'run/main_scenes'],
     ['application', 'run/main_scene_extra'],
     ['Application', 'run/main_scene'],
     ['application', 'run/Main_Loop_Type'],
     ['editor_plugin', 'enabled'],
     ['application', 'config/name'],
-  ])('writes %s / %s: only the exact engine key and its .tag overrides are refused', (s, k) => {
+  ])('writes %s / %s', (s, k) => {
     expect(settingTargetError(s, k)).toBeNull();
   });
 
@@ -248,25 +251,45 @@ describe('handleSetProjectSetting', () => {
     expect(projectFile(dir)).toBe(LF_PROJECT);
   });
 
-  it('refuses every key that selects what runs on launch without touching the file', async () => {
+  // Breaks when the main scene, main loop type or editor plugin key is refused again, or written to the wrong place.
+  it('writes the main scene, the main loop type and an editor plugin key, as the saved file shows', async () => {
     const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
-    const cases: Array<[string, string, RegExp]> = [
-      ['application', 'run/main_scene', /run_project/],
-      ['application', 'run/main_scene.windows', /run_project/],
-      ['application/run', 'main_loop_type', /main loop/],
-      ['editor_plugins', 'enabled', /Plugins/],
+    const writes: Array<{ section: string; key: string; value?: string; literal?: string }> = [
+      { section: 'application', key: 'run/main_scene', value: 'res://other.tscn' },
+      { section: 'application', key: 'run/main_loop_type', value: 'MyLoop' },
+      {
+        section: 'editor_plugins',
+        key: 'enabled',
+        literal: 'PackedStringArray("res://addons/demo/plugin.cfg")',
+      },
     ];
-    for (const [section, key, solution] of cases) {
-      const result = await handleSetProjectSetting({
-        projectPath: dir,
-        section,
-        key,
-        value: 'res://evil.tscn',
-      });
-      expectErrorMatching(result, /selects/);
-      expect(errorText(result)).toContain(`"${section}/${key}"`);
-      expect(unwrap(result).content[1]?.text ?? '', `${section}/${key}`).toMatch(solution);
+    for (const write of writes) {
+      const result = await handleSetProjectSetting({ projectPath: dir, ...write });
+      expect(hasError(result), errorText(result)).toBe(false);
     }
+
+    const saved = projectFile(dir);
+    expect(saved).toContain('\nrun/main_scene="res://other.tscn"\n');
+    expect(saved).not.toContain('run/main_scene="res://main.tscn"');
+    expect(saved).toContain('\nrun/main_loop_type="MyLoop"\n');
+    expect(saved).toContain('[editor_plugins]');
+    expect(saved).toContain('\nenabled=PackedStringArray("res://addons/demo/plugin.cfg")\n');
+    expect(saved).toContain('config/name="Demo" ; kept');
+    expect(saved).toContain('Globals="*res://globals.gd"');
+  });
+
+  // Breaks when a refusal text says security again.
+  it('refuses an autoload key with a message that does not name security', async () => {
+    const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
+    const result = await handleSetProjectSetting({
+      projectPath: dir,
+      section: 'autoload',
+      key: 'Globals',
+      value: '*res://other.gd',
+    });
+    expect(hasError(result)).toBe(true);
+    expect(errorText(result)).not.toMatch(/security/i);
+    expect(unwrap(result).content[1]?.text ?? '').not.toMatch(/security/i);
     expect(projectFile(dir)).toBe(LF_PROJECT);
   });
 
@@ -284,7 +307,7 @@ describe('handleSetProjectSetting', () => {
     expect(projectFile(dir)).toBe(LF_PROJECT);
   });
 
-  it('still writes an allowed key beside the refused ones, byte for byte elsewhere', async () => {
+  it('writes a key that only resembles main_scene, byte for byte elsewhere', async () => {
     const dir = tmp.makeProject('mcp-setting-', LF_PROJECT);
     await handleSetProjectSetting({
       projectPath: dir,

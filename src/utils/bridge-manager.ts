@@ -39,7 +39,7 @@ import {
   mcpDir,
 } from './artifact-paths.js';
 
-/** Autoload name this server reserves in a target project's `project.godot`; `run_project`'s pre-flight scan uses it to skip the injected bridge. */
+/** Autoload name this server reserves in a target project's `project.godot`; the injected bridge entry is recognised by it. */
 export const BRIDGE_AUTOLOAD_NAME = 'McpBridge' as const;
 
 /** `project.godot` already registers `McpBridge` at a path this server does not own: the one inject failure the user can act on, so it is surfaced instead of a bridge timeout. */
@@ -509,7 +509,7 @@ export class BridgeManager {
       .map((e) => e.info);
   }
 
-  /** `listOtherLiveOwners` without pruning, for a caller that has promised to write nothing yet (`render_movie` ahead of its launch gate). @throws {BridgeRegistryUnreadableError} */
+  /** `listOtherLiveOwners` without pruning, for a caller that has promised to write nothing yet (`render_movie` ahead of its launch confirmation). @throws {BridgeRegistryUnreadableError} */
   peekOtherLiveOwners(projectPath: string): BridgeOwnerInfo[] {
     return this.readLiveOwners(projectPath, false)
       .filter((e) => !this.isSelfOwnerFile(e.fileName))

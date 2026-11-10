@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import type { GodotRunner } from '../../../src/utils/godot-runner.js';
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
+import { makeContext } from '../../helpers/runtime-fakes.js';
+
+/** Accepts every confirmation prompt, so a script goes to the bridge. */
+const scriptCtx = makeContext();
 
 interface FakeRunnerOverrides {
   response: string;
@@ -55,7 +59,7 @@ describe('handleRunScript compile-error diagnostics (error-43 class)', () => {
       response: COMPILE_FAIL_RESPONSE,
       runtimeErrors: [...ERROR43_STDERR],
     });
-    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT });
+    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT }, scriptCtx);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     const text = JSON.stringify(result.error);
@@ -70,7 +74,7 @@ describe('handleRunScript compile-error diagnostics (error-43 class)', () => {
       response: COMPILE_FAIL_RESPONSE,
       runtimeErrors: [],
     });
-    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT });
+    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT }, scriptCtx);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     const text = JSON.stringify(result.error);
@@ -84,7 +88,7 @@ describe('handleRunScript compile-error diagnostics (error-43 class)', () => {
       response: JSON.stringify({ error: 'Script must define func execute' }),
       runtimeErrors: [...ERROR43_STDERR],
     });
-    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT });
+    const result = await handleRunScript(fake, { script: BENIGN_SCRIPT }, scriptCtx);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     const text = JSON.stringify(result.error);

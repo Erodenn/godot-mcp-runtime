@@ -1,7 +1,0 @@
-config_version=5
-
-[application]
-
-config/name="godot-import-remap-project"
-run/main_scene="res://clean.tscn"
-config/features=PackedStringArray("4.5")

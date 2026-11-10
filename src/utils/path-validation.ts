@@ -129,11 +129,11 @@ export function resolveProjectPath(
   return { input: userPath, relPath, absPath, resPath: RES_PREFIX + relPath };
 }
 
-/** Extensions a `scene` argument of a launch may end in: Godot runs a positional argument as the scene only when it ends in one of these (case-sensitive), else the main scene runs, so anything outside would have the gate scan one file while the engine runs another. */
+/** Extensions a `scene` argument of a launch may end in: Godot runs a positional argument as the scene only when it ends in one of these (case-sensitive), else the main scene runs, so any other argument is ignored and the main scene runs. */
 export const LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.tscn', '.scn'];
 
-/** Extensions the engine runs as a command-line scene but the gate does not read: launched with a `Not scanned` warning, refused in strict mode. */
-export const UNSCANNED_LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.escn', '.tres', '.res'];
+/** Resource-file extensions the engine also runs as a command-line scene. */
+export const RESOURCE_LAUNCH_SCENE_EXTENSIONS: readonly string[] = ['.escn', '.tres', '.res'];
 
 /** Scene-file suffixes `add_node` accepts as a `nodeType` instead of a class name.
  * Mirrored by `_SCENE_SUFFIXES` in `src/scripts/godot_operations.gd` -- KEEP IN SYNC. */
@@ -149,13 +149,13 @@ export function isSceneFileNodeType(nodeType: string): boolean {
 export function isLaunchScenePath(scene: string): boolean {
   return (
     LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension)) ||
-    isUnscannedLaunchScenePath(scene)
+    isResourceLaunchScenePath(scene)
   );
 }
 
-/** True when `scene` ends, case-sensitively, in an extension the launch gate does not read. */
-export function isUnscannedLaunchScenePath(scene: string): boolean {
-  return UNSCANNED_LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
+/** True when `scene` ends, case-sensitively, in a resource-file extension the engine runs as a scene. */
+export function isResourceLaunchScenePath(scene: string): boolean {
+  return RESOURCE_LAUNCH_SCENE_EXTENSIONS.some((extension) => scene.endsWith(extension));
 }
 
 /** Validates a scene-tree path (NodePath), a namespace separate from files so project-root containment does not apply: rejects empty and `..` segments; the relative form is the convention. */

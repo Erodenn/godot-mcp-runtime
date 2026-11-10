@@ -1,5 +1,5 @@
-import { join, sep, resolve } from 'path';
-import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'fs';
+import { sep, resolve } from 'path';
+import { existsSync, readFileSync, statSync } from 'fs';
 import {
   BRIDGE_PING_TIMEOUT_MS,
   BRIDGE_WAIT_ATTACHED_CONNECTED_TIMEOUT_MS,
@@ -39,22 +39,8 @@ import {
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { parseScriptDiagnostics, condenseProcessTail } from '../utils/output-parsing.js';
-import { randomUUID } from 'crypto';
-import {
-  createNullContext,
-  ElicitationUnsupportedError,
-  isElicitAccepted,
-  type McpContext,
-  type ElicitorResult,
-} from '../utils/mcp-context.js';
-import {
-  evaluateScript,
-  matchesToWarnings,
-  summarizeMatch,
-  type PolicyDecision,
-  type PolicyMatch,
-} from '../utils/run-script-policy.js';
-import { auditScriptsDir, screenshotsDir } from '../utils/artifact-paths.js';
+import { createNullContext, type McpContext } from '../utils/mcp-context.js';
+import { screenshotsDir } from '../utils/artifact-paths.js';
 import {
   MS_PER_SECOND,
   TIMESTAMP_OVERFLOW_ERRORS,
@@ -65,11 +51,7 @@ import {
   BridgeAutoloadCollisionError,
   BridgeRegistryUnreadableError,
 } from '../utils/bridge-manager.js';
-import {
-  ELICITATION_OPT_OUT_SOLUTION,
-  rejectNonSceneLaunchArg,
-  runLaunchGate,
-} from '../utils/launch-gate.js';
+import { confirmFirstUse, rejectNonSceneLaunchArg } from '../utils/confirmation.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 import {
   MAX_RUNTIME_TIMEOUT_MS,
@@ -85,7 +67,7 @@ import {
   runtimeToolWording,
   type NoSessionWording,
 } from '../utils/session-report.js';
-import { CLIENT_REQUEST_TIMEOUT_MS, commandWasNotSent, sessionKey } from '../utils/godot-runner.js';
+import { CLIENT_REQUEST_TIMEOUT_MS, sessionKey } from '../utils/godot-runner.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 export const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -191,7 +173,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_project',
     description:
-      'Start a runtime session: spawn the project (stdout/stderr captured), or with attach: true wait for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. The new session becomes current; sessions on other projects keep running. Returns: projectPath, sessionMode, bridgePort, message; warnings leads on a scan finding or a start caveat. Errors if the bridge never answers.',
+      'Start a runtime session: spawn the project (stdout/stderr captured; asks the user to confirm the first time per project), or with attach: true wait for a Godot you launch yourself (nothing spawned or captured). Required before take_screenshot, simulate_input, get_ui_elements and run_script; returns once the bridge answers. It becomes current; others keep running. Returns: projectPath, sessionMode, bridgePort, message; warnings leads on a start caveat. Errors if the bridge never answers.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -207,7 +189,7 @@ export const runtimeToolDefinitions = [
         scene: {
           type: 'string',
           description:
-            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Not valid with attach: true. Must end in .tscn, .scn, .escn, .tres or .res; only .tscn is scanned.',
+            'Scene to run (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Not valid with attach: true. Must end in .tscn, .scn, .escn, .tres or .res.',
         },
         background: {
           type: 'boolean',
@@ -730,7 +712,7 @@ export const runtimeToolDefinitions = [
   {
     name: 'run_script',
     description:
-      'Run GDScript in the running game with scene tree access. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; execute may await, cut off at the timeout (not cancelled). The return is JSON-serialized: vectors as {x,y[,z,w]}, Color as {r,g,b,a}, a Node as {class,name,path}. Compiled under project warning settings. Returns: projectPath, result, warnings, tip. Spawned: a runtime error is an error if result is null, else a warning. Attached: errors are unobservable.',
+      'Run GDScript in the running game. It must extend RefCounted and define func execute(scene_tree: SceneTree) -> Variant; execute may await, cut off at the timeout (not cancelled). Return is JSON-serialized: vectors as {x,y[,z,w]}, Color as {r,g,b,a}, a Node as {class,name,path}. Compiled with project warnings. Returns: projectPath, result, warnings, tip. Spawned: a runtime error is an error if result is null, else a warning. Attached: errors are unobservable. Asks the user once per project.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -766,14 +748,6 @@ export const runtimeToolDefinitions = [
 ] as const satisfies readonly ToolDefinition[];
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
-const MAX_POLICY_SOLUTIONS = 4;
-
-function formatMoreFindingsSuffix(total: number): string {
-  if (total <= 1) return '';
-  const extra = total - 1;
-  return ` (+${extra} more finding${extra > 1 ? 's' : ''})`;
-}
-
 /** `oversize` is required: the command ran when the bridge sent its oversize error, and a flat `error` read as refusal would tell the caller to repeat landed work. */
 function parseBridgeJson<T = unknown>(
   responseStr: string,
@@ -828,102 +802,6 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
   if (runtimeErrors.length > 0) {
     target.warnings = capRuntimeErrorLines(runtimeErrors);
   }
-}
-
-// elicit_cancelled is a dismissed prompt, not a refusal; elicit_bypassed ran unprompted (elicitation disabled).
-// not_sent: admitted but never reached the bridge; admitted_as holds what the decision would have been.
-type AdmittedAuditDecision = 'elicit_accepted' | 'elicit_bypassed' | 'warn' | 'ok';
-type AuditDecision =
-  | 'hard_block'
-  | 'elicit_denied'
-  | 'elicit_cancelled'
-  | 'not_sent'
-  | AdmittedAuditDecision;
-
-interface AuditSidecar {
-  decision: AuditDecision;
-  /** Present only with `decision: 'not_sent'`. */
-  admitted_as?: AdmittedAuditDecision;
-  tier: 1 | 2 | 3 | null;
-  strict_mode: boolean;
-  promoted_by_strict: boolean;
-  findings: Array<{
-    rule: string;
-    line: number;
-    column: number;
-    matched_text: string;
-  }>;
-  timestamp: string;
-}
-
-/** Both writes are best-effort. The directory outlives the session: cleanup removes `bridge/` only. */
-function writeAuditSidecar(
-  projectPath: string,
-  script: string,
-  decision: AuditDecision,
-  policy: PolicyDecision,
-  strictMode: boolean,
-  admittedAs?: AdmittedAuditDecision,
-  /** Overwrite this sidecar (and keep its script file) instead of writing a new pair. */
-  rewriteSidecarFile?: string,
-): string | null {
-  try {
-    const projectRoot = resolve(projectPath);
-    const scriptsDir = resolve(auditScriptsDir(projectRoot));
-    if (!isUnderDir(projectRoot, scriptsDir)) {
-      logDebug(
-        `Sidecar write skipped: resolved script dir ${scriptsDir} escapes projectRoot ${projectRoot}`,
-      );
-      return null;
-    }
-    mkdirSync(scriptsDir, { recursive: true });
-    const baseName = `${Date.now()}-${randomUUID()}`;
-    const scriptFile = join(scriptsDir, `${baseName}.gd`);
-    if (rewriteSidecarFile === undefined) writeFileSync(scriptFile, script, 'utf8');
-
-    const sidecar: AuditSidecar = {
-      decision,
-      ...(admittedAs !== undefined ? { admitted_as: admittedAs } : {}),
-      tier: policy.effectiveTier,
-      strict_mode: strictMode,
-      promoted_by_strict: policy.promotedByStrict,
-      findings: policy.matches.map((m) => ({
-        rule: m.ruleId,
-        line: m.line,
-        column: m.column,
-        matched_text: m.matchedText,
-      })),
-      timestamp: new Date().toISOString(),
-    };
-    const sidecarFile = rewriteSidecarFile ?? join(scriptsDir, `${baseName}.policy.json`);
-    writeFileSync(sidecarFile, JSON.stringify(sidecar, null, 2), 'utf8');
-    logDebug(`Saved script + policy sidecar to ${sidecarFile}`);
-    return sidecarFile;
-  } catch (error) {
-    logDebug(`Failed to write audit sidecar: ${error}`);
-    return null;
-  }
-}
-
-function formatBlockMessage(matches: readonly PolicyMatch[]): string {
-  if (matches.length === 0) return 'Blocked by run_script security policy.';
-  const head = summarizeMatch(matches[0]!);
-  return `Blocked: ${head}.${formatMoreFindingsSuffix(matches.length)} The script was not executed.`;
-}
-
-function collectSolutions(matches: readonly PolicyMatch[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const m of matches) {
-    for (const sol of m.solutions) {
-      if (!seen.has(sol)) {
-        seen.add(sol);
-        out.push(sol);
-      }
-    }
-    if (out.length >= MAX_POLICY_SOLUTIONS) break;
-  }
-  return out;
 }
 
 const SESSION_ENDED_AT_READY_MESSAGE =
@@ -1091,7 +969,7 @@ export async function handleRunProject(
   if (!attach.ok) return attach;
 
   return attach.value === true
-    ? startAttachedSession(runner, projectPath, args, ctx)
+    ? startAttachedSession(runner, projectPath, args)
     : startSpawnedSession(runner, projectPath, args, ctx);
 }
 
@@ -1130,7 +1008,7 @@ async function startSpawnedSession(
   if (!profiling.ok) return profiling;
   const isProfiling = profiling.value === true;
 
-  // Everything that can say no precedes the gate, which prompts a human: an impossible launch must never ask or record confirmation.
+  // Everything that can say no precedes the confirmation, which prompts a human: an impossible launch must never ask or record confirmation.
   if (!runner.getGodotPath()) {
     await runner.detectGodotPath();
     if (!runner.getGodotPath()) {
@@ -1157,21 +1035,15 @@ async function startSpawnedSession(
     );
   }
 
-  const gate = await runLaunchGate(
-    {
-      projectPath,
-      scene: resolvedScene,
-      confirm: true,
-      launchedByServer: true,
-      toolName: 'run_project',
-    },
+  const confirmation = await confirmFirstUse(
+    { kind: 'launch', toolName: 'run_project', projectPath },
     ctx,
   );
-  if (!gate.ok) return gate;
-  const { warnings } = gate.value;
+  if (!confirmation.ok) return confirmation;
+  const { warnings } = confirmation.value;
 
   // Start, bridge wait and failed-start teardown are one operation on `started`, never on the current session.
-  // The launch gate stays outside: a confirmation prompt can be held open for minutes.
+  // The confirmation stays outside: a prompt can be held open for minutes.
   return runSessionExclusive(runner, 'run_project', () =>
     launchSpawnedSession(runner, projectPath, warnings, {
       scene: resolvedScene,
@@ -1391,12 +1263,11 @@ function keptAttachedSessionWording(probe: AttachedProbeOutcome): {
   };
 }
 
-/** No Godot executable to resolve and no launch to confirm; the pre-flight scan still runs because the scanned scripts execute with the bridge attached. */
+/** No Godot executable to resolve and no launch to confirm: the user starts the process, so nothing is asked here. */
 async function startAttachedSession(
   runner: GodotRunner,
   projectPath: string,
   args: OperationParams,
-  ctx: McpContext,
 ): Promise<HandlerResult> {
   const spawnOnlyRefusal = rejectSpawnOnlyParams(args);
   if (spawnOnlyRefusal) return err(spawnOnlyRefusal);
@@ -1404,28 +1275,14 @@ async function startAttachedSession(
   const bridgePort = parseBridgePortArg(args);
   if (!bridgePort.ok) return bridgePort;
 
-  const gate = await runLaunchGate(
-    {
-      projectPath,
-      scene: undefined,
-      confirm: false,
-      launchedByServer: false,
-      toolName: 'run_project',
-    },
-    ctx,
-  );
-  if (!gate.ok) return gate;
-  const { warnings } = gate.value;
-
   return runSessionExclusive(runner, 'run_project', () =>
-    attachSession(runner, projectPath, warnings, bridgePort.value),
+    attachSession(runner, projectPath, bridgePort.value),
   );
 }
 
 async function attachSession(
   runner: GodotRunner,
   projectPath: string,
-  warnings: readonly string[],
   requestedPort: number | undefined,
 ): Promise<HandlerResult> {
   try {
@@ -1447,7 +1304,6 @@ async function attachSession(
           bridgePort: existing.bridgePort,
           warnings: [
             `${kept.warning}${portNote} To attach afresh, call stop_project first, then run_project with attach: true, and restart Godot while that call waits.`,
-            ...warnings,
           ],
           message: `${kept.message} stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.`,
         });
@@ -1501,7 +1357,7 @@ async function attachSession(
       projectPath,
       sessionMode: 'attached',
       bridgePort: readyPort,
-      warnings: [...startWarnings, ...warnings],
+      warnings: [...startWarnings],
       message:
         'Attached to the project and the MCP bridge is ready. stdout/stderr are not captured in attach mode; stop_project detaches without stopping Godot.',
     });
@@ -2494,7 +2350,7 @@ export async function handleRunScript(
   const session = requireRuntimeSession(runner, wording);
   if (!session.ok) return session;
   const sessionProjectPath = session.value.projectPath;
-  // Captured at the gate with the path: the payload reports the session as admitted.
+  // Captured with the path: the payload reports the session the script was confirmed for.
   const sessionMode = session.value.mode;
   const tip = sessionMode === 'attached' ? RUN_SCRIPT_TIP_ATTACHED : RUN_SCRIPT_TIP;
 
@@ -2510,157 +2366,22 @@ export async function handleRunScript(
     );
   }
 
-  // Before the gate: a call that cannot be sent must not prompt a human or leave an audit record of a script that ran.
+  // Before the confirmation: a call that cannot be sent must not prompt a human.
   const timeoutResult = parseTimeoutMsArg(args, 'timeout', RUN_SCRIPT_DEFAULT_TIMEOUT_MS);
   if (!timeoutResult.ok) return timeoutResult;
   const requestedTimeoutMs = timeoutResult.value;
   const noMargin = timeoutLeavesNoAnswerMargin('run_script', requestedTimeoutMs);
   if (noMargin) return err(noMargin);
 
-  // Skipped entirely when GODOT_MCP_DISABLE_SECURITY is set: no scan, decision, prompt, warnings or sidecar, and Tier 1 blocks included.
-  let warningsFromPolicy: string[] = [];
-  // Set when the policy admits the script; its record is written at the send (see `auditAdmitted`).
-  let admitted: { policy: PolicyDecision; decision: AdmittedAuditDecision } | null = null;
-  if (!ctx.disableSecurity) {
-    const policy = evaluateScript(script, ctx.strictMode);
-    if (policy.decision === 'hard_block') {
-      writeAuditSidecar(sessionProjectPath, script, 'hard_block', policy, ctx.strictMode);
-      return err(
-        createErrorResponse(formatBlockMessage(policy.matches), collectSolutions(policy.matches)),
-      );
-    }
+  // Asks once per project per server session, whatever the session mode; the prompt can be held open for minutes, so it stays outside the queue turn.
+  const confirmation = await confirmFirstUse(
+    { kind: 'script', toolName: 'run_script', projectPath: sessionProjectPath },
+    ctx,
+  );
+  if (!confirmation.ok) return confirmation;
+  const confirmationWarnings = confirmation.value.warnings;
 
-    // Decline, cancel and elicitation-unavailable all deny. Disabled elicitation proceeds unprompted, audited as `elicit_bypassed`.
-    // Strict mode promotes Tier 2 to hard_block in `evaluateScript`, so this branch is never reached under strict.
-    let elicitBypassed = false;
-    if (policy.decision === 'elicit_required') {
-      if (ctx.disableElicitation) {
-        elicitBypassed = true;
-        warningsFromPolicy = matchesToWarnings(policy.matches);
-      } else {
-        let elicitResult: ElicitorResult;
-        try {
-          const head = summarizeMatch(policy.matches[0]!);
-          elicitResult = await ctx.elicitor({
-            message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
-            requestedSchema: {
-              type: 'object',
-              properties: {
-                confirm: { type: 'boolean', description: 'Allow the script to run' },
-              },
-              required: ['confirm'],
-            },
-          });
-        } catch (error) {
-          // An unanswered prompt is audited like a dismissed one (the launch gate does the same); only a client without the capability is a denial.
-          const unsupported = error instanceof ElicitationUnsupportedError;
-          writeAuditSidecar(
-            sessionProjectPath,
-            script,
-            unsupported ? 'elicit_denied' : 'elicit_cancelled',
-            policy,
-            ctx.strictMode,
-          );
-          if (!unsupported) {
-            return err(
-              createErrorResponse(
-                `run_script confirmation was not answered (${getErrorMessage(error)}). The script was not run.`,
-                [
-                  'Restructure the script to avoid the flagged primitive',
-                  ELICITATION_OPT_OUT_SOLUTION,
-                ],
-              ),
-            );
-          }
-          return err(
-            createErrorResponse(
-              `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
-              [
-                'Restructure the script to avoid the flagged primitive',
-                'Use an MCP client that supports the elicitation/create capability',
-              ],
-            ),
-          );
-        }
-
-        if (!isElicitAccepted(elicitResult)) {
-          // A `cancel` is a dismissed prompt (some clients auto-cancel unseen), not a `decline`; worded as in the launch gate, pointing at the opt-out.
-          const cancelled = elicitResult.action === 'cancel';
-          writeAuditSidecar(
-            sessionProjectPath,
-            script,
-            cancelled ? 'elicit_cancelled' : 'elicit_denied',
-            policy,
-            ctx.strictMode,
-          );
-          const finding = summarizeMatch(policy.matches[0]!);
-          return err(
-            createErrorResponse(
-              cancelled
-                ? `run_script confirmation was cancelled without an explicit choice (${finding}). Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them. The script was not executed.`
-                : `User declined: ${finding}. The script was not executed.`,
-              cancelled
-                ? [...collectSolutions(policy.matches), ELICITATION_OPT_OUT_SOLUTION]
-                : collectSolutions(policy.matches),
-            ),
-          );
-        }
-        warningsFromPolicy = matchesToWarnings(policy.matches);
-      }
-    } else if (policy.decision === 'warn') {
-      warningsFromPolicy = matchesToWarnings(policy.matches);
-    }
-
-    // A Tier 2 accept and a prompt-free bypass are recorded apart from a Tier 3 warn, preserving the confirmation event.
-    let decision: AdmittedAuditDecision;
-    if (policy.decision === 'ok') decision = 'ok';
-    else if (policy.decision === 'elicit_required')
-      decision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
-    else decision = 'warn';
-    admitted = { policy, decision };
-  }
-
-  // One record per admitted call: the admitted decision if sent, `not_sent` if the call ended first.
-  let audited = false;
-  let admittedSidecarFile: string | null = null;
-  const auditAdmitted = (sent: boolean): void => {
-    if (admitted === null || audited) return;
-    audited = true;
-    if (sent) {
-      admittedSidecarFile = writeAuditSidecar(
-        sessionProjectPath,
-        script,
-        admitted.decision,
-        admitted.policy,
-        ctx.strictMode,
-      );
-    } else {
-      writeAuditSidecar(
-        sessionProjectPath,
-        script,
-        'not_sent',
-        admitted.policy,
-        ctx.strictMode,
-        admitted.decision,
-      );
-    }
-  };
-
-  // The record precedes the send; a send whose frame was never written is rewritten as `not_sent`.
-  const markNotSent = (): void => {
-    if (admitted === null || admittedSidecarFile === null) return;
-    writeAuditSidecar(
-      sessionProjectPath,
-      script,
-      'not_sent',
-      admitted.policy,
-      ctx.strictMode,
-      admitted.decision,
-      admittedSidecarFile,
-    );
-  };
-
-  const result = await runSessionExclusive(runner, 'run_script', async () => {
+  return runSessionExclusive(runner, 'run_script', async () => {
     // A confirmation prompt can be held open for minutes: re-check the session now the turn has come; the script was confirmed for that session only.
     const current = requireRuntimeSession(runner, wording);
     if (!current.ok) return current;
@@ -2678,27 +2399,22 @@ export async function handleRunScript(
         ),
       );
     }
-    // The queue wait comes off the timeout; a refusal leaves the record to the `not_sent` write below.
+    // The queue wait comes off the timeout.
     const charged = chargeQueueWait(runner, 'run_script', {
       kind: 'shorten',
       budgetMs: requestedTimeoutMs,
     });
     if (!charged.ok) return charged;
-    auditAdmitted(true);
     return executeAdmittedScript(runner, {
       script,
       timeout: charged.value,
       sessionProjectPath,
       sessionMode,
       tip,
-      warningsFromPolicy,
+      confirmationWarnings,
       wording,
-      markNotSent,
     });
   });
-  // Without a record only when never sent: no turn came, or the session was gone or replaced.
-  auditAdmitted(false);
-  return result;
 }
 
 async function executeAdmittedScript(
@@ -2709,21 +2425,12 @@ async function executeAdmittedScript(
     sessionProjectPath: string;
     sessionMode: RuntimeSessionMode | null;
     tip: string;
-    warningsFromPolicy: string[];
+    confirmationWarnings: string[];
     wording: NoSessionWording;
-    markNotSent: () => void;
   },
 ): Promise<HandlerResult> {
-  const {
-    script,
-    timeout,
-    sessionProjectPath,
-    sessionMode,
-    tip,
-    warningsFromPolicy,
-    wording,
-    markNotSent,
-  } = admitted;
+  const { script, timeout, sessionProjectPath, sessionMode, tip, confirmationWarnings, wording } =
+    admitted;
   try {
     const {
       response: responseStr,
@@ -2819,7 +2526,7 @@ async function executeAdmittedScript(
         result: null,
         warnings: [
           'Script returned null. If unexpected, check get_debug_output for runtime errors - GDScript does not propagate exceptions.',
-          ...warningsFromPolicy,
+          ...confirmationWarnings,
         ],
         tip,
       };
@@ -2834,7 +2541,7 @@ async function executeAdmittedScript(
       !nullIsNonFinite
     ) {
       return createStructuredResponse({
-        warnings: [ATTACHED_NULL_RESULT_WARNING, ...warningsFromPolicy],
+        warnings: [ATTACHED_NULL_RESULT_WARNING, ...confirmationWarnings],
         projectPath: sessionProjectPath,
         result: null,
         tip,
@@ -2849,7 +2556,7 @@ async function executeAdmittedScript(
     // Only the runtime-error lines are capped (the unbounded part); the count entry names the log holding the rest.
     const combinedWarnings = [
       ...(nonFiniteWarning !== null ? [nonFiniteWarning] : []),
-      ...warningsFromPolicy,
+      ...confirmationWarnings,
       ...capRuntimeErrorLines(runtimeErrors),
     ];
     if (combinedWarnings.length > 0) {
@@ -2858,7 +2565,6 @@ async function executeAdmittedScript(
 
     return createStructuredResponse(leadWithWarnings(payload));
   } catch (error: unknown) {
-    if (commandWasNotSent(error)) markNotSent();
     return err(
       runtimeCommandFailure(
         runner,

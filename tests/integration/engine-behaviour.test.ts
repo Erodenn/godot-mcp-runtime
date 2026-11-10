@@ -25,6 +25,10 @@ import {
   handleSimulateInput,
 } from '../../src/tools/runtime-tools.js';
 import { scanProjectFile } from '../../src/utils/project-godot.js';
+import { makeContext } from '../helpers/runtime-fakes.js';
+
+/** Accepts every confirmation prompt, so a script goes to the bridge. */
+const scriptCtx = makeContext();
 
 const FIXTURE_MAIN_SCENE = 'main.tscn';
 
@@ -656,16 +660,24 @@ describe('headless scene saves', () => {
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
-      const control = await handleRunScript(runner, {
-        script:
-          'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 1.5\n',
-      });
+      const control = await handleRunScript(
+        runner,
+        {
+          script:
+            'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 1.5\n',
+        },
+        scriptCtx,
+      );
       expect(payloadOf(control, 'run_script returning 1.5').result).toBe(1.5);
 
-      const claim = await handleRunScript(runner, {
-        script:
-          'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\tvar zero := 0.0\n\treturn 1.0 / zero\n',
-      });
+      const claim = await handleRunScript(
+        runner,
+        {
+          script:
+            'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\tvar zero := 0.0\n\treturn 1.0 / zero\n',
+        },
+        scriptCtx,
+      );
       expect(claim.ok, `an infinite float broke the response; ${describeResult(claim)}`).toBe(true);
       const claimed = payloadOf(claim, 'run_script returning 1.0 / 0.0');
       expect(claimed.result).toBeNull();
@@ -683,19 +695,23 @@ describe('headless scene saves', () => {
       const project = runtimeCopy(FIXTURE_MAIN_SCENE);
       await runProjectOrSkip(runner, ctx, project);
 
-      const claim = await handleRunScript(runner, {
-        script: [
-          'extends RefCounted',
-          'func execute(scene_tree: SceneTree) -> Variant:',
-          '\treturn {',
-          '\t\t"bad_rect": Rect2(Vector2(INF, 0.0), Vector2(1.0, 1.0)),',
-          '\t\t"bad_basis": Basis(Vector3(NAN, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0)),',
-          '\t\t"good_rect": Rect2(Vector2(1.0, 2.0), Vector2(3.0, 4.0)),',
-          '\t\t"good_basis": Basis.IDENTITY,',
-          '\t}',
-          '',
-        ].join('\n'),
-      });
+      const claim = await handleRunScript(
+        runner,
+        {
+          script: [
+            'extends RefCounted',
+            'func execute(scene_tree: SceneTree) -> Variant:',
+            '\treturn {',
+            '\t\t"bad_rect": Rect2(Vector2(INF, 0.0), Vector2(1.0, 1.0)),',
+            '\t\t"bad_basis": Basis(Vector3(NAN, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0)),',
+            '\t\t"good_rect": Rect2(Vector2(1.0, 2.0), Vector2(3.0, 4.0)),',
+            '\t\t"good_basis": Basis.IDENTITY,',
+            '\t}',
+            '',
+          ].join('\n'),
+        },
+        scriptCtx,
+      );
       expect(claim.ok, `a text-form INF broke the response; ${describeResult(claim)}`).toBe(true);
       const payload = payloadOf(claim, 'run_script returning text-form values with INF');
       const result = payload.result as Record<string, unknown>;

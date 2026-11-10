@@ -1,7 +1,7 @@
-/** export_mesh_library writes the format the output extension names: a `.tres` is text the launch pre-flight scan reads, a `.res` stays binary. */
+/** export_mesh_library writes the format the output extension names: a `.tres` is text, a `.res` stays binary. */
 
 import { describe, beforeAll, expect } from 'vitest';
-import { cpSync, readFileSync, writeFileSync } from 'fs';
+import { cpSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { itGodot } from '../helpers/godot-skip.js';
 import { dropProjectFeatureVersion, useTmpDirs } from '../helpers/tmp.js';
@@ -14,7 +14,6 @@ import {
   handleCreateScene,
   handleExportMeshLibrary,
 } from '../../src/tools/scene-tools.js';
-import { collectSceneScripts } from '../../src/utils/scene-parsing.js';
 
 const CASE_TIMEOUT_MS = 120_000;
 const SOURCE_SCENE = 'tiles.tscn';
@@ -54,7 +53,7 @@ async function projectWithTile(): Promise<string> {
 
 describe('export_mesh_library output format', () => {
   itGodot(
-    'a .tres output is a text MeshLibrary holding the item, and a scene referencing it is walked without a not-scanned notice',
+    'a .tres output is a text MeshLibrary holding the item',
     async () => {
       const project = await projectWithTile();
       const result = await handleExportMeshLibrary(runner, {
@@ -69,18 +68,6 @@ describe('export_mesh_library output format', () => {
       const text = readFileSync(join(project, 'pieces.tres'), 'utf8');
       expect(text.startsWith(TEXT_RESOURCE_HEADER)).toBe(true);
       expect(text).toContain(TILE_NAME);
-
-      const hostScene = [
-        '[gd_scene load_steps=2 format=3]',
-        '',
-        '[ext_resource type="MeshLibrary" path="res://pieces.tres" id="1"]',
-        '',
-        '[node name="Host" type="Node3D"]',
-        '',
-      ].join('\n');
-      writeFileSync(join(project, 'host.tscn'), hostScene, 'utf8');
-      const collected = collectSceneScripts(join(project, 'host.tscn'), project);
-      expect(collected.unscanned).toEqual([]);
     },
     CASE_TIMEOUT_MS,
   );

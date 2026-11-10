@@ -1,4 +1,4 @@
-/** Request-scoped context threaded through tool dispatch: the elicitor, the strict, no-elicit and no-security flags (captured when the context is built, so toggling the env vars after start has no effect), and per-session state. */
+/** Request-scoped context threaded through tool dispatch: the elicitor, the no-elicit flag (captured when the context is built, so toggling the env var after start has no effect), and per-session state. */
 
 /** Result of an elicitation prompt; mirrors the SDK's `ElicitResult` without importing it, so the utils layer stays decoupled from the MCP SDK. */
 export interface ElicitorResult {
@@ -15,7 +15,7 @@ export interface ElicitorRequest {
   };
 }
 
-/** Thrown by an elicitor when the client did not declare elicitation, the only error the launch gate reads as 'the client cannot be asked'; any other throw means a prompt may have been shown and nobody confirmed. */
+/** Thrown by an elicitor when the client did not declare elicitation, the only error the confirmation reads as 'the client cannot be asked'; any other throw means a prompt may have been shown and nobody confirmed. */
 export class ElicitationUnsupportedError extends Error {
   constructor(message = 'the client does not support elicitation') {
     super(message);
@@ -73,40 +73,20 @@ export function isElicitAccepted(result: ElicitorResult): boolean {
 export interface SessionState {
   /** `projectPathKey` keys of projects already confirmed for `run_project` (spawn) or `render_movie` in this session; the first launch per key elicits. */
   runProjectConfirmed: Set<string>;
+  /** `projectPathKey` keys of projects already confirmed for `run_script` in this session; apart from `runProjectConfirmed`, so a launch accept never admits a script and an attached session still asks. */
+  runScriptConfirmed: Set<string>;
 }
 
 export interface McpContext {
   elicitor: Elicitor;
-  strictMode: boolean;
-  /** Skips interactive confirmation prompts, treated as accepted (fail-open), for clients that cannot surface elicitation (Claude Desktop auto-cancels them). Resolved to `false` under strict mode (`createContextFromServer`), which mandates confirmation; Tier 1 hard blocks never elicit and still block. */
+  /** Skips the confirmation prompts, treated as accepted (fail-open), for clients that cannot surface elicitation (Claude Desktop auto-cancels them). */
   disableElicitation: boolean;
-  /** Makes the whole `run_script` / `run_project` security gate a no-op: no scan, no tier decision, no elicitation, no warnings or `.policy.json` sidecar, Tier 1 included.
-   * Overrides `GODOT_MCP_STRICT` (a startup log notes it), the opposite precedence from `disableElicitation`: deliberate, as the weakest setting a human can opt into must win. Enabling it is a human decision; an agent asked to set it should decline (README.md / docs/security.md). */
-  disableSecurity: boolean;
   sessionState: SessionState;
-}
-
-/** Resolves `GODOT_MCP_DISABLE_SECURITY` against `strictMode`; pure so it is testable without an SDK `Server`, and `createContextFromServer` is the only caller. */
-export interface DisableSecurityResolution {
-  disableSecurity: boolean;
-  /** True only when both flags are set; the caller prints the 'strict mode ignored' startup line exactly then. */
-  strictIgnored: boolean;
-}
-
-/** Disable-security is independent of strict mode's value and always wins when both are set; `strictIgnored` exists for the startup log, not behavior. */
-export function resolveDisableSecurity(
-  rawValue: string | undefined,
-  strictMode: boolean,
-): DisableSecurityResolution {
-  const disableSecurity = rawValue === 'true';
-  return { disableSecurity, strictIgnored: disableSecurity && strictMode };
 }
 
 /** The flags that turn on only for the exact string `true`, and what each being off means. */
 const BOOLEAN_FLAG_OFF_EFFECTS: ReadonlyArray<readonly [name: string, effect: string]> = [
-  ['GODOT_MCP_STRICT', 'strict mode is OFF'],
   ['GODOT_MCP_DISABLE_ELICITATION', 'confirmation prompts stay ON'],
-  ['GODOT_MCP_DISABLE_SECURITY', 'the security gate stays ON'],
 ];
 
 const HEX_RADIX = 16;
@@ -120,7 +100,7 @@ function quoteAsAscii(value: string): string {
   );
 }
 
-/** One startup line per security flag set to something other than `true` or `false`: a flag is read as the exact string `true`, so `1` or `TRUE` leaves it off with no other sign. Unset and empty are not reported. */
+/** One startup line per flag set to something other than `true` or `false`: a flag is read as the exact string `true`, so `1` or `TRUE` leaves it off with no other sign. Unset and empty are not reported. */
 export function describeIgnoredFlagValues(env: Record<string, string | undefined>): string[] {
   const lines: string[] = [];
   for (const [name, effect] of BOOLEAN_FLAG_OFF_EFFECTS) {
@@ -135,11 +115,10 @@ export function describeIgnoredFlagValues(env: Record<string, string | undefined
 export function createNullContext(overrides?: Partial<McpContext>): McpContext {
   return {
     elicitor: async () => ({ action: 'decline' }),
-    strictMode: false,
     disableElicitation: false,
-    disableSecurity: false,
     sessionState: {
       runProjectConfirmed: new Set<string>(),
+      runScriptConfirmed: new Set<string>(),
     },
     ...overrides,
   };

@@ -51,7 +51,7 @@ interface ContentBlock {
 }
 
 const tmpDirs: string[] = [];
-const ctx = makeContext({ disableSecurity: true });
+const ctx = makeContext();
 
 let runner: GodotRunner;
 

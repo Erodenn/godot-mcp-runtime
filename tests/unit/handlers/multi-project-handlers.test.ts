@@ -26,6 +26,8 @@ import { installSession, currentRecord } from '../../helpers/session-install.js'
 import { fakeSessionApi } from '../../helpers/fake-sessions.js';
 import { expectErrorMatching, hasError, unwrap } from '../../helpers/assertions.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
+import { makeContext } from '../../helpers/runtime-fakes.js';
+import type { McpContext } from '../../../src/utils/mcp-context.js';
 
 const tmp = useTmpDirs();
 
@@ -37,7 +39,11 @@ const BENIGN_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1
 const SINGLE_PROJECT_SCREENSHOT_ERROR =
   'No active runtime session. A project must be running or attached to take a screenshot.';
 
-type RuntimeHandler = (runner: GodotRunner, args: Record<string, unknown>) => unknown;
+type RuntimeHandler = (
+  runner: GodotRunner,
+  args: Record<string, unknown>,
+  ctx?: McpContext,
+) => unknown;
 
 function liveProcess(): GodotProcess {
   return {
@@ -488,7 +494,7 @@ describe('projectPath in runtime responses', () => {
       installLive(runner, a, PORT_A, true);
       stubBridge(runner, bridgePayload);
 
-      const result = await handler(runner, args);
+      const result = await handler(runner, args, makeContext());
 
       expect(payloadOf(result).projectPath).toBe(a);
     },

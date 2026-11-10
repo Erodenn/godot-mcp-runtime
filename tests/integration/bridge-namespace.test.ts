@@ -1,5 +1,5 @@
 // The bridge lives under a `.gdignore` directory, which suppresses the importer; Godot resolves autoloads through `load()` and generates no `.uid` for the script there.
-// Screenshot and run_script audit artifacts land under the namespace and survive `stopProject`, which removes only `bridge/`.
+// Screenshot artifacts land under the namespace and survive `stopProject`, which removes only `bridge/`; run_script writes nothing there.
 
 import { describe, beforeAll, afterEach, expect } from 'vitest';
 import { existsSync, readFileSync, readdirSync, cpSync } from 'fs';
@@ -13,9 +13,9 @@ import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript } from '../../src/tools/runtime-tools.js';
 import { hasError } from '../helpers/assertions.js';
+import { makeContext } from '../helpers/runtime-fakes.js';
 import {
   BRIDGE_SCRIPT_RES_PATH,
-  auditScriptsDir,
   bridgeDir,
   bridgeScriptAbsPath,
   mcpDir,
@@ -23,6 +23,8 @@ import {
 } from '../../src/utils/artifact-paths.js';
 
 const BRIDGE_WAIT_MS = 20000;
+/** Where 3.x kept a `.gd` copy and a `.policy.json` per script. */
+const SCRIPT_COPY_DIR_NAME = 'scripts';
 const BRIDGE_COMMAND_TIMEOUT_MS = 15000;
 const CASE_TIMEOUT_MS = 60000;
 
@@ -116,31 +118,30 @@ describe('bridge artifact namespace', () => {
   );
 
   itGodot(
-    'run_script audit pairs land under .mcp/godot-runtime/scripts/ and survive stopProject',
+    'run_script writes no script copy or sidecar under .mcp/godot-runtime/',
     async (ctx) => {
       const id = randomBytes(6).toString('hex');
-      tmpProject = join(tmpdir(), `godot-mcp-runtime-audit-${id}`);
+      tmpProject = join(tmpdir(), `godot-mcp-runtime-no-copy-${id}`);
       cpSync(fixtureProjectPath, tmpProject, { recursive: true });
 
       await runProjectOrSkip(runner, ctx, tmpProject, { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script:
-          'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn {"ok": true}\n',
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script:
+            'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn {"ok": true}\n',
+        },
+        makeContext(),
+      );
       expect(hasError(result)).toBe(false);
 
-      const scriptsDir = auditScriptsDir(tmpProject);
-      expect(existsSync(scriptsDir)).toBe(true);
-      const sidecars = readdirSync(scriptsDir).filter((f) => f.endsWith('.policy.json'));
-      expect(sidecars.length).toBeGreaterThan(0);
+      const scriptsDir = join(mcpDir(tmpProject), 'godot-runtime', SCRIPT_COPY_DIR_NAME);
+      expect(existsSync(scriptsDir)).toBe(false);
 
       await runner.stopProject();
 
-      expect(existsSync(scriptsDir)).toBe(true);
-      expect(readdirSync(scriptsDir).filter((f) => f.endsWith('.policy.json')).length).toBe(
-        sidecars.length,
-      );
+      expect(existsSync(scriptsDir)).toBe(false);
     },
     CASE_TIMEOUT_MS,
   );

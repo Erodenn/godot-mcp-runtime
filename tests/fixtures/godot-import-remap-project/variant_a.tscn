@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="Texture2D" path="res://variant_a.png" id="1_tex"]
-
-[node name="Main" type="Sprite2D"]
-texture = ExtResource("1_tex")

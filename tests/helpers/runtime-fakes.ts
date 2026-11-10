@@ -37,9 +37,7 @@ export interface RuntimeFake {
 export function makeContext(
   opts: {
     elicit?: Elicitor;
-    strict?: boolean;
     disableElicitation?: boolean;
-    disableSecurity?: boolean;
   } = {},
 ): McpContext {
   const defaultElicit: Elicitor = async () => ({
@@ -48,10 +46,8 @@ export function makeContext(
   });
   return {
     elicitor: opts.elicit ?? defaultElicit,
-    strictMode: opts.strict === true,
     disableElicitation: opts.disableElicitation === true,
-    disableSecurity: opts.disableSecurity === true,
-    sessionState: { runProjectConfirmed: new Set<string>() },
+    sessionState: { runProjectConfirmed: new Set<string>(), runScriptConfirmed: new Set<string>() },
   };
 }
 

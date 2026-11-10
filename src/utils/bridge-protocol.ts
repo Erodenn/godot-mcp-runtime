@@ -1,5 +1,5 @@
 // Wire format shared with the McpBridge autoload: 4-byte big-endian length prefix + UTF-8 JSON payload, max 16 MiB.
-// KEEP IN SYNC: src/scripts/mcp_bridge.gd implements the same framing; the session token is an accident guard, not a security boundary (docs/security.md).
+// KEEP IN SYNC: src/scripts/mcp_bridge.gd implements the same framing; the session token is an accident guard, not a security boundary.
 
 import * as net from 'net';
 

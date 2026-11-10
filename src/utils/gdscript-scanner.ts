@@ -1,5 +1,5 @@
-/** Hand-written tokenizer for GDScript source: strips comments and string literals so the policy never matches `"OS.execute"` or `# OS.execute`, and coalesces member-access chains into one `memberChain` token. Not a parser.
- * Blind spot by design (see `docs/security.md`): aliasing and dataflow are invisible, so `var f = OS; f.execute(...)` is two unrelated identifiers; the policy answers only the alias step it can see (`var f = OS`) with its alias rules. */
+/** Hand-written tokenizer for GDScript source: strips comments and string literals so a caller never matches `"OS.execute"` or `# OS.execute`, and coalesces member-access chains into one `memberChain` token. Not a parser.
+ * Aliasing and dataflow are invisible by design: `var f = OS; f.execute(...)` is two unrelated identifiers. */
 
 export type TokenKind =
   | 'identifier'

@@ -1,7 +1,7 @@
 import { tokenizeStripped, type Token } from './gdscript-scanner.js';
 
 /** How a script's tokens use a handler name. `connected`: named inside a `connect(...)` call. `referenced`: named as a Callable value elsewhere (`var f = _on_x`, `Callable(self, "_on_x")`, `_on_x.bind(..)`).
- * `maybe`: a Callable is built from a method name the tokens cannot pin to a string, and the name could be this handler (see `MethodReach`). `none`: no sign of use. Read-only: shares the scanner with the security gate and changes nothing there. */
+ * `maybe`: a Callable is built from a method name the tokens cannot pin to a string, and the name could be this handler (see `MethodReach`). `none`: no sign of use. Read-only: uses the shared GDScript tokenizer. */
 export type HandlerUse = 'connected' | 'referenced' | 'maybe' | 'none';
 
 /** Where a `maybe` came from: the script it was found in (when known) and the line of the Callable site. */

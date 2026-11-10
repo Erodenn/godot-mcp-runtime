@@ -10,6 +10,10 @@ import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleGetDebugOutput, handleRunScript } from '../../src/tools/runtime-tools.js';
 import type { HandlerResult } from '../../src/mcp.types.js';
+import { makeContext } from '../helpers/runtime-fakes.js';
+
+/** Accepts every confirmation prompt, so a script goes to the bridge. */
+const scriptCtx = makeContext();
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
   const dst = join(tmpdir(), `godot-mcp-runscript-diag-${id}`);
@@ -67,7 +71,11 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         'func execute(scene_tree: SceneTree) -> Variant:\n' +
         '\treturn some_missing_identifier\n';
 
-      const result = await handleRunScript(runner, { script: badScript, timeout: 15000 });
+      const result = await handleRunScript(
+        runner,
+        { script: badScript, timeout: 15000 },
+        scriptCtx,
+      );
 
       expect(result.ok).toBe(false);
       if (result.ok) return;
@@ -93,7 +101,11 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         'func execute(scene_tree: SceneTree) -> Variant:\n' +
         '\treturn 1 + 1\n';
 
-      const result = await handleRunScript(runner, { script: goodScript, timeout: 15000 });
+      const result = await handleRunScript(
+        runner,
+        { script: goodScript, timeout: 15000 },
+        scriptCtx,
+      );
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -114,7 +126,11 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         'extends RefCounted\n' +
         'func execute(scene_tree: SceneTree) -> Variant:\n' +
         '\treturn some_missing_identifier\n';
-      const failed = await handleRunScript(runner, { script: badScript, timeout: STEP_TIMEOUT_MS });
+      const failed = await handleRunScript(
+        runner,
+        { script: badScript, timeout: STEP_TIMEOUT_MS },
+        scriptCtx,
+      );
       expect(failed.ok).toBe(false);
       if (failed.ok) return;
       expect(textOf(failed)).toContain('some_missing_identifier');
@@ -146,7 +162,7 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         '\tfor i in 3:\n' +
         '\t\tawait scene_tree.process_frame\n' +
         '\treturn Engine.get_process_frames() - start\n';
-      const result = await handleRunScript(runner, { script, timeout: STEP_TIMEOUT_MS });
+      const result = await handleRunScript(runner, { script, timeout: STEP_TIMEOUT_MS }, scriptCtx);
       expect(result.ok, textOf(result)).toBe(true);
       if (!result.ok) return;
       const frames = result.value.structuredContent?.result as number;
@@ -169,10 +185,14 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         '\tvar list := [\n1,\n]\n' +
         '\tawait scene_tree.process_frame\n' +
         '\treturn text.length() + list.size()\n';
-      const fromMultiLine = await handleRunScript(runner, {
-        script: multiLine,
-        timeout: STEP_TIMEOUT_MS,
-      });
+      const fromMultiLine = await handleRunScript(
+        runner,
+        {
+          script: multiLine,
+          timeout: STEP_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(fromMultiLine.ok, textOf(fromMultiLine)).toBe(true);
       if (!fromMultiLine.ok) return;
       expect(fromMultiLine.value.structuredContent?.result).toBe('\nfirst\n'.length + 1);
@@ -182,10 +202,14 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         '@warning_ignore("unused_parameter") func execute(scene_tree: SceneTree) -> Variant:\n' +
         '\tawait scene_tree.process_frame\n' +
         '\treturn 5\n';
-      const fromAnnotated = await handleRunScript(runner, {
-        script: annotated,
-        timeout: STEP_TIMEOUT_MS,
-      });
+      const fromAnnotated = await handleRunScript(
+        runner,
+        {
+          script: annotated,
+          timeout: STEP_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(fromAnnotated.ok, textOf(fromAnnotated)).toBe(true);
       if (!fromAnnotated.ok) return;
       expect(fromAnnotated.value.structuredContent?.result).toBe(5);
@@ -208,7 +232,11 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         '\tnode.free()\n' +
         '\treturn node\n';
       const started = Date.now();
-      const result = await handleRunScript(runner, { script, timeout: SHORT_TIMEOUT_MS });
+      const result = await handleRunScript(
+        runner,
+        { script, timeout: SHORT_TIMEOUT_MS },
+        scriptCtx,
+      );
       expect(result.ok, textOf(result)).toBe(true);
       expect(Date.now() - started).toBeLessThan(SHORT_TIMEOUT_MS);
     },
@@ -229,16 +257,25 @@ describe('run_script compile-error diagnostics (live bridge)', () => {
         '\tawait never_fires\n' +
         '\treturn 1\n';
       const started = Date.now();
-      const timedOut = await handleRunScript(runner, { script: stuck, timeout: SHORT_TIMEOUT_MS });
+      const timedOut = await handleRunScript(
+        runner,
+        { script: stuck, timeout: SHORT_TIMEOUT_MS },
+        scriptCtx,
+      );
       const elapsed = Date.now() - started;
       expect(timedOut.ok).toBe(false);
       expect(textOf(timedOut)).toContain('run_script timed out');
       expect(elapsed).toBeLessThan(SHORT_TIMEOUT_MS + SOCKET_GRACE_MS);
 
-      const after = await handleRunScript(runner, {
-        script: 'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 7\n',
-        timeout: STEP_TIMEOUT_MS,
-      });
+      const after = await handleRunScript(
+        runner,
+        {
+          script:
+            'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 7\n',
+          timeout: STEP_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(after.ok, textOf(after)).toBe(true);
       if (!after.ok) return;
       expect(after.value.structuredContent?.result).toBe(7);

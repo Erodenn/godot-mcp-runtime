@@ -11,6 +11,10 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript, MAX_INPUT_BATCH_BUDGET_MS } from '../../src/tools/runtime-tools.js';
 import { MAX_FRAME_BYTES } from '../../src/utils/bridge-protocol.js';
 import { hasError, unwrap } from '../helpers/assertions.js';
+import { makeContext } from '../helpers/runtime-fakes.js';
+
+/** Accepts every confirmation prompt, so a script goes to the bridge. */
+const scriptCtx = makeContext();
 
 const BRIDGE_WAIT_MS = 20000;
 const CASE_TIMEOUT_MS = 60000;
@@ -175,17 +179,25 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('cycle'), { waitMs: BRIDGE_WAIT_MS });
 
-      const array = await handleRunScript(runner, {
-        script: SELF_CONTAINING_ARRAY_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const array = await handleRunScript(
+        runner,
+        {
+          script: SELF_CONTAINING_ARRAY_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(hasError(array)).toBe(false);
       expect(resultOf(array)).toEqual(Array.from({ length: SELF_REFERENCES }, () => CYCLE_MARKER));
 
-      const dictionary = await handleRunScript(runner, {
-        script: SELF_CONTAINING_DICTIONARY_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const dictionary = await handleRunScript(
+        runner,
+        {
+          script: SELF_CONTAINING_DICTIONARY_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(hasError(dictionary)).toBe(false);
       expect(resultOf(dictionary)).toEqual({
         name: 'root',
@@ -201,10 +213,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('shared'), { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script: SHARED_NOT_CYCLIC_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: SHARED_NOT_CYCLIC_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(false);
       expect(resultOf(result)).toEqual([
@@ -221,10 +237,14 @@ describe('bridge serialization bounds and the parent watch', () => {
       await runProjectOrSkip(runner, ctx, copyFixture('oversize'), { waitMs: BRIDGE_WAIT_MS });
       const started = Date.now();
 
-      const result = await handleRunScript(runner, {
-        script: OVERSIZE_RESULT_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: OVERSIZE_RESULT_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(true);
       const text = unwrap(result).content[0]!.text!;
@@ -232,10 +252,15 @@ describe('bridge serialization bounds and the parent watch', () => {
       expect(text).not.toMatch(/timed out/);
       expect(Date.now() - started).toBeLessThan(SCRIPT_TIMEOUT_MS);
 
-      const next = await handleRunScript(runner, {
-        script: 'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 7\n',
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const next = await handleRunScript(
+        runner,
+        {
+          script:
+            'extends RefCounted\nfunc execute(scene_tree: SceneTree) -> Variant:\n\treturn 7\n',
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
       expect(resultOf(next)).toBe(7);
     },
     CASE_TIMEOUT_MS,
@@ -274,10 +299,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('shapes'), { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script: VALUE_SHAPES_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: VALUE_SHAPES_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(false);
       const payload = payloadOf(result);
@@ -302,10 +331,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('packedbudget'), { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script: PACKED_OVER_BUDGET_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: PACKED_OVER_BUDGET_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(false);
       const elements = payloadOf(result).result as unknown[];
@@ -323,10 +356,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('freed'), { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script: FREED_NODE_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: FREED_NODE_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(false);
       const payload = payloadOf(result);
@@ -343,10 +380,14 @@ describe('bridge serialization bounds and the parent watch', () => {
     async (ctx) => {
       await runProjectOrSkip(runner, ctx, copyFixture('plainobject'), { waitMs: BRIDGE_WAIT_MS });
 
-      const result = await handleRunScript(runner, {
-        script: PLAIN_OBJECT_SCRIPT,
-        timeout: SCRIPT_TIMEOUT_MS,
-      });
+      const result = await handleRunScript(
+        runner,
+        {
+          script: PLAIN_OBJECT_SCRIPT,
+          timeout: SCRIPT_TIMEOUT_MS,
+        },
+        scriptCtx,
+      );
 
       expect(hasError(result)).toBe(false);
       const value = payloadOf(result).result as {

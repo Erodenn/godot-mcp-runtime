@@ -21,7 +21,7 @@ import { condenseProcessTail } from '../utils/output-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
-import { rejectNonSceneLaunchArg, runLaunchGate } from '../utils/launch-gate.js';
+import { confirmFirstUse, rejectNonSceneLaunchArg } from '../utils/confirmation.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
 import {
   CLIENT_ANSWER_CEILING_MS,
@@ -106,7 +106,7 @@ const MOVIE_MARGIN_REFUSED_FRAMES =
     MOVIE_TIMEOUT_PER_FRAME_MS +
   1;
 const MOVIE_STDERR_TAIL_LINES = 20;
-// Measurement and launch-gate warnings are never cut, so a stderr flood cannot push a scan finding out of the payload.
+// Measurement and confirmation warnings are never cut, so a stderr flood cannot push one out of the payload.
 export const MOVIE_RUNTIME_WARNINGS_MAX = 30;
 const MOVIE_CLEANUP_MAX_RETRIES = 3;
 const MOVIE_CLEANUP_RETRY_DELAY_MS = 100;
@@ -120,7 +120,7 @@ export const renderToolDefinitions = [
   {
     name: 'render_movie',
     description:
-      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, no session, no input (to interact: run_project + simulate_input + take_screenshot). mode check (default): stats, likelyBlank, motion, inline frames; files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths, bytesWritten; warnings leads if anything was unmeasured. Needs a display. Errors on timeout, failed run, or a live session.',
+      'Render the project (or `scene`) for a set number of frames in a separate movie-writer run: no bridge, session or input (to interact: run_project, simulate_input). mode check (default): stats, likelyBlank, motion, inline frames, files deleted. frames: keeps PNGs. video: .avi/.ogv, no stats. Returns: frameCount, likelyBlank, anyMotion, samples, paths, bytesWritten; warnings leads if unmeasured. Needs a display; asks the user once per project. Errors on timeout, failed run or live session.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -132,7 +132,7 @@ export const renderToolDefinitions = [
         scene: {
           type: 'string',
           description:
-            'Scene to render (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Must end in .tscn, .scn, .escn, .tres or .res; only .tscn is scanned.',
+            'Scene to render (path relative to project, e.g. "scenes/main.tscn"). Omit to use the project\'s main scene. Must end in .tscn, .scn, .escn, .tres or .res.',
         },
         mode: {
           type: 'string',
@@ -860,7 +860,7 @@ interface RunContext {
   runDir: string;
   outputPath: string;
   timeoutMs: number;
-  gateWarnings: string[];
+  confirmationWarnings: string[];
 }
 
 async function engineVersion(runner: GodotRunner): Promise<string> {
@@ -962,7 +962,7 @@ function buildVideoResponse(rc: RunContext, result: MovieProcessResult): Handler
   const warnings = [
     ...(bytesWritten === null ? [BYTES_UNMEASURED_WARNING] : []),
     ...runtimeErrorWarnings(rc.runner, result.stderr),
-    ...rc.gateWarnings,
+    ...rc.confirmationWarnings,
   ];
   return createStructuredResponse({
     ...(warnings.length > 0 ? { warnings } : {}),
@@ -1002,7 +1002,7 @@ function buildPngResponse(
   const warnings = measurementWarnings(measurement, frameCount, rc.options.frames);
   if (bytesWritten === null) warnings.push(BYTES_UNMEASURED_WARNING);
   warnings.push(...runtimeErrorWarnings(rc.runner, result.stderr));
-  warnings.push(...rc.gateWarnings);
+  warnings.push(...rc.confirmationWarnings);
 
   // A check run keeps nothing; remove now so a removal failure is reported in this response.
   if (isCheck) {
@@ -1075,7 +1075,7 @@ export function createRenderMovieHandler(
     // Refusals precede anything that could prompt a human or touch disk.
     if (!deps.displayAvailable()) return err(refuseNoDisplay());
 
-    // Sessions only: a stranded bridge entry is repaired inside the launch step, after the gate.
+    // Sessions only: a stranded bridge entry is repaired inside the launch step, after the confirmation.
     const busy = refuseIfSessionLiveOnProject(runner, root);
     if (busy !== null) return err(busy);
 
@@ -1094,11 +1094,11 @@ export function createRenderMovieHandler(
       );
     }
 
-    const gate = await runLaunchGate(
-      { projectPath: root, scene, confirm: true, launchedByServer: true, toolName: 'render_movie' },
+    const confirmation = await confirmFirstUse(
+      { kind: 'launch', toolName: 'render_movie', projectPath: root },
       ctx,
     );
-    if (!gate.ok) return gate;
+    if (!confirmation.ok) return confirmation;
 
     const runId = `${mode === 'check' ? CHECK_RUN_ID_PREFIX : ''}${Date.now()}-${randomUUID()}`;
     const runDir = movieRunDir(root, runId);
@@ -1116,7 +1116,7 @@ export function createRenderMovieHandler(
       runDir,
       outputPath,
       timeoutMs: computeMovieTimeoutMs(frames),
-      gateWarnings: gate.value.warnings,
+      confirmationWarnings: confirmation.value.warnings,
     };
 
     // The last session check, the first disk write and the spawn are one step under the session queue, with the run registered before the spawn:
@@ -1132,10 +1132,10 @@ export function createRenderMovieHandler(
           worstCaseMs: rc.timeoutMs + MOVIE_KILL_WORST_CASE_MS,
         });
         if (!charged.ok) return charged;
-        // The gate can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
-        const busyAfterGate = refuseIfSessionLiveOnProject(runner, root);
-        if (busyAfterGate !== null) return err(busyAfterGate);
-        // A bridge a dead server stranded would load into the movie run: removed here, where the gate has passed and a write to project.godot is allowed. The check after it is the refusal for an entry the repair left.
+        // The confirmation can hold a prompt open for as long as a human takes; a session started meanwhile has injected the bridge, so ask again.
+        const busyAfterConfirmation = refuseIfSessionLiveOnProject(runner, root);
+        if (busyAfterConfirmation !== null) return err(busyAfterConfirmation);
+        // A bridge a dead server stranded would load into the movie run: removed here, where the confirmation has passed and a write to project.godot is allowed. The check after it is the refusal for an entry the repair left.
         runner.repairStrandedBridge(root);
         const stranded = refuseIfBridgeEntryStranded(root);
         if (stranded !== null) return err(stranded);
@@ -1181,7 +1181,7 @@ export function createRenderMovieHandler(
     }
     if (!('started' in launched)) return launched;
 
-    // Past the gate and the second session check, and no live run owns a stale check directory: removed beside the render, not inside the queued step.
+    // Past the confirmation and the second session check, and no live run owns a stale check directory: removed beside the render, not inside the queued step.
     const staleCleanup = removeStaleCheckRuns(root, deps.removeRunDir ?? removeRunDirAsync);
 
     let response: HandlerResult;

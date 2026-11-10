@@ -237,7 +237,7 @@ export const sceneToolDefinitions = [
   {
     name: 'export_mesh_library',
     description:
-      "Export a scene's MeshInstance3D children as a MeshLibrary for GridMap. The outputPath extension sets the format: .tres is text (prefer it; the launch pre-flight scan reads it), .res is binary (reported as not scanned). Not for 2D scenes. meshItemNames picks a subset, else all. Overwrites silently. Returns: outputPath, itemCount, itemNames read from the saved library; warnings leads when a requested name was not exported. Errors if no valid meshes, or while a runtime session is live.",
+      "Export a scene's MeshInstance3D children as a MeshLibrary for GridMap. The outputPath extension sets the format: .tres is text (prefer it), .res is binary. Not for 2D scenes. meshItemNames picks a subset, else all. Overwrites silently. Returns: outputPath, itemCount, itemNames read from the saved library; warnings leads when a requested name was not exported. Errors if no valid meshes, or while a runtime session is live.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
