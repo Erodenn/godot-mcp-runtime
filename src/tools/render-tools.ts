@@ -21,7 +21,11 @@ import { condenseProcessTail } from '../utils/output-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { createNullContext, type McpContext } from '../utils/mcp-context.js';
-import { confirmFirstUse, rejectNonSceneLaunchArg } from '../utils/confirmation.js';
+import {
+  confirmFirstUse,
+  rejectNonSceneLaunchArg,
+  withConfirmationWarnings,
+} from '../utils/confirmation.js';
 import { findLiveSessionOnProject, type LiveSessionOnProject } from '../utils/headless-op.js';
 import {
   CLIENT_ANSWER_CEILING_MS,
@@ -1182,11 +1186,11 @@ export function createRenderMovieHandler(
       );
     } catch (error) {
       if (error instanceof SessionQueueTimeoutError) {
-        return err(sessionBusyError(error));
+        return withConfirmationWarnings(err(sessionBusyError(error)), confirmationWarnings);
       }
       launched = { started: Promise.reject(error) };
     }
-    if (!('started' in launched)) return launched;
+    if (!('started' in launched)) return withConfirmationWarnings(launched, confirmationWarnings);
 
     // Past the confirmation and the second session check, and no live run owns a stale check directory: removed beside the render, not inside the queued step.
     const staleCleanup = removeStaleCheckRuns(root, deps.removeRunDir ?? removeRunDirAsync);
@@ -1224,7 +1228,7 @@ export function createRenderMovieHandler(
         });
       }
     }
-    return response;
+    return withConfirmationWarnings(response, confirmationWarnings);
   };
 }
 

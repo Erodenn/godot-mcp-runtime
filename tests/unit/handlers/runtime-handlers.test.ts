@@ -4453,3 +4453,42 @@ describe('a confirmation prompt is charged against the call it held up', () => {
     expect(requestedAt!).toBeGreaterThanOrEqual(before);
   });
 });
+
+describe('a warning that nobody was asked reaches the agent on an error too', () => {
+  const VALID_SCRIPT = 'extends RefCounted\nfunc execute(scene_tree):\n\treturn 1\n';
+  const SCRIPT_UNASKED = 'running the script without user confirmation';
+  const LAUNCH_UNASKED = 'launching without user confirmation';
+
+  // Red when withConfirmationWarnings is dropped from run_script: the project is recorded and no call ever says so.
+  it('run_script: a first call that fails carries the warning, and the next one does not', async () => {
+    const dir = tmp.makeProject('unasked-script-error-');
+    const fake = createRuntimeFake();
+    fake.setSession({ mode: 'spawned', projectPath: dir, process: makeRunningProcess() });
+    fake.setBridgeResponse(JSON.stringify({ success: false, error: 'boom' }), []);
+    const ctx = makeContext({ disableElicitation: true });
+
+    const first = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT }, ctx);
+    const second = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT }, ctx);
+
+    expect(hasError(first)).toBe(true);
+    expect(allText(first)).toContain(SCRIPT_UNASKED);
+    expect(hasError(second)).toBe(true);
+    expect(allText(second)).not.toContain(SCRIPT_UNASKED);
+  });
+
+  it('run_project: a first launch that fails carries the warning', async () => {
+    const dir = tmp.makeProject('unasked-launch-error-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(false, 'timeout after 20s');
+
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ disableElicitation: true }),
+    );
+
+    expect(hasError(result)).toBe(true);
+    expect(allText(result)).toContain(LAUNCH_UNASKED);
+  });
+});

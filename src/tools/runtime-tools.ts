@@ -51,7 +51,11 @@ import {
   BridgeAutoloadCollisionError,
   BridgeRegistryUnreadableError,
 } from '../utils/bridge-manager.js';
-import { confirmFirstUse, rejectNonSceneLaunchArg } from '../utils/confirmation.js';
+import {
+  confirmFirstUse,
+  rejectNonSceneLaunchArg,
+  withConfirmationWarnings,
+} from '../utils/confirmation.js';
 import { measurePngFile } from '../utils/pixel-stats.js';
 import {
   MAX_RUNTIME_TIMEOUT_MS,
@@ -1056,7 +1060,7 @@ async function startSpawnedSession(
       }),
     promptedAt ?? undefined,
   );
-  return launched;
+  return withConfirmationWarnings(launched, warnings);
 }
 
 async function launchSpawnedSession(
@@ -2425,7 +2429,7 @@ export async function handleRunScript(
     },
     promptedAt ?? undefined,
   );
-  return response;
+  return withConfirmationWarnings(response, confirmationWarnings);
 }
 
 async function executeAdmittedScript(

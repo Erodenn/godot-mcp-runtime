@@ -1,7 +1,7 @@
 /** The two once-per-project confirmation prompts (a launch, and `run_script`) and the launch scene check; free of `GodotRunner` and `src/tools/` so any tool that starts or injects code can call it. */
 
 import { resolve } from 'path';
-import type { ToolResponse } from '../mcp.types.js';
+import type { HandlerResult, ToolResponse } from '../mcp.types.js';
 import { createErrorResponse, getErrorMessage } from './error-response.js';
 import {
   ElicitationUnsupportedError,
@@ -153,4 +153,14 @@ export async function confirmFirstUse(
   }
   confirmed.add(projectKey);
   return ok({ warnings, promptedAt });
+}
+
+/** Adds a confirmation's warnings to an error result: the project is already recorded, so the first call is the only one that can say later calls go ahead unasked. A success payload carries them itself. */
+export function withConfirmationWarnings(
+  result: HandlerResult,
+  warnings: readonly string[],
+): HandlerResult {
+  if (result.ok || warnings.length === 0) return result;
+  result.error.content.push({ type: 'text', text: `Warnings:\n- ${warnings.join('\n- ')}` });
+  return result;
 }

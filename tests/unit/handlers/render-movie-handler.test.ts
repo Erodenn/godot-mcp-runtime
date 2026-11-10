@@ -1176,6 +1176,21 @@ describe('render_movie charges its confirmation prompt against the request timeo
     expectErrorMatching(result, /before asking for its turn \(its confirmation prompt\)/);
     expect(stub.calls).toHaveLength(0);
   });
+
+  // Red when withConfirmationWarnings is dropped from render_movie: the project is recorded and no call ever says so.
+  it('puts the unasked warning on a failed first render', async () => {
+    const { dir, runner, handler } = setup({ stub: { result: { exitCode: 1 } } });
+
+    const result = await handler(
+      runner,
+      { projectPath: dir, frames: TEST_FRAMES },
+      makeContext({ disableElicitation: true }),
+    );
+
+    expect(hasError(result)).toBe(true);
+    const texts = unwrap(result).content.map((c) => c.text ?? '');
+    expect(texts.some((text) => text.includes(ELICITATION_DISABLED_LAUNCH_WARNING))).toBe(true);
+  });
 });
 
 describe('render_movie run outcomes', () => {
