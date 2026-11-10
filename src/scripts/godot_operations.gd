@@ -966,6 +966,13 @@ func _resource_text_declares_script(full_path: String) -> bool:
 			return true
 	return false
 
+# 4.5 keeps a script that failed to compile on the resource (get_script() non-null, its declared values absent); 4.6+ loads the resource without one.
+func _resource_script_attached(res: Resource, full_path: String) -> bool:
+	var script: Variant = res.get_script()
+	if script is Script:
+		return _check_script_attachable(script, script.resource_path).ok
+	return not _resource_text_declares_script(full_path)
+
 func _text_resource_key(raw_path: String) -> String:
 	var full_path := _scene_file_key(raw_path)
 	if full_path.is_empty():
@@ -1051,7 +1058,7 @@ func set_resource_properties(params: Variant) -> void:
 		log_error("%s holds a %s, which the resource tools do not edit: use the scene tools for a scene, and edit a script as a file" % [_project_relative(full_path), res.get_class()])
 		_fail_operation()
 		return
-	if res.get_script() == null and _resource_text_declares_script(full_path):
+	if not _resource_script_attached(res, full_path):
 		log_error("The resource's script could not be attached (parse errors, or a script for another base type), so saving would drop the values it declares. Check the script with validate")
 		_fail_operation()
 		return
