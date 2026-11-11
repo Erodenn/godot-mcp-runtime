@@ -22,9 +22,10 @@ import {
   BRIDGE_WAIT_SPAWNED_TIMEOUT_MS,
   PARENT_WATCH_PORT_ENV,
   ParentWatchListener,
+  STRANDED_SWEEP_ENV,
   requestOnce,
 } from './bridge-protocol.js';
-import type { ActionBoundaryMark } from './bridge-protocol.js';
+import type { ActionBoundaryMark, StrandedSweepCommand } from './bridge-protocol.js';
 import { logDebug, logError, DEBUG_MODE } from './logger.js';
 import type { OperationParams } from '../mcp.types.js';
 import {
@@ -520,6 +521,8 @@ export class GodotRunner {
   private readonly queue = new SessionQueue();
   private readonly knownSessions = new WeakSet<object>();
   private readonly parentWatch = new ParentWatchListener();
+  /** Entry the bridge runs when its server died without the exit hook; null where it is not built (tests run from `src/`), and the game then only quits. */
+  private strandedSweepScript: string | null;
   /** Headless children without `close`; they lead their own process group outside Windows, so the exit hook kills what is left. */
   private readonly headlessChildren = new Set<ChildProcess>();
   /** Spawned games without `exit`; a game whose kill was unconfirmed leaves the session map, so the exit hook kills from here too. */
@@ -543,6 +546,8 @@ export class GodotRunner {
     this.operationsScriptPath = join(__dirname, '..', 'scripts', 'godot_operations.gd');
     const bridgeScriptPath = join(__dirname, '..', 'scripts', 'mcp_bridge.gd');
     this.bridge = new BridgeManager(bridgeScriptPath);
+    const sweepScript = join(__dirname, '..', 'sweep-stranded.js');
+    this.strandedSweepScript = existsSync(sweepScript) ? sweepScript : null;
     logDebug(`Operations script path: ${this.operationsScriptPath}`);
 
     if (config?.godotPath) {
@@ -1201,7 +1206,7 @@ export class GodotRunner {
       logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
       const spawnOptions: SpawnOptions = {
         ...godotSpawnOptions(background ? 'run-background' : 'run'),
-        // KEEP IN SYNC: the three MCP_* names below with `_ready` in src/scripts/mcp_bridge.gd.
+        // KEEP IN SYNC: the MCP_* names below with `_ready` in src/scripts/mcp_bridge.gd.
         env: {
           ...process.env,
           MCP_SESSION_TOKEN: sessionToken,
@@ -1209,6 +1214,7 @@ export class GodotRunner {
           MCP_BRIDGE_PORT: String(port),
           // Spawned sessions only; an attached Godot never gets one.
           ...(parentWatchPort !== null ? { [PARENT_WATCH_PORT_ENV]: String(parentWatchPort) } : {}),
+          ...this.strandedSweepEnv(projectPath),
         },
       };
       if (background) {
@@ -1319,6 +1325,16 @@ export class GodotRunner {
     if (found === null || found.stopping === null) return found;
     await found.stopping.catch(() => undefined);
     return this.sessions.get(key) ?? null;
+  }
+
+  /** The sweep a spawned game's bridge launches once its parent watch finds this server gone; empty when there is no sweep entry. */
+  private strandedSweepEnv(projectPath: string): Record<string, string> {
+    if (this.strandedSweepScript === null) return {};
+    const command: StrandedSweepCommand = {
+      executable: process.execPath,
+      arguments: [this.strandedSweepScript, projectPath],
+    };
+    return { [STRANDED_SWEEP_ENV]: JSON.stringify(command) };
   }
 
   /** Parent-watch port for a spawned game, or null when it could not be bound (non-fatal: no watchdog). */

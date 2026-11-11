@@ -1,12 +1,13 @@
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { cpSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { cpSync, existsSync, readFileSync } from 'fs';
+import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { removeTmpDir } from '../helpers/tmp.js';
 import { itGodot } from '../helpers/godot-skip.js';
 import { runProjectOrSkip } from '../helpers/run-project-or-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
+import { STRANDED_SWEEP_PROBE_MARKER } from '../helpers/stranded-sweep-probe.mjs';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { handleRunScript, MAX_INPUT_BATCH_BUDGET_MS } from '../../src/tools/runtime-tools.js';
 import { MAX_FRAME_BYTES } from '../../src/utils/bridge-protocol.js';
@@ -26,6 +27,7 @@ const BIG_STRING_CHARS = 1_000_000;
 const BIG_STRING_COUNT = 20;
 /** The bridge checks its parent connection every 2 s and needs two checks at most. */
 const PARENT_WATCH_EXIT_WAIT_MS = 15000;
+const STRANDED_SWEEP_PROBE = resolve('tests/helpers/stranded-sweep-probe.mjs');
 
 const CYCLE_MARKER = '<truncated: this container contains itself>';
 
@@ -441,10 +443,16 @@ describe('bridge serialization bounds and the parent watch', () => {
   );
 
   itGodot(
-    'a spawned game quits by itself when its connection to the server is lost',
+    'a spawned game quits by itself when its connection to the server is lost, after the stranded-bridge sweep it launched',
     async (ctx) => {
-      await runProjectOrSkip(runner, ctx, copyFixture('parentwatch'), { waitMs: BRIDGE_WAIT_MS });
+      // Built tree only, so a probe stands in; it never repairs, because this test process is still a live owner.
+      (runner as unknown as { strandedSweepScript: string | null }).strandedSweepScript =
+        STRANDED_SWEEP_PROBE;
+      const project = copyFixture('parentwatch');
+      const marker = join(project, STRANDED_SWEEP_PROBE_MARKER);
+      await runProjectOrSkip(runner, ctx, project, { waitMs: BRIDGE_WAIT_MS });
       const spawned = runner.activeProcess!;
+      let markerAtExit: string | null = null;
       const exited = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
           () => reject(new Error('the game did not quit after losing its parent connection')),
@@ -452,6 +460,8 @@ describe('bridge serialization bounds and the parent watch', () => {
         );
         spawned.process.once('exit', () => {
           clearTimeout(timer);
+          // Read at the exit itself: the game waits for the sweep, so its mark is already written.
+          markerAtExit = existsSync(marker) ? readFileSync(marker, 'utf8') : null;
           resolve();
         });
       });
@@ -460,6 +470,7 @@ describe('bridge serialization bounds and the parent watch', () => {
       (runner as unknown as { parentWatch: { close(): void } }).parentWatch.close();
 
       await exited;
+      expect(markerAtExit).toBe(resolve(project));
       expect(spawned.hasExited).toBe(true);
       expect(runner.hasActiveRuntimeSession()).toBe(false);
     },

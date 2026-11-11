@@ -66,7 +66,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 > [!IMPORTANT]
 > `get_debug_output` has nothing to return in attached mode. stdout and stderr only flow through processes MCP started itself, so for an externally launched Godot its `output`, `errors` and `running` are `null` with a warning, never empty lists. Let `run_project` spawn the game if you need the debug stream.
 
-The bridge cleans itself up automatically - on `stop_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). A game the server spawned also quits by itself within a few seconds if the server process is killed outright. Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
+The bridge cleans itself up automatically - on `stop_project`, and also without a tool call when the game exits on its own, the bridge connection drops, or the server shuts down (including a client that just closes the connection). A game the server spawned also quits by itself within a few seconds if the server process is killed outright, and removes the autoload entry from `project.godot` on its way out. Its artifacts live under `.mcp/godot-runtime/` in the project, which the server adds to `.gitignore`. No leftover autoloads, no modified project files.
 
 ## How It Compares
 

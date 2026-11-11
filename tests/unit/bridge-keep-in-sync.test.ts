@@ -14,6 +14,7 @@ import {
   NON_FINITE_COUNT_FIELD,
   OVERSIZE_RESPONSE_FIELD,
   PARENT_WATCH_PORT_ENV,
+  STRANDED_SWEEP_ENV,
 } from '../../src/utils/bridge-protocol.js';
 import { screenshotsDir } from '../../src/utils/artifact-paths.js';
 import { stderrRequestsImport } from '../../src/utils/headless-op.js';
@@ -233,6 +234,31 @@ describe('mcp_bridge.gd parent watch', () => {
     expect(quit).toBeGreaterThan(giveUp);
     expect(poll.slice(giveUp, quit)).toContain('return');
     expect(poll).toContain('_parent_watch.put_data(_parent_watch_beat) == OK');
+  });
+
+  it('launches the stranded-bridge sweep from the variable the server sets, only once the server is gone', () => {
+    expect(gdConst('STRANDED_SWEEP_ENV')).toBe(`"${STRANDED_SWEEP_ENV}"`);
+    expect(gdFunctionBody('_launch_stranded_sweep')).toContain(
+      'OS.get_environment(STRANDED_SWEEP_ENV)',
+    );
+    const launches = bridgeSource.match(/_launch_stranded_sweep\(/g) ?? [];
+    expect(launches).toHaveLength(2);
+    const poll = gdFunctionBody('_poll_parent_watch');
+    const giveUp = poll.indexOf('if not _parent_watch_established:');
+    expect(poll.indexOf('_launch_stranded_sweep()')).toBeGreaterThan(giveUp);
+  });
+
+  it('quits after the sweep ends or its named deadline passes, never before', () => {
+    const poll = gdFunctionBody('_poll_stranded_sweep');
+    expect(poll).toContain('OS.is_process_running(_sweep_pid)');
+    expect(poll).toContain('_sweep_deadline_ms');
+    expect(Number(gdConst('STRANDED_SWEEP_WAIT_MS'))).toBeGreaterThan(0);
+    expect(gdFunctionBody('_poll_parent_watch')).toContain('STRANDED_SWEEP_WAIT_MS');
+  });
+
+  it('never edits project.godot itself', () => {
+    expect(bridgeSource).not.toMatch(/project\.godot"/);
+    expect(bridgeSource).not.toContain('ProjectSettings.save');
   });
 
   it('checks on a named interval', () => {

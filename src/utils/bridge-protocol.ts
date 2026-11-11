@@ -46,6 +46,16 @@ export function clampTimerDelay(ms: number): number {
 // KEEP IN SYNC: `PARENT_WATCH_PORT_ENV` in src/scripts/mcp_bridge.gd.
 export const PARENT_WATCH_PORT_ENV = 'MCP_PARENT_WATCH_PORT';
 
+// Gives a spawned game, as JSON, the command that runs this server's stranded-bridge repair; the bridge launches it when the parent watch finds the server gone.
+// KEEP IN SYNC: `STRANDED_SWEEP_ENV` in src/scripts/mcp_bridge.gd.
+export const STRANDED_SWEEP_ENV = 'MCP_STRANDED_SWEEP';
+
+/** What `STRANDED_SWEEP_ENV` holds: `arguments` are the sweep entry and the project path. */
+export interface StrandedSweepCommand {
+  executable: string;
+  arguments: string[];
+}
+
 /** Listener a spawned game's bridge holds a connection to, so the game can tell its server died without running an exit hook (the OS closes a dead process's sockets). It accepts and discards, is unref'd, and is never closed. */
 export class ParentWatchListener {
   private server: net.Server | null = null;

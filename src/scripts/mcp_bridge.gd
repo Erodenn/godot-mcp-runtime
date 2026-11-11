@@ -97,6 +97,11 @@ const MAX_REDUCED_ERROR_CHARS := 512
 const PARENT_WATCH_PORT_ENV := "MCP_PARENT_WATCH_PORT"
 # A server killed outright is noticed within two checks: the first write after its death is answered with a reset, the second fails.
 const PARENT_WATCH_INTERVAL_MS := 2000
+# KEEP IN SYNC: STRANDED_SWEEP_ENV in src/utils/bridge-protocol.ts.
+# JSON {executable, arguments}: the server's own stranded-bridge repair, launched once the parent watch finds the server gone, so this script never edits project.godot.
+const STRANDED_SWEEP_ENV := "MCP_STRANDED_SWEEP"
+# The game outlives the sweep up to this long: a job or launcher that ends with the game would otherwise kill the sweep mid-repair.
+const STRANDED_SWEEP_WAIT_MS := 10000
 
 # KEEP IN SYNC: FRAME_CAP_COMMAND and FRAME_CAP_FIELD in src/tools/profiler-tools.ts.
 const FRAME_CAP_COMMAND := "frame_cap"
@@ -243,6 +248,9 @@ var _parent_watch: StreamPeerTCP = null
 var _parent_watch_established: bool = false
 var _parent_watch_next_ms: int = 0
 var _parent_watch_beat: PackedByteArray = PackedByteArray()
+# The running stranded-bridge sweep, or -1; the game quits once it ends or at the deadline.
+var _sweep_pid: int = -1
+var _sweep_deadline_ms: int = 0
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -285,6 +293,8 @@ func _is_usable_port(port: int) -> bool:
 	return port >= PORT_MIN and port <= PORT_MAX
 
 func _process(_delta: float) -> void:
+	if _sweep_pid != -1:
+		_poll_stranded_sweep()
 	if _parent_watch != null:
 		_poll_parent_watch()
 	if not _track_watch.is_empty():
@@ -341,6 +351,40 @@ func _poll_parent_watch() -> void:
 		push_warning("McpBridge: the parent watch connection was never established; this game will not quit by itself if the MCP server is killed")
 		return
 	print("McpBridge: the MCP server that started this game is gone; quitting")
+	_sweep_pid = _launch_stranded_sweep()
+	if _sweep_pid == -1:
+		get_tree().quit()
+		return
+	_sweep_deadline_ms = Time.get_ticks_msec() + STRANDED_SWEEP_WAIT_MS
+
+# A server killed outright leaves its McpBridge entry in project.godot. Returns the sweep's pid, or -1 when there is none to run.
+func _launch_stranded_sweep() -> int:
+	var text := OS.get_environment(STRANDED_SWEEP_ENV)
+	if text == "":
+		return -1
+	var command: Variant = JSON.parse_string(text)
+	var malformed := "McpBridge: %s is malformed; the McpBridge entry stays in project.godot until the next headless tool call on this project" % STRANDED_SWEEP_ENV
+	if not (command is Dictionary) or not (command.get("executable") is String) or not (command.get("arguments") is Array):
+		push_warning(malformed)
+		return -1
+	var arguments := PackedStringArray()
+	for argument: Variant in command["arguments"]:
+		if not (argument is String):
+			push_warning(malformed)
+			return -1
+		arguments.append(argument)
+	var pid := OS.create_process(command["executable"], arguments)
+	if pid == -1:
+		push_warning("McpBridge: the stranded-bridge sweep could not be started; the McpBridge entry stays in project.godot until the next headless tool call on this project")
+	return pid
+
+func _poll_stranded_sweep() -> void:
+	var running := OS.is_process_running(_sweep_pid)
+	if running and Time.get_ticks_msec() < _sweep_deadline_ms:
+		return
+	if running:
+		push_warning("McpBridge: the stranded-bridge sweep did not finish in %d ms; quitting anyway" % STRANDED_SWEEP_WAIT_MS)
+	_sweep_pid = -1
 	get_tree().quit()
 
 func _poll_peer(peer: PeerState) -> void:
