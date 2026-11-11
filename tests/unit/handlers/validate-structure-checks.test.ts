@@ -6,11 +6,7 @@ import { fixtureProjectPath } from '../../helpers/fixture-paths.js';
 
 const validBase = { projectPath: fixtureProjectPath };
 
-/**
- * A validate_batch payload carrying one target. Single mode with checks runs
- * the parse validation and the checks against one instantiated scene in one
- * Godot process, so its payload is the batch shape unwrapped by the handler.
- */
+/** A validate_batch payload carrying one target; single mode with checks returns the batch shape unwrapped by the handler. */
 function batchStdout(target: Record<string, unknown>): string {
   return JSON.stringify({ results: [{ target: 'main.tscn', errors: [], ...target }] });
 }
@@ -134,7 +130,6 @@ describe('handleValidate: structure checks', () => {
     expect(hasError(result)).toBe(false);
     const data = parseResult(result);
     expect(data.valid).toBe(false);
-    // One process now, so the findings appear exactly once and in order.
     expect(data.errors).toEqual(errors);
   });
 });

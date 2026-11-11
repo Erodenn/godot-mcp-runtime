@@ -1,26 +1,13 @@
-/**
- * Integration tests for headless scene mutation round-trips.
- *
- * Each mutating test gets a fresh tmp copy of the fixture project to avoid
- * touching the committed fixture. The auto-save invariant is pinned: every
- * mutation (add_node, set_node_property, delete_node) must persist to disk
- * without an explicit save_scene call.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { cpSync, readFileSync, writeFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
-
-// --- tmp project helpers ---
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -32,15 +19,11 @@ function makeTmpProject(): string {
 function cleanup(dirs: string[]) {
   for (const dir of dirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
   dirs.length = 0;
 }
-
-// --- shared runner ---
 
 let runner: GodotRunner;
 
@@ -48,8 +31,6 @@ beforeAll(async () => {
   runner = new GodotRunner({ godotPath: process.env.GODOT_PATH });
   await runner.detectGodotPath();
 });
-
-// --- tests ---
 
 describe('add_node round-trip', () => {
   const tmpDirs: string[] = [];
@@ -105,13 +86,7 @@ describe('add_node round-trip', () => {
   itGodot(
     'add_node with non-existent parentNodePath does not produce a success message or mutate the scene',
     async () => {
-      // Regression: SceneTree.quit(n) in Godot 4 only schedules a quit for
-      // end-of-frame, so control was falling through past the failing
-      // _apply_add_node call into save_scene_to_path + the success print().
-      // Stdout then read as success and the parent-not-found stderr was
-      // discarded. The fix is `return` after every `quit(1)` in
-      // godot_operations.gd; this test pins the contract that failed
-      // headless ops MUST NOT emit a "added successfully" line.
+      // SceneTree.quit(n) only schedules a quit for end-of-frame, so a failing headless op must `return` after quit(1) and emit no result line.
       const originalTscn = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
 
       let stdoutSeen = '';
@@ -134,16 +109,11 @@ describe('add_node round-trip', () => {
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
-      // Either the runner rejected, or it returned stdout the handler would
-      // classify as failure (no "added successfully" marker).
-      expect(stdoutSeen).not.toContain('added successfully');
-      // The Godot side should have reported the parent-not-found error to stderr.
+      expect(stdoutSeen).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderrSeen.toLowerCase()).toContain('parent node not found');
 
-      // The scene must not have been mutated: no phantom Orphan node entry.
       const tscnAfter = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
       expect(tscnAfter).not.toMatch(/\[node name="Orphan"/);
-      // Belt-and-suspenders: the file should be byte-identical to the original.
       expect(tscnAfter).toBe(originalTscn);
     },
     60000,
@@ -208,9 +178,7 @@ describe('set_node_properties round-trip', () => {
   itGodot(
     'reports success:false with an error naming the property when the property does not exist',
     async () => {
-      // Regression: node.set() is void and silently no-ops on unknown keys, so the
-      // GDScript handler used to unconditionally write success:true. Now it checks
-      // `prop in node` first and surfaces an error for unknown properties.
+      // node.set() is void and silently no-ops on unknown keys, so the handler must check `prop in node` first.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
@@ -247,8 +215,7 @@ describe('delete_nodes round-trip', () => {
   itGodot(
     'get_scene_tree no longer lists the node after delete_nodes',
     async () => {
-      // Fixture invariant: tests/fixtures/godot-project/main.tscn ships with a Sprite2D
-      // child of the root Node2D: fixture.test.ts guards this shape.
+      // Relies on main.tscn shipping a Sprite2D child of the root Node2D (fixture.test.ts guards this shape).
       await runner.executeOperation(
         'delete_nodes',
         { scenePath: 'main.tscn', nodePaths: ['root/Sprite2D'] },
@@ -279,14 +246,11 @@ describe('delete_nodes round-trip', () => {
       );
 
       const tscnContent = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
-      // The Sprite2D node entry should no longer appear in the file
       expect(tscnContent).not.toMatch(/\[node name="Sprite2D"/);
     },
     40000,
   );
 });
-
-// --- bug-fix regression coverage ---
 
 describe('add_node coerces dict properties (Bug #1)', () => {
   const tmpDirs: string[] = [];
@@ -321,7 +285,6 @@ describe('add_node coerces dict properties (Bug #1)', () => {
       const tscnContent = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
       expect(tscnContent).toMatch(/position = Vector2\(\s*100\s*,\s*200\s*\)/);
       expect(tscnContent).toMatch(/scale = Vector2\(\s*2\s*,\s*3\s*\)/);
-      // Color components serialize as floats; just assert the channel values are present
       expect(tscnContent).toMatch(/modulate = Color\(\s*1\s*,\s*0\.5\s*,\s*0\.25\s*,\s*1\s*\)/);
     },
     60000,
@@ -342,8 +305,7 @@ describe('connect_signal persists with CONNECT_PERSIST (Bug #2)', () => {
   itGodot(
     'connect_signal writes a [connection] entry that survives re-pack',
     async () => {
-      // Fixture has root Node2D (named "root") with a Label and Sprite2D child.
-      // The Label has the queue_free method; root has tree_exiting signal.
+      // Fixture root Node2D "root" has a Label (queue_free method) and Sprite2D; root has the tree_exiting signal.
       await runner.executeOperation(
         'connect_signal',
         {
@@ -380,9 +342,7 @@ describe('get_node_signals reports scene-root-relative connection targets', () =
   itGodot(
     'reports a child target as "root/<Child>" and a self-connection as "root", both usable by disconnect_signal',
     async () => {
-      // get_object().get_path() returns "" for a node instantiated outside the
-      // live SceneTree (which headless scenes always are), so before the fix
-      // every connection target read as empty, not only self-connections.
+      // get_object().get_path() returns "" for a node outside the live SceneTree (always so in headless), so every connection target once read as empty.
       await runner.executeOperation(
         'connect_signal',
         {
@@ -428,8 +388,6 @@ describe('get_node_signals reports scene-root-relative connection targets', () =
       };
       expect(selfConn.target).toBe('root');
 
-      // Both reported targets must round-trip straight into disconnect_signal
-      // with no rewriting by the caller.
       await runner.executeOperation(
         'disconnect_signal',
         {
@@ -476,7 +434,6 @@ describe('load_sprite rejects unimported textures with a clear error (Bug #4)', 
   itGodot(
     'returns a non-empty stderr / non-zero status rather than silently succeeding',
     async () => {
-      // Write a fresh 1x1 PNG without an .import sidecar.
       const pngBytes = Buffer.from([
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
@@ -499,21 +456,17 @@ describe('load_sprite rejects unimported textures with a clear error (Bug #4)', 
           tmpProject,
           30000,
         );
-        // If it didn't throw, we expect stderr to mention the failure
         errorMessage = stderr || '';
       } catch (err) {
         threw = true;
         errorMessage = err instanceof Error ? err.message : String(err);
       }
 
-      // Either a thrown error or a stderr message, but NOT silent success.
-      // At the raw runner level the cold-import probe fires before load():
-      // the marker names the texture so executeSceneOp can import and retry.
+      // At the raw runner level the cold-import probe fires before load() and names the texture so executeSceneOp can import and retry.
       expect(threw || errorMessage.length > 0).toBe(true);
       expect(errorMessage).toContain('[IMPORT_NEEDED]');
       expect(errorMessage).toContain('res://unimported.png');
 
-      // .tscn must NOT have been mutated to add a texture line.
       const tscnContent = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
       expect(tscnContent).not.toMatch(/texture\s*=\s*ExtResource/);
     },
@@ -550,10 +503,7 @@ describe('find_node_by_path accepts root-name-prefixed paths (Bug #5)', () => {
   itGodot(
     'get_node_properties accepts the actual scene root name ("Main") as first segment',
     async () => {
-      // Fixture's scene root is named "Main". Before fix: "Main/Label" was
-      // routed verbatim into get_node_or_null, which only resolves descendants
-      // and would return null. After fix: first segment matching the root name
-      // is stripped.
+      // The fixture root is "Main"; "Main/Label" must have the root segment stripped before get_node_or_null, which only resolves descendants.
       const { stdout } = await runner.executeOperation(
         'get_node_properties',
         { scenePath: 'main.tscn', nodes: [{ node_path: 'Main/Label' }] },
@@ -567,8 +517,6 @@ describe('find_node_by_path accepts root-name-prefixed paths (Bug #5)', () => {
     60000,
   );
 });
-
-// --- helpers ---
 
 interface TreeNode {
   name: string;

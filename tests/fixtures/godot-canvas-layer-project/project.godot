@@ -1,0 +1,24 @@
+; Engine configuration file.
+; CanvasLayer and content_scale_factor fixture for godot-mcp-runtime tests: window and viewport are the same size.
+; See tests/fixtures/README.md for usage.
+
+config_version=5
+
+[application]
+
+config/name="godot-mcp-runtime canvas layer fixture"
+run/main_scene="res://canvas_layer_probe.tscn"
+config/features=PackedStringArray("4.4")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

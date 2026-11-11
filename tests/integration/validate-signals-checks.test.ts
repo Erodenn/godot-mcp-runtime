@@ -1,19 +1,6 @@
-/**
- * Integration tests for the signals check of the validate tool
- * (GDScript op validate_checks with checks: [{ type: "signals" }]).
- *
- * Covers the four check classes against real Godot: clean scene verifies,
- * method_missing_on_target (connection to a method the target lacks),
- * naming_convention (handler not starting with _on_), orphaned_handler
- * (script-defined _on_* method with no incoming connection), and the
- * nodePath subtree scope (issues outside the scope are not reported, and
- * handlers connected to targets outside the scope are not false orphans).
- *
- * Requires GODOT_PATH.
- */
-
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { cpSync, writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -21,6 +8,8 @@ import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { extractJson } from '../../src/utils/output-parsing.js';
+import { handleValidate } from '../../src/tools/validate-tools.js';
+import { unwrap } from '../helpers/assertions.js';
 
 function makeTmpProject(): string {
   const id = randomBytes(6).toString('hex');
@@ -32,10 +21,8 @@ function makeTmpProject(): string {
 function cleanup(dirs: string[]) {
   for (const dir of dirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
   dirs.length = 0;
 }
@@ -48,8 +35,7 @@ async function verify(runner: GodotRunner, project: string, nodePath?: string) {
     checks: [check],
   };
   const { stdout } = await runner.executeOperation('validate_checks', params, project, 30000);
-  // Adapt the validate_checks shape ({ valid, errors }) to the issue-oriented
-  // assertions below: each error carries node/signal/target/method/problem.
+  // Adapts the validate_checks shape ({ valid, errors }) to issue-oriented assertions.
   const parsed = JSON.parse(extractJson(stdout)) as {
     valid: boolean;
     errors: Array<{
@@ -101,9 +87,7 @@ describe('validate: signals checks', () => {
   itGodot(
     'reports method_missing_on_target when the handler does not exist on the target',
     async () => {
-      // connect_signal refuses to wire a nonexistent method, so write the
-      // malformed [connection] directly into the .tscn - the state a broken
-      // code-generated or hand-edited scene ends up in.
+      // connect_signal refuses a nonexistent method, so the malformed [connection] is written straight into the .tscn.
       const tscn = join(tmpProject, 'main.tscn');
       let content = readFileSync(tscn, 'utf8');
       content +=
@@ -127,7 +111,6 @@ describe('validate: signals checks', () => {
   itGodot(
     'reports naming_convention when the handler does not begin with _on_',
     async () => {
-      // queue_free exists on Label, so only the naming check fires.
       await runner.executeOperation(
         'connect_signal',
         {
@@ -182,8 +165,7 @@ describe('validate: signals checks', () => {
   itGodot(
     'a partially-wired node only reports the unwired _on_* method as orphaned',
     async () => {
-      // One node with two _on_* methods where only one is connected: the
-      // connected one must not be flagged just because a sibling method is.
+      // The connected handler must not be flagged just because a sibling method is.
       mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
       writeFileSync(
         join(tmpProject, 'scripts', 'partial.gd'),
@@ -218,7 +200,6 @@ describe('validate: signals checks', () => {
       );
       expect(orphans.length).toBe(1);
       expect(orphans[0].method).toBe('_on_second_orphaned');
-      // The connected handler must appear nowhere in the issues.
       expect(
         result.issues.some((i: { method?: string }) => i.method === '_on_first_connected'),
       ).toBe(false);
@@ -265,11 +246,46 @@ describe('validate: signals checks', () => {
   );
 
   itGodot(
+    'does not report a handler the script connects in code, and still reports its unconnected sibling',
+    async () => {
+      mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(tmpProject, 'scripts', 'code_wired.gd'),
+        'extends Label\n' +
+          'func _ready():\n' +
+          '\tvisibility_changed.connect(_on_code_connected)\n' +
+          'func _on_code_connected():\n' +
+          '\ttext = "one"\n' +
+          'func _on_really_orphaned():\n' +
+          '\ttext = "two"\n',
+      );
+      await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: 'root/Label', scriptPath: 'scripts/code_wired.gd' },
+        tmpProject,
+        30000,
+      );
+
+      // Through the handler: the raw validate_checks operation cannot see code connections, the token pass in the handler does.
+      const response = await handleValidate(runner, {
+        projectPath: tmpProject,
+        scenePath: 'main.tscn',
+        checks: [{ type: 'signals' }],
+      });
+      const payload = JSON.parse(unwrap(response).content[0]!.text) as {
+        errors: Array<{ problem?: string; method?: string }>;
+      };
+      const orphans = payload.errors.filter((e) => e.problem === 'orphaned_handler');
+      expect(orphans.map((e) => e.method)).toEqual(['_on_really_orphaned']);
+      expect(orphans[0]).not.toHaveProperty('script');
+    },
+    60000,
+  );
+
+  itGodot(
     'reports method_missing_on_target for a misspelled private handler on a scripted node',
     async () => {
-      // The handler is named without an _on_ prefix so it cannot register as an
-      // orphan: the misspelled connection below is then the only possible
-      // issue, and the whole issues array can be asserted.
+      // The handler has no _on_ prefix so it cannot register as an orphan; the misspelled connection is then the only possible issue.
       mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
       writeFileSync(
         join(tmpProject, 'scripts', 'handlers.gd'),
@@ -281,9 +297,7 @@ describe('validate: signals checks', () => {
         tmpProject,
         30000,
       );
-      // connect_signal refuses a method the target lacks, so the misspelling
-      // is written straight into the .tscn - the state a hand-edited or
-      // code-generated scene ends up in.
+      // connect_signal refuses a method the target lacks, so the misspelling is written straight into the .tscn.
       const tscn = join(tmpProject, 'main.tscn');
       writeFileSync(
         tscn,
@@ -311,10 +325,7 @@ describe('validate: signals checks', () => {
   itGodot(
     'reports no issues for a scripted node whose handlers are all wired',
     async () => {
-      // False-positive guard for the predicate above: a scripted node with one
-      // declared, connected handler must produce an empty issues array. Any
-      // engine-internal connection that leaks through is printed by the
-      // whole-array comparison instead of being filtered away.
+      // False-positive guard: whole-array comparison prints any engine-internal connection that leaks through instead of filtering it.
       mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
       writeFileSync(
         join(tmpProject, 'scripts', 'all_wired.gd'),
@@ -349,7 +360,6 @@ describe('validate: signals checks', () => {
   itGodot(
     'scopes to the nodePath subtree',
     async () => {
-      // Orphaned handler on Label, scope verification to Sprite2D: no issues.
       mkdirSync(join(tmpProject, 'scripts'), { recursive: true });
       writeFileSync(
         join(tmpProject, 'scripts', 'orphaned.gd'),

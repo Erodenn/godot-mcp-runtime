@@ -1,0 +1,8 @@
+[gd_scene format=3]
+
+[node name="MotionStatic" type="Node2D"]
+
+[node name="Still" type="ColorRect" parent="."]
+offset_right = 200.0
+offset_bottom = 200.0
+color = Color(1, 0, 0, 1)

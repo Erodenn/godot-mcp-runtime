@@ -1,16 +1,4 @@
-/**
- * Shared assertion helpers for handler tests.
- *
- * Handlers return `Result<ToolSuccessPayload, ToolResponse>` instead of
- * `ToolResponse` directly - the dispatch edge in `src/dispatch.ts` maps the
- * Result back to the MCP wire envelope. These helpers accept either shape so
- * tests written before or after that change stay readable.
- *
- * `hasError` is the canonical predicate. `unwrap` returns the underlying
- * envelope (the success `value` or the error `error`) so test code that needs
- * to inspect `content[i].text` directly can do so without knowing whether the
- * handler returned a Result or a raw response.
- */
+/** Handlers return `Result<ToolSuccessPayload, ToolResponse>`; these helpers accept either that or a raw ToolResponse. */
 
 import { expect } from 'vitest';
 
@@ -30,12 +18,7 @@ function isResult(value: unknown): value is { ok: boolean; value?: unknown; erro
   return typeof value === 'object' && value !== null && 'ok' in (value as Record<string, unknown>);
 }
 
-/**
- * Return the wire-shaped envelope from either a Result-wrapped handler return
- * or a raw `ToolResponse`. Use in tests that need to read `content[i].text`
- * directly: `unwrap(result).content[0].text` works regardless of which side
- * of the Phase-3 boundary the handler under test is on.
- */
+/** Returns the wire-shaped envelope from a Result-wrapped or raw handler return. */
 export function unwrap(result: unknown): EnvelopeShape {
   if (isResult(result)) {
     return (result.ok ? result.value : result.error) as EnvelopeShape;
@@ -50,10 +33,7 @@ export function hasError(result: unknown): boolean {
   return typeof result === 'object' && result !== null && 'isError' in result;
 }
 
-/**
- * Extract the rendered error text from a handler error response.
- * Returns `null` if the result is not an error envelope or has no text content.
- */
+/** Null when the result is not an error envelope or has no text content. */
 export function errorText(result: unknown): string | null {
   if (!hasError(result)) return null;
   const envelope = unwrap(result);
@@ -62,12 +42,7 @@ export function errorText(result: unknown): string | null {
   return content[0]?.text ?? null;
 }
 
-/**
- * Assert the handler returned an error envelope AND its rendered text matches
- * `pattern`. Use this in rejection tests so distinct branches stay
- * distinguishable: a refactor that misroutes an error path will fail loudly
- * instead of silently passing because both branches end in `isError: true`.
- */
+/** Asserts both the error envelope and its text, so a misrouted error path fails instead of passing on `isError: true` alone. */
 export function expectErrorMatching(result: unknown, pattern: RegExp): void {
   expect(hasError(result)).toBe(true);
   const text = errorText(result);

@@ -28,13 +28,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Create GitHub release
+      - name: Assemble release notes
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_BODY_MAX_CHARS: 125000
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           highlights=".github/release-notes/${tag}.md"
@@ -45,6 +43,20 @@ jobs:
           else
             cp generated-notes.md release-notes.md
           fi
+          chars=$(LC_ALL=C.UTF-8 wc -m < release-notes.md)
+          if [ "$chars" -gt "$RELEASE_BODY_MAX_CHARS" ]; then
+            echo "::error file=${highlights}::Release body is ${chars} characters; GitHub accepts at most ${RELEASE_BODY_MAX_CHARS}. Shorten the release notes before tagging."
+            exit 1
+          fi
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
           gh release create "$tag" \
             --title "$tag" \
             --notes-file release-notes.md \

@@ -1,0 +1,11 @@
+[gd_scene format=3 uid="uid://76owar7af2bj"]
+
+[node name="Base" type="Node2D"]
+
+[node name="Arm" type="Sprite2D" parent="."]
+position = Vector2(1, 2)
+modulate = Color(1, 0, 0, 1)
+
+[node name="Leg" type="Label" parent="."]
+offset_right = 40.0
+text = "leg"

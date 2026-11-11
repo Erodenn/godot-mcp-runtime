@@ -1,20 +1,14 @@
-/**
- * Fakes for runtime-session handler tests (simulate_input, check_project's
- * runtime probe, ...).
- *
- * Unlike the generic fake-runner.ts (headless executeOperation), these model
- * the live-bridge command path: sendCommandWithErrors + the public session
- * fields handlers guard on (activeSessionMode, activeProjectPath,
- * activeProcess).
- */
+/** Models the live-bridge command path (sendCommandWithErrors and the public session fields handlers guard on), unlike the headless fake-runner.ts. */
 
 import type {
   GodotRunner,
   GodotProcess,
+  RuntimeSessionInfo,
   RuntimeSessionMode,
   RuntimeStopResult,
 } from '../../src/utils/godot-runner.js';
 import type { Elicitor, McpContext } from '../../src/utils/mcp-context.js';
+import { fakeSessionApi } from './fake-sessions.js';
 
 export interface BridgeCall {
   command: string;
@@ -32,35 +26,37 @@ export interface RuntimeFake {
     process?: Partial<GodotProcess> | null;
     hasExited?: boolean;
   }): void;
+  setOtherSessions(infos: RuntimeSessionInfo[]): void;
   setBridgeResponse(response: unknown, runtimeErrors?: string[]): void;
   setSendCommandError(error: Error | null): void;
   setBridgeHook(hook: (() => void) | null): void;
-  /**
-   * Stand in for the per-action stderr attribution the real runner derives from
-   * boundary sentinels, so handler tests can drive the attachment logic without
-   * a process. Defaults to no errors and no timeout.
-   */
+  /** Stands in for the per-action stderr attribution the real runner derives from boundary sentinels. */
   setActionErrorBuckets(buckets: string[][], trailing?: string[], timedOut?: boolean): void;
 }
 
+/** Test context with the given elicitor; the default accepts every prompt. Its clock moves only by `promptMs` per prompt (0 by default), so a budget edge holds to the millisecond. */
 export function makeContext(
   opts: {
     elicit?: Elicitor;
-    strict?: boolean;
     disableElicitation?: boolean;
-    disableSecurity?: boolean;
+    /** How long each prompt stays open on the context's clock before it is answered. */
+    promptMs?: number;
   } = {},
 ): McpContext {
   const defaultElicit: Elicitor = async () => ({
     action: 'accept',
     content: { confirm: true },
   });
+  const answer = opts.elicit ?? defaultElicit;
+  let clockMs = 0;
   return {
-    elicitor: opts.elicit ?? defaultElicit,
-    strictMode: opts.strict === true,
+    elicitor: async (request) => {
+      clockMs += opts.promptMs ?? 0;
+      return answer(request);
+    },
     disableElicitation: opts.disableElicitation === true,
-    disableSecurity: opts.disableSecurity === true,
-    sessionState: { runProjectConfirmed: new Set<string>() },
+    sessionState: { runProjectConfirmed: new Set<string>(), runScriptConfirmed: new Set<string>() },
+    now: () => clockMs,
   };
 }
 
@@ -74,6 +70,7 @@ export function createRuntimeFake(): RuntimeFake {
   let actionErrorBuckets: string[][] = [];
   let actionErrorTrailing: string[] = [];
   let actionSentinelTimedOut = false;
+  let others: RuntimeSessionInfo[] = [];
 
   let state = {
     activeSessionMode: null as RuntimeSessionMode | null,
@@ -91,6 +88,17 @@ export function createRuntimeFake(): RuntimeFake {
     get activeProcess() {
       return state.activeProcess;
     },
+    ...fakeSessionApi(() => ({
+      current: {
+        mode: state.activeSessionMode,
+        projectPath: state.activeProjectPath,
+        process: state.activeProcess,
+      },
+      others,
+    })),
+    // The fake has nothing to serialize, so the operation runs at once.
+    runExclusive: <T>(_label: string, operation: () => Promise<T>): Promise<T> => operation(),
+    queueTurn: () => null,
     detectGodotPath: async () => '/usr/local/bin/godot',
     getVersion: async () => '4.7.2.stable.official',
     sendCommandWithErrors: async (
@@ -120,7 +128,13 @@ export function createRuntimeFake(): RuntimeFake {
       state.activeSessionMode = null;
       state.activeProjectPath = null;
       state.activeProcess = null;
-      return { success: true };
+      return {
+        mode: 'spawned',
+        projectPath: '/fake/project',
+        output: [],
+        errors: [],
+        cleanupProblems: [],
+      };
     },
     getErrorCount: () => 0,
     beginActionErrorCapture: () => ({ marker: 0 }),
@@ -158,6 +172,9 @@ export function createRuntimeFake(): RuntimeFake {
         activeProjectPath: opts.projectPath ?? null,
         activeProcess: proc,
       };
+    },
+    setOtherSessions(infos: RuntimeSessionInfo[]) {
+      others = infos;
     },
     setBridgeResponse(response: unknown, runtimeErrors?: string[]) {
       bridgeResponse = response;

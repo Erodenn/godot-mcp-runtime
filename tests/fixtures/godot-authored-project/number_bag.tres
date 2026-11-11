@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="NumberBag" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://number_bag.gd" id="1_bag"]
+
+[resource]
+script = ExtResource("1_bag")
+count = 1
+stock = {
+"gold": 1,
+"rate": 2.0
+}
+tags = [1, 2.0]
+any = 2.0

@@ -1,26 +1,9 @@
-/**
- * Regression tests for GitHub issue #62: attaching a script that cannot be
- * instantiated reported `success: true` while the script never reached the
- * saved scene.
- *
- * Root cause: `load()` succeeds and returns a Script resource even when the
- * script is unusable (a GDScript parse error, or a C# class missing from the
- * compiled game assembly), and `Object.set_script()` on an unusable script
- * fails SILENTLY -- it prints an ERROR to stderr and leaves `get_script()`
- * null, with nothing for the caller to check. `godot_operations.gd` now
- * gates every "script" assignment (`attach_script`, `set_node_properties`,
- * `add_node`) on `_check_script_attachable` (can_instantiate() / is_abstract())
- * before the assignment, and backstops with `_verify_script_attached` after
- * it, in case some case slips past the gate.
- *
- * Requires GODOT_PATH. Skipped locally when it is unset; CI sets it in the
- * godot-integration job and runs this file on Godot 4.5.1 and 4.6.2 (both
- * standard, non-.NET builds -- the C#-specific case is skipped there, and
- * the opt-in C# test below never runs in CI).
- */
+// `load()` succeeds on an unusable script (parse error, C# class missing from the assembly) and set_script() then fails silently, leaving get_script() null.
+// The standard builds CI runs skip the C#-specific case; the opt-in C# test never runs in CI.
 
 import { describe, beforeAll, beforeEach, afterAll, expect, it } from 'vitest';
-import { cpSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { cpSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -28,7 +11,7 @@ import { execFileSync } from 'child_process';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
-import { extractJson } from '../../src/utils/output-parsing.js';
+import { extractJson, OPERATION_RESULT_SENTINEL } from '../../src/utils/output-parsing.js';
 
 const PARSE_ERROR_SCRIPT = 'extends Node2D\nfunc _ready(:\n';
 const VALID_SCRIPT = 'extends Node2D\nfunc _ready():\n\tpass\n';
@@ -73,10 +56,8 @@ beforeEach(() => {
 afterAll(() => {
   for (const dir of tmpDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
+      removeTmpDir(dir);
+    } catch {}
   }
 });
 
@@ -96,13 +77,8 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
         30000,
       );
 
-      // attach_script quits(1) before printing its success payload, so
-      // stdout carries no success JSON -- the error is on stderr. Not
-      // asserting stdout is empty outright: on some engine builds a stray
-      // RID-leak warning at process exit lands on stdout instead of stderr
-      // (see STDOUT_NOISE_LINE_PATTERN in src/utils/headless-op.ts), which
-      // is exit noise, not a payload.
-      expect(stdout).not.toMatch(/"success"\s*:\s*true/);
+      // Stdout is not asserted empty: some engine builds print a stray RID-leak warning to stdout at exit (see STDOUT_NOISE_LINE_PATTERN in src/utils/headless-op.ts).
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/cannot be instantiated/i);
       expect(stderr).toMatch(/parse error/i);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -126,7 +102,7 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
       );
 
       const parsed = JSON.parse(extractJson(stdout));
-      expect(parsed.success).toBe(true);
+      expect(parsed.scriptPath).toBe('good.gd');
       const sceneText = readFileSync(scenePath, 'utf-8');
       expect(sceneText).toMatch(/ext_resource type="Script" path="res:\/\/good\.gd"/);
       expect(sceneText).toMatch(/script = ExtResource\(/);
@@ -156,7 +132,7 @@ describe('attach_script rejects a script that cannot be instantiated', () => {
         30000,
       );
 
-      expect(stdout).not.toMatch(/"success"\s*:\s*true/);
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/no c# support/i);
       expect(stderr).toMatch(/GODOT_PATH/);
       const sceneText = readFileSync(scenePath, 'utf-8');
@@ -217,7 +193,7 @@ describe('add_node rejects a properties.script that cannot be instantiated', () 
         30000,
       );
 
-      expect(stdout).not.toContain('added successfully');
+      expect(stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(stderr).toMatch(/cannot be instantiated/i);
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="BadScripted"/);
@@ -227,16 +203,7 @@ describe('add_node rejects a properties.script that cannot be instantiated', () 
   );
 });
 
-// --- Opt-in C# coverage ---
-//
-// Gated on GODOT_MONO_PATH (a Godot .NET build) and a `dotnet` on PATH,
-// neither of which CI provides. Set both locally to run this suite:
-//
-//   GODOT_MONO_PATH=/path/to/Godot_mono npx vitest run tests/integration/script-attach-validation.test.ts
-//
-// Builds a minimal C# project fixture from scratch in a tmp dir (mirroring
-// the manual repro template): a Player.cs class, a matching .csproj using
-// the Godot.NET.Sdk, and a scene with a node to attach it to.
+// Gated on GODOT_MONO_PATH (a Godot .NET build) and `dotnet` on PATH, which CI provides neither of.
 const monoGodotPath = process.env.GODOT_MONO_PATH;
 const itMono = it.skipIf(!monoGodotPath || !hasDotnet());
 
@@ -295,21 +262,19 @@ describe('C# script attachment against a Godot .NET build', () => {
       const scenePath = join(monoProject, 'main.tscn');
       const originalTscn = readFileSync(scenePath, 'utf-8');
 
-      // Before dotnet build: the compiled assembly has no Player class yet.
       const before = await monoRunner.executeOperation(
         'attach_script',
         { scenePath: 'main.tscn', nodePath: 'root/Player', scriptPath: 'Player.cs' },
         monoProject,
         30000,
       );
-      expect(before.stdout).not.toMatch(/"success"\s*:\s*true/);
+      expect(before.stdout).not.toContain(OPERATION_RESULT_SENTINEL);
       expect(before.stderr).toMatch(/cannot be instantiated/i);
       expect(before.stderr).toMatch(/dotnet build/i);
       expect(readFileSync(scenePath, 'utf-8')).toBe(originalTscn);
 
       execFileSync('dotnet', ['build'], { cwd: monoProject, timeout: 120000, stdio: 'ignore' });
 
-      // After dotnet build: the class is in the compiled assembly.
       const after = await monoRunner.executeOperation(
         'attach_script',
         { scenePath: 'main.tscn', nodePath: 'root/Player', scriptPath: 'Player.cs' },
@@ -317,7 +282,7 @@ describe('C# script attachment against a Godot .NET build', () => {
         30000,
       );
       const parsed = JSON.parse(extractJson(after.stdout));
-      expect(parsed.success).toBe(true);
+      expect(parsed.scriptPath).toBe('Player.cs');
       const sceneAfter = readFileSync(scenePath, 'utf-8');
       expect(sceneAfter).toMatch(/ext_resource type="Script" path="res:\/\/Player\.cs"/);
       expect(sceneAfter).toMatch(/script = ExtResource\(/);

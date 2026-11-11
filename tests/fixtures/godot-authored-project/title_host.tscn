@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://title_host.gd" id="1_host"]
+
+[node name="TitleHost" type="Node"]
+script = ExtResource("1_host")

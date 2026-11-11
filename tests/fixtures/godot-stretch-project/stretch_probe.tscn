@@ -1,0 +1,22 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://stretch_probe.gd" id="1"]
+
+[node name="StretchProbe" type="Control"]
+mouse_filter = 2
+script = ExtResource("1")
+
+[node name="ClickBtn" type="Button" parent="."]
+offset_left = 200.0
+offset_top = 300.0
+offset_right = 520.0
+offset_bottom = 420.0
+text = "Click"
+
+[node name="GhostBtn" type="Button" parent="."]
+mouse_filter = 2
+offset_left = 200.0
+offset_top = 600.0
+offset_right = 520.0
+offset_bottom = 720.0
+text = "Ghost"

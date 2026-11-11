@@ -1,11 +1,3 @@
-/**
- * Recursive validation of a structure check's schema.
- *
- * A malformed entry below the top level used to cross the boundary unchecked
- * and land on a typed GDScript parameter. Rejecting it here is what keeps the
- * diagnosis specific about which part of the schema is wrong.
- */
-
 import { describe, it, expect } from 'vitest';
 import { handleValidate } from '../../../src/tools/validate-tools.js';
 import { createFakeRunner } from '../../helpers/fake-runner.js';
@@ -24,9 +16,8 @@ describe('handleValidate - nested structure schema validation', () => {
     });
 
     expectErrorMatching(result, /Invalid schema at schema\.children\[0\]/);
-    // The malformed entry is rejected before Godot is spawned at all: the
-    // parse validation and the checks share one process, and the schema is
-    // shape-checked before that process is asked for.
+    // Rejected before Godot is spawned: the parse validation and the checks share one process, and the
+    // schema is shape-checked first.
     expect(fake.calls).toEqual([]);
   });
 
@@ -67,5 +58,35 @@ describe('handleValidate - nested structure schema validation', () => {
     expect(hasError(result)).toBe(false);
     expect(fake.calls.map((c) => c.operation)).toEqual(['validate_batch']);
     expect(fake.calls[0]!.params).toEqual({ targets: [{ scene_path: SCENE, checks }] });
+  });
+});
+
+describe('handleValidate - signals check node spelling', () => {
+  it('refuses a signals check that carries both nodePath and node_path', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: SCENE,
+      checks: [{ type: 'signals', nodePath: 'root/HUD', node_path: 'root/Other' }],
+    });
+
+    expectErrorMatching(result, /nodePath or node_path, not both/);
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('refuses the pair on a targets item as well', async () => {
+    const fake = createFakeRunner();
+    const result = await handleValidate(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      targets: [
+        {
+          scenePath: SCENE,
+          checks: [{ type: 'signals', nodePath: 'root/HUD', node_path: 'root' }],
+        },
+      ],
+    });
+
+    expect(fake.calls).toEqual([]);
+    expect(JSON.stringify(result)).toMatch(/nodePath or node_path, not both/);
   });
 });

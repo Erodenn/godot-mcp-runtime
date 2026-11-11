@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3 uid="uid://clomui4eibwiq"]
+
+[ext_resource type="Script" uid="uid://cp6gyxwwwr27j" path="res://player.gd" id="1_abc"]
+
+[node name="Player" type="Node2D"]
+script = ExtResource("1_abc")
+speed = 9.0
+
+[node name="Body" type="Sprite2D" parent="."]
+position = Vector2(3, 4)

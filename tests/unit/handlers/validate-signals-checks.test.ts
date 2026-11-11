@@ -11,11 +11,7 @@ function parseResult(result: unknown): { valid: boolean; errors: unknown[] } {
   return JSON.parse(envelope.content[0]!.text);
 }
 
-/**
- * The single call a scenePath-plus-checks validate makes. Single mode runs the
- * parse validation and the checks against one instantiated scene in one Godot
- * process, so the target travels inside validate_batch's targets array.
- */
+/** The single call a scenePath-plus-checks validate makes: parse validation and checks share one process, so the target travels in validate_batch targets. */
 function checksTarget(fake: { calls: Array<{ operation: string; params: unknown }> }) {
   expect(fake.calls).toHaveLength(1);
   const call = fake.calls[0]!;
@@ -112,7 +108,6 @@ describe('handleValidate: signals checks', () => {
     expect(hasError(result)).toBe(false);
     const data = parseResult(result);
     expect(data.valid).toBe(false);
-    // One process now, so the findings appear exactly once and in order.
     expect(data.errors).toEqual(errors);
   });
 

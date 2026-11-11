@@ -1,29 +1,46 @@
-/**
- * Shared paths to the committed Godot fixture project.
- *
- * Tests should import these instead of redoing the
- * fileURLToPath/dirname/join dance in every spec file.
- */
-
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Absolute path to tests/fixtures/godot-project. */
 export const fixtureProjectPath = join(here, '..', 'fixtures', 'godot-project');
 
-/** Absolute path to tests/fixtures/godot-profiling-project (hot _process loop). */
+/** Files shaped the way the Godot editor writes them; copy it before mutating. */
+export const authoredFixtureProjectPath = join(here, '..', 'fixtures', 'godot-authored-project');
+
 export const profilingFixtureProjectPath = join(here, '..', 'fixtures', 'godot-profiling-project');
 
-/** Scene path *relative to the project root*: matches the MCP tool contract. */
+/** A 720x1280 viewport under `canvas_items` stretch in a 540x960 window; copy it before launching. */
+export const stretchFixtureProjectPath = join(here, '..', 'fixtures', 'godot-stretch-project');
+
+/** A 1280x720 viewport in a window of the same size under `canvas_items` stretch, with a scene holding a transformed CanvasLayer and one that sets `content_scale_factor`; copy it before launching. */
+export const canvasLayerFixtureProjectPath = join(
+  here,
+  '..',
+  'fixtures',
+  'godot-canvas-layer-project',
+);
+
+export const canvasLayerProbeScenePath = 'canvas_layer_probe.tscn';
+
+export const contentScaleProbeScenePath = 'content_scale_probe.tscn';
+
 export const fixtureScenePath = 'main.tscn';
 
-/** Absolute path to the fixture's main.tscn. */
 export const fixtureSceneAbsPath = join(fixtureProjectPath, fixtureScenePath);
 
-/** Probe scene for the simulate_input integration tests (sibling of main.tscn). */
 export const inputProbeScenePath = 'input_probe.tscn';
 
-/** Absolute path to the fixture's input_probe.tscn. */
 export const inputProbeSceneAbsPath = join(fixtureProjectPath, inputProbeScenePath);
+
+export const inputOcclusionScenePath = 'input_probe_occlusion.tscn';
+
+export const inputScrollScenePath = 'input_probe_scroll.tscn';
+
+export const blankScenePath = 'blank.tscn';
+
+export const blankSceneAbsPath = join(fixtureProjectPath, blankScenePath);
+
+export const motionAnimatedScenePath = 'motion_animated.tscn';
+
+export const motionStaticScenePath = 'motion_static.tscn';

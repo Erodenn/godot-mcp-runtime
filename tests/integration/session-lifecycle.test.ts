@@ -1,14 +1,6 @@
-/**
- * A spawned Godot that dies on its own (killed
- * from outside, the same shape as a crash or a window the user closed) must
- * clear its own session and bridge artifacts, keep its captured logs readable
- * through `get_debug_output`, and let `stop_project` succeed idempotently.
- *
- * Requires GODOT_PATH.
- */
-
 import { describe, beforeAll, afterEach, expect } from 'vitest';
-import { existsSync, readFileSync, cpSync, rmSync } from 'fs';
+import { existsSync, readFileSync, cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -22,7 +14,6 @@ import { bridgeDir, mcpDir } from '../../src/utils/artifact-paths.js';
 
 const BRIDGE_WAIT_MS = 20000;
 const CASE_TIMEOUT_MS = 60000;
-/** How long to wait for the OS to deliver the killed process's exit event. */
 const EXIT_WAIT_MS = 15000;
 
 describe('spawned session self-exit', () => {
@@ -34,19 +25,14 @@ describe('spawned session self-exit', () => {
     await runner.detectGodotPath();
   });
 
-  // Runs even when an assertion above threw, so no Godot is stranded.
   afterEach(async () => {
     try {
       await runner.stopProject();
-    } catch {
-      // already stopped
-    }
+    } catch {}
     if (tmpProject) {
       try {
-        rmSync(tmpProject, { recursive: true, force: true });
-      } catch {
-        // best-effort
-      }
+        removeTmpDir(tmpProject);
+      } catch {}
       tmpProject = null;
     }
   });
@@ -62,8 +48,7 @@ describe('spawned session self-exit', () => {
       const spawned = runner.activeProcess!;
       expect(existsSync(bridgeDir(tmpProject))).toBe(true);
 
-      // Kill it the way the engine crashing or the user closing the window
-      // would: from outside, with no stop_project call.
+      // Killed from outside with no stop_project call, the way a crash or a closed window would.
       const exited = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
           () => reject(new Error('Godot process did not exit within timeout')),
@@ -76,10 +61,8 @@ describe('spawned session self-exit', () => {
       });
       spawned.process.kill('SIGKILL');
       await exited;
-      // The 'exit' listener under test is registered before this one, so it
-      // has already run by the time the promise settles.
+      // The 'exit' listener under test is registered before this one, so it has already run when the promise settles.
 
-      // Session fields cleared, process and its logs retained.
       expect(runner.activeSessionMode).toBeNull();
       expect(runner.activeProjectPath).toBeNull();
       expect(runner.activeBridgePort).toBeNull();
@@ -87,24 +70,21 @@ describe('spawned session self-exit', () => {
       expect(runner.activeProcess).not.toBeNull();
       expect(runner.activeProcess!.hasExited).toBe(true);
 
-      // Bridge artifacts are gone from disk; the .mcp container is not.
       expect(existsSync(bridgeDir(tmpProject))).toBe(false);
       expect(readFileSync(join(tmpProject, 'project.godot'), 'utf8')).not.toContain('McpBridge=');
       expect(existsSync(mcpDir(tmpProject))).toBe(true);
 
-      // The logs are still reachable and the exit is reported.
       const debugResult = handleGetDebugOutput(runner, {});
       expect(hasError(debugResult)).toBe(false);
       const debug = JSON.parse(unwrap(debugResult).content[0].text);
       expect(debug.running).toBe(false);
       expect(debug.exitCode !== undefined).toBe(true);
 
-      // stop_project succeeds and says the process had already exited.
       const stopResult = await handleStopProject(runner);
       expect(hasError(stopResult)).toBe(false);
       const stopped = JSON.parse(unwrap(stopResult).content[0].text);
       expect(stopped.alreadyExited).toBe(true);
-      expect(stopped.mode).toBe('spawned');
+      expect(stopped.sessionMode).toBe('spawned');
       expect(runner.activeProcess).toBeNull();
     },
     CASE_TIMEOUT_MS,

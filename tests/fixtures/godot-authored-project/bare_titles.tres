@@ -1,0 +1,7 @@
+[gd_resource type="Resource" script_class="TitleTable" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://title_table.gd" id="1_titles"]
+
+[resource]
+script = ExtResource("1_titles")
+label = &"era_1"

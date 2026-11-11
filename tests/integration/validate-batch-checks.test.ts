@@ -1,16 +1,8 @@
-/**
- * Integration tests for per-target checks inside the batch validate operation
- * (GDScript op validate_batch with a checks[] array on a targets[] item).
- *
- * These assert the two properties the wire shape exists for: the whole batch,
- * checks included, runs in one Godot process, and a target that cannot be
- * loaded reports on itself without costing the other targets their result.
- *
- * Requires GODOT_PATH.
- */
+/** The whole batch, checks included, runs in one Godot process, and a target that cannot be loaded reports on itself without costing the others their result. */
 
 import { describe, beforeAll, beforeEach, afterAll, expect } from 'vitest';
-import { cpSync, rmSync } from 'fs';
+import { cpSync } from 'fs';
+import { removeTmpDir } from '../helpers/tmp.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
@@ -24,6 +16,7 @@ const TEST_TIMEOUT_MS = 60000;
 
 interface BatchResult {
   target: string;
+  resolvedPath?: string;
   valid: boolean;
   errors: Array<{ message?: string }>;
   checkErrors?: Array<{ check?: string; path?: string; message?: string }>;
@@ -55,18 +48,15 @@ describe('validate - batch targets with checks', () => {
   afterAll(() => {
     for (const dir of tmpDirs) {
       try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // best-effort cleanup
-      }
+        removeTmpDir(dir);
+      } catch {}
     }
   });
 
   itGodot(
     'runs checks for every target in one Godot process',
     async () => {
-      // input_probe.tscn's root is a Node, so the third target's Control
-      // schema is a deliberate mismatch and the only failing target.
+      // input_probe.tscn's root is a Node, so the third target's Control schema is a deliberate mismatch and the only failing target.
       const { stdout } = await runner.executeOperation(
         'validate_batch',
         {
@@ -88,9 +78,15 @@ describe('validate - batch targets with checks', () => {
 
       const parsed = JSON.parse(extractJson(stdout)) as { results: BatchResult[] };
       expect(parsed.results).toHaveLength(3);
-      expect(parsed.results[0]).toEqual({ target: 'placeholder.gd', valid: true, errors: [] });
+      expect(parsed.results[0]).toEqual({
+        target: 'placeholder.gd',
+        resolvedPath: 'res://placeholder.gd',
+        valid: true,
+        errors: [],
+      });
       expect(parsed.results[1]).toEqual({
         target: 'main.tscn',
+        resolvedPath: 'res://main.tscn',
         valid: true,
         errors: [],
         checkErrors: [],
@@ -131,6 +127,7 @@ describe('validate - batch targets with checks', () => {
       expect(parsed.results).toHaveLength(2);
       expect(parsed.results[0]).toEqual({
         target: 'main.tscn',
+        resolvedPath: 'res://main.tscn',
         valid: true,
         errors: [],
         checkErrors: [],
@@ -139,7 +136,12 @@ describe('validate - batch targets with checks', () => {
         target: 'ghost.tscn',
         valid: false,
         errors: [{ message: 'File not found: res://ghost.tscn' }],
-        checkErrors: [{ message: 'Scene checks skipped: could not load scene ghost.tscn' }],
+        checkErrors: [
+          {
+            message:
+              'Scene checks skipped: could not load scene ghost.tscn (Scene file does not exist: res://ghost.tscn)',
+          },
+        ],
       });
     },
     TEST_TIMEOUT_MS,

@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemStats" load_steps=3 format=3 uid="uid://csword1tres"]
+
+[ext_resource type="Script" uid="uid://bitemstats1x" path="res://item_stats.gd" id="1_item"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_hit"]
+size = Vector2(4, 8)
+
+[resource]
+script = ExtResource("1_item")
+title = "Sword"
+power = 12
+weight = 3.5
+tint = Color(1, 0, 0, 1)
+shape = SubResource("RectangleShape2D_hit")

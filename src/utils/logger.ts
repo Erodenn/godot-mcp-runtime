@@ -1,4 +1,3 @@
-// Debug mode from environment
 export const DEBUG_MODE = process.env.DEBUG === 'true';
 
 export function logDebug(message: string): void {
