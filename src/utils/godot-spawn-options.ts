@@ -7,9 +7,9 @@ export type GodotSpawnKind = 'headless' | 'run' | 'run-background' | 'movie' | '
 // windowsHide is a cheap measure against console painting, not a proven cure; killed kinds are `detached` so a signal to the group reaches a wrapper's engine.
 export function godotSpawnOptions(kind: GodotSpawnKind): SpawnOptions {
   const leadsOwnGroup = process.platform !== 'win32';
-  if (kind === 'headless' || kind === 'run-background') {
-    return { stdio: 'pipe', detached: leadsOwnGroup, windowsHide: true };
-  }
+  // A game is detached on Windows too: libuv puts every other child in a kill-on-close job, so a hard-killed server would take the game down before its parent watch could launch the stranded-bridge sweep.
+  if (kind === 'run-background') return { stdio: 'pipe', detached: true, windowsHide: true };
+  if (kind === 'headless') return { stdio: 'pipe', detached: leadsOwnGroup, windowsHide: true };
   // Stdin is ignored: nothing is written to a movie run.
   if (kind === 'movie') {
     return {
@@ -18,6 +18,6 @@ export function godotSpawnOptions(kind: GodotSpawnKind): SpawnOptions {
       windowsHide: true,
     };
   }
-  if (kind === 'run') return { stdio: 'pipe', detached: leadsOwnGroup };
+  if (kind === 'run') return { stdio: 'pipe', detached: true };
   return { stdio: 'pipe' };
 }

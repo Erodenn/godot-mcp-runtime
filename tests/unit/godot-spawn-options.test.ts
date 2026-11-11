@@ -13,6 +13,8 @@ const ALL_KINDS: readonly GodotSpawnKind[] = [
 const WINDOWED_KINDS: readonly GodotSpawnKind[] = ['run', 'editor'];
 /** Kinds the server kills later, so they lead a process group a group signal can reach. */
 const KILLED_KINDS: readonly GodotSpawnKind[] = ['headless', 'run', 'run-background', 'movie'];
+/** Games, detached everywhere so a hard-killed server's Windows job cannot end them before the parent watch runs the stranded-bridge sweep. */
+const GAME_KINDS: readonly GodotSpawnKind[] = ['run', 'run-background'];
 const LEADS_OWN_GROUP = process.platform !== 'win32';
 
 describe('godotSpawnOptions', () => {
@@ -27,7 +29,7 @@ describe('godotSpawnOptions', () => {
   it('the background run spawn hides its window', () => {
     expect(godotSpawnOptions('run-background')).toEqual({
       stdio: 'pipe',
-      detached: LEADS_OWN_GROUP,
+      detached: true,
       windowsHide: true,
     });
   });
@@ -40,9 +42,10 @@ describe('godotSpawnOptions', () => {
     });
   });
 
-  it('every kind the server kills leads its own process group outside Windows, and the editor never does', () => {
+  it('every kind the server kills leads its own process group outside Windows, games on Windows too, and the editor never does', () => {
     for (const kind of KILLED_KINDS) {
-      expect(godotSpawnOptions(kind).detached, kind).toBe(LEADS_OWN_GROUP);
+      const expected = GAME_KINDS.includes(kind) ? true : LEADS_OWN_GROUP;
+      expect(godotSpawnOptions(kind).detached, kind).toBe(expected);
     }
     expect(godotSpawnOptions('editor')).not.toHaveProperty('detached');
   });
@@ -54,7 +57,7 @@ describe('godotSpawnOptions', () => {
       // to read the key as a decision that was made for a windowed process.
       expect(options, kind).not.toHaveProperty('windowsHide');
     }
-    expect(godotSpawnOptions('run')).toEqual({ stdio: 'pipe', detached: LEADS_OWN_GROUP });
+    expect(godotSpawnOptions('run')).toEqual({ stdio: 'pipe', detached: true });
     expect(godotSpawnOptions('editor')).toEqual({ stdio: 'pipe' });
   });
 
