@@ -99,7 +99,7 @@ export class GodotMcpServer {
     this.server = new Server(
       {
         name: 'godot-mcp',
-        version: '4.0.0',
+        version: '4.0.1',
       },
       {
         capabilities: {
