@@ -36,9 +36,14 @@ export function rejectNonSceneLaunchArg(scene: string): ToolResponse | null {
 /** `launch`: starting a project (`run_project` spawn, `render_movie`). `script`: `run_script` on a live session, attached ones included. Each has its own confirmed set, so one accept never admits the other. */
 export type ConfirmationKind = 'launch' | 'script';
 
+/** Separates the prompt's headline from its detail. Some clients (Claude Code) do not wrap the message, so the headline must read alone in an 80-column terminal. */
+const PROMPT_DETAIL_SEPARATOR = '\n\n';
+
 interface ConfirmationWording {
-  /** The prompt, after `<tool> will `. */
-  prompt: (projectPath: string) => string;
+  /** The prompt's first line, after `<tool> wants to `; carries no path so it stays short. */
+  headline: string;
+  /** The rest of the prompt, after the headline. */
+  detail: (projectPath: string) => string;
   /** The form field's description in the prompt. */
   field: string;
   /** What did not happen when the answer is not an accept. */
@@ -51,16 +56,18 @@ interface ConfirmationWording {
 
 const CONFIRMATION_WORDING: Readonly<Record<ConfirmationKind, ConfirmationWording>> = {
   launch: {
-    prompt: (projectPath) =>
-      `start the Godot project at ${projectPath}. The project's autoloads, scenes and scripts run with your user permissions. Proceed?`,
+    headline: 'launch a Godot project.',
+    detail: (projectPath) =>
+      `Project: ${projectPath}${PROMPT_DETAIL_SEPARATOR}The project's autoloads, scenes and scripts run with your user permissions. Proceed?`,
     field: 'Allow the project to launch',
     notDone: 'The project was not launched.',
     declinedAct: 'launch',
     proceeding: 'launching',
   },
   script: {
-    prompt: (projectPath) =>
-      `run GDScript written by the agent inside the running game at ${projectPath}. It runs with your user permissions and can read and write files, use the network and start programs. Proceed?`,
+    headline: 'run agent-written code in your game.',
+    detail: (projectPath) =>
+      `Project: ${projectPath}${PROMPT_DETAIL_SEPARATOR}The agent's GDScript runs inside the running game with your user permissions and can read and write files, use the network and start programs. Proceed?`,
     field: 'Allow the script to run',
     notDone: 'The script was not run.',
     declinedAct: 'script run',
@@ -112,7 +119,7 @@ export async function confirmFirstUse(
   const promptedAt = ctx.now();
   try {
     elicitResult = await ctx.elicitor({
-      message: `${request.toolName} will ${wording.prompt(absProjectPath)}`,
+      message: `${request.toolName} wants to ${wording.headline}${PROMPT_DETAIL_SEPARATOR}${wording.detail(absProjectPath)}`,
       requestedSchema: {
         type: 'object',
         properties: { confirm: { type: 'boolean', description: wording.field } },

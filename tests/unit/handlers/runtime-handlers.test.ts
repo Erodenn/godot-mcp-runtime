@@ -74,6 +74,8 @@ afterAll(() => {
   else process.env.DISPLAY = savedDisplay;
 });
 
+// Claude Code does not wrap a prompt message: the headline must fit an 80-column terminal inside the dialog's border.
+const PROMPT_HEADLINE_MAX_COLUMNS = 72;
 const acceptingContext = makeContext;
 const declineElicitor: Elicitor = async () => ({ action: 'decline' });
 const cancelElicitor: Elicitor = async () => ({ action: 'cancel' });
@@ -2218,7 +2220,7 @@ describe('handleRunScript confirmation', () => {
   const OS_EXECUTE_SCRIPT =
     'extends RefCounted\nfunc execute(scene_tree):\n\tOS.execute("rm", ["-rf", "/"])\n\treturn 0\n';
   const SCRIPT_COPY_DIR_NAME = 'scripts';
-  const SCRIPT_PROMPT_START = 'run_script will run GDScript written by the agent';
+  const SCRIPT_PROMPT_START = 'run_script wants to run agent-written code in your game.';
   const DECLINED_SCRIPT_ADVICE = 'do not call run_script on this project again';
 
   function activeFake(dir: string, mode: RuntimeSessionMode = 'spawned'): RuntimeFake {
@@ -2255,10 +2257,10 @@ describe('handleRunScript confirmation', () => {
     expect(hasError(first)).toBe(false);
     expect(hasError(second)).toBe(false);
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain(
-      `${SCRIPT_PROMPT_START} inside the running game at ${resolve(dir)}`,
-    );
-    expect(messages[0]).toContain('runs with your user permissions');
+    expect(messages[0]?.split('\n')[0]).toBe(SCRIPT_PROMPT_START);
+    expect(messages[0]?.split('\n')[0]?.length).toBeLessThanOrEqual(PROMPT_HEADLINE_MAX_COLUMNS);
+    expect(messages[0]).toContain(`Project: ${resolve(dir)}`);
+    expect(messages[0]).toContain('runs inside the running game with your user permissions');
     expect(fake.bridgeCalls).toHaveLength(2);
   });
 
@@ -2538,7 +2540,9 @@ describe('handleRunProject launch confirmation', () => {
     await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
 
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain(`run_project will start the Godot project at ${resolve(dir)}`);
+    expect(messages[0]?.split('\n')[0]).toBe('run_project wants to launch a Godot project.');
+    expect(messages[0]?.split('\n')[0]?.length).toBeLessThanOrEqual(PROMPT_HEADLINE_MAX_COLUMNS);
+    expect(messages[0]).toContain(`Project: ${resolve(dir)}`);
     expect(messages[0]).toContain('run with your user permissions');
     expect(messages[0]).not.toMatch(/finding|tier|scan|OS\.execute/i);
   });

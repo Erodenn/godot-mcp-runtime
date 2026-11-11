@@ -1082,7 +1082,8 @@ describe('render_movie launch confirmation', () => {
     payloadOf(await handler(runner, { projectPath: dir, frames: TEST_FRAMES }, ctx));
 
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain(`render_movie will start the Godot project at ${resolve(dir)}`);
+    expect(messages[0]?.split('\n')[0]).toBe('render_movie wants to launch a Godot project.');
+    expect(messages[0]).toContain(`Project: ${resolve(dir)}`);
     expect(messages[0]).toContain('run with your user permissions');
     expect(messages[0]).not.toMatch(/finding|tier|scan|evil|OS\.execute/i);
   });
