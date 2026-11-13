@@ -43,6 +43,10 @@ jobs:
           else
             cp generated-notes.md release-notes.md
           fi
+          earlier=$(node scripts/release-notes-links.js "$tag" "$GITHUB_REPOSITORY")
+          if [ -n "$earlier" ]; then
+            printf '\n%s\n' "$earlier" >> release-notes.md
+          fi
           chars=$(LC_ALL=C.UTF-8 wc -m < release-notes.md)
           if [ "$chars" -gt "$RELEASE_BODY_MAX_CHARS" ]; then
             echo "::error file=${highlights}::Release body is ${chars} characters; GitHub accepts at most ${RELEASE_BODY_MAX_CHARS}. Shorten the release notes before tagging."
